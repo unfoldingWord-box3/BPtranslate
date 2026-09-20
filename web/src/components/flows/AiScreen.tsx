@@ -43,6 +43,7 @@ import { LockBanner, ReadyBanner } from "./FlowBanners";
 import { FlowStatusChip } from "./FlowStatusChip";
 import type { FlowScreenContext } from "./types";
 import { PipelineMenu } from "../PipelineMenu";
+import { AiServiceSection } from "../AiServiceSection";
 import { pipelineStore, type PipelineJob } from "../../sync/pipelineStore";
 import { useProjectConfig } from "../../hooks/useProjectConfig";
 import {
@@ -546,38 +547,27 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
         </Stack>
       </Box>
 
-      <Box
-        sx={{
-          bgcolor: "background.paper",
-          border: 1,
-          borderColor: "divider",
-          borderRadius: 1.5,
-          boxShadow: 1,
-          overflow: "hidden",
-        }}
-      >
-        <Box sx={{ p: 2 }}>
-          <Typography variant="h6" sx={{ fontSize: "1rem" }}>
-            {t("aiStudio.apiRunsTitle")}
-          </Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-            {t("aiStudio.apiRunsBody")}
-          </Typography>
+      {/* AI service (provider / model / BYO key) — moved here from the admin
+          Setup desk (#479) so configuring the AI and using it live on one
+          screen. AiServiceSection is dependency-free by design and renders its
+          own heading. Admin-only: AiScreen admits editors too (they run
+          pipelines, requireEditor), but the AI-provider routes are
+          requireAdmin — ungated, an editor would only collect 403s. */}
+      {role === "admin" && (
+        <Box
+          sx={{
+            bgcolor: "background.paper",
+            border: 1,
+            borderColor: "divider",
+            borderRadius: 1.5,
+            boxShadow: 1,
+            overflow: "hidden",
+            p: 2,
+          }}
+        >
+          <AiServiceSection />
         </Box>
-        <Stack direction="row" alignItems="center" spacing={1.5} sx={{ p: 1.5, borderTop: 1, borderColor: "divider" }}>
-          <Typography variant="caption" color="text.secondary">
-            {t("aiStudio.comingSoon")}
-          </Typography>
-          <Box sx={{ flex: 1 }} />
-          <Tooltip title={t("aiStudio.apiTokensTooltip")}>
-            <span>
-              <Button size="small" disabled>
-                {t("aiStudio.manageApiTokens")}
-              </Button>
-            </span>
-          </Tooltip>
-        </Stack>
-      </Box>
+      )}
 
       <Snackbar open={Boolean(notice)} autoHideDuration={6000} onClose={() => setNotice(null)} message={notice ?? ""} />
       </Box>
