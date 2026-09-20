@@ -26,7 +26,7 @@ import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import CloudDownloadIcon from "@mui/icons-material/CloudDownload";
 import AutoStoriesIcon from "@mui/icons-material/AutoStories";
 import TranslateIcon from "@mui/icons-material/Translate";
-import { ApiError, api, importedSourceRepos, isAdmin } from "../sync/api";
+import { ApiError, api, importedSourceRepos, isAdmin, isReadOnly } from "../sync/api";
 import { ImportFromDoor43Dialog } from "./ImportFromDoor43Dialog";
 import type {
   ImportHasLocalEditsBody,
@@ -437,6 +437,16 @@ export function PipelineMenu({ book, chapter, onMessage, onImported }: Props) {
       setResourceBusy(false);
     }
   };
+
+  // Every action this menu exposes — AI runs (POST /pipelines/start), the
+  // Door43 import (POST /books/:book/import) and the Aquifer pull/re-source —
+  // is gated server-side to editors/admins (requireEditor / requireAdmin). A
+  // viewer can only ever collect 403s here, so render nothing at all. This
+  // fixes the classic-editor case where the AI trigger was shown to viewers
+  // and 403'd on click (#481). AiScreen already returns early for viewers
+  // before mounting this menu; keeping the guard on the component itself makes
+  // it host-independent (Shell's top bar had no such gate).
+  if (isReadOnly()) return null;
 
   return (
     <>
