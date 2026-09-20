@@ -65,14 +65,12 @@ import {
 } from "../../sync/api";
 import { BOOKS, bookName } from "../../lib/bookNames";
 import {
-  classifyAiTranslateResult,
   mainPaneState,
   repullDefaultRange,
   type BooksFetchStatus,
 } from "../../lib/importIntent";
-import { startBookAiTranslate } from "../../lib/aiTranslate";
 import { realChapterNumbers } from "../../lib/bookSummary";
-import { isTranslationProject, useProjectConfig } from "../../hooks/useProjectConfig";
+import { useProjectConfig } from "../../hooks/useProjectConfig";
 import { ImportFromDoor43Dialog } from "../ImportFromDoor43Dialog";
 import { BringInBookDialog } from "./BringInBookDialog";
 import { FlowStatusChip } from "./FlowStatusChip";
@@ -380,11 +378,8 @@ function BookDetailPanel({
 }) {
   const { t } = useTranslation();
   const isAdmin = role === "admin";
-  const cfg = useProjectConfig();
-  const isTranslation = isTranslationProject(cfg);
 
   const [summary, setSummary] = useState<BookSummary | null>(null);
-  const [aiBusy, setAiBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -427,38 +422,6 @@ function BookDetailPanel({
       await onImported();
       await loadSummary();
     })();
-  };
-
-  const runAiTranslate = async () => {
-    let chapters = realChapterNumbers(summary);
-    if (chapters.length === 0) {
-      const fresh = await loadSummary();
-      chapters = realChapterNumbers(fresh);
-    }
-    if (chapters.length === 0) {
-      setMessage(t("flowBooks.detail.nothingToTranslate"));
-      return;
-    }
-    setAiBusy(true);
-    setError(null);
-    setWarning(null);
-    try {
-      const res = await startBookAiTranslate(book, chapters);
-      const verdict = classifyAiTranslateResult(res);
-      if (verdict === "failed") {
-        setError(t("flowBooks.detail.aiNoneStarted"));
-      } else if (verdict === "partial") {
-        setWarning(t("flowBooks.detail.aiPartial", { started: res.started, failed: res.failed }));
-      } else {
-        setMessage(
-          res.skipped
-            ? t("flowBooks.detail.aiStartedSkipped", { started: res.started, skipped: res.skipped })
-            : t("flowBooks.detail.aiStarted", { count: res.started }),
-        );
-      }
-    } finally {
-      setAiBusy(false);
-    }
   };
 
   const chapterNumbers = useMemo(() => realChapterNumbers(summary), [summary]);
@@ -520,18 +483,10 @@ function BookDetailPanel({
                     </Button>
                   </>
                 )}
-                {effectiveImported && isTranslation && (
-                  <Button
-                    variant="outlined"
-                    color="secondary"
-                    disabled={aiBusy}
-                    onClick={() => void runAiTranslate()}
-                    startIcon={aiBusy ? <CircularProgress size={16} color="inherit" /> : undefined}
-                    sx={{ minHeight: 40 }}
-                  >
-                    {t("flowBooks.detail.aiTranslateWholeBook")}
-                  </Button>
-                )}
+                {/* "AI Translate whole book" moved to the AI studio (#/ai),
+                    disabled pending a product decision (issue #480). It fans
+                    out to two pipeline jobs per chapter, so it does not belong
+                    next to the ordinary Open / Re-pull actions. */}
               </Stack>
 
               <Alert severity="info" variant="outlined" sx={{ mt: 2 }}>

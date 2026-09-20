@@ -441,6 +441,20 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
             </span>
           </Tooltip>
         )}
+        {/* Whole-book AI translate moved here from the Books screen (issue #480),
+            parked disabled pending a product decision. It fans out to two
+            pipeline jobs per chapter, so if ever enabled it needs a job-count
+            confirmation (mirror PipelineMenu's confirm pattern) and its
+            enable-conditions: role === "admin", book imported, translation
+            project. startBookAiTranslate (web/src/lib/aiTranslate.ts) is kept
+            intact for that day; the control is unreachable until then. */}
+        <Tooltip title={t("aiStudio.translateWholeBookDisabled")}>
+          <span>
+            <Button size="small" variant="outlined" color="secondary" disabled>
+              {t("aiStudio.translateWholeBook")}
+            </Button>
+          </span>
+        </Tooltip>
       </Stack>
 
       <Box
