@@ -550,6 +550,59 @@ console.log("\n[#456: a translate job whose create() never landed force-fails wi
   assert(row.state === "failed", `the row force-fails regardless of the terminate outcome (got ${row.state})`);
 }
 
+console.log("\n[#456: a dispatch rescued to 'running' between the capture SELECT and the force-fail UPDATE is NOT terminated]");
+{
+  // The capture SELECT and the force-fail UPDATE are two separate statements.
+  // dispatchNext's own `state='running', runner='internal'` UPDATE carries no
+  // `WHERE state='dispatching'` guard, so a still-live dispatch can land it in
+  // between: the force-fail then no-ops and the instance is legitimately
+  // running. Terminating on the SELECT's say-so would kill a live paid job and
+  // leave a 'running' row holding the single global dispatch slot until the 48h
+  // sweep. Modelled deterministically by flipping the row the instant before
+  // the force-fail UPDATE executes.
+  const { sqlite, env } = freshEnv();
+  const realNow = sqlite.prepare("SELECT unixepoch() AS n").get().n;
+  seedStuckDispatch(sqlite, { jobId: "job-rescued", pipelineType: "translate", updatedAt: realNow - 200 });
+
+  const inner = env.DB;
+  env.DB = {
+    prepare(sql) {
+      const stmt = inner.prepare(sql);
+      if (!/error_message = 'auto-failed: dispatch did not complete'/.test(sql)) return stmt;
+      const wrap = (st) => ({
+        ...st,
+        bind: (...a) => wrap(st.bind(...a)),
+        run() {
+          sqlite
+            .prepare("UPDATE pipeline_jobs SET state = 'running', runner = 'internal', updated_at = unixepoch() WHERE job_id = ?")
+            .run("job-rescued");
+          return st.run();
+        },
+      });
+      return wrap(stmt);
+    },
+    batch: inner.batch.bind(inner),
+  };
+
+  const terminated = [];
+  env.WORKSPACE_SLUG = "bsoj";
+  env.TRANSLATE_WORKFLOW = {
+    async get(id) {
+      return { id, terminate: async () => { terminated.push(id); } };
+    },
+    async create() { throw new Error("the sweep must never create an instance"); },
+  };
+
+  await pollAllNonTerminal(env);
+
+  const row = sqlite.prepare("SELECT state FROM pipeline_jobs WHERE job_id = ?").get("job-rescued");
+  assert(row.state === "running", `the rescued job is left running, not force-failed (got ${row.state})`);
+  assert(
+    terminated.length === 0,
+    `its live Workflow instance is NOT terminated (got ${JSON.stringify(terminated)})`,
+  );
+}
+
 if (failed > 0) {
   console.error(`\n${failed} assertion(s) failed`);
   process.exit(1);

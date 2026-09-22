@@ -1261,8 +1261,28 @@ export async function pollAllNonTerminal(env: Env): Promise<void> {
   )
     .bind(STUCK_DISPATCH_THRESHOLD_SECONDS, DISPATCH_TIMEOUT_ERROR_KIND, DISPATCH_TIMEOUT_ERROR_MESSAGE)
     .run();
-  for (const r of stuckTranslateDispatches.results ?? []) {
-    await terminateTranslateInstance(env, r.job_id);
+  // Terminate ONLY the rows this sweep actually force-failed. The SELECT above
+  // and the UPDATE are two separate statements, so a still-live dispatchNext can
+  // land its `state='running', runner='internal'` UPDATE (which carries no
+  // `WHERE state='dispatching'` guard of its own) in between: the force-fail
+  // then no-ops and the row is legitimately running. Terminating on the SELECT's
+  // say-so would kill that live instance and leave a `running` row holding the
+  // single global dispatch slot and the chapter write-lock until the 48h
+  // no-progress sweep. Re-reading state after the UPDATE closes that window.
+  const capturedIds = (stuckTranslateDispatches.results ?? []).map((r) => r.job_id);
+  if (capturedIds.length > 0) {
+    const placeholders = capturedIds.map((_, i) => `?${i + 1}`).join(", ");
+    const forceFailed = await env.DB.prepare(
+      `SELECT job_id FROM pipeline_jobs
+        WHERE job_id IN (${placeholders})
+          AND state = 'failed'
+          AND error_kind = 'interrupted'`,
+    )
+      .bind(...capturedIds)
+      .all<{ job_id: string }>();
+    for (const r of forceFailed.results ?? []) {
+      await terminateTranslateInstance(env, r.job_id);
+    }
   }
   // Upstream #493 / #511: a dispatch that timed out on OUR side (marked
   // ambiguous by dispatchNext's own catch block, see
