@@ -1543,7 +1543,22 @@
       "missing_output": "The AI service didn't return any content for this chapter. Retry — if it keeps happening, this chapter may need attention.",
       "stale_output": "The AI's draft was based on an older version of this chapter and was rejected to avoid overwriting newer edits. Retry to draft against the current text.",
       "interrupted": "This run was interrupted before it finished — likely the server restarted mid-job. Nothing was lost; retry to pick it back up.",
-      "import_failed": "The finished draft couldn't be imported into the chapter. An admin may need to look at the import log."
+      "import_failed": "The finished draft couldn't be imported into the chapter. An admin may need to look at the import log.",
+      "rate_limited": "The AI provider is rate-limiting our requests. This clears on its own — try again in a few minutes.",
+      "provider_overloaded": "The AI provider is overloaded right now. Try again in a few minutes.",
+      "timeout": "The AI provider took too long to respond. Try again in a few minutes.",
+      "network_error": "We couldn't reach the AI provider. Check the connection and try again in a few minutes.",
+      "invalid_key": "The AI provider rejected the API key. An admin needs to check the AI settings.",
+      "model_not_found": "The configured AI model isn't available. An admin needs to check the AI settings.",
+      "context_too_long": "This chapter is too large for the AI model's context window. The chapter was not changed.",
+      "output_too_long": "The AI's answer was longer than the model allows and was cut off. The chapter was not changed — try a smaller range.",
+      "empty_output": "The AI returned an empty answer. The chapter was not changed — try again.",
+      "provider_error": "The AI provider returned an error. An admin may need to check the AI settings; retrying won't help until it's fixed.",
+      "provider_not_supported_internal": "This deployment can't run the selected AI provider in-house. An admin needs to check the AI settings.",
+      "resource_not_supported_internal": "The internal AI runner doesn't support this resource type yet. An admin needs to check the AI settings.",
+      "checks_failed": "The AI's answer didn't pass validation — it didn't fit the expected format. The chapter was not changed.",
+      "internal_error_after_call": "The AI answered, but processing its response failed. The chapter was not changed.",
+      "internal_error": "Something went wrong while running this job. Nothing was changed — try again."
     }
   },
   "flowTranslate": {
