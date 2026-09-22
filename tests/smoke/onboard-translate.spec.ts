@@ -50,59 +50,89 @@ test.describe.serial("onboarding + AI translate smoke", () => {
   }) => {
     const { context, auth } = await newUserContext(browser, "admin");
     const page = await context.newPage();
-    let uiWizardApplied = false;
 
     await test.step("mint admin session", async () => {
       expect(auth.userId).toBeTruthy();
       expect(auth.csrf).toBeTruthy();
     });
 
-    await test.step("drive Setup wizard: detect org, resolve ambiguous lanes, apply", async () => {
+    // Per-action timeout so a stale selector fails in seconds and the API
+    // fallback below actually gets to run. Without one, a single .click()
+    // against a button the redesigned wizard no longer renders eats the whole
+    // 300s test budget and the catch block never executes (#494).
+    const ACTION_MS = 15_000;
+    // Gates that wait on a DCS round trip (org detection, apply) get more.
+    const NETWORK_MS = 60_000;
+
+    await test.step("drive Setup wizard: confirm org, sources, lanes, apply", async () => {
       await page.goto("/#/preferences/setup");
       const wizard = page.locator('section[aria-labelledby="setup-wizard-heading"]');
       await expect(wizard).toBeVisible();
 
+      // MUI's Collapse (StepContent's exit transition) unmounts the outgoing
+      // step only after its animation finishes — so right after a "Next" click
+      // there's a brief window where both the outgoing and incoming steps'
+      // buttons coexist in the DOM. Wait for the count to settle back to one
+      // before clicking, or a locator resolving to two elements throws a
+      // strict-mode violation.
+      const next = wizard.getByRole("button", { name: /^next$/i });
+      const clickNext = async () => {
+        await expect(next).toHaveCount(1, { timeout: ACTION_MS });
+        await expect(next).toBeEnabled({ timeout: NETWORK_MS });
+        await next.click({ timeout: ACTION_MS });
+      };
+
       try {
-        // Step 1 — gatewayAdmin checklist acknowledgement.
-        await wizard.getByRole("button", { name: /repositories are set up/i }).click();
+        // Step 1 — "Your organization". Nothing is typed here any more: the org
+        // is read from the current workspace (read-only), detection fires on
+        // mount, and the resource language is pre-seeded from the proposal. So
+        // the only gate is Next becoming enabled (draft detected + language).
+        // NB: because the org is no longer typed, the UI path can only configure
+        // the CURRENT workspace's org — SMOKE_ORG must match it (both default to
+        // BSOJ, the first entry in wrangler.toml's WORKSPACES). Pointing
+        // SMOKE_ORG somewhere else drops this step into the API fallback.
+        await expect(wizard.getByText(SMOKE_ORG, { exact: true }).first()).toBeVisible({
+          timeout: NETWORK_MS,
+        });
+        await clickNext();
 
-        // Step 2 — detect org.
-        await wizard.getByPlaceholder("BibleEditorMLTest").fill(SMOKE_ORG);
-        await wizard.getByRole("button", { name: /detect/i }).click();
+        // Step 2 — "Sources to pull from". unfoldingWord is the default upstream
+        // and is marked verified without a round trip, and every resource row is
+        // checked (= pull from upstream) by default, so the defaults are already
+        // what this suite wants. Assert the upstream org rather than just the
+        // field's presence: a changed default would otherwise sail past here and
+        // surface much later as "no tn rows imported for OBA 1".
+        await expect(wizard.getByLabel(/default upstream org/i)).toHaveValue("unfoldingWord", {
+          timeout: ACTION_MS,
+        });
+        await clickNext();
 
-        // Ambiguous lit/sim roles render as MUI selects with no other
-        // comboboxes on this page — resolve them to the AVD/NAV pair.
-        const comboboxes = wizard.getByRole("combobox");
-        await expect(comboboxes).toHaveCount(2, { timeout: 20_000 });
-        await comboboxes.nth(0).click();
-        await page.getByRole("option", { name: "ar_avd" }).click();
-        await comboboxes.nth(1).click();
-        await page.getByRole("option", { name: "ar_nav" }).click();
+        // Step 3 — "Your scripture lanes". SMOKE_ORG's lit/sim roles are
+        // ambiguous, so detection leaves both target-repo fields empty; resolve
+        // them to the AVD/NAV pair (the same choice the API fallback makes).
+        // Both fields share the "Target repository" label and are told apart by
+        // their per-lane placeholders.
+        await wizard.getByPlaceholder("ru_rlob").fill("ar_avd", { timeout: ACTION_MS });
+        await wizard.getByPlaceholder("es-419_gst").fill("ar_nav", { timeout: ACTION_MS });
+        await clickNext();
 
-        // MUI's Collapse (StepContent's exit transition) unmounts the outgoing
-        // step only after its animation finishes — so right after a "Next"
-        // click there's a brief window where both the outgoing and incoming
-        // steps' own "Next"/"Back" buttons coexist in the DOM. Wait for the
-        // count to settle back to one before clicking again, or a locator
-        // resolving to two elements throws a strict-mode violation.
-        const nextButton = wizard.getByRole("button", { name: /^next$/i });
-        await nextButton.click();
-        await expect(nextButton).toHaveCount(1, { timeout: 5_000 });
+        // Step 4 — "Review & apply". Apply persists the custom-gl overrides and
+        // then patches each lane's edit/align mode before advancing.
+        const apply = wizard.getByRole("button", { name: /apply configuration/i });
+        await expect(apply).toBeEnabled({ timeout: ACTION_MS });
+        await apply.click({ timeout: ACTION_MS });
 
-        // Step 3 — confirm lanes (pre-filled from the selections above).
-        await expect(wizard.getByText(/confirm the literal and simplified/i)).toBeVisible();
-        await nextButton.click();
-
-        // Step 4 — apply.
-        await expect(wizard.getByRole("button", { name: /apply configuration/i })).toBeVisible();
-        await wizard.getByRole("button", { name: /apply configuration/i }).click();
-        await expect(wizard.getByRole("button", { name: /import book/i })).toBeVisible({ timeout: 20_000 });
-        uiWizardApplied = true;
+        // Step 5 — "Done". Setup no longer imports a book (that moved to the
+        // Books screen), so reaching Done is the end of the UI path; the import
+        // below always goes through the API.
+        await expect(wizard.getByRole("button", { name: /go to import/i })).toBeVisible({
+          timeout: NETWORK_MS,
+        });
       } catch (e) {
-        // MUI Select accessible-name flakiness fallback (flagged in the task
-        // spec): drive the same contract directly via the API the wizard
-        // itself calls, and downgrade the assertion to "wizard rendered +
-        // detect succeeded" rather than a full click-through proof.
+        // Wizard-drive fallback: drive the same contract directly via the API
+        // the wizard itself calls, and downgrade the assertion to "wizard
+        // rendered" rather than a full click-through proof. The per-action
+        // timeouts above are what make this reachable.
         console.warn(`[smoke] UI wizard drive failed (${e}); falling back to API apply`);
         const detectRes = await context.request.get(`/api/orgs/${encodeURIComponent(SMOKE_ORG)}/inferred-config`);
         expect(detectRes.ok(), `GET inferred-config: ${detectRes.status()}`).toBeTruthy();
@@ -132,36 +162,25 @@ test.describe.serial("onboarding + AI translate smoke", () => {
           data: { preset: "custom-gl", overrides },
         });
         expect(applyRes.ok(), `PUT project-config fallback: ${applyRes.status()} ${await applyRes.text()}`).toBeTruthy();
-        // TODO(smoke): once the ambiguous-role MUI selects carry a stable
-        // accessible name, remove this fallback and require the UI path.
       }
     });
 
     await test.step("import OBA and populate articles", async () => {
-      if (uiWizardApplied) {
-        const wizard = page.locator('section[aria-labelledby="setup-wizard-heading"]');
-        await wizard.locator('input[role="combobox"]').fill(BOOK);
-        await page.getByRole("option", { name: new RegExp(BOOK) }).first().click();
-        await wizard.getByRole("button", { name: /import book/i }).click();
-        // Import + the full tW/tA populate-loop drain can take a while on a
-        // real book. Populate warnings (unreachable articles) are tolerated —
-        // we only require the wizard to reach its final step.
-        await expect(wizard.getByText(/you're all set/i)).toBeVisible({ timeout: 180_000 });
-      } else {
-        const importRes = await context.request.post(`/api/books/${BOOK}/import`, {
-          headers: { "x-csrf-token": auth.csrf },
-          timeout: 120_000,
+      // Always via the API: the redesigned wizard configures only — importing
+      // moved out of Setup and onto the Books screen.
+      const importRes = await context.request.post(`/api/books/${BOOK}/import`, {
+        headers: { "x-csrf-token": auth.csrf },
+        timeout: 120_000,
+      });
+      expect(importRes.ok(), `import ${BOOK}: ${importRes.status()} ${await importRes.text()}`).toBeTruthy();
+      for (let round = 0; round < 60; round++) {
+        const r = await context.request.post("/api/articles/populate", {
+          headers: { "x-csrf-token": auth.csrf, "Content-Type": "application/json" },
+          data: { book: BOOK },
         });
-        expect(importRes.ok(), `import ${BOOK}: ${importRes.status()} ${await importRes.text()}`).toBeTruthy();
-        for (let round = 0; round < 60; round++) {
-          const r = await context.request.post("/api/articles/populate", {
-            headers: { "x-csrf-token": auth.csrf, "Content-Type": "application/json" },
-            data: { book: BOOK },
-          });
-          expect(r.ok()).toBeTruthy();
-          const body = await r.json();
-          if (body.skipped || body.aborted || body.remaining === 0) break;
-        }
+        expect(r.ok()).toBeTruthy();
+        const body = await r.json();
+        if (body.skipped || body.aborted || body.remaining === 0) break;
       }
     });
 

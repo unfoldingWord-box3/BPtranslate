@@ -864,7 +864,6 @@
     "gatewayAdminIntro": "First, create your organization's resource repositories on Door43 (for example, using gatewayAdmin). You'll need one repository per resource:",
     "gatewayAdminChecklist": "• {lang}_tn — translationNotes\n• {lang}_glt / {lang}_gst — literal & simplified text\n• {lang}_twl — translationWords links\n• {lang}_tw — translationWords\n• {lang}_ta — translationAcademy\n• {lang}_tq — translationQuestions",
     "gatewayAdminLink": "Open Door43",
-    "reposReady": "My repositories are set up",
     "detectIntro": "Enter your Door43 org. We'll read its manifests and propose a configuration — resolve anything missing or ambiguous below.",
     "confirmLanesIntro": "Confirm the literal and simplified scripture repositories. These are installed directly when you apply. To change a lane's source after onboarding, use the scripture repositories section in Project mode.",
     "litRepoLabel": "Literal text repository",
