@@ -23,6 +23,7 @@ import {
   parseVerseContentJson,
 } from "./contentJson.ts";
 import { ensureLaneState, requireLaneState } from "./scriptureLane";
+import { BOOK_REVIEW_ROLLUP_SQL, BOOK_SUMMARY_COUNTS_SQL } from "./bookRollupSql.ts";
 
 export const chapters = new Hono<{ Bindings: Env; Variables: { userId?: number } }>();
 
@@ -358,11 +359,11 @@ chapters.patch("/:book/:chapter/lanes/:lane/bulk", requireEditor, async (c) => {
 });
 
 // Book-level summary: chapter list + row counts. Useful for the timeline.
-// Also the book-level review rollup (docs/ux-simplification.md A2): each
-// chapter additionally reports tnValidated / tqValidated (live rows with
-// translation_state='validated' — the 0037/0038 partial indexes keep these
-// cheap) and versesDone (verse_statuses.done, the flag setVerseDone writes).
-// Additive fields — existing consumers are unaffected.
+// Also the book-level review rollup (docs/ux-simplification.md A2, widened to
+// the full translation_state breakdown for issue #104). The two statements and
+// the documented response shape live in ./bookRollupSql.ts — read that file
+// for the fields, the counting rules, and the cost note. Additive fields
+// only; existing consumers are unaffected.
 chapters.get("/:book", async (c) => {
   const book = c.req.param("book").toUpperCase();
   const db = c.env.DB;
@@ -382,44 +383,17 @@ chapters.get("/:book", async (c) => {
     tq?: number;
     twl?: number;
     tnValidated?: number;
+    tnAiDraft?: number;
+    tnEdited?: number;
+    tnNoState?: number;
     tqValidated?: number;
+    tqAiDraft?: number;
+    tqEdited?: number;
+    tqNoState?: number;
     versesDone?: number;
   }>([
-    db
-      .prepare(
-        `SELECT chapter,
-                SUM(CASE WHEN kind='verse' THEN 1 ELSE 0 END) AS verses,
-                SUM(CASE WHEN kind='tn' THEN 1 ELSE 0 END) AS tn,
-                SUM(CASE WHEN kind='tq' THEN 1 ELSE 0 END) AS tq,
-                SUM(CASE WHEN kind='twl' THEN 1 ELSE 0 END) AS twl
-         FROM (
-           SELECT chapter, 'verse' AS kind FROM verses WHERE book = ?1 AND bible_version = 'ULT' AND source_generation = ?2 AND verse > 0
-           UNION ALL
-           SELECT chapter, 'tn' FROM tn_rows WHERE book = ?1 AND deleted_at IS NULL AND trashed_at IS NULL
-           UNION ALL
-           SELECT chapter, 'tq' FROM tq_rows WHERE book = ?1 AND deleted_at IS NULL
-           UNION ALL
-           SELECT chapter, 'twl' FROM twl_rows WHERE book = ?1 AND deleted_at IS NULL
-         )
-         GROUP BY chapter ORDER BY chapter`,
-      )
-      .bind(book, litGen),
-    db
-      .prepare(
-        `SELECT chapter,
-                SUM(CASE WHEN kind='tn_validated' THEN 1 ELSE 0 END) AS tnValidated,
-                SUM(CASE WHEN kind='tq_validated' THEN 1 ELSE 0 END) AS tqValidated,
-                SUM(CASE WHEN kind='verse_done' THEN 1 ELSE 0 END) AS versesDone
-         FROM (
-           SELECT chapter, 'tn_validated' AS kind FROM tn_rows WHERE book = ?1 AND deleted_at IS NULL AND trashed_at IS NULL AND translation_state = 'validated'
-           UNION ALL
-           SELECT chapter, 'tq_validated' FROM tq_rows WHERE book = ?1 AND deleted_at IS NULL AND translation_state = 'validated'
-           UNION ALL
-           SELECT chapter, 'verse_done' FROM verse_statuses WHERE book = ?1 AND done = 1 AND verse > 0
-         )
-         GROUP BY chapter`,
-      )
-      .bind(book),
+    db.prepare(BOOK_SUMMARY_COUNTS_SQL).bind(book, litGen),
+    db.prepare(BOOK_REVIEW_ROLLUP_SQL).bind(book),
   ]);
   const rollupByChapter = new Map(
     (rollup.results ?? []).map((r) => [r.chapter, r]),
@@ -433,7 +407,13 @@ chapters.get("/:book", async (c) => {
       tq: row.tq ?? 0,
       twl: row.twl ?? 0,
       tnValidated: r?.tnValidated ?? 0,
+      tnAiDraft: r?.tnAiDraft ?? 0,
+      tnEdited: r?.tnEdited ?? 0,
+      tnNoState: r?.tnNoState ?? 0,
       tqValidated: r?.tqValidated ?? 0,
+      tqAiDraft: r?.tqAiDraft ?? 0,
+      tqEdited: r?.tqEdited ?? 0,
+      tqNoState: r?.tqNoState ?? 0,
       versesDone: r?.versesDone ?? 0,
     };
   });

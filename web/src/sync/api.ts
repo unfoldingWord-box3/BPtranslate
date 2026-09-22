@@ -172,12 +172,26 @@ export interface BookSummary {
     tn: number;
     tq: number;
     twl: number;
-    // Review rollup (docs/ux-simplification.md A2): live rows with
-    // translation_state='validated' and verses flagged done. Optional because
-    // an older API build omits them — consumers must treat absence as
-    // "rollup unavailable", not as zero progress.
+    // Review rollup (docs/ux-simplification.md A2, widened to the full
+    // translation_state breakdown for issue #104): live rows bucketed by
+    // translation_state, plus verses flagged done. `*NoState` means
+    // translation_state IS NULL — a row the translate pipeline never touched.
+    // The four state buckets sum exactly to `tn` / `tq`; api/src/bookRollupSql.ts
+    // holds the counting rules and the test that pins that invariant.
+    //
+    // Optional because an older API build omits them — consumers must treat
+    // absence as "rollup unavailable", not as zero progress. The AiDraft /
+    // Edited / NoState fields are newer than Validated, so a build can serve
+    // the latter without the former: check presence per field, never infer it
+    // from a sibling.
     tnValidated?: number;
+    tnAiDraft?: number;
+    tnEdited?: number;
+    tnNoState?: number;
     tqValidated?: number;
+    tqAiDraft?: number;
+    tqEdited?: number;
+    tqNoState?: number;
     versesDone?: number;
   }>;
 }

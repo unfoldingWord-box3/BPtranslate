@@ -5,6 +5,7 @@
 
 import {
   classifySnapshot,
+  draftsAwaitingReview,
   isTerminalRunStatus,
   latestPerResource,
   progressPercent,
@@ -48,6 +49,29 @@ assert(
     ch(2, 8, 4, 2),
   ]);
   assert(p !== null && p.notes.done === 5 && p.notes.total === 9, "missing per-chapter fields coerce to 0");
+}
+
+// ── draftsAwaitingReview (issue #104 rollup extension) ──────────────────────
+
+assert(
+  draftsAwaitingReview([ch(1, 10, 5, 3, { tnValidated: 2 }), ch(2, 8, 4, 2)]) === null,
+  "validated-only rollup (API predates the state breakdown) -> null, not 0",
+);
+
+{
+  const a = draftsAwaitingReview([
+    ch(1, 10, 5, 3, { tnAiDraft: 2, tnEdited: 1, tnNoState: 2, tqAiDraft: 1, tqEdited: 0, tqNoState: 1 }),
+    ch(2, 8, 4, 2, { tnAiDraft: 0, tnEdited: 1, tnNoState: 3, tqAiDraft: 0, tqEdited: 2, tqNoState: 0 }),
+  ]);
+  assert(a !== null, "state breakdown present -> object");
+  assert(a.notes === 4, "notes awaiting review = ai_draft + edited across chapters");
+  assert(a.questions === 3, "questions awaiting review = ai_draft + edited across chapters");
+}
+
+{
+  // NoState rows are untranslated source, never a review backlog.
+  const a = draftsAwaitingReview([ch(1, 10, 9, 4, { tnAiDraft: 0, tnEdited: 0, tnNoState: 9, tqNoState: 4 })]);
+  assert(a !== null && a.notes === 0 && a.questions === 0, "rows with no translation_state are not a backlog");
 }
 
 assert(progressPercent({ done: 0, total: 0 }) === 0, "0/0 -> 0% (no divide-by-zero)");

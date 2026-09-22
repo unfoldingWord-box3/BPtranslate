@@ -49,6 +49,38 @@ export function reviewProgress(chapters: SummaryChapter[]): ReviewProgress | nul
   return p;
 }
 
+export interface AwaitingReview {
+  notes: number;
+  questions: number;
+}
+
+/**
+ * Rows a human still has to look at: tn / tq in translation_state 'ai_draft'
+ * or 'edited' (the rollup extension from issue #104). Deliberately NOT
+ * "everything not validated" — rows with no translation_state were never
+ * touched by the translate pipeline, so counting them would report
+ * untranslated source as a review backlog.
+ *
+ * Returns null when no chapter carries either draft-state field, i.e. the API
+ * build predates the widened rollup: the caller must show absence, not 0.
+ */
+export function draftsAwaitingReview(chapters: SummaryChapter[]): AwaitingReview | null {
+  const hasRollup = chapters.some(
+    (c) =>
+      c.tnAiDraft !== undefined ||
+      c.tnEdited !== undefined ||
+      c.tqAiDraft !== undefined ||
+      c.tqEdited !== undefined,
+  );
+  if (!hasRollup) return null;
+  const out: AwaitingReview = { notes: 0, questions: 0 };
+  for (const c of chapters) {
+    out.notes += (c.tnAiDraft ?? 0) + (c.tnEdited ?? 0);
+    out.questions += (c.tqAiDraft ?? 0) + (c.tqEdited ?? 0);
+  }
+  return out;
+}
+
 /** 0..100, clamped; 0 when the total is 0 (the bar simply stays empty). */
 export function progressPercent(pair: ProgressPair): number {
   if (pair.total <= 0) return 0;
