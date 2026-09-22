@@ -47,7 +47,7 @@ import type { WorkflowStep } from "cloudflare:workers";
 // --experimental-strip-types test runner, which does no extension guessing.
 // Wrangler/esbuild resolves them identically; type-only imports are stripped
 // and can stay extensionless.
-import { dcsUrls, dcsResourceFile, dcsRawUrl, fileCommitSha, fetchText, heldOutNoteResources, releaseLockedLaneHoldOuts, NT_BOOKS } from "./dcsSources.ts";
+import { dcsUrls, dcsResourceFile, dcsRawUrl, fileCommitSha, fetchText, fetchTextWithStatus, heldOutNoteResources, releaseLockedLaneHoldOuts, unlockedLaneHoldOutsToProbe, shouldReleaseProbedHoldOut, NT_BOOKS, type FetchTextResult, type LockedLanes } from "./dcsSources.ts";
 import { getProjectConfig, type ProjectConfig } from "./projectConfig.ts";
 import { heldOutChapters, isChapterHeldOut, NOTHING_HELD_OUT, type HeldOut } from "./bookSource.ts";
 import {
@@ -2785,6 +2785,46 @@ async function clearTombstoneBlockAlert(env: Env, book: string, resource: Resour
   }
 }
 
+// Reimport self-heal for a book whose ULT/UST were held out of the nightly
+// reimport by a translate-mode import's English fallback. Mutates `scriptureHeld`
+// (deleting each released resource so the caller's stage loop re-pulls it) and
+// clears the matching book_imports.*_source columns in one UPDATE.
+//
+//  - LOCKED (textReadOnly) lanes release UNCONDITIONALLY via
+//    releaseLockedLaneHoldOuts — a published Bible never legitimately sources
+//    English, so a non-null column is always poison (the #440 case).
+//  - UNLOCKED lanes release only when `probe` reports the lane repo now serves
+//    the book (shouldReleaseProbedHoldOut) — the column can be a legitimate
+//    404-only fallback, so it must not be cleared blind (issue #441).
+//
+// `probe` is injected (not fetched inline) so the decision + the column-clear
+// SQL are testable against the real schema without a network — see
+// scriptureSelfHeal.test.mjs. Returns what was released for logging/tests.
+export async function selfHealScriptureHoldOuts(
+  env: Env,
+  book: string,
+  scriptureHeld: Set<Resource>,
+  lockedLanes: LockedLanes,
+  probe: (resource: "ult" | "ust") => Promise<FetchTextResult>,
+): Promise<{ locked: ("ult" | "ust")[]; probed: ("ult" | "ust")[] }> {
+  const locked = releaseLockedLaneHoldOuts(scriptureHeld, lockedLanes);
+  for (const r of locked) scriptureHeld.delete(r);
+
+  const probed: ("ult" | "ust")[] = [];
+  for (const r of unlockedLaneHoldOutsToProbe(scriptureHeld, lockedLanes)) {
+    if (shouldReleaseProbedHoldOut(await probe(r))) probed.push(r);
+  }
+  for (const r of probed) scriptureHeld.delete(r);
+
+  const cleared = [...locked, ...probed];
+  if (cleared.length > 0) {
+    const cols = cleared.map((r) => `${r}_source = NULL`).join(", ");
+    await env.DB.prepare(`UPDATE book_imports SET ${cols} WHERE book = ?1`).bind(book).run();
+    console.warn("reimport: released scripture hold-out", { book, locked, probed });
+  }
+  return { locked, probed };
+}
+
 // SHA-gate each requested resource and stage the changed ones to R2. Returns
 // the book's chapter extent + a manifest the chunk steps read from.
 async function planAndStageBookResources(
@@ -2837,22 +2877,26 @@ async function planAndStageBookResources(
     heldByResource[r] = await heldOutChapters(env, cfg, book, r, r === "tn" ? prov?.tn_source : prov?.tq_source);
   }
   const scriptureHeld: Set<Resource> = needsScriptureProv ? heldOutNoteResources(prov) : new Set();
-  // Self-heal for books whose locked (textReadOnly) lane was loaded from the
-  // English translationSource by the pre-fix translate-mode import: release
-  // the hold-out and clear the stale provenance so this pass re-pulls the lane
-  // repo's own text (pristine rows only, as always). See releaseLockedLaneHoldOuts.
+  // Self-heal for books whose lane was loaded from the English translationSource
+  // by a pre-fix / scaffold-only translate-mode import. A LOCKED (textReadOnly)
+  // lane releases unconditionally (a published Bible never legitimately sources
+  // English — the #440 case). An UNLOCKED lane's column can be a legitimate
+  // 404-only fallback, so it releases only after PROBING the lane repo and
+  // finding the book now present (issue #441 — the fallback never lifting once
+  // the org populates its own scripture repo). Either release clears the stale
+  // provenance so this pass re-pulls the lane repo's own pristine rows.
   if (scriptureHeld.has("ult") || scriptureHeld.has("ust")) {
     const [litRow, simRow] = await Promise.all([requireLaneState(env, "lit"), requireLaneState(env, "sim")]);
-    const released = releaseLockedLaneHoldOuts(scriptureHeld, {
+    const lockedLanes: LockedLanes = {
       lit: activeLaneConfig(litRow).textReadOnly,
       sim: activeLaneConfig(simRow).textReadOnly,
+    };
+    await selfHealScriptureHoldOuts(env, book, scriptureHeld, lockedLanes, async (resource) => {
+      const file = dcsResourceFile(cfg, book, resource);
+      if (!file) return { status: 0, text: null }; // unknown book/path → transient, keep held
+      const src = await resourceSourceRef(env, resource, cfg);
+      return fetchTextWithStatus(env, dcsRawUrl(env, src.owner, src.repo, file.path, src.ref));
     });
-    for (const r of released) scriptureHeld.delete(r);
-    if (released.length > 0) {
-      const cols = released.map((r) => `${r}_source = NULL`).join(", ");
-      await env.DB.prepare(`UPDATE book_imports SET ${cols} WHERE book = ?1`).bind(book).run();
-      console.warn("reimport: released locked-lane scripture hold-out", { book, released });
-    }
   }
 
   const entries: StagedResource[] = [];

@@ -946,6 +946,51 @@ test("one R2 hiccup while storing a billed draft cannot separate it from its pri
   assert.equal(s.blobs.map.get(keys.output), fixture(`${DRY}work/batch-01-out.tsv`));
 });
 
+test("a draft put that never lands is non-fatal: the batch finishes through the repair call in one attempt (#462)", async () => {
+  // Before #460 the batch output was written in the same paying step, so a
+  // refused draft put had to fail the whole batch — a step retry would re-buy
+  // the model call. #460 split the validated output into its own retryable
+  // persist step, and the draft put now happens mid-loop with the repair call
+  // about to run in this attempt regardless. So a refused draft put must NOT
+  // throw away the already-paid draft and the batch with it: log and continue.
+  const prompts = [];
+  let phase = 1;
+  const s = await scenario({ transport: async (req) => {
+    prompts.push(req.user);
+    // Draft drops a row (error-severity → fails checks → repair pass); the
+    // repair call then returns the full, valid batch.
+    if (phase === 1) { phase = 2; return replayReply(req.user, { drop: 1 }); }
+    return replayReply(req.user);
+  } });
+  const src = await steps.guardAndSourceStep(s.deps, PARAMS);
+  await steps.contextStep(s.deps, PARAMS, src.batchCount);
+  const keys = storage.batchKeys(WS, JOB, "01");
+
+  // The draft put is refused PERMANENTLY — every attempt, past persistBilled's
+  // in-step retries — so the fatal path (if it still existed) would fire.
+  let draftPuts = 0;
+  const flaky = {
+    ...s.deps,
+    blobs: {
+      ...s.blobs,
+      async put(key, value, opts) {
+        if (/-draft\./.test(key)) { draftPuts += 1; throw new Error("R2 PutObject: 500 internal error"); }
+        return s.blobs.put(key, value, opts);
+      },
+    },
+  };
+
+  // No throw: the batch completes on this single attempt.
+  const r = await batchStep(flaky, PARAMS, 0, src.batchCount);
+  assert.equal(prompts.length, 2, "one draft, then the repair call — completed in this attempt, not re-run");
+  assert.equal(r.attempts, 2, "pass 1 drafted, pass 2 repaired");
+  assert.equal(r.reused, false);
+  assert.equal(r.calls, 2, "both the draft and the repair call are billed");
+  assert.ok(draftPuts >= 3, "persistBilled's in-step retries still ran before giving up (was " + draftPuts + ")");
+  assert.equal(s.blobs.map.has(keys.draft), false, "the draft never landed — the resume shortcut is simply forfeited");
+  assert.equal(s.blobs.map.get(keys.output), fixture(`${DRY}work/batch-01-out.tsv`), "the validated output is still persisted");
+});
+
 test("a stored draft that validates is promoted to the batch output, never re-bought, and still billed", async () => {
   const s = await scenario({ transport: async () => { throw new Error("the provider must not be called"); } });
   const src = await steps.guardAndSourceStep(s.deps, PARAMS);

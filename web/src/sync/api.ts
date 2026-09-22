@@ -1292,6 +1292,7 @@ export type PipelineState =
   | "done";
 
 export type PipelineErrorKind =
+  // Fly bot kinds (docs/ai-pipeline-integration.md §3).
   | "transient_outage"
   | "auth_error"
   | "usage_limit"
@@ -1300,7 +1301,26 @@ export type PipelineErrorKind =
   | "missing_output"
   | "stale_output"
   | "interrupted"
-  | "import_failed";
+  | "import_failed"
+  // Internal translate-runner kinds (#445): api/src/translate/llm.ts
+  // RETRYABLE_CODES / NON_RETRYABLE_CODES plus workflowSteps.ts. Listed here so
+  // ERROR_COPY_KEY in AiScreen.tsx is exhaustive — a new runner code without
+  // copy is a typecheck error, not a silent "Unrecognized error" fallback (#471).
+  | "rate_limited"
+  | "provider_overloaded"
+  | "timeout"
+  | "network_error"
+  | "invalid_key"
+  | "model_not_found"
+  | "context_too_long"
+  | "output_too_long"
+  | "empty_output"
+  | "provider_error"
+  | "provider_not_supported_internal"
+  | "resource_not_supported_internal"
+  | "checks_failed"
+  | "internal_error_after_call"
+  | "internal_error";
 
 // Mirrors the bp-assistant contract (docs/ai-pipeline-integration.md §3).
 // Server validates with .strict(); unknown keys are rejected. Per-pipeline-type

@@ -40,6 +40,20 @@ import {
 } from "./workspaces.ts";
 import { autoClaimWorkspaceForAdmin } from "./workspaceAutoClaim.ts";
 import { presetForOrg, seedProjectConfigIfAbsent } from "./projectConfig.ts";
+import { z } from "zod";
+import { parseJson } from "./httpJson.ts";
+
+// Schemas for the DCS OAuth boundary (#484). These replace the unchecked
+// `(await res.json()) as T` casts in the callback below: a token or profile
+// response whose shape doesn't match is rejected at parse and mapped to the
+// same 502 the non-2xx path already returns, instead of flowing inward as
+// undefined/garbage (e.g. a numeric access_token that reads as truthy).
+const DcsTokenResponse = z.object({ access_token: z.string().optional() });
+const DcsUserResponse = z.object({
+  id: z.number(),
+  login: z.string(),
+  full_name: z.string().optional(),
+});
 
 // Isolate-level memoization for ensureWorkspaceUser (below), keyed
 // `${WORKSPACE_SLUG}:${userId}` — once mirrored this isolate, never repeat
@@ -626,7 +640,13 @@ export async function callbackDcsAuth(c: AppContext): Promise<Response> {
     }),
   });
   if (!tokenRes.ok) return c.json({ error: "token_exchange_failed" }, 502);
-  const tokenData = (await tokenRes.json()) as { access_token?: string };
+  let tokenData: z.infer<typeof DcsTokenResponse>;
+  try {
+    tokenData = await parseJson(tokenRes, DcsTokenResponse, "DCS OAuth token");
+  } catch (e) {
+    console.warn(`[auth] DCS token response failed validation: ${e instanceof Error ? e.message : e}`);
+    return c.json({ error: "token_exchange_failed" }, 502);
+  }
   const accessToken = tokenData.access_token;
   if (!accessToken) return c.json({ error: "no_access_token" }, 502);
 
@@ -635,7 +655,13 @@ export async function callbackDcsAuth(c: AppContext): Promise<Response> {
     headers: { Authorization: `token ${accessToken}` },
   });
   if (!userRes.ok) return c.json({ error: "user_fetch_failed" }, 502);
-  const dcsUser = (await userRes.json()) as { id: number; login: string; full_name?: string };
+  let dcsUser: z.infer<typeof DcsUserResponse>;
+  try {
+    dcsUser = await parseJson(userRes, DcsUserResponse, "DCS user profile");
+  } catch (e) {
+    console.warn(`[auth] DCS user profile failed validation: ${e instanceof Error ? e.message : e}`);
+    return c.json({ error: "user_fetch_failed" }, 502);
+  }
 
   // ── Login-time workspace resolution ────────────────────────────────────
   // index.ts's fetch() wrapper picked this request's workspace from the be_ws

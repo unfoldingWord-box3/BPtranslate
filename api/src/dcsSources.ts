@@ -320,6 +320,36 @@ export function releaseLockedLaneHoldOuts(
   return out;
 }
 
+// Companion to releaseLockedLaneHoldOuts for UNLOCKED lanes (issue #441).
+// On an UNLOCKED (wizard/custom) lane a non-null book_imports.ult_source /
+// ust_source can be a LEGITIMATE 404-only fallback: the lane repo genuinely
+// lacked the book at import time, so the English translationSource was pulled
+// in and the column stamped (see scriptureImportOverrides). Unlike a locked
+// lane it CANNOT be released blind — the English may still be all that exists.
+// So this returns only the CANDIDATES: the held scripture resources sitting on
+// an unlocked lane, whose lane repo must be PROBED before releasing. twl is
+// never lane text.
+export function unlockedLaneHoldOutsToProbe(
+  held: ReadonlySet<ReimportResource>,
+  lockedLanes: LockedLanes,
+): ("ult" | "ust")[] {
+  const out: ("ult" | "ust")[] = [];
+  if (!lockedLanes.lit && held.has("ult")) out.push("ult");
+  if (!lockedLanes.sim && held.has("ust")) out.push("ust");
+  return out;
+}
+
+// A probed unlocked-lane hold-out is released ONLY on a definitive 200 that
+// carried a body — i.e. the lane repo now serves the book. Every other outcome
+// keeps the hold-out (the English fallback stays): a 404 means the lane still
+// lacks the book; a 5xx / network error (status 0) / truncated 200 (text null)
+// is transient, and releasing on those would clear provenance to re-pull
+// nothing — or a partial. This is the inverse of shouldFallBackOnStatus's
+// "only 404 is terminal" discipline: here only a whole 200 is terminal.
+export function shouldReleaseProbedHoldOut(result: FetchTextResult): boolean {
+  return result.status === 200 && result.text != null;
+}
+
 // Best-effort text fetch. 404 / network failure → null, so callers can warn
 // and continue when a single file is missing (matches the "incomplete sample
 // dir" behaviour of scripts/import-book.mjs).

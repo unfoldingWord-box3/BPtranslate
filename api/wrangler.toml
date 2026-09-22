@@ -222,6 +222,17 @@ SUPER_ADMINS = ""
 
 [env.production]
 name = "bptranslate"
+# The OAuth token used to deploy is a member of more than one Cloudflare
+# account, so any `--remote` / `--env production` command without this would
+# abort non-interactively ("More than one account available but unable to
+# select one in non-interactive mode"). This is the unfoldingWord account,
+# which owns the deployed `bptranslate` worker and all three D1 databases.
+# The default (dev) env deliberately has no account_id here — leaving it unset
+# keeps dev-only remote commands from silently resolving to the wrong account
+# for a contributor who isn't a member of unfoldingWord. See the Deploy
+# section in CLAUDE.md; this removes the need to export CLOUDFLARE_ACCOUNT_ID
+# by hand for prod commands.
+account_id = "5a3ffd86280d3ed086be76d955829242"
 
 [env.production.assets]
 directory = "../web/dist"

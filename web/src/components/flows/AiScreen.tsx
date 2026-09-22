@@ -43,6 +43,7 @@ import { LockBanner, ReadyBanner } from "./FlowBanners";
 import { FlowStatusChip } from "./FlowStatusChip";
 import type { FlowScreenContext } from "./types";
 import { PipelineMenu } from "../PipelineMenu";
+import { AiServiceSection } from "../AiServiceSection";
 import { pipelineStore, type PipelineJob } from "../../sync/pipelineStore";
 import { useProjectConfig } from "../../hooks/useProjectConfig";
 import {
@@ -80,6 +81,7 @@ function typeLabel(type: PipelineType, t: TFunction): string {
 // ERROR_COPY verbatim (same enum, same intent: no bare enum string in front
 // of a translator).
 const ERROR_COPY_KEY: Record<PipelineErrorKind, string> = {
+  // Fly bot kinds.
   transient_outage: "aiStudio.errors.transient_outage",
   auth_error: "aiStudio.errors.auth_error",
   usage_limit: "aiStudio.errors.usage_limit",
@@ -89,6 +91,23 @@ const ERROR_COPY_KEY: Record<PipelineErrorKind, string> = {
   stale_output: "aiStudio.errors.stale_output",
   interrupted: "aiStudio.errors.interrupted",
   import_failed: "aiStudio.errors.import_failed",
+  // Internal translate-runner kinds (#445/#471). The Record<PipelineErrorKind>
+  // type makes this exhaustive: a new runner code with no copy fails typecheck.
+  rate_limited: "aiStudio.errors.rate_limited",
+  provider_overloaded: "aiStudio.errors.provider_overloaded",
+  timeout: "aiStudio.errors.timeout",
+  network_error: "aiStudio.errors.network_error",
+  invalid_key: "aiStudio.errors.invalid_key",
+  model_not_found: "aiStudio.errors.model_not_found",
+  context_too_long: "aiStudio.errors.context_too_long",
+  output_too_long: "aiStudio.errors.output_too_long",
+  empty_output: "aiStudio.errors.empty_output",
+  provider_error: "aiStudio.errors.provider_error",
+  provider_not_supported_internal: "aiStudio.errors.provider_not_supported_internal",
+  resource_not_supported_internal: "aiStudio.errors.resource_not_supported_internal",
+  checks_failed: "aiStudio.errors.checks_failed",
+  internal_error_after_call: "aiStudio.errors.internal_error_after_call",
+  internal_error: "aiStudio.errors.internal_error",
 };
 
 function errorCopy(kind: PipelineErrorKind | null, t: TFunction): string {
@@ -441,6 +460,20 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
             </span>
           </Tooltip>
         )}
+        {/* Whole-book AI translate moved here from the Books screen (issue #480),
+            parked disabled pending a product decision. It fans out to two
+            pipeline jobs per chapter, so if ever enabled it needs a job-count
+            confirmation (mirror PipelineMenu's confirm pattern) and its
+            enable-conditions: role === "admin", book imported, translation
+            project. startBookAiTranslate (web/src/lib/aiTranslate.ts) is kept
+            intact for that day; the control is unreachable until then. */}
+        <Tooltip title={t("aiStudio.translateWholeBookDisabled")}>
+          <span>
+            <Button size="small" variant="outlined" color="secondary" disabled>
+              {t("aiStudio.translateWholeBook")}
+            </Button>
+          </span>
+        </Tooltip>
       </Stack>
 
       <Box
@@ -546,38 +579,27 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
         </Stack>
       </Box>
 
-      <Box
-        sx={{
-          bgcolor: "background.paper",
-          border: 1,
-          borderColor: "divider",
-          borderRadius: 1.5,
-          boxShadow: 1,
-          overflow: "hidden",
-        }}
-      >
-        <Box sx={{ p: 2 }}>
-          <Typography variant="h6" sx={{ fontSize: "1rem" }}>
-            {t("aiStudio.apiRunsTitle")}
-          </Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-            {t("aiStudio.apiRunsBody")}
-          </Typography>
+      {/* AI service (provider / model / BYO key) — moved here from the admin
+          Setup desk (#479) so configuring the AI and using it live on one
+          screen. AiServiceSection is dependency-free by design and renders its
+          own heading. Admin-only: AiScreen admits editors too (they run
+          pipelines, requireEditor), but the AI-provider routes are
+          requireAdmin — ungated, an editor would only collect 403s. */}
+      {role === "admin" && (
+        <Box
+          sx={{
+            bgcolor: "background.paper",
+            border: 1,
+            borderColor: "divider",
+            borderRadius: 1.5,
+            boxShadow: 1,
+            overflow: "hidden",
+            p: 2,
+          }}
+        >
+          <AiServiceSection />
         </Box>
-        <Stack direction="row" alignItems="center" spacing={1.5} sx={{ p: 1.5, borderTop: 1, borderColor: "divider" }}>
-          <Typography variant="caption" color="text.secondary">
-            {t("aiStudio.comingSoon")}
-          </Typography>
-          <Box sx={{ flex: 1 }} />
-          <Tooltip title={t("aiStudio.apiTokensTooltip")}>
-            <span>
-              <Button size="small" disabled>
-                {t("aiStudio.manageApiTokens")}
-              </Button>
-            </span>
-          </Tooltip>
-        </Stack>
-      </Box>
+      )}
 
       <Snackbar open={Boolean(notice)} autoHideDuration={6000} onClose={() => setNotice(null)} message={notice ?? ""} />
       </Box>

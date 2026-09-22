@@ -23,8 +23,11 @@ import { DatabaseSync } from "node:sqlite";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Hono } from "hono";
+import { SignJWT } from "jose";
 
-import { dispatchNext, pollAllNonTerminal } from "./pipelines.ts";
+import { dispatchNext, pollAllNonTerminal, pipelines } from "./pipelines.ts";
+import { attachAuth } from "./auth.ts";
 import { encryptApiKey } from "./aiKeyCrypto.ts";
 import { clearProjectConfigCache } from "./projectConfig.ts";
 import { outKey } from "./translate/storage.ts";
@@ -405,6 +408,44 @@ function wf(state, current, output) {
   };
 }
 
+// A proxy job (runner NULL) that already reached 'running' on the Fly bot — the
+// row #469 cares about: dispatched while BT_API_TOKEN was present, still in
+// flight when the token is removed. attempt_count defaults to 0.
+function seedRunningProxyJob(sqlite, { jobId = "proxy-1", upstreamId = "bot-1" } = {}) {
+  sqlite
+    .prepare(
+      `INSERT INTO pipeline_jobs
+         (job_id, user_id, pipeline_type, book, start_chapter, end_chapter, session_key,
+          state, upstream_job_id, runner, created_at, updated_at)
+       VALUES (?, 1, 'translate', 'OBA', 1, 1, ?, 'running', ?, NULL, unixepoch(), unixepoch())`,
+    )
+    .run(jobId, `sess-${jobId}`, upstreamId);
+}
+
+// Route-level harness (mirrors viewerGuard.test.mjs) for GET /:jobId, whose 503
+// capability gate #469's second fix moves behind the row's stamped runner.
+const ROUTE_SIGNING = "test-signing-key-that-is-at-least-32-bytes-long";
+const ROUTE_ISSUER = "bible-editor";
+function routeApp() {
+  const app = new Hono();
+  app.use("*", attachAuth);
+  app.route("/api/pipelines", pipelines);
+  return app;
+}
+async function editorToken(sub = "1") {
+  const now = Math.floor(Date.now() / 1000);
+  return new SignJWT({ username: "translator", role: "editor" })
+    .setProtectedHeader({ alg: "HS256" })
+    .setSubject(sub)
+    .setIssuer(ROUTE_ISSUER)
+    .setIssuedAt(now)
+    .setExpirationTime(now + 3600)
+    .sign(new TextEncoder().encode(ROUTE_SIGNING));
+}
+function getReq(token) {
+  return { method: "GET", headers: { cookie: `be_access=${token}` } };
+}
+
 test("pollPipelineJob (internal): a running status keeps the row running and refreshes the progress chip", async () => {
   const sqlite = freshSqlite();
   seedRunningInternalJob(sqlite, wf("running", { status: "batch 3/11" }));
@@ -472,6 +513,72 @@ test("pollAllNonTerminal (no BT_API_TOKEN): still advances an internal job — t
   const row = jobRow(sqlite);
   assert.equal(row.state, "failed", "the internal job reached its terminal state with no bot token present");
   assert.equal(row.error_kind, "invalid_key");
+});
+
+test("pollAllNonTerminal (no BT_API_TOKEN): a running proxy job is skipped — no `Bearer undefined`, no attempt_count burned (#469)", async () => {
+  const sqlite = freshSqlite();
+  // The token was present when this proxy job reached 'running', then removed
+  // mid-run. The sweep must NOT fetch the bot with `Bearer undefined` (the
+  // throwing fetch would surface it) and must NOT advance attempt_count toward
+  // the poll cap — a token outage is recoverable, so the job is left untouched.
+  seedRunningProxyJob(sqlite);
+  const env = freshEnv(sqlite, { BT_API_TOKEN: undefined });
+
+  const calls = await withNoFetch(async (count) => {
+    await pollAllNonTerminal(env);
+    return count();
+  });
+
+  assert.equal(calls, 0, "no `Bearer undefined` request was attempted against the bot");
+  const row = jobRow(sqlite, "proxy-1");
+  assert.equal(row.state, "running", "the proxy job is left recoverable, not marched toward auto-fail");
+  assert.equal(row.attempt_count, 0, "a token-less sweep does not consume the proxy job's poll budget");
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/pipelines/:jobId capability gate (#469 fix 2)
+// ---------------------------------------------------------------------------
+
+test("GET /:jobId (internal): a running internal job still returns its status after config flips off — availability follows the stamped runner, not current config (#469)", async () => {
+  const sqlite = freshSqlite();
+  // Dispatched internally (runner='internal'); config later flipped so the
+  // deployment is no longer AI-configured (no BT_API_TOKEN, PIPELINE_MODE off).
+  // The status lives in D1, so the owning client must still poll it — a 503 from
+  // the capability probe would strand a legitimately in-flight job.
+  seedRunningInternalJob(sqlite, wf("running", { status: "batch 3/11" }));
+  const env = freshEnv(sqlite, {
+    BT_API_TOKEN: undefined,
+    JWT_SIGNING_KEY: ROUTE_SIGNING,
+    JWT_ISSUER: ROUTE_ISSUER,
+  });
+  const app = routeApp();
+  const tok = await editorToken("1");
+
+  const res = await withNoFetch(async () => app.request("/api/pipelines/job-1", getReq(tok), env));
+  assert.equal(res.status, 200, "the internal job's status is served, not a 503 from the capability gate");
+  const body = await res.json();
+  assert.equal(body.state, "running", "the stored wf_status_json is returned as the job status");
+});
+
+test("GET /:jobId (proxy / bogus): the capability probe still 503s for non-internal rows under a token-less deployment (#467 unchanged)", async () => {
+  const sqlite = freshSqlite();
+  seedRunningProxyJob(sqlite);
+  const env = freshEnv(sqlite, {
+    BT_API_TOKEN: undefined,
+    JWT_SIGNING_KEY: ROUTE_SIGNING,
+    JWT_ISSUER: ROUTE_ISSUER,
+  });
+  const app = routeApp();
+  const tok = await editorToken("1");
+
+  await withNoFetch(async () => {
+    // A proxy row is not stamped 'internal', so the gate still fires.
+    const proxy = await app.request("/api/pipelines/proxy-1", getReq(tok), env);
+    assert.equal(proxy.status, 503, "a running proxy job on a token-less deployment still hits the capability gate");
+    // The AiScreen "is AI configured?" probe (a bogus id) still 503s too.
+    const bogus = await app.request("/api/pipelines/does-not-exist", getReq(tok), env);
+    assert.equal(bogus.status, 503, "the bogus-id probe still reports the deployment as unconfigured");
+  });
 });
 
 // ---------------------------------------------------------------------------

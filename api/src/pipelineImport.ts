@@ -482,6 +482,11 @@ export interface ApplyResult {
   tnSkippedDup: number;
   tqCreated: number;
   tqUpdated: number;
+  // A tq_rows UPDATE lost its version CAS to a concurrent write (e.g. a
+  // translator's edit landing between our read and write) — the proposal is
+  // left unaccepted for a later pass / manual review, not silently clobbered.
+  // See applyTqUpsert.
+  tqSkippedConflict: number;
   // tw/ta article files updated in place by the translate apply (by path).
   articleUpdated: number;
   verseUpdated: number;
@@ -563,6 +568,7 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
     tnSkippedDup: 0,
     tqCreated: 0,
     tqUpdated: 0,
+    tqSkippedConflict: 0,
     articleUpdated: 0,
     verseUpdated: 0,
     affectedChapters: [],
@@ -743,9 +749,13 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
     const sortOrder = (tqCounters.get(k) ?? 0) + 100;
     tqCounters.set(k, sortOrder);
     const action = await applyTqUpsert(env, p, userId, sortOrder, claimedTqIds);
-    affected.add(p.chapter);
-    if (action === "created") result.tqCreated += 1;
-    else result.tqUpdated += 1;
+    if (action === "conflict") {
+      result.tqSkippedConflict += 1;
+    } else {
+      affected.add(p.chapter);
+      if (action === "created") result.tqCreated += 1;
+      else result.tqUpdated += 1;
+    }
   }
 
   // Preload the book's UHB/UGNT source words once (a single query — cap-safe)
@@ -1451,7 +1461,7 @@ async function applyTqUpsert(
   userId: number,
   sortOrder: number,
   claimedIds: Set<string>,
-): Promise<"created" | "updated"> {
+): Promise<"created" | "updated" | "conflict"> {
   const payload = JSON.parse(p.payload_json) as Record<string, unknown>;
   const rawId = typeof payload.id === "string" && payload.id.length > 0 ? payload.id : null;
 
@@ -1516,7 +1526,24 @@ async function applyTqUpsert(
         question: payload.question ?? null,
         response: payload.response ?? null,
       };
-      await env.DB.batch([
+      // CAS-guarded, mirroring applyVerseUpdate below. tq_rows is live editable
+      // content (TQ has no active-pipeline PATCH guard the way tn does, so a
+      // translator's edit can land here between our SELECT above and this
+      // write). Without `AND version = ?13` this UPDATE would unconditionally
+      // overwrite it and then mark the proposal accepted — silently discarding
+      // the concurrent edit. The whole write stays ONE D1 batch (one
+      // transaction), so a lost CAS can never leave the content UPDATE
+      // committed with its audit trail missing.
+      //
+      // The accept runs immediately after the UPDATE so its `changes() > 0`
+      // reads THAT mutation's row count (an intervening statement would reset
+      // changes()); the audit INSERT self-gates in SQL on a causal fingerprint
+      // (version = newVersion AND updated_by = our userId AND updated_at = now)
+      // rather than JS branching, which a D1 batch can't make conditional on an
+      // earlier statement. updated_by is the AI-pipeline user, never a human's,
+      // so a translator CAS racing from the same starting version — which
+      // computes the identical newVersion — can't satisfy the fingerprint.
+      const results = await env.DB.batch([
         env.DB
           .prepare(
             // sort_order is refreshed too: TQ has no preserve/keep semantics —
@@ -1528,7 +1555,7 @@ async function applyTqUpsert(
                 SET ref_raw = ?1, tags = ?2, quote = ?3, occurrence = ?4,
                     question = ?5, response = ?6, sort_order = ?7, verse = ?8,
                     version = version + 1, updated_at = ?9, updated_by = ?10
-              WHERE id = ?11 AND book = ?12 AND deleted_at IS NULL`,
+              WHERE id = ?11 AND book = ?12 AND deleted_at IS NULL AND version = ?13`,
           )
           .bind(
             patch.ref_raw,
@@ -1543,20 +1570,44 @@ async function applyTqUpsert(
             userId,
             id,
             p.book,
+            existing.version,
           ),
+        env.DB
+          .prepare(
+            `UPDATE pending_imports SET accepted_at = unixepoch(), accepted_by = ?2
+              WHERE id = ?1 AND changes() > 0`,
+          )
+          .bind(p.id, userId),
         env.DB
           .prepare(
             `INSERT INTO edit_log
                (kind, row_key, book, user_id, prev_version, new_version, action, payload_json, source)
-             VALUES ('tq', ?1, ?2, ?3, ?4, ?5, 'update', ?6, ?7)`,
+             SELECT 'tq', ?1, ?2, ?3, ?4, ?5, 'update', ?6, ?7
+              WHERE EXISTS (
+                SELECT 1 FROM tq_rows
+                 WHERE id = ?1 AND book = ?2 AND version = ?5
+                   AND updated_by = ?3 AND updated_at = ?8
+              )`,
           )
-          .bind(id, p.book, userId, existing.version, newVersion, JSON.stringify(patch), AI_SOURCE),
-        env.DB
-          .prepare(
-            `UPDATE pending_imports SET accepted_at = unixepoch(), accepted_by = ?2 WHERE id = ?1`,
-          )
-          .bind(p.id, userId),
+          .bind(id, p.book, userId, existing.version, newVersion, JSON.stringify(patch), AI_SOURCE, now),
       ]);
+      if ((results[0]?.meta?.changes ?? 0) === 0) {
+        // Lost the race: a concurrent write advanced this row's version between
+        // our SELECT and the UPDATE, so the CAS matched nothing — the accept and
+        // audit both self-gated shut. Leave pending_imports unaccepted: it stays
+        // visible via GET /api/pending-imports for review, and is deliberately
+        // NOT auto-retried (re-applying this now-stale AI content over the
+        // concurrent edit would reproduce the exact clobber this guard prevents).
+        // The id is NOT claimed — nothing of ours landed on it.
+        console.warn("pipeline apply: tq CAS conflict — row changed since read, skipping (needs manual review)", {
+          id,
+          book: p.book,
+          chapter: p.chapter,
+          verse: p.verse,
+          expectedVersion: existing.version,
+        });
+        return "conflict";
+      }
       claimedIds.add(id);
       return "updated";
     }

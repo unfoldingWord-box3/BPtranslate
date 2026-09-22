@@ -129,14 +129,20 @@ async function withMockedClock(fn) {
 // live-row SELECT filters deleted_at IS NULL, but the INSERT constraint has no
 // such filter). `hardErrorIds` simulates a non-UNIQUE insert failure that must
 // propagate rather than being retried down the chain.
-function buildFakeTqDb({ tombstonedIds = new Set(), hardErrorIds = new Set(), liveRows = new Map() } = {}) {
+function buildFakeTqDb({ tombstonedIds = new Set(), hardErrorIds = new Set(), racedIds = new Set(), liveRows = new Map() } = {}) {
   const batches = [];
   const insertedIds = [];
   const updatedIds = [];
   const updatedVerses = [];
   const insertAttempts = [];
   const insertArgs = [];
+  const acceptedPendingIds = [];
   const dbState = { claimedAt: 4000 };
+  // Row count of the most-recent `UPDATE tq_rows SET` dispatched, so the accept
+  // (`... AND changes() > 0`) and the EXISTS-gated audit INSERT in applyTqUpsert
+  // can report changes:0 when the guarded UPDATE they depend on matched nothing
+  // — the way real SQLite would in one batch. See the CAS-conflict test.
+  let lastTqUpdateChanges = 1;
 
   // Each importJobOutput call issues exactly one pending_imports SELECT (in
   // applyJobOutput); proposalsQueue hands out one array per call, in order, so
@@ -188,10 +194,27 @@ function buildFakeTqDb({ tombstonedIds = new Set(), hardErrorIds = new Set(), li
     if (/UPDATE tq_rows\s+SET/.test(sql)) {
       // bind order per applyTqUpsert's UPDATE: ref_raw(0), tags(1), quote(2),
       // occurrence(3), question(4), response(5), sort_order(6), verse(7),
-      // updated_at(8), updated_by(9), id(10), book(11).
+      // updated_at(8), updated_by(9), id(10), book(11), expectedVersion(12).
       const id = args[10];
+      const expectedVersion = args[12];
+      const live = liveRows.get(id);
+      // CAS: the UPDATE only matches while `version = ?13` still holds. For an id
+      // in racedIds, simulate a concurrent writer that advanced the version
+      // AFTER applyTqUpsert's SELECT read it (the SELECT returned live.version,
+      // which is what got bound), so the compare-and-swap misses by one.
+      let effectiveStored = live ? live.version : expectedVersion;
+      if (racedIds.has(id)) {
+        effectiveStored = (live?.version ?? 0) + 1;
+        racedIds.delete(id); // one simulated race per id
+      }
+      if (effectiveStored !== expectedVersion) {
+        lastTqUpdateChanges = 0;
+        return { changes: 0, rows: [], single: null };
+      }
+      lastTqUpdateChanges = 1;
       updatedIds.push(id);
       updatedVerses.push(args[7]);
+      if (live) live.version = expectedVersion + 1;
       return { changes: 1, rows: [], single: null };
     }
     if (/INSERT INTO tq_rows/.test(sql)) {
@@ -213,9 +236,22 @@ function buildFakeTqDb({ tombstonedIds = new Set(), hardErrorIds = new Set(), li
       return { changes: 1, rows: [], single: null };
     }
     if (/INSERT INTO edit_log/.test(sql)) {
+      // The tq UPDATE-path audit self-gates on `WHERE EXISTS (... FROM tq_rows
+      // ...)`; it must report no write when the guarded UPDATE it depends on
+      // missed. The create-path audit (plain VALUES) always lands.
+      if (/WHERE EXISTS/.test(sql) && /FROM tq_rows/.test(sql)) {
+        return { changes: lastTqUpdateChanges > 0 ? 1 : 0, rows: [], single: null };
+      }
       return { changes: 1, rows: [], single: null };
     }
     if (/SET accepted_at = unixepoch\(\), accepted_by = \?2/.test(sql)) {
+      // The tq UPDATE-path accept carries `AND changes() > 0`; it must not
+      // accept the proposal when the guarded UPDATE before it matched nothing.
+      // The create-path / lane-skip accepts (no changes() clause) always land.
+      if (/changes\(\) > 0/.test(sql) && lastTqUpdateChanges === 0) {
+        return { changes: 0, rows: [], single: null };
+      }
+      acceptedPendingIds.push(args[0]);
       return { changes: 1, rows: [], single: null };
     }
     if (/UPDATE pipeline_jobs SET import_claimed_at = NULL/.test(sql)) {
@@ -260,7 +296,7 @@ function buildFakeTqDb({ tombstonedIds = new Set(), hardErrorIds = new Set(), li
     },
   };
 
-  return { env, batches, insertedIds, updatedIds, updatedVerses, insertAttempts, insertArgs, liveRows, setProposals };
+  return { env, batches, insertedIds, updatedIds, updatedVerses, insertAttempts, insertArgs, acceptedPendingIds, liveRows, setProposals };
 }
 
 await withMockedClock(async () => {
@@ -561,6 +597,82 @@ await withMockedClock(async () => {
     updatedVerses.length === 1 && updatedVerses[0] === 5,
     `TQ verse-move: a live row at verse 1 updated by a proposal for verse 5 must have its UPDATE bind verse=5, ` +
       `not stay filed under its old verse (got updatedVerses=${updatedVerses.join(",")})`,
+  );
+});
+
+// ── TQ CAS conflict: a concurrent write landing between applyTqUpsert's SELECT
+//    and its UPDATE must NOT be silently overwritten. The guarded UPDATE
+//    (`AND version = ?13`) matches nothing, so the row is skipped, counted in
+//    tqSkippedConflict, left NOT accepted in pending_imports, and NOT audited —
+//    the app's own 409 re-queue behaviour, not a clobber. (Ports upstream #776,
+//    adapted to this fork's changes()/EXISTS-fingerprint gate — the fork has no
+//    last_change_source column.) ──
+await withMockedClock(async () => {
+  const { env, updatedIds, acceptedPendingIds, batches, setProposals } = buildFakeTqDb({
+    liveRows: new Map([["abc1", { version: 7, chapter: 1, verse: 1 }]]),
+    racedIds: new Set(["abc1"]),
+  });
+
+  setProposals([
+    {
+      id: 42,
+      kind: "tq",
+      book: "GEN",
+      chapter: 1,
+      verse: 1,
+      bible_version: null,
+      payload_json: JSON.stringify({ id: "abc1", book: "GEN", chapter: 1, verse: 1, question: "q-would-clobber" }),
+    },
+  ]);
+
+  const originalConsoleWarn = console.warn;
+  const originalConsoleError = console.error;
+  console.warn = () => {};
+  console.error = () => {};
+  let result;
+  try {
+    result = await importJobOutput(
+      env,
+      { jobId: "job-tq-cas-conflict", pipelineType: "tqs", book: "GEN", startChapter: 1, endChapter: 1 },
+      [],
+    );
+  } finally {
+    console.warn = originalConsoleWarn;
+    console.error = originalConsoleError;
+  }
+
+  assert(result.claimLost !== true, `TQ CAS conflict: the job still completes (claimLost=${result.claimLost})`);
+  assert(
+    result.applied?.tqSkippedConflict === 1 && result.applied?.tqUpdated === 0,
+    `TQ CAS conflict: the raced row is counted as a skipped conflict, not an update ` +
+      `(got tqSkippedConflict=${result.applied?.tqSkippedConflict}, tqUpdated=${result.applied?.tqUpdated})`,
+  );
+  assert(
+    updatedIds.length === 0,
+    `TQ CAS conflict: no UPDATE is treated as landed (got updatedIds=${updatedIds.join(",")})`,
+  );
+  assert(
+    !acceptedPendingIds.includes(42),
+    `TQ CAS conflict: the proposal is left UNACCEPTED in pending_imports so it stays visible for review, ` +
+      `not marked accepted over a clobbered write (acceptedPendingIds=${acceptedPendingIds.join(",")})`,
+  );
+  // The guard SQL must actually be present — a regression guard against it being
+  // simplified back to an unconditional UPDATE / accept.
+  const tqUpdateBatch = batches.find((b) => b.some((s) => /UPDATE tq_rows\s+SET/.test(s.sql)));
+  const tqUpdateStmt = tqUpdateBatch?.find((s) => /UPDATE tq_rows\s+SET/.test(s.sql));
+  const tqAcceptStmt = tqUpdateBatch?.find((s) => /SET accepted_at = unixepoch\(\)/.test(s.sql));
+  const tqAuditStmt = tqUpdateBatch?.find((s) => /INSERT INTO edit_log/.test(s.sql));
+  assert(
+    tqUpdateStmt != null && /AND version = \?13/.test(tqUpdateStmt.sql),
+    `TQ CAS conflict: the tq_rows UPDATE carries the version CAS ("AND version = ?13")`,
+  );
+  assert(
+    tqAcceptStmt != null && /changes\(\) > 0/.test(tqAcceptStmt.sql),
+    `TQ CAS conflict: the accept self-gates on "changes() > 0"`,
+  );
+  assert(
+    tqAuditStmt != null && /WHERE EXISTS/.test(tqAuditStmt.sql) && /FROM tq_rows/.test(tqAuditStmt.sql),
+    `TQ CAS conflict: the audit INSERT self-gates on a "WHERE EXISTS (... FROM tq_rows ...)" fingerprint`,
   );
 });
 

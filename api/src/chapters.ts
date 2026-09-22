@@ -215,10 +215,10 @@ chapters.patch("/:book/:chapter/:verse/status", requireEditor, async (c) => {
       .bind(book, chapter, verse, done, now),
     c.env.DB
       .prepare(
-        `INSERT INTO edit_log (kind, row_key, user_id, prev_version, new_version, action, payload_json)
-         VALUES ('verse_status', ?1, ?2, NULL, NULL, 'update', ?3)`,
+        `INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action, payload_json)
+         VALUES ('verse_status', ?1, ?2, ?3, NULL, NULL, 'update', ?4)`,
       )
-      .bind(`${book}/${chapter}/${verse}`, userId, JSON.stringify({ done: !!parsed.data.done })),
+      .bind(`${book}/${chapter}/${verse}`, book, userId, JSON.stringify({ done: !!parsed.data.done })),
   ]);
   const row = await c.env.DB.prepare(
     `SELECT * FROM verse_statuses WHERE book = ?1 AND chapter = ?2 AND verse = ?3`,
@@ -294,10 +294,10 @@ chapters.patch("/:book/:chapter/:verse/lanes/:lane", requireEditor, async (c) =>
     mutate,
     c.env.DB
       .prepare(
-        `INSERT INTO edit_log (kind, row_key, user_id, prev_version, new_version, action, payload_json)
-         VALUES ('verse_lane', ?1, ?2, NULL, NULL, 'update', ?3)`,
+        `INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action, payload_json)
+         VALUES ('verse_lane', ?1, ?2, ?3, NULL, NULL, 'update', ?4)`,
       )
-      .bind(`${book}/${chapter}/${verse}/${lane}`, userId, JSON.stringify({ lane, checked: parsed.data.checked })),
+      .bind(`${book}/${chapter}/${verse}/${lane}`, book, userId, JSON.stringify({ lane, checked: parsed.data.checked })),
   ]);
   const checkers = await laneCheckersFor(c.env.DB, book, chapter, verse, lane);
   const check = { book, chapter, verse, lane, checkers };
@@ -349,10 +349,10 @@ chapters.patch("/:book/:chapter/lanes/:lane/bulk", requireEditor, async (c) => {
   stmts.push(
     c.env.DB
       .prepare(
-        `INSERT INTO edit_log (kind, row_key, user_id, prev_version, new_version, action, payload_json)
-         VALUES ('verse_lane', ?1, ?2, NULL, NULL, 'update', ?3)`,
+        `INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action, payload_json)
+         VALUES ('verse_lane', ?1, ?2, ?3, NULL, NULL, 'update', ?4)`,
       )
-      .bind(`${book}/${chapter}/${lane}/bulk`, userId, JSON.stringify({ lane, checked: parsed.data.checked, verses })),
+      .bind(`${book}/${chapter}/${lane}/bulk`, book, userId, JSON.stringify({ lane, checked: parsed.data.checked, verses })),
   );
   await c.env.DB.batch(stmts);
   const all = await c.env.DB
