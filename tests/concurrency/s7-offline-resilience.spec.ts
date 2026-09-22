@@ -18,6 +18,12 @@ const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
 // ops without user action.
 
 test("edits queued while offline survive and flush on reconnect", async ({ browser }) => {
+  // The outbox poll below can legitimately take up to 10s on a loaded machine,
+  // which pushes this test's worst-case serial budget past playwright.config's
+  // 30s default. Without this, a slow-but-successful poll fails as "Test
+  // timeout of 30000ms exceeded" — a worse diagnostic than the flake this
+  // spec's fix (#501) removed.
+  test.setTimeout(60_000);
   const probe = await apiRequest.newContext({ baseURL: BASE });
   const probeAuth = await mintToken(probe, "probe");
   const chapter = await fetchChapter(probe, probeAuth.token, "ZEC", 6);
@@ -58,36 +64,56 @@ test("edits queued while offline survive and flush on reconnect", async ({ brows
   // IndexedDB transaction and overruns any fixed delay on a loaded machine. It
   // cannot race the other way — the context stays offline for this whole
   // window, so a queued op cannot drain.
-  const readQueuedOpCount = () => page.evaluate(async () => {
-    const open = (name: string, version?: number) =>
-      new Promise<IDBDatabase>((resolve, reject) => {
-        const req = indexedDB.open(name, version);
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = () => reject(req.error);
-      });
-    const dbs = (await indexedDB.databases()).filter((d) =>
-      (d.name ?? "").startsWith("bible-editor-outbox"),
-    );
-    let queued = 0;
-    for (const meta of dbs) {
-      const db = await open(meta.name!, meta.version);
-      if (!db.objectStoreNames.contains("ops")) {
-        db.close();
-        continue;
+  // Matched on offlineText, which is unique per run, so this counts THIS edit
+  // rather than "some pending op" — a later auto-enqueue elsewhere in the app
+  // can't satisfy it, and neither can a leftover from another database.
+  const readQueuedOpCount = (text: string) => () =>
+    page.evaluate(async (needle) => {
+      try {
+        const open = (name: string, version?: number) =>
+          new Promise<IDBDatabase>((resolve, reject) => {
+            const req = indexedDB.open(name, version);
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+          });
+        const dbs = (await indexedDB.databases()).filter((d) =>
+          (d.name ?? "").startsWith("bible-editor-outbox"),
+        );
+        let queued = 0;
+        for (const meta of dbs) {
+          const db = await open(meta.name!, meta.version);
+          try {
+            if (!db.objectStoreNames.contains("ops")) continue;
+            const ops: Array<Record<string, unknown>> = await new Promise((resolve, reject) => {
+              const tx = db.transaction("ops", "readonly");
+              const req = tx.objectStore("ops").getAll();
+              req.onsuccess = () => resolve(req.result as Array<Record<string, unknown>>);
+              req.onerror = () => reject(req.error);
+            });
+            queued += ops.filter(
+              (o) =>
+                (o.status === "pending" || o.status === "in_flight") &&
+                JSON.stringify(o).includes(needle),
+            ).length;
+          } finally {
+            // finally, so a rejected getAll can't leak a connection across the
+            // poll's repeated runs and block a future version upgrade.
+            db.close();
+          }
+        }
+        return queued;
+      } catch {
+        // Retry rather than hard-fail: expect.poll does NOT catch an exception
+        // thrown by the generator itself, so a transient DOMException would
+        // abort the poll with a raw error instead of polling on.
+        return 0;
       }
-      const ops: Array<{ status: string }> = await new Promise((resolve, reject) => {
-        const tx = db.transaction("ops", "readonly");
-        const req = tx.objectStore("ops").getAll();
-        req.onsuccess = () => resolve(req.result as Array<{ status: string }>);
-        req.onerror = () => reject(req.error);
-      });
-      db.close();
-      queued += ops.filter((o) => o.status === "pending" || o.status === "in_flight").length;
-    }
-    return queued;
-  });
+    }, text);
   await expect
-    .poll(readQueuedOpCount, { timeout: 10_000 })
+    .poll(readQueuedOpCount(offlineText), {
+      timeout: 10_000,
+      message: "expected at least one pending outbox op while offline",
+    })
     .toBeGreaterThan(0);
 
   // While offline the server must NOT see the edit. Verify via a separate
