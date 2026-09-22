@@ -77,6 +77,7 @@ type Location =
 function positionFromLoc(loc: Location): { book: string; chapter: number; verse: number } | null {
   switch (loc.view) {
     case "chapter":
+    case "verse":
     case "translateAlign":
       return { book: loc.book, chapter: loc.chapter, verse: loc.verse };
     case "notes":
@@ -482,15 +483,20 @@ export function App() {
   };
 
   // Remember the last scripture location so leaving preferences/articles
-  // returns here instead of the default landing book. Only tracks chapter
-  // views; a fresh load straight into preferences keeps the default.
+  // returns here instead of the default landing book. Tracks every working
+  // scripture view (the same set positionFromLoc recognizes — chapter, verse,
+  // notes, questions, translate*), so "back to scripture" from an opened tW/tA
+  // article returns to where the user actually was — including the verse view,
+  // whose visits used to be dropped, sending them back to a stale chapter (#478).
+  // A fresh load straight into preferences keeps the default.
   const lastScriptureRef = useRef<{ book: string; chapter: number; verse: number }>({
     book: DEFAULT_BOOK,
     chapter: 1,
     verse: 1,
   });
-  if (loc.view === "chapter") {
-    lastScriptureRef.current = { book: loc.book, chapter: loc.chapter, verse: loc.verse };
+  const lastScripturePos = positionFromLoc(loc);
+  if (lastScripturePos) {
+    lastScriptureRef.current = lastScripturePos;
   }
   const backToScripture = () => {
     const { book, chapter, verse } = lastScriptureRef.current;
