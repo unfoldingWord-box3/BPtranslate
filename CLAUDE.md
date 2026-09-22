@@ -25,7 +25,7 @@ Rule of thumb: if you'd open more than two files or run more than two bash comma
 - Tactical 7-month replacement for gatewayEdit + tcCreate. Read [`docs/plan.md`](docs/plan.md) and [`docs/handoff.md`](docs/handoff.md) before non-trivial work. If a wave-specific handoff exists (e.g. [`docs/wave-2-handoff.md`](docs/wave-2-handoff.md)), read that first.
 - We borrow a lot of code from `../tcc-ge-dcs` — look there for help/inspiration.
 - We are intentionally rethinking the backend to remove DCS from the loop except for once daily.
-- Volta-pinned: Node 24.15.0, npm 11.12.1. npm workspaces (`api/`, `web/`).
+- Volta-pinned: Node 24.21.0, npm 11.19.0. npm workspaces (`api/`, `web/`).
 
 ## Session state — read first, update last
 
