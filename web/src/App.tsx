@@ -132,8 +132,14 @@ function safeDecode(s: string): string {
 // replaceState deliberately does NOT fire hashchange, so the Loc the caller
 // returns alongside this call is what actually renders — same contract the
 // legacy #/import redirect below has always used.
+//
+// location.search is preserved: parseHash runs in App's FIRST useState
+// initializer, ahead of the ones that read ?_auth_denied / ?_choose_ws, so
+// dropping the query here would silently swallow the denied screen or the
+// workspace picker for anyone arriving with both a retired hash and one of
+// those params.
 function retire(next: string) {
-  history.replaceState(null, "", location.pathname + next);
+  history.replaceState(null, "", location.pathname + location.search + next);
 }
 
 function parseHash(): Location {
@@ -174,7 +180,9 @@ function parseHash(): Location {
   // (#173). Its only entry points were HomeScreen's two queue cards and the
   // FlowNav pill bar, both deleted in the same change. Notes are the queue's
   // main workload, so a stale bookmark lands on the redesigned notes screen for
-  // that chapter; #/questions is one tap away from the package hub.
+  // that chapter; #/questions is one tap away from the package hub. The
+  // reviewer-only actions the queue carried (restore/hint/preserve, edit
+  // history, bulk approve, the tQ grid) have no new-UI home yet — #390.
   const rv = location.hash.match(/^#\/review\/([A-Za-z0-9]+)(?:\/(\d+))?$/);
   if (rv) {
     const book = rv[1].toUpperCase();
@@ -291,6 +299,12 @@ function parseHash(): Location {
   // "SCRIPTURE" / "ALIGN" / "WORDS" / "VERSE" — a broken screen, not a 404. The
   // 1–2 segment #/scripture and #/words forms never reach here (claimed above);
   // only the legacy longer forms and the bare #/align, #/verse do.
+  //
+  // This covers the arities the deleted screens actually produced, not every
+  // near miss: a hand-typed #/review, #/team/ or #/align/GEN/3/5/dual still
+  // reaches the catch-all and renders that garbage book. Unchanged from before
+  // this deletion, and closing it means anchoring the catch-all — a separate
+  // change with its own blast radius.
   const fv = location.hash.match(
     /^#\/(scripture|align|words|verse)(?:\/([A-Za-z0-9]+)(?:\/(\d+))?(?:\/(\d+))?)?$/,
   );
@@ -301,6 +315,7 @@ function parseHash(): Location {
     // #/align keeps its verse (the redesigned aligner is verse-addressable);
     // #/words is per-book; #/scripture and the verse overview land on the
     // redesigned scripture queue for that chapter, the closest live surface.
+    // That chapter-not-verse landing is the gap tracked by #389.
     if (fv[1] === "align") {
       retire(`#/alignment/${book}/${chapter}/${verse}`);
       return { view: "translateAlign", book, chapter, verse, mode: "single" };

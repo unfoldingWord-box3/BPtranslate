@@ -436,7 +436,8 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
       // seek to the exact verse; that screen was deleted with the rest of the
       // old flows screens (#173) and parseHash now redirects the arity here, so
       // ask for the live route directly. The jump lands on the draft's chapter
-      // rather than its verse until the redesigned screen grows verse seeking.
+      // rather than its verse until the redesigned screen grows verse seeking
+      // (#389 — same shape as the tq/twl row-landing gap in #335).
       if (flowRouting) location.hash = `#/scripture/${m.book}/${m.chapter}`;
       else onNavigate?.(m.book, m.chapter, m.verse);
     } else {
