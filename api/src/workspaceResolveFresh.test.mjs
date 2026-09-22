@@ -122,6 +122,40 @@ function makeTrackingD1(db, counts, track) {
   };
 }
 
+// Like makeD1, but a mutable `fail.on` flag makes every registry SELECT .all()
+// reject — simulating a transient `SELECT … FROM workspaces` failure (issue
+// #495). `.first()` and writes are left working so the seed/claim paths a test
+// sets up beforehand still function; only the roster read fails while fail.on.
+function makeFailingD1(db, counts, fail) {
+  function bound(sql, params) {
+    return {
+      first: async () => db.prepare(sql).get(...params) ?? null,
+      all: async () => {
+        if (/^\s*select/i.test(sql)) {
+          if (fail.on) throw new Error("simulated transient registry read failure");
+          counts.reads++;
+        }
+        return { results: db.prepare(sql).all(...params) };
+      },
+      run: async () => {
+        const r = db.prepare(sql).run(...params);
+        return { meta: { changes: Number(r.changes) } };
+      },
+    };
+  }
+  return {
+    prepare(sql) {
+      return { bind: (...params) => bound(sql, params), ...bound(sql, []) };
+    },
+    batch: async (stmts) => {
+      const out = [];
+      for (const s of stmts) out.push(await s.run());
+      return out;
+    },
+    _tag: "shared-db",
+  };
+}
+
 // A deployed-but-unclaimed pool binding: live D1-shaped (prepare is a function)
 // so parseEntry accepts a claimed row bound to it, but never actually queried.
 const liveBinding = () => ({ prepare: () => ({}) });
@@ -305,6 +339,88 @@ console.log("[resolveFresh] a known or null slug resolves from cache with no ext
   const none = await resolveWorkspaceFresh(envB, null);
   assert(none.slug === "home", "null slug -> list[0]");
   assert(counts.reads === 1, "no recheck read for known / null slugs");
+}
+
+// ── 7. #495: a FAILED registry read must not clobber a good cached roster ─────
+//       A transient read failure during a forced reprime (the path
+//       invalidateAndReprime / the unknown-slug recheck take) used to cache
+//       { workspaces: null }, collapsing every KNOWN slug onto list[0].
+
+console.log("[resolveFresh] a failed registry read during a forced reprime keeps the good roster (known slugs still resolve to their own binding)");
+{
+  const sqlite = freshDb();
+  claim(sqlite, "home", "HomeOrg", "DB"); // list[0]
+  claim(sqlite, "orgx", "OrgX", "DB_ORGX");
+  const counts = { reads: 0 };
+  const fail = { on: false };
+  const envB = { DB: makeFailingD1(sqlite, counts, fail), DB_ORGX: liveBinding() };
+
+  await primeWorkspaces(envB); // good roster: home + orgx
+  assert(listWorkspaces(envB).length === 2, "primed with both workspaces");
+  assert(counts.reads === 1, "one registry read on prime");
+
+  // A transient read failure hits during a forced reprime.
+  fail.on = true;
+  await primeWorkspaces(envB, { force: true }); // read throws internally, fails soft
+  fail.on = false;
+
+  assert(listWorkspaces(envB).length === 2, "the good roster survived the failed reprime read");
+  const orgx = resolveWorkspace(envB, "orgx");
+  assert(orgx.slug === "orgx", "known slug still resolves after a failed reprime read");
+  assert(orgx.binding === "DB_ORGX", "…to its OWN binding, not the home tenant's DB (list[0]) — #495 fixed");
+}
+
+// ── 7b. the clobber path in the wild: an unknown-slug recheck whose read fails
+//        must not strand the isolate on list[0] for KNOWN slugs.
+
+console.log("[resolveFresh] an unknown-slug recheck whose read fails leaves known slugs resolving to their own binding");
+{
+  const sqlite = freshDb();
+  claim(sqlite, "home", "HomeOrg", "DB"); // list[0]
+  claim(sqlite, "orgx", "OrgX", "DB_ORGX");
+  const counts = { reads: 0 };
+  const fail = { on: false };
+  const envB = { DB: makeFailingD1(sqlite, counts, fail), DB_ORGX: liveBinding() };
+
+  await primeWorkspaces(envB); // good roster: home + orgx
+
+  // An unknown slug triggers a recheck (invalidateAndReprime) whose read fails.
+  fail.on = true;
+  const dead = await resolveWorkspaceFresh(envB, "ghost");
+  fail.on = false;
+  assert(dead.slug === "home", "the unknown slug falls back to list[0] as before");
+
+  // The pre-#495 clobber would have left the roster as the synthetic fallback,
+  // so a KNOWN slug would now mis-resolve to list[0]. It must not.
+  const orgx = resolveWorkspace(envB, "orgx");
+  assert(orgx.slug === "orgx", "a known slug is unaffected by the failed recheck");
+  assert(orgx.binding === "DB_ORGX", "…still its OWN binding, not list[0]");
+}
+
+// ── 7c. cold isolate whose very FIRST read fails stays unprimed → retries ─────
+//        rather than latching onto the fallback (so a later successful read
+//        loads the real roster without waiting for isolate recycle).
+
+console.log("[resolveFresh] a cold isolate whose first read fails retries on the next prime instead of latching the fallback");
+{
+  const sqlite = freshDb();
+  claim(sqlite, "home", "HomeOrg", "DB");
+  claim(sqlite, "orgx", "OrgX", "DB_ORGX");
+  const counts = { reads: 0 };
+  const fail = { on: true }; // first read fails
+  const envB = { DB: makeFailingD1(sqlite, counts, fail), DB_ORGX: liveBinding() };
+
+  await primeWorkspaces(envB); // read throws; nothing cached
+  // Falls through to the env-var/default roster meanwhile (no WORKSPACES here →
+  // the synthetic implicit default), NOT a stuck cache.
+  assert(listWorkspaces(envB).length === 1, "cold failed read falls through to the implicit default");
+
+  // The registry recovers; the next prime is not short-circuited by a cached
+  // fallback and loads the real roster.
+  fail.on = false;
+  await primeWorkspaces(envB);
+  assert(listWorkspaces(envB).length === 2, "a later successful prime loads the real roster (isolate was not latched on the fallback)");
+  assert(resolveWorkspace(envB, "orgx").binding === "DB_ORGX", "orgx resolves to its own binding after recovery");
 }
 
 console.log("workspaceResolveFresh: all assertions passed");
