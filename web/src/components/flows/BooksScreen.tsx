@@ -381,8 +381,6 @@ function BookDetailPanel({
 
   const [summary, setSummary] = useState<BookSummary | null>(null);
   const [message, setMessage] = useState<string | null>(null);
-  const [warning, setWarning] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [justImported, setJustImported] = useState(false);
   const [repullOpen, setRepullOpen] = useState(false);
   // The "Bring in this book" source sheet (docs/ux-simplification.md §1.3).
@@ -409,8 +407,6 @@ function BookDetailPanel({
   // sources first, then the POST, including the has_local_edits discard
   // confirm. This callback is the shared post-import path.
   const handleImported = (res: Awaited<ReturnType<typeof api.importBook>>) => {
-    setError(null);
-    setWarning(null);
     const sources = importedSourceRepos(res.sources);
     setMessage(
       sources.length
@@ -505,16 +501,6 @@ function BookDetailPanel({
           {message && (
             <Alert severity="success" sx={{ mt: 2 }} onClose={() => setMessage(null)}>
               {message}
-            </Alert>
-          )}
-          {warning && (
-            <Alert severity="warning" sx={{ mt: 2 }} onClose={() => setWarning(null)}>
-              {warning}
-            </Alert>
-          )}
-          {error && (
-            <Alert severity="error" sx={{ mt: 2 }} onClose={() => setError(null)}>
-              {error}
             </Alert>
           )}
         </PanelBody>
