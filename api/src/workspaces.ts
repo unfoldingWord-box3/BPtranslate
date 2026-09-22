@@ -201,42 +201,64 @@ export async function primeWorkspaces(env: Env, opts?: { force?: boolean }): Pro
   // is ready, never the synthetic implicit default.
   if (!opts?.force && registryState.has(db as object)) return;
 
-  let workspaces: Workspace[] | null = null;
+  // Read the registry FIRST, isolated from the seed write below, because the two
+  // failure modes must be handled differently. A failed READ must never clobber a
+  // good cached roster (issue #495): the old catch set `workspaces = null` and
+  // wrote it through, so a single transient `SELECT … FROM workspaces` failure
+  // collapsed every known slug in the isolate onto list[0] — another tenant's D1
+  // — until something reprimed. Instead, on a read failure we leave the existing
+  // cache in place (a warm isolate, or a forced reprime, keeps its roster) and,
+  // for a cold isolate whose very first read failed, leave the cache UNSET so the
+  // next request retries rather than latching onto the fallback. Either way the
+  // synchronous resolvers fall through to the env-var/default roster meanwhile.
+  let rows: WorkspaceRow[];
   try {
-    const rows = await readRegistry(db);
-    if (rows.length > 0) {
-      // D1 returns NULLs; parseEntry wants missing optionals as `undefined`
-      // (a null exportOwner would otherwise be rejected as the wrong type).
-      const parsed: Workspace[] = [];
-      const seen = new Set<string>();
-      for (const r of rows) {
-        const ws = parseEntry(env, {
-          slug: r.slug,
-          label: r.label,
-          org: r.org,
-          binding: r.binding,
-          exportOwner: r.exportOwner ?? undefined,
-        });
-        if (!ws || seen.has(ws.slug)) continue;
-        seen.add(ws.slug);
-        parsed.push(ws);
-      }
-      workspaces = parsed.length > 0 ? parsed : null;
-    } else {
-      // Empty registry: seed it from the WORKSPACES env var (never the implicit
-      // default — that must stay dynamic). Nothing to seed → stay on fallback.
-      const seed = parseEnvEntries(env);
-      if (seed.length > 0) {
-        await seedRegistry(db, seed);
-        workspaces = seed;
-      }
-    }
+    rows = await readRegistry(db);
   } catch (e) {
     console.warn(
-      "workspaces: registry prime failed, falling back to WORKSPACES env var",
+      "workspaces: registry read failed, keeping existing roster (env-var/default fallback until a read succeeds)",
       e instanceof Error ? e.message : String(e),
     );
-    workspaces = null;
+    return;
+  }
+
+  let workspaces: Workspace[] | null = null;
+  if (rows.length > 0) {
+    // D1 returns NULLs; parseEntry wants missing optionals as `undefined`
+    // (a null exportOwner would otherwise be rejected as the wrong type).
+    const parsed: Workspace[] = [];
+    const seen = new Set<string>();
+    for (const r of rows) {
+      const ws = parseEntry(env, {
+        slug: r.slug,
+        label: r.label,
+        org: r.org,
+        binding: r.binding,
+        exportOwner: r.exportOwner ?? undefined,
+      });
+      if (!ws || seen.has(ws.slug)) continue;
+      seen.add(ws.slug);
+      parsed.push(ws);
+    }
+    workspaces = parsed.length > 0 ? parsed : null;
+  } else {
+    // Empty registry (a SUCCESSFUL read of zero claimed rows — distinct from the
+    // failed read above): seed it from the WORKSPACES env var (never the implicit
+    // default — that must stay dynamic). Nothing to seed → stay on fallback. A
+    // seed WRITE failure is non-fatal (see seedRegistry): use the seed roster for
+    // this isolate regardless, and the next boot retries the write.
+    const seed = parseEnvEntries(env);
+    if (seed.length > 0) {
+      workspaces = seed;
+      try {
+        await seedRegistry(db, seed);
+      } catch (e) {
+        console.warn(
+          "workspaces: registry seed write failed (non-fatal, using env roster this isolate)",
+          e instanceof Error ? e.message : String(e),
+        );
+      }
+    }
   }
   registryState.set(db as object, { workspaces });
 }
@@ -725,12 +747,15 @@ export function resolveWorkspace(env: Env, slug: string | null): Workspace {
 //     work per window, not one reprime per slug.
 //
 // Reprimes are SERIALIZED per shared-DB object: at most one runs at a time,
-// regardless of slug. A reprime is delete-then-reprime on the shared
-// registryState, and primeWorkspaces does not dedupe in-flight loads, so two
-// reprimes running at once issue independent registry reads and whichever
-// settles LAST wins unconditionally — a stale or failed read finishing last
-// would clobber a good roster with the fallback (workspaces: null). Because the
-// slugs are stamped below, a freshly-claimed slug would then fall through to
+// regardless of slug. A reprime overwrites the shared registryState in place,
+// and primeWorkspaces does not dedupe in-flight loads, so two reprimes running
+// at once issue independent registry reads and whichever settles LAST wins
+// unconditionally. A STALE (older-but-still-valid) read finishing last would
+// clobber a newer roster — serializing the reads is what prevents that. (A
+// FAILED read no longer clobbers: primeWorkspaces keeps the existing roster on a
+// read error instead of caching the fallback — issue #495 — but a stale
+// successful read still can.) Because the slugs are stamped below, a stale read
+// clobbering a good roster would leave a freshly-claimed slug falling through to
 // list[0] (another tenant's D1) for the rest of the window: the exact hole this
 // resolver exists to close. So a caller waits out any reprime already in flight
 // (re-checking after each whether it answered this slug) before starting its
