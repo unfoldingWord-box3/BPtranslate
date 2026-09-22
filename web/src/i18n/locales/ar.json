@@ -1146,7 +1146,6 @@
     "gatewayAdminIntro": "أولًا، أنشئ مستودعات موارد منظمتك على Door43 (مثلًا باستخدام gatewayAdmin). ستحتاج إلى مستودع واحد لكل مورد:",
     "gatewayAdminChecklist": "• {lang}_tn — translationNotes\n• {lang}_glt / {lang}_gst — النص الحرفي والمبسّط\n• {lang}_twl — روابط translationWords\n• {lang}_tw — translationWords\n• {lang}_ta — translationAcademy\n• {lang}_tq — translationQuestions",
     "gatewayAdminLink": "فتح Door43",
-    "reposReady": "مستودعاتي جاهزة",
     "detectIntro": "أدخل منظمتك على Door43. سنقرأ ملفات manifest الخاصة بها ونقترح تكوينًا — عالج أي عنصر مفقود أو غامض أدناه.",
     "confirmLanesIntro": "أكّد مستودعي النص الحرفي والنص المبسّط. تُثبَّت هذه مباشرةً عند التطبيق. لتغيير مصدر مسار بعد الإعداد الأولي، استخدم قسم مستودعات النص الكتابي في وضع المشروع.",
     "litRepoLabel": "مستودع النص الحرفي",
