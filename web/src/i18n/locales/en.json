@@ -1746,12 +1746,6 @@
       "importedBook": "Imported {{book}}.",
       "hasLocalEdits": "{{book}} already carries local edits ({{tn}} tN, {{tq}} tQ, {{twl}} TWL, {{verses}} verses). A destructive re-import would discard them, so it is not offered here.",
       "importFailed": "Import of {{book}} failed: {{error}}",
-      "nothingToTranslate": "Nothing to translate — this book has no chapters loaded.",
-      "aiNoneStarted": "No AI runs started. The pipeline is often unavailable in this environment (503 pipeline_api_disabled when no bot token is configured).",
-      "aiPartial": "{{started}} run(s) started, {{failed}} failed to start.",
-      "aiStarted_one": "{{count}} AI run(s) started.",
-      "aiStarted_other": "{{count}} AI run(s) started.",
-      "aiStartedSkipped": "{{started}} AI run(s) started, {{skipped}} already running.",
       "notYetImported": "Not yet imported"
     },
     "sheet": {
@@ -2494,7 +2488,6 @@
     },
     "setup": {
       "navWizard": "Setup wizard",
-      "navAiService": "AI service",
       "navOverrides": "Source overrides",
       "navLocalization": "Localization",
       "title": "Setup & preferences",
@@ -2512,7 +2505,6 @@
       "bookListLoadError": "Couldn't load the book list.",
       "bookLabel": "Book",
       "notImported": "not imported",
-      "aiServiceSub": "Provider, model, and API key AI drafts and checks run on.",
       "localizationSub": "UI string overrides for this workspace."
     },
     "team": {

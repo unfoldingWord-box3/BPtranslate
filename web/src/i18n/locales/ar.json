@@ -1870,16 +1870,6 @@
       "importedBook": "تم استيراد {{book}}.",
       "hasLocalEdits": "يحمل {{book}} تعديلات محلية بالفعل ({{tn}} tN، {{tq}} tQ، {{twl}} TWL، {{verses}} آيات). إعادة الاستيراد المُتلِفة ستتخلص منها، لذا لا تُعرض هنا.",
       "importFailed": "تعذّر استيراد {{book}}: {{error}}",
-      "nothingToTranslate": "لا شيء للترجمة — لا يحتوي هذا السفر على أصحاحات محمَّلة.",
-      "aiNoneStarted": "لم تبدأ أي عمليات ذكاء اصطناعي. كثيرًا ما يكون خط المعالجة غير متاح في هذه البيئة (503 pipeline_api_disabled عند عدم تهيئة رمز البوت).",
-      "aiPartial": "بدأت {{started}} من العمليات، وفشل بدء {{failed}}.",
-      "aiStarted_zero": "لم تبدأ أي عمليات ذكاء اصطناعي.",
-      "aiStarted_one": "بدأت عملية ذكاء اصطناعي واحدة.",
-      "aiStarted_two": "بدأت عمليتا ذكاء اصطناعي.",
-      "aiStarted_few": "بدأت {{count}} عمليات ذكاء اصطناعي.",
-      "aiStarted_many": "بدأت {{count}} عملية ذكاء اصطناعي.",
-      "aiStarted_other": "بدأت {{count}} عملية ذكاء اصطناعي.",
-      "aiStartedSkipped": "بدأت {{started}} من عمليات الذكاء الاصطناعي، و{{skipped}} قيد التشغيل بالفعل.",
       "notYetImported": "لم يُستورد بعد"
     },
     "sheet": {
@@ -2698,7 +2688,6 @@
     },
     "setup": {
       "navWizard": "معالج الإعداد",
-      "navAiService": "خدمة الذكاء الاصطناعي",
       "navOverrides": "تجاوزات المصدر",
       "navLocalization": "التوطين",
       "title": "الإعداد والتفضيلات",
@@ -2716,7 +2705,6 @@
       "bookListLoadError": "تعذّر تحميل قائمة الأسفار.",
       "bookLabel": "السفر",
       "notImported": "غير مستورد",
-      "aiServiceSub": "المزوّد والنموذج ومفتاح API التي تعمل عليها مسودات الذكاء الاصطناعي وفحوصه.",
       "localizationSub": "تجاوزات نصوص الواجهة لمساحة العمل هذه."
     },
     "team": {
