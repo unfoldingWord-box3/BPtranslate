@@ -514,8 +514,11 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 /**
  * Persist something the org has ALREADY been billed for, mid-step. Retries the
  * put in-step (R2 hiccups are transient and cost nothing to re-try) and, if it
- * still will not land, fails the step non-retryably: the repair call that would
- * follow is money spent on top of a draft nothing can resume from.
+ * still will not land, throws `output_persist_failed`. Whether that throw is
+ * fatal is the caller's call: `withinStepReturnLimit` lets it fail the step —
+ * an oversized return cannot be made durable at all, so a retry would re-buy the
+ * batch — while `persistDraft` catches it, because since #460 the draft is only
+ * a resume shortcut (see there).
  */
 async function persistBilled(deps: StepDeps, key: string, text: string, what: string): Promise<void> {
   let last: unknown;
@@ -549,13 +552,28 @@ type StoredDraft = { output: string; calls: LlmCall[] };
 
 /**
  * Store the billed-but-invalid draft before the repair call — text and ledger
- * together, under persistBilled's in-step retries. If it will not land, the
- * step fails non-retryably rather than spending the repair call on a draft
- * nothing can resume from.
+ * together, under persistBilled's in-step retries.
+ *
+ * Non-fatal (issue #462). Before #460 the batch output was written inside this
+ * same paying step, so a failed draft put had to fail the batch: a step retry
+ * would have re-bought the model call. #460 moved the validated output into its
+ * own retryable `batch-NN-persist` step, and this draft put now happens mid-loop
+ * with the repair call about to run in THIS attempt regardless. So a refused
+ * draft put no longer risks re-buying anything — it only forfeits the resume
+ * shortcut a future retry could have taken (`readDraft` then returns null and
+ * the batch re-drafts). Log and continue to the repair call rather than throwing
+ * away a completable batch — and the draft it already paid for — to dodge a cost
+ * that is no longer incurred. The in-step retries still run inside persistBilled.
  */
 async function persistDraft(deps: StepDeps, keys: BatchKeys, nn: string, output: string, calls: readonly LlmCall[]): Promise<void> {
   const stored: StoredDraft = { output, calls: [...calls] };
-  await persistBilled(deps, keys.draft, JSON.stringify(stored), `work/batch-${nn}-draft.json`);
+  try {
+    await persistBilled(deps, keys.draft, JSON.stringify(stored), `work/batch-${nn}-draft.json`);
+  } catch (err) {
+    console.warn("translate batch: could not persist billed draft; continuing to the repair call (a later retry will re-draft)", {
+      nn, error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 /**
