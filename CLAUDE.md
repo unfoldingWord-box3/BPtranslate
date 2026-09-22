@@ -175,6 +175,24 @@ One Playwright worker, no test-level parallelism — every test shares the seede
 
 The `webServer` polls `/api/health` through Vite's proxy so it waits for **both** Vite and Wrangler to be up before tests start.
 
+### Localization — mandatory subagent pass on every UI change
+
+**Any time you create or change UI, you must dispatch a subagent to localize it before you finish.** Not optional, not "if it looks like it needs it." This app ships a UI in 14 languages (`web/src/i18n/locales/*.json`, `en.json` is the source of truth) and we have repeatedly shipped hardcoded English — buttons, tooltips, dialog titles, `aria-label`s, toast/error text, `confirm()` strings, empty-state copy, `placeholder`s. Every one of those is invisible to `typecheck` and to the build.
+
+The pass has **two halves, and the second is not skippable**:
+
+1. **Code pass.** Every user-visible string goes through `t("ns.key")`; add the key to `en.json` **and to all 13 other locale files** (an untranslated locale must not silently fall back — that's how the current ~419-key-per-locale gap accumulated). Then run:
+
+   ```sh
+   node scripts/check-i18n.mjs
+   ```
+
+   It reports MISSING base keys, missing CLDR plural categories, STALE keys not in `en.json`, and code→`en` ORPHANs (a `t()` key typo renders the raw string — nothing else catches it). It must exit clean.
+
+2. **Browser pass — because the code pass misses things.** Switch the UI language to a non-Latin locale (Arabic is best: it also exercises RTL) and *click through the surface you changed* — open every menu, dialog, tab, popper, error and empty state. Anything still rendering English is a miss. Use the built-in **localization mode** inspect-to-edit overlay (`web/src/components/LocalizationInspector.tsx`, toggled from the Localization tab in Preferences) to hover elements and see which key backs them; text with no match is either hardcoded or an interpolated template (a known gap in the overlay's text-match heuristic — verify those by reading the code). Follow the runbook in **Browser-driven verification** below to get a server and a browser.
+
+Report the result the same way as any other verification: what you clicked, what you found, what you did not check.
+
 ### Browser-driven verification
 
 When wrapping up changes that touch frontend behavior — UI, auth flow, save path, history, anything that's only really verified by clicking through the app — drive Chrome yourself via the **Claude-in-Chrome MCP**. Don't hand the smoke test back to the user. `typecheck` and `npm run build` catch types and bundling; they don't catch "the button does nothing." The old handoff doc claim that "vite needs the user" is wrong — `npm run dev` runs cleanly with `Bash run_in_background`.
