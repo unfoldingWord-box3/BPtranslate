@@ -1557,7 +1557,23 @@
       "resource_not_supported_internal": "The internal AI runner doesn't support this resource type yet. An admin needs to check the AI settings.",
       "checks_failed": "The AI's answer didn't pass validation — it didn't fit the expected format. The chapter was not changed.",
       "internal_error_after_call": "The AI answered, but processing its response failed. The chapter was not changed.",
-      "internal_error": "Something went wrong while running this job. Nothing was changed — try again."
+      "internal_error": "Something went wrong while running this job. Nothing was changed — try again.",
+      "workspace_missing": "This workspace could not be found while starting the run. Refresh and try again; if it keeps happening, contact an admin.",
+      "workspace_unknown": "This workspace isn't set up for AI runs yet. An admin needs to finish configuring it.",
+      "job_missing": "The run record couldn't be found — it may have already been cleared. Nothing was changed; start a new run.",
+      "job_not_running": "This run wasn't active anymore, so no action was taken. Start a new run if you still need it.",
+      "cancelled": "This run was cancelled. Nothing was changed.",
+      "artifact_missing": "An expected intermediate file from the run was missing. Nothing was changed — try again.",
+      "source_not_found": "The source text for this run couldn't be found. An admin needs to check the project's source settings.",
+      "no_source_rows": "There was no source content to translate in the selected range. Nothing was changed.",
+      "scripture_fetch_failed": "The source scripture couldn't be loaded. This is usually temporary — try again in a few minutes.",
+      "output_persist_failed": "The AI's answer couldn't be saved. The chapter was not changed — try again.",
+      "ai_provider_unavailable": "No AI provider is configured for this workspace. An admin needs to set one up in the AI settings.",
+      "ai_provider_changed": "The AI provider changed while this run was in progress. Nothing was changed — start the run again.",
+      "ai_provider_key_decrypt_failed": "The saved AI key couldn't be read. An admin needs to re-enter it in the AI settings.",
+      "target_book_absent": "The target book isn't available for this run. An admin needs to check the project setup.",
+      "merge_failed": "The AI's results couldn't be merged into the chapter. The chapter was not changed — try again.",
+      "merge_shrink_refused": "The AI's result was rejected because it would have removed existing content. The chapter was not changed."
     }
   },
   "flowTranslate": {

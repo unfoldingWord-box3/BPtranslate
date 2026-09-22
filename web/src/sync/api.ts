@@ -1320,7 +1320,28 @@ export type PipelineErrorKind =
   | "resource_not_supported_internal"
   | "checks_failed"
   | "internal_error_after_call"
-  | "internal_error";
+  | "internal_error"
+  // TranslateStepError kinds (#471 follow-up): every `new TranslateStepError(…)`
+  // in api/src/translate/workflowSteps.ts reaches the client via failedStatus.
+  // #475 mapped the llm.ts provider codes + the internal_error catch-all; these
+  // are the remaining step-level kinds, so ERROR_COPY_KEY stays exhaustive and a
+  // failure shows human copy instead of the raw "Unrecognized error: {kind}".
+  | "workspace_missing"
+  | "workspace_unknown"
+  | "job_missing"
+  | "job_not_running"
+  | "cancelled"
+  | "artifact_missing"
+  | "source_not_found"
+  | "no_source_rows"
+  | "scripture_fetch_failed"
+  | "output_persist_failed"
+  | "ai_provider_unavailable"
+  | "ai_provider_changed"
+  | "ai_provider_key_decrypt_failed"
+  | "target_book_absent"
+  | "merge_failed"
+  | "merge_shrink_refused";
 
 // Mirrors the bp-assistant contract (docs/ai-pipeline-integration.md §3).
 // Server validates with .strict(); unknown keys are rejected. Per-pipeline-type
