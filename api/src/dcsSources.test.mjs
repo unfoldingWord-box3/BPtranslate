@@ -15,6 +15,8 @@ import {
   scriptureImportOverrides,
   heldOutNoteResources,
   releaseLockedLaneHoldOuts,
+  unlockedLaneHoldOutsToProbe,
+  shouldReleaseProbedHoldOut,
   shouldFallBackOnStatus,
   resolveSourceRef,
   normalizeSourceRef,
@@ -445,6 +447,56 @@ function runPure() {
   assert(
     releaseLockedLaneHoldOuts(new Set(["twl"]), locked).length === 0,
     "releaseLockedLaneHoldOuts: nothing held for ult/ust → nothing released",
+  );
+
+  // ── unlockedLaneHoldOutsToProbe — issue #441 self-heal candidate selection ──
+  // The mirror of releaseLockedLaneHoldOuts: locked lanes are handled there
+  // (released blind); this returns the held ult/ust on UNLOCKED lanes, which
+  // must be probed before releasing.
+  assert(
+    unlockedLaneHoldOutsToProbe(heldAll, locked).length === 0,
+    "unlockedLaneHoldOutsToProbe: locked lanes → nothing to probe (releaseLockedLaneHoldOuts handles them)",
+  );
+  assert(
+    unlockedLaneHoldOutsToProbe(heldAll, unlocked).join(",") === "ult,ust",
+    "unlockedLaneHoldOutsToProbe: unlocked lanes → ult+ust probed, twl/tn untouched",
+  );
+  assert(
+    unlockedLaneHoldOutsToProbe(heldAll, { lit: false, sim: true }).join(",") === "ult",
+    "unlockedLaneHoldOutsToProbe: per-lane (only the unlocked one is probed)",
+  );
+  assert(
+    unlockedLaneHoldOutsToProbe(new Set(["twl", "tn"]), unlocked).length === 0,
+    "unlockedLaneHoldOutsToProbe: nothing held for ult/ust → nothing to probe",
+  );
+  // Complementary with releaseLockedLaneHoldOuts on a mixed lane pair: every
+  // held ult/ust lands in exactly one bucket (locked→release, unlocked→probe).
+  assert(
+    releaseLockedLaneHoldOuts(heldAll, { lit: true, sim: false }).join(",") === "ult" &&
+      unlockedLaneHoldOutsToProbe(heldAll, { lit: true, sim: false }).join(",") === "ust",
+    "locked/unlocked buckets are complementary on a mixed lane pair",
+  );
+
+  // ── shouldReleaseProbedHoldOut — only a whole 200 lifts the fallback ──
+  assert(
+    shouldReleaseProbedHoldOut({ status: 200, text: "\\id LUK\n" }) === true,
+    "shouldReleaseProbedHoldOut: 200 with body → release (lane repo now has the book)",
+  );
+  assert(
+    shouldReleaseProbedHoldOut({ status: 404, text: null }) === false,
+    "shouldReleaseProbedHoldOut: 404 → keep held (lane still lacks the book)",
+  );
+  assert(
+    shouldReleaseProbedHoldOut({ status: 0, text: null }) === false,
+    "shouldReleaseProbedHoldOut: network error (status 0) → keep held (transient)",
+  );
+  assert(
+    shouldReleaseProbedHoldOut({ status: 500, text: null }) === false,
+    "shouldReleaseProbedHoldOut: 5xx → keep held (transient)",
+  );
+  assert(
+    shouldReleaseProbedHoldOut({ status: 200, text: null, truncated: true }) === false,
+    "shouldReleaseProbedHoldOut: truncated 200 → keep held (never re-pull a partial)",
   );
 
   // ── resolveSourceRef + normalizeSourceRef (the shared per-resource accessor) ──
