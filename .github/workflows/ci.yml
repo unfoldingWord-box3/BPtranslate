@@ -3,8 +3,9 @@ name: CI
 # Runs on every PR and on pushes to main. Fast, deterministic checks only:
 # typecheck + api/web unit tests (the alignment/replace/export regression
 # suites) + build.
-# The Playwright e2e suite is intentionally NOT gated here yet — it spins up
-# Vite + Wrangler and is slower/flakier; add it once it proves stable in CI.
+# The Playwright e2e suites (concurrency + smoke) live in a separate workflow,
+# e2e.yml — they spin up Vite + Wrangler and drive Chromium, so they are kept
+# out of this fast lane. See #483 for promoting them to required checks.
 on:
   pull_request:
   push:
