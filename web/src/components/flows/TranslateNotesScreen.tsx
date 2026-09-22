@@ -61,10 +61,11 @@
 //   * Approve                  → api.validateNote
 //   * Not needed               → api.trashNote (the existing tn soft-trash,
 //                                relabelled; the row stays recoverable)
-//   * Redo                     → api.tnQuick for verse notes; intro/general
-//                                notes (verse === 0) use the single-row
-//                                translate pipeline instead (classic NoteCard
-//                                "Re-run" already does this — issue #300)
+//   * Redo                     → api.tnQuick for OT verse notes; intro/general
+//                                notes (verse === 0) and every NT verse note
+//                                use the single-row translate pipeline instead
+//                                (classic NoteCard "Re-run" already does this —
+//                                issue #300; NT routing: see lib/tnRedo.ts)
 //
 // Chapter locks (verified in api/src/rows.ts, findings §2.7): tn PATCH is
 // lock-EXEMPT, and /validate + /trash have no lock check at all. So every write
@@ -1092,7 +1093,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
     }
   }
 
-  const redoBlockedReason = tnRedoBlockedReason(row, {
+  const redoBlockedReason = tnRedoBlockedReason(row, book, {
     aiUnavailable,
     noNoteSelected: t("flowTranslate.noNoteSelected"),
     needsSupportRef: t("flowTranslate.redoNeedsSupportRef"),
@@ -1177,8 +1178,9 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
     // failure / early return) clears it in finally.
     let keepSpinningForPipeline = false;
     try {
-      if (tnRedoUsesPipeline(row)) {
-        // Chapter intros (N:intro → verse 0, chapter ≥ 1). Book front:intro
+      if (tnRedoUsesPipeline(row, book)) {
+        // Chapter intros (N:intro → verse 0, chapter ≥ 1) and NT verse notes
+        // (tn-quick is Hebrew-only — lib/tnRedo.ts). Book front:intro
         // (chapter 0) is out of scope for this flows screen — startChapter
         // must be positive on the pipeline start route.
         const started = await pipelineStore.start({
@@ -1270,10 +1272,17 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
         // and leave Redo enabled. Latching aiUnavailable on a bare 503 here used
         // to disable Redo for the whole session on a single upstream hiccup,
         // with only a faint caption to explain it (the "greyed out and nothing
-        // happened" report).
+        // happened" report). Carry the bot's error code with the status so a
+        // 503 reads as "503 uhb_missing_for_verse", not a bare number — the
+        // bare number is what kept the NT-verse case undiagnosed.
         say(
           t("flowTranslate.redoFailed", {
-            status: err instanceof ApiError ? err.status : t("flowTranslate.genericError"),
+            status:
+              err instanceof ApiError
+                ? code
+                  ? `${err.status} ${code}`
+                  : err.status
+                : t("flowTranslate.genericError"),
           }),
         );
       }

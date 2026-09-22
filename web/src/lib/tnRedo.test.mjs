@@ -23,19 +23,45 @@ test("intro rows (verse 0) use the pipeline redo path", () => {
   assert.equal(tnRedoUsesPipeline({ verse: 1 }), false);
 });
 
+test("NT verse notes use the pipeline redo path — tn-quick has no Greek source", () => {
+  // The bot's tn-quick loads only the Hebrew Bible (UHB) and answers 503
+  // `uhb_missing_for_verse` for any NT verse before the model runs
+  // (unfoldingWord/bp-assistant#394).
+  assert.equal(tnRedoUsesPipeline({ verse: 1 }, "LUK"), true);
+  assert.equal(tnRedoUsesPipeline({ verse: 1 }, "luk"), true);
+  assert.equal(tnRedoUsesPipeline({ verse: 1 }, "ZEC"), false);
+  assert.equal(tnRedoUsesPipeline({ verse: 1 }, "GEN"), false);
+  // Unknown book keeps the tn-quick path (same default as isHebrewBook).
+  assert.equal(tnRedoUsesPipeline({ verse: 1 }, null), false);
+  assert.equal(tnRedoUsesPipeline({ verse: 1 }, undefined), false);
+});
+
+test("NT verse-note redo is not blocked by missing support_reference or quote", () => {
+  assert.equal(
+    tnRedoBlockedReason({ verse: 1, support_reference: null, quote: null }, "LUK", msgs),
+    null,
+  );
+  // OT verse notes still need both tn-quick anchors.
+  assert.equal(
+    tnRedoBlockedReason({ verse: 1, support_reference: null, quote: null }, "ZEC", msgs),
+    "needs-ref",
+  );
+});
+
 test("intro redo is not blocked by missing support_reference or quote", () => {
   const intro = { verse: 0, support_reference: null, quote: null };
-  assert.equal(tnRedoBlockedReason(intro, msgs), null);
+  assert.equal(tnRedoBlockedReason(intro, "ZEC", msgs), null);
 });
 
 test("verse-note redo still requires support_reference and quote", () => {
   assert.equal(
-    tnRedoBlockedReason({ verse: 1, support_reference: null, quote: "x" }, msgs),
+    tnRedoBlockedReason({ verse: 1, support_reference: null, quote: "x" }, "ZEC", msgs),
     "needs-ref",
   );
   assert.equal(
     tnRedoBlockedReason(
       { verse: 1, support_reference: "rc://*/ta/man/translate/figs-metaphor", quote: "" },
+      "ZEC",
       msgs,
     ),
     "needs-quote",
@@ -47,6 +73,7 @@ test("verse-note redo still requires support_reference and quote", () => {
         support_reference: "rc://*/ta/man/translate/figs-metaphor",
         quote: "the word",
       },
+      "ZEC",
       msgs,
     ),
     null,
@@ -86,10 +113,11 @@ test("only the explicit not-configured codes latch Redo off; transient failures 
 });
 
 test("aiUnavailable and missing row still block every path", () => {
-  assert.equal(tnRedoBlockedReason(null, msgs), "no-note");
+  assert.equal(tnRedoBlockedReason(null, "ZEC", msgs), "no-note");
   assert.equal(
     tnRedoBlockedReason(
       { verse: 0 },
+      "ZEC",
       { ...msgs, aiUnavailable: "ai-off" },
     ),
     "ai-off",

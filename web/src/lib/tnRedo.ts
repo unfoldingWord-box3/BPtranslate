@@ -1,9 +1,16 @@
 // Shared gating for the flows Translate Notes "Redo" verb.
 //
-// Verse notes use the quote-anchored tn-quick path (support_reference +
-// quote required). Intro/general notes (`verse === 0`) have neither — they
-// retranslate through the existing single-row translate pipeline instead
-// (same path classic NoteCard "Re-run" already uses). See issue #300.
+// Old Testament verse notes use the quote-anchored tn-quick path
+// (support_reference + quote required). Two kinds of row retranslate through
+// the existing single-row translate pipeline instead (same path classic
+// NoteCard "Re-run" already uses):
+//   * intro/general notes (`verse === 0`) — no quote or support ref (#300);
+//   * New Testament verse notes — the bot's tn-quick drafter only loads the
+//     Hebrew Bible (UHB), so every NT verse answers 503 `uhb_missing_for_verse`
+//     before the model is called (BSOJ on LUK, 2026-09-14; bot-side Greek
+//     support tracked in unfoldingWord/bp-assistant#394).
+
+import { isHebrewBook } from "./testament.ts";
 
 export type TnRedoRow = {
   verse: number;
@@ -15,9 +22,16 @@ export function isIntroTnRow(row: Pick<TnRedoRow, "verse">): boolean {
   return row.verse === 0;
 }
 
-/** True when Redo should start a translate pipeline job rather than tn-quick. */
-export function tnRedoUsesPipeline(row: Pick<TnRedoRow, "verse">): boolean {
-  return isIntroTnRow(row);
+/**
+ * True when Redo should start a translate pipeline job rather than tn-quick:
+ * intro rows, and any verse note in a New Testament book (tn-quick has no
+ * Greek source text — see the header). An unknown book keeps the tn-quick path.
+ */
+export function tnRedoUsesPipeline(
+  row: Pick<TnRedoRow, "verse">,
+  book?: string | null,
+): boolean {
+  return isIntroTnRow(row) || !isHebrewBook(book);
 }
 
 // Escape hatch for intro Redo: a fresh single-row translate rarely needs this
@@ -77,6 +91,7 @@ export function redoErrorIsAiUnconfigured(code: string | null | undefined): bool
 
 export function tnRedoBlockedReason(
   row: TnRedoRow | null | undefined,
+  book: string | null | undefined,
   opts: {
     aiUnavailable: string | null;
     noNoteSelected: string;
@@ -86,8 +101,9 @@ export function tnRedoBlockedReason(
 ): string | null {
   if (opts.aiUnavailable) return opts.aiUnavailable;
   if (!row) return opts.noNoteSelected;
-  // Intros skip quote/supportRef — the pipeline retranslates free-form markdown.
-  if (tnRedoUsesPipeline(row)) return null;
+  // Pipeline rows (intros, NT verse notes) skip quote/supportRef — the
+  // pipeline retranslates the source note, so tn-quick's anchors aren't needed.
+  if (tnRedoUsesPipeline(row, book)) return null;
   if (!row.support_reference) return opts.needsSupportRef;
   if (!row.quote) return opts.needsQuote;
   return null;

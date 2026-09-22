@@ -23,19 +23,10 @@ export type SourceQueryKind =
 const HEBREW_MARK = /[֑-ׇֽֿׁׂׅׄ]/;
 const STRONG_RE = /^\s*([HhGg])?0*(\d{1,5})([a-z])?\s*$/;
 
-// 39 OT book codes. Anything else (including front/back/uncoded) is
-// treated as NT for bare-Strong's prefix purposes.
-const OT_BOOKS = new Set([
-  "GEN", "EXO", "LEV", "NUM", "DEU", "JOS", "JDG", "RUT", "1SA", "2SA",
-  "1KI", "2KI", "1CH", "2CH", "EZR", "NEH", "EST", "JOB", "PSA", "PRO",
-  "ECC", "SNG", "ISA", "JER", "LAM", "EZK", "DAN", "HOS", "JOL", "AMO",
-  "OBA", "JON", "MIC", "NAM", "HAB", "ZEP", "HAG", "ZEC", "MAL",
-]);
-
-export function isHebrewBook(bookCode: string | null | undefined): boolean {
-  if (!bookCode) return true; // default to OT if unknown — the dev default is ZEC anyway
-  return OT_BOOKS.has(bookCode.toUpperCase());
-}
+// OT/NT classification lives in testament.ts (dependency-free so pure
+// helpers can unit-test against it); re-exported here for existing importers.
+import { isHebrewBook } from "./testament.ts";
+export { isHebrewBook };
 
 // True for bare-digit / zero-padded queries — the only case where the user
 // needs to disambiguate "search as text" vs "search as Strong's". Anything
