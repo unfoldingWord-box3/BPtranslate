@@ -24,10 +24,6 @@ concurrency:
 jobs:
   smoke:
     runs-on: ubuntu-latest
-    # dev-smoke.mjs defaults --persist-to to a Windows path ("C:/be-smoke");
-    # point it at a real Linux temp dir for the runner.
-    env:
-      SMOKE_PERSIST: ${{ runner.temp }}/be-smoke
     steps:
       - uses: actions/checkout@v5
 
@@ -54,7 +50,14 @@ jobs:
       # launches wrangler (8797) + vite (5175) wired to the translate stub.
       # The stub reverse-proxies org manifests / book files to the real
       # git.door43.org, so this job needs outbound network to Door43.
+      # dev-smoke.mjs defaults --persist-to to a Windows path ("C:/be-smoke");
+      # point it at a real Linux temp dir for the runner. This has to live on
+      # the step, not on the job: the `runner` context is not available in a
+      # job-level `env:` block, and using it there makes the whole workflow
+      # file fail to compile (startup_failure, zero jobs run).
       - name: Smoke suite (Playwright)
+        env:
+          SMOKE_PERSIST: ${{ runner.temp }}/be-smoke
         run: npm run test:smoke
 
       - name: Upload smoke report
