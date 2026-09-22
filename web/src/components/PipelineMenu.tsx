@@ -1,6 +1,12 @@
 // Per-chapter trigger UI for bp-assistant pipelines (see
 // docs/ai-pipeline-integration.md). Three pipeline types, ~1h each, run on
 // the bot; we kick off and surface status via the bottom pill.
+//
+// generate/notes/tqs (OPTIONS below) are the original bp-assistant bot
+// pipelines. We're decoupling from that bot in favor of the internal
+// translate runner (see issue link in git history around 2026-09), so these
+// are surfaced only in a collapsed, disabled "Advanced" section — not
+// removed outright in case the decoupling stalls. See issue #470.
 
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -217,17 +223,17 @@ function relativeMinutes(seconds: number): string {
 export function PipelineMenu({ book, chapter, onMessage, onImported }: Props) {
   const { t } = useTranslation();
   const projectConfig = useProjectConfig();
-  // Gateway-language projects also offer "Translate chapter" (drafts the whole
-  // chapter's tN). The English root project (translationSource == null) sees
-  // exactly the original three options.
-  const visibleOptions = useMemo(
-    () =>
-      isTranslationProject(projectConfig)
-        ? [...OPTIONS, TRANSLATE_OPTION, TRANSLATE_TQ_OPTION]
-        : OPTIONS,
+  // Gateway-language projects offer "Translate translation notes"/"Translate
+  // translation questions" (draft the whole chapter from the source repo) as
+  // the primary, top-of-menu actions. The English root project
+  // (translationSource == null) sees neither — it has no source to translate
+  // from.
+  const translateOptions = useMemo(
+    () => (isTranslationProject(projectConfig) ? [TRANSLATE_OPTION, TRANSLATE_TQ_OPTION] : []),
     [projectConfig],
   );
   const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [confirm, setConfirm] = useState<PipelineOption | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [activeJobs, setActiveJobs] = useState<PipelineJob[]>([]);
@@ -281,7 +287,10 @@ export function PipelineMenu({ book, chapter, onMessage, onImported }: Props) {
         (me == null || j.user_id === me),
     );
 
-  const close = () => setAnchorEl(null);
+  const close = () => {
+    setAnchorEl(null);
+    setAdvancedOpen(false);
+  };
 
   const start = async () => {
     if (!confirm) return;
@@ -449,7 +458,7 @@ export function PipelineMenu({ book, chapter, onMessage, onImported }: Props) {
         {t("pipeline.aiButton")}
       </Button>
       <Menu anchorEl={anchorEl} open={Boolean(anchorEl)} onClose={close}>
-        {visibleOptions.map((opt) => {
+        {translateOptions.map((opt) => {
           const running = runningType(opt.type);
           return (
             <MenuItem
@@ -471,7 +480,7 @@ export function PipelineMenu({ book, chapter, onMessage, onImported }: Props) {
             </MenuItem>
           );
         })}
-        <Divider />
+        {translateOptions.length > 0 && <Divider />}
         <MenuItem
           onClick={() => {
             close();
@@ -516,6 +525,24 @@ export function PipelineMenu({ book, chapter, onMessage, onImported }: Props) {
             />
           </MenuItem>
         )}
+        <Divider />
+        <MenuItem
+          onClick={(e) => {
+            e.stopPropagation();
+            setAdvancedOpen((v) => !v);
+          }}
+        >
+          <ListItemText
+            primary={t("pipeline.advanced")}
+            secondary={t("pipeline.advancedDesc")}
+          />
+        </MenuItem>
+        {advancedOpen &&
+          OPTIONS.map((opt) => (
+            <MenuItem key={opt.key} disabled sx={{ pl: 3, opacity: 0.5 }}>
+              <ListItemText primary={t(opt.label)} secondary={t(opt.description)} />
+            </MenuItem>
+          ))}
       </Menu>
       <ImportFromDoor43Dialog
         open={importOpen}

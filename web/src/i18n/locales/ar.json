@@ -925,6 +925,8 @@
     "descTqs": "أسئلة ترجمة (tq) مُحاذاة للـ ULT/UST الحالي.",
     "durationGenerate": "~60–100 دقيقة",
     "durationNotesTqs": "~30–60 دقيقة",
+    "advanced": "متقدم",
+    "advancedDesc": "أدوات قديمة قيد الإيقاف التدريجي — معطّلة حالياً.",
     "importFromDoor43": "استيراد من Door43",
     "importFromDoor43Desc": "جلب ULT/UST/TN/TQ/TWL — لن يطمس التعديلات المحلية.",
     "aquiferPull": "جلب مسودات Aquifer",
