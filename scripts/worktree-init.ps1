@@ -50,12 +50,37 @@ if ((Test-Path $devVarsSrc) -and -not (Test-Path $devVarsDst)) {
     Write-Host "copied api/.dev.vars from main checkout"
 }
 
+# Step 2: install dependencies if absent.
 if (Test-Path (Join-Path $worktreeRoot "node_modules")) {
     Write-Host "node_modules already present (real install) - skipping. Delete it to force a reinstall."
-    exit 0
+} else {
+    Write-Host "Installing dependencies (npm install) in $worktreeRoot ..."
+    npm install
+    if ($LASTEXITCODE -ne 0) { throw "npm install failed (exit $LASTEXITCODE)" }
+    Write-Host "Worktree ready - self-contained node_modules, no junction to main."
 }
 
-Write-Host "Installing dependencies (npm install) in $worktreeRoot ..."
-npm install
-if ($LASTEXITCODE -ne 0) { throw "npm install failed (exit $LASTEXITCODE)" }
-Write-Host "Worktree ready - self-contained node_modules, no junction to main."
+# Step 3: build web/dist if absent. api/wrangler.toml's [assets] directory is
+# "../web/dist"; `wrangler dev` exits at once when it's missing, so `npm run dev`
+# fails and Vite is left orphaned on :5173.
+if (Test-Path (Join-Path $worktreeRoot "web\dist")) {
+    Write-Host "web/dist already present - skipping build."
+} else {
+    Write-Host "Building web/dist (npm run build:web) ..."
+    npm run build:web
+    if ($LASTEXITCODE -ne 0) { throw "npm run build:web failed (exit $LASTEXITCODE)" }
+}
+
+# Step 4: apply local D1 migrations. Without them the local SQLite has no schema
+# and `POST /api/auth/dev` 500s with "no such table: users". `migrations apply`
+# is idempotent (applies only unapplied migrations), so it is safe to run every
+# time; answer its prompt non-interactively.
+Write-Host "Applying local D1 migrations (bptranslate_dev) ..."
+Push-Location (Join-Path $worktreeRoot "api")
+try {
+    "y" | npx wrangler d1 migrations apply bptranslate_dev --local
+    if ($LASTEXITCODE -ne 0) { throw "d1 migrations apply failed (exit $LASTEXITCODE)" }
+} finally {
+    Pop-Location
+}
+Write-Host "Worktree init complete."
