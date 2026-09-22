@@ -61,6 +61,11 @@ test.describe.serial("onboarding + AI translate smoke", () => {
     // against a button the redesigned wizard no longer renders eats the whole
     // 300s test budget and the catch block never executes (#494).
     const ACTION_MS = 15_000;
+    // Set when the wizard drive throws and the API fallback takes over. The
+    // fallback keeps the rest of the round trip (import -> translate -> approve)
+    // running so a single wizard regression still reports what ELSE broke, but
+    // the run must not be allowed to finish green — see the final step.
+    let fallbackReason: string | null = null;
     // Gates that wait on a DCS round trip (org detection, apply) get more.
     const NETWORK_MS = 60_000;
 
@@ -133,6 +138,7 @@ test.describe.serial("onboarding + AI translate smoke", () => {
         // the wizard itself calls, and downgrade the assertion to "wizard
         // rendered" rather than a full click-through proof. The per-action
         // timeouts above are what make this reachable.
+        fallbackReason = String(e);
         console.warn(`[smoke] UI wizard drive failed (${e}); falling back to API apply`);
         const detectRes = await context.request.get(`/api/orgs/${encodeURIComponent(SMOKE_ORG)}/inferred-config`);
         expect(detectRes.ok(), `GET inferred-config: ${detectRes.status()}`).toBeTruthy();
@@ -279,6 +285,22 @@ test.describe.serial("onboarding + AI translate smoke", () => {
         await new Promise((r) => setTimeout(r, 500));
       }
       expect(validated, "row did not reach translation_state=validated after approve").toBeTruthy();
+    });
+
+    // Last, so a wizard regression still reports what else broke downstream —
+    // but it must not report GREEN. Before per-action timeouts existed, any
+    // wizard breakage hard-failed by accident (the stale selector ate the whole
+    // 300s budget). Now it fails in seconds and the API fallback silently
+    // reconfigures the org, so without this the suite would pass while the very
+    // surface #494 is about was dead. Covers every route into the fallback, not
+    // just a stale selector: a SMOKE_ORG that no longer matches the current
+    // workspace's org, or a third ambiguous lane role the two placeholder fills
+    // don't resolve, land here too.
+    await test.step("the Setup wizard UI path was actually exercised", async () => {
+      expect(
+        fallbackReason,
+        `Setup wizard UI drive failed and the suite continued via the API fallback, so the wizard itself is unverified: ${fallbackReason}`,
+      ).toBeNull();
     });
   });
 });
