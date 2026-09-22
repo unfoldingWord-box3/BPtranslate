@@ -21,7 +21,14 @@ import { readFileSync } from "node:fs";
 import { Hono } from "hono";
 import { SignJWT, jwtVerify } from "jose";
 import { callbackDcsAuth } from "./auth.ts";
-import { primeWorkspaces, resolveWorkspace, workspaceEnv, parseWorkspaceCookie } from "./workspaces.ts";
+import {
+  claimWorkspace,
+  primeWorkspaces,
+  resolveWorkspace,
+  resolveWorkspaceFresh,
+  workspaceEnv,
+  parseWorkspaceCookie,
+} from "./workspaces.ts";
 
 function assert(cond, msg) {
   if (!cond) {
@@ -523,6 +530,52 @@ console.log("[autoClaim] an admin of TWO un-onboarded orgs consumes only one slo
   } finally {
     globalThis.fetch = realFetch;
   }
+}
+
+// ── 9. A claim made by ANOTHER isolate must not resolve to another tenant ───
+//
+// Regression for the Codex review finding: the registry is loaded once per
+// isolate and never expires, so an isolate warmed before a claim has never
+// heard of the new slug — and resolveWorkspace answers an unknown slug with
+// list[0], i.e. a different org's database, while the user's JWT already
+// carries the admin role resolved in their new workspace. resolveWorkspaceFresh
+// (used by index.ts's fetch wrapper) rechecks the registry on an unknown slug.
+
+console.log("[stale isolate] a be_ws for a slug claimed elsewhere re-reads the registry instead of falling back");
+{
+  const sharedSql = sharedDbSqlite();
+  const pool1Sql = poolDbSqlite();
+  registerPoolRows(sharedSql, "pool1");
+
+  // Isolate A boots and caches the roster BEFORE any claim exists.
+  const isolateA = makeEnv(sharedSql, { DB_POOL1: pool1Sql });
+  await primeWorkspaces(isolateA);
+  assert(
+    resolveWorkspace(isolateA, null).slug === "uw",
+    "precondition: isolate A's cached roster is just the pre-existing workspace",
+  );
+
+  // Isolate B claims pool1 for NewOrg (as the OAuth callback would).
+  const isolateB = makeEnv(sharedSql, { DB_POOL1: pool1Sql });
+  await primeWorkspaces(isolateB);
+  const claimed = await claimWorkspace(isolateB, { org: "NewOrg", label: "NewOrg" });
+  assert(claimed?.workspace.slug === "pool1", "isolate B claimed pool1");
+
+  // Isolate A, still warm, now receives a request carrying be_ws=pool1.
+  assert(
+    resolveWorkspace(isolateA, "pool1").slug === "uw",
+    "the stale cache alone WOULD hand the request another tenant's workspace",
+  );
+  const fresh = await resolveWorkspaceFresh(isolateA, "pool1");
+  assert(
+    fresh.slug === "pool1" && fresh.binding === "DB_POOL1",
+    `the recheck resolves the newly claimed workspace, got ${fresh.slug}/${fresh.binding}`,
+  );
+
+  // A genuinely dead slug still falls back, and the recheck is rate limited so
+  // a stream of junk cookies can't turn into a registry read per request.
+  const dead = await resolveWorkspaceFresh(isolateA, "no-such-workspace");
+  assert(dead.slug === "uw", "an unknown slug still falls back to the first workspace");
 }
 
 console.log("workspaceAutoClaim: all assertions passed");

@@ -640,6 +640,42 @@ export function resolveLoginWorkspace(opts: {
   return loginResolution(fallback, "no_match");
 }
 
+// Rate limit for the stale-roster recheck below, keyed on the shared-DB binding
+// (i.e. per isolate). Bounds the cost of a request stream carrying a junk be_ws
+// value to one registry read per window per isolate.
+const unknownSlugRecheck = new WeakMap<object, number>();
+const UNKNOWN_SLUG_RECHECK_MS = 10_000;
+
+// resolveWorkspace, plus one recheck when the request names a workspace this
+// isolate has never heard of.
+//
+// Why it exists: the registry is loaded ONCE per isolate and never expires, so
+// a workspace claimed by ANOTHER isolate (the OAuth callback that auto-claimed
+// a pool slot, or a super admin's manual claim) is invisible here — and
+// resolveWorkspace answers an unknown slug with list[0], i.e. a DIFFERENT
+// tenant's database. The user's Access JWT already carries the `admin` role
+// resolved in their new workspace, and requireAdmin reads that claim off the
+// token, so the fallback would let them write to another org's D1 until this
+// isolate happened to recycle. (X-Workspace catches this for the SPA, but that
+// header is detection, not enforcement — any other caller can omit it.)
+//
+// An unrecognized slug is exactly the signature of that stale roster, so treat
+// it as a cache-miss: re-read the registry once (rate-limited) and re-resolve.
+// A genuinely dead slug still falls back to list[0] as before, at the cost of
+// one registry read per window.
+export async function resolveWorkspaceFresh(env: Env, slug: string | null): Promise<Workspace> {
+  const ws = resolveWorkspace(env, slug);
+  if (!slug || ws.slug === slug) return ws;
+  const db = sharedDb(env);
+  if (!db) return ws;
+  const now = Date.now();
+  const last = unknownSlugRecheck.get(db as object) ?? 0;
+  if (now - last < UNKNOWN_SLUG_RECHECK_MS) return ws;
+  unknownSlugRecheck.set(db as object, now);
+  await invalidateAndReprime(env);
+  return resolveWorkspace(env, slug);
+}
+
 // Exact slug match; unknown/null slug falls back to the first workspace
 // (the implicit default when WORKSPACES is unset).
 export function resolveWorkspace(env: Env, slug: string | null): Workspace {

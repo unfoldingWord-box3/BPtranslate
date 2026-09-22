@@ -29,7 +29,7 @@ import { syncTemplates } from "./templateSync";
 import { attachAuth, requireAuth, requireCsrf, mintDevToken, startDcsAuth, callbackDcsAuth, authMe, authLogout, refreshToken, updateLastLocation, currentUserId } from "./auth";
 import { workspaceRoutes } from "./workspaceRoutes";
 import { blockViewerWrites } from "./viewerGuard";
-import { listWorkspaces, resolveWorkspace, workspaceEnv, parseWorkspaceCookie, requireWorkspaceMatch, primeWorkspaces } from "./workspaces";
+import { listWorkspaces, resolveWorkspaceFresh, workspaceEnv, parseWorkspaceCookie, requireWorkspaceMatch, primeWorkspaces } from "./workspaces";
 
 export interface Env {
   DB: D1Database;
@@ -491,10 +491,16 @@ export default {
     //
     // primeWorkspaces() loads the roster from the shared-DB registry table once
     // per isolate (fails soft to the WORKSPACES env var, then the implicit
-    // default) so the synchronous resolveWorkspace below reads it. It's a no-op
-    // after the first request in this isolate.
+    // default) so the resolve below reads it. It's a no-op after the first
+    // request in this isolate.
+    //
+    // resolveWorkspaceFresh, not resolveWorkspace: a per-isolate roster loaded
+    // once and never expired can't see a workspace another isolate claimed, and
+    // an unknown slug otherwise resolves to list[0] — another tenant's D1, with
+    // the caller's already-minted admin role. It rechecks the registry (rate
+    // limited) only when the cookie names a workspace this isolate lacks.
     await primeWorkspaces(env);
-    const ws = resolveWorkspace(env, parseWorkspaceCookie(request));
+    const ws = await resolveWorkspaceFresh(env, parseWorkspaceCookie(request));
     return app.fetch(request, workspaceEnv(env, ws), ctx);
   },
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
