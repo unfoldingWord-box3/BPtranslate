@@ -47,13 +47,28 @@ export async function reopenLaneChecks(
   if (lanes.length === 0) return;
   try {
     const placeholders = lanes.map((_l, i) => `?${i + 4}`).join(", ");
-    const res = await env.DB
-      .prepare(
-        `DELETE FROM verse_lane_checks
-          WHERE book = ?1 AND chapter = ?2 AND verse = ?3 AND lane IN (${placeholders})`,
-      )
-      .bind(book, chapter, verse, ...lanes)
-      .run();
+    // #686 item 3: this DELETE used to leave no trace at all — a checkoff could
+    // vanish with nothing in edit_log explaining why. Paired in one batch with a
+    // conditional audit INSERT, the same `WHERE changes() > 0` idiom the PATCH
+    // path uses (D1 batch() runs both statements sequentially on one connection,
+    // so changes() in the second reads the DELETE's own row count), so a no-op
+    // reopen (nothing was checked) writes nothing. user_id is NULL: this is a
+    // side effect of a content save, not itself a user action on the checkoff.
+    const [res] = await env.DB.batch([
+      env.DB
+        .prepare(
+          `DELETE FROM verse_lane_checks
+            WHERE book = ?1 AND chapter = ?2 AND verse = ?3 AND lane IN (${placeholders})`,
+        )
+        .bind(book, chapter, verse, ...lanes),
+      env.DB
+        .prepare(
+          `INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action, payload_json, source)
+           SELECT 'verse_lane', ?1, ?2, NULL, NULL, NULL, 'update', ?3, 'lane_reopen'
+            WHERE changes() > 0`,
+        )
+        .bind(`${book}/${chapter}/${verse}`, book, JSON.stringify({ lanes, reason: "content_edit_reopen" })),
+    ]);
     // Nothing was checked here → nothing reopened → no need to notify anyone.
     if (!res.meta.changes) return;
     for (const lane of lanes) {
