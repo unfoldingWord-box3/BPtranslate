@@ -26,9 +26,10 @@
 //    (WorkspaceChoiceDialog, web/src/components/WorkspaceChoiceDialog.tsx:61 —
 //    picking an org actually switches and reloads; the caption says so).
 //
-//  * AI service (#188) and Localization (#189) — same pattern: AiServiceSection
-//    and LocalizationSection were already standalone components and are
-//    mounted here directly, no re-implementation.
+//  * Localization (#189) — LocalizationSection was already a standalone
+//    component and is mounted here directly, no re-implementation. (AI service,
+//    #188, was mounted here too until #479 moved it to the AI studio so config
+//    and use share one screen.)
 //
 //  * Source overrides — the artifact's per-book tN/tQ override table maps to a
 //    REAL backend (issue #103: api.getBookSources / setBookSource /
@@ -68,7 +69,6 @@ import { useProjectConfig } from "../../hooks/useProjectConfig";
 import { SetupWizard } from "../SetupWizard";
 import { WorkspaceChoiceDialog } from "../WorkspaceChoiceDialog";
 import { BookSourceOverridesPanel } from "../BookSourceOverridesPanel";
-import { AiServiceSection } from "../AiServiceSection";
 import { LocalizationSection } from "../LocalizationSection";
 import { bookName, BOOKS } from "../../lib/bookNames";
 import { AdminDesk } from "./AdminDesk";
@@ -77,12 +77,11 @@ import type { FlowScreenContext } from "./types";
 
 const INSPIRE = "#31ADE3";
 
-type SectionKey = "wizard" | "aiService" | "overrides" | "localization";
+type SectionKey = "wizard" | "overrides" | "localization";
 
 // Key names only — translated at render via t().
 const SECTION_LABEL_KEYS: Record<SectionKey, string> = {
   wizard: "adminPages.setup.navWizard",
-  aiService: "adminPages.setup.navAiService",
   overrides: "adminPages.setup.navOverrides",
   localization: "adminPages.setup.navLocalization",
 };
@@ -258,7 +257,7 @@ export default function AdminSetupScreen({ role, me, onNavigate }: AdminSetupScr
   const cfg = useProjectConfig();
   const admin = role === "admin";
 
-  const sections: SectionKey[] = admin ? ["wizard", "aiService", "overrides", "localization"] : [];
+  const sections: SectionKey[] = admin ? ["wizard", "overrides", "localization"] : [];
 
   return (
     <AdminDesk current="setup">
@@ -333,17 +332,10 @@ export default function AdminSetupScreen({ role, me, onNavigate }: AdminSetupScr
 
             <WizardPanel />
 
-            {/* AI service is org-wide admin config (provider/model/key), not a
-                translation-memory feature — gate on admin only, matching
-                classic Preferences, so admins on source-language or read-only
-                workspaces can still reach it. */}
-            <SectionPanel
-              id="aiService"
-              title={t("adminPages.setup.navAiService")}
-              sub={t("adminPages.setup.aiServiceSub")}
-            >
-              <AiServiceSection />
-            </SectionPanel>
+            {/* AI service (provider/model/key) moved to the AI studio (#/ai,
+                AiScreen.tsx) under #479 — configuring the AI now lives on the
+                same screen where it's used. Classic #/preferences keeps its own
+                copy until classic retires (#173). */}
 
             <OverridesPanel initialBook={me?.lastBook ?? null} />
 
