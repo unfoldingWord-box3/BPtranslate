@@ -123,4 +123,59 @@ assert(
   "non-fallback workspace: outbox DB is suffixed identically to the drafts stores",
 );
 
+// ── issue #502: reconcilableSiblingDbName() — the SAFE-to-adopt sibling of the
+// name a store actually opened. It exists so an edit/draft queued under one
+// member of the { base, base-{slug} } pair (the fallback flag is boot-timed, so
+// the same workspace can open either across a reload) is rescued, not stranded —
+// WITHOUT ever mixing two orgs' data. ────────────────────────────────────────
+
+const BASE = "bible-editor-outbox";
+const { reconcilableSiblingDbName } = await import("./workspace.ts");
+
+// Fallback workspace (its slug is a real, non-"default" string, e.g. "bsoj"):
+// the two candidate names both belong to it, so each is the other's safe sibling
+// regardless of which one this session happened to open.
+setWorkspaceSlug("bsoj");
+setWorkspaceIsFallback(true);
+assert(
+  reconcilableSiblingDbName(BASE, "bible-editor-outbox") === "bible-editor-outbox-bsoj",
+  "fallback + opened legacy base -> adopt from the suffixed mistimed-write DB",
+);
+assert(
+  reconcilableSiblingDbName(BASE, "bible-editor-outbox-bsoj") === "bible-editor-outbox",
+  "fallback + opened suffixed (flag not yet landed at open) -> adopt from legacy base",
+);
+
+// Non-fallback workspace: the unsuffixed `base` is the FALLBACK workspace's home
+// and may hold another org's edits, so it is NEVER a safe sibling to adopt into
+// a suffixed store — the whole point of the suffixing.
+setWorkspaceSlug("org2");
+setWorkspaceIsFallback(false);
+assert(
+  reconcilableSiblingDbName(BASE, "bible-editor-outbox-org2") === null,
+  "non-fallback: never adopt the shared legacy base into a suffixed store (no org mixing)",
+);
+assert(
+  reconcilableSiblingDbName(BASE, "bible-editor-outbox") === null,
+  "non-fallback: opening the legacy base itself has no safe sibling either",
+);
+
+// A different org's suffixed DB is not a member of the current slug's pair.
+setWorkspaceSlug("bsoj");
+setWorkspaceIsFallback(true);
+assert(
+  reconcilableSiblingDbName(BASE, "bible-editor-outbox-org2") === null,
+  "another org's suffixed DB is not part of this slug's pair -> left untouched",
+);
+
+// The implicit "default" workspace never suffixes, so there is only one
+// candidate name and thus no pair to reconcile.
+data.delete("bible-editor.workspace");
+data.delete("bible-editor.workspace-is-fallback");
+assert(getWorkspaceSlug() === "default", "reset to implicit default");
+assert(
+  reconcilableSiblingDbName(BASE, "bible-editor-outbox") === null,
+  "default workspace: single candidate name, nothing to reconcile",
+);
+
 console.log("\nAll workspace smoke checks passed.");

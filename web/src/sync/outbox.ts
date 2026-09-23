@@ -29,6 +29,7 @@ import {
   targetKey,
 } from "./outboxTargeting.ts";
 import { workspaceDbName } from "./workspace";
+import { adoptSiblingRecords } from "./dbReconcile";
 import i18n from "../i18n";
 
 // DISPLAY-ONLY fallback for the freeze reason stamped on a quarantined op —
@@ -61,8 +62,9 @@ function laneQuarantineReason(bibleVersion: string): string {
 // Only non-fallback slugs get the "-{slug}" suffix. The fallback rule itself
 // lives in workspace.ts's workspaceDbName(), shared verbatim with the drafts
 // stores (drafts.ts, alignmentDrafts.ts) — see issue #228.
+const OUTBOX_BASE = "bible-editor-outbox";
 function outboxDbName(): string {
-  return workspaceDbName("bible-editor-outbox");
+  return workspaceDbName(OUTBOX_BASE);
 }
 
 const DB_VERSION = 1;
@@ -195,7 +197,8 @@ function db() {
   if (!dbp) {
     // Resolved at first-open time (not module load) so it picks up a slug
     // written during boot reconciliation (see App.tsx) before any op is queued.
-    dbp = openDB(outboxDbName(), DB_VERSION, {
+    const name = outboxDbName();
+    dbp = openDB(name, DB_VERSION, {
       upgrade(db) {
         if (!db.objectStoreNames.contains(STORE)) {
           const store = db.createObjectStore(STORE, { keyPath: "id" });
@@ -203,6 +206,21 @@ function db() {
           store.createIndex("status", "status");
         }
       },
+    }).then((idb) => {
+      // #502: the fallback flag that decides `name` is written during boot, so
+      // a reload can open the OTHER of this workspace's two candidate names and
+      // strand ops queued under the first. Adopt any stranded ops from the safe
+      // sibling into the one we opened, then drain so they finally ship. Kicked
+      // off (not awaited) so the first open — and any enqueue racing it — never
+      // blocks; the adopted ops are ordered by queuedAt/seq like any other.
+      void adoptSiblingRecords({ base: OUTBOX_BASE, opened: name, openedDb: idb, store: STORE })
+        .then((n) => {
+          if (n > 0) void drain();
+        })
+        .catch(() => {
+          /* best-effort — see adoptSiblingRecords */
+        });
+      return idb;
     });
   }
   return dbp;

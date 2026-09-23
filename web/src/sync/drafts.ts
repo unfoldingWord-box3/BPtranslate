@@ -14,6 +14,7 @@ import { isLaneFrozen } from "./laneFreeze";
 import { onOutboxResult } from "./outbox";
 import { generationForSuccessfulOp } from "./draftSaveState";
 import { workspaceDbName } from "./workspace";
+import { adoptSiblingRecords } from "./dbReconcile";
 
 // Base name; the actual per-workspace DB name is derived via workspaceDbName()
 // so drafts written in one Door43 org never surface in another (issue #228).
@@ -91,12 +92,28 @@ type Subscriber = (drafts: DraftRecord[]) => void;
 let dbp: Promise<IDBPDatabase> | null = null;
 function db() {
   if (!dbp) {
-    dbp = openDB(workspaceDbName(DB_NAME), DB_VERSION, {
+    const name = workspaceDbName(DB_NAME);
+    dbp = openDB(name, DB_VERSION, {
       upgrade(d) {
         if (!d.objectStoreNames.contains(STORE)) {
           d.createObjectStore(STORE, { keyPath: "key" });
         }
       },
+    }).then((idb) => {
+      // #502: same boot-timing race as the outbox — a reload can open the OTHER
+      // of this workspace's two candidate DB names and strand unsaved drafts
+      // (lost typing, the very thing this store exists to prevent). Adopt any
+      // stranded drafts from the safe sibling into the one we opened, then notify
+      // so subscribers (UnsavedToasts / SyncStatusBar) surface the recovered
+      // "N unsaved". Not awaited so the first open never blocks.
+      void adoptSiblingRecords({ base: DB_NAME, opened: name, openedDb: idb, store: STORE })
+        .then((n) => {
+          if (n > 0) void notify();
+        })
+        .catch(() => {
+          /* best-effort — see adoptSiblingRecords */
+        });
+      return idb;
     });
   }
   return dbp;
