@@ -18,6 +18,7 @@ import { openDB, type IDBPDatabase } from "idb";
 import { isReadOnly } from "./api";
 import { onOutboxResult } from "./outbox";
 import { workspaceDbName } from "./workspace";
+import { adoptSiblingRecords } from "./dbReconcile";
 
 // Base name; the actual per-workspace DB name is derived via workspaceDbName()
 // so alignment drafts written in one Door43 org never surface in another
@@ -50,12 +51,25 @@ export interface AlignmentDraftRecord {
 let dbp: Promise<IDBPDatabase> | null = null;
 function db() {
   if (!dbp) {
-    dbp = openDB(workspaceDbName(DB_NAME), DB_VERSION, {
+    const name = workspaceDbName(DB_NAME);
+    dbp = openDB(name, DB_VERSION, {
       upgrade(d) {
         if (!d.objectStoreNames.contains(STORE)) {
           d.createObjectStore(STORE, { keyPath: "key" });
         }
       },
+    }).then((idb) => {
+      // #502: same boot-timing race as the outbox and text-drafts store — a
+      // reload can open the OTHER of this workspace's two candidate DB names and
+      // strand in-progress alignment work. Adopt any stranded drafts from the
+      // safe sibling into the one we opened; the aligner reads them back on mount
+      // (no subscriber to notify here). Not awaited so the first open never blocks.
+      void adoptSiblingRecords({ base: DB_NAME, opened: name, openedDb: idb, store: STORE }).catch(
+        () => {
+          /* best-effort — see adoptSiblingRecords */
+        },
+      );
+      return idb;
     });
   }
   return dbp;

@@ -67,3 +67,40 @@ export function setWorkspaceIsFallback(isFallback: boolean): void {
 export function workspaceDbName(base: string): string {
   return getWorkspaceIsFallback() ? base : `${base}-${getWorkspaceSlug()}`;
 }
+
+// Issue #502: workspaceDbName()'s result depends on the fallback flag, which is
+// written during boot (App.tsx) — so across a reload the same browser can pick a
+// DIFFERENT name for the SAME workspace. The two candidate names for the current
+// slug are always the pair { base, `${base}-${slug}` }: the unknown/early window
+// resolves to one (slug still "default", or flag not yet landed) and the settled
+// window to the other. An edit/draft queued under one is invisible to the next
+// session that opened the other, and never flushes — silent loss on the save
+// protocol's "durable across tab close" claim.
+//
+// Given the name a store ACTUALLY opened this session, this returns the other
+// member of that pair when — and only when — it is SAFE to adopt its records
+// into `opened`, else null. Safety is the whole point:
+//
+//   - Both members of the pair provably belong to the CURRENT workspace only for
+//     the FALLBACK workspace. There `base` is the fallback's own legacy home and
+//     `${base}-${slug}` is where a mistimed pre-flag write went, so moving records
+//     between them stays inside one workspace.
+//   - For a NON-fallback workspace the unsuffixed `base` is the *fallback*
+//     workspace's store and may hold a different org's records; adopting from it
+//     would mix two orgs' edits — the exact hazard workspaceDbName's suffixing
+//     exists to prevent. So we never reconcile it. (This is the same "suffixing is
+//     the conservative side" reasoning in outbox.ts's outboxDbName comment.)
+//
+// `opened` must be a member of the current slug's pair; anything else (e.g. a
+// different org's `${base}-${otherSlug}`) returns null and is left untouched.
+export function reconcilableSiblingDbName(base: string, opened: string): string | null {
+  const slug = getWorkspaceSlug();
+  // "default" never suffixes, so there is only one candidate name — no pair.
+  if (slug === "default") return null;
+  const suffixed = `${base}-${slug}`;
+  const sibling = opened === base ? suffixed : opened === suffixed ? base : null;
+  if (sibling === null) return null; // `opened` isn't a member of this slug's pair
+  // Only the fallback workspace can safely reconcile the pair (see above).
+  if (!getWorkspaceIsFallback()) return null;
+  return sibling;
+}
