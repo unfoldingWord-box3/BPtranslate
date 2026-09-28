@@ -30,6 +30,7 @@ import {
   type Role,
 } from "./sync/api";
 import { setPipelineUser } from "./sync/pipelineStore";
+import { api } from "./sync/api";
 import { getWorkspaceSlug, setWorkspaceSlug, setWorkspaceIsFallback } from "./sync/workspace";
 import {
   WorkspaceChoiceDialog,
@@ -933,23 +934,40 @@ export function App() {
                 username={auth.kind === "ready" ? auth.me?.username ?? null : null}
                 onLogout={handleSignOut}
                 isAdmin={auth.kind === "ready" && auth.role === "admin"}
-                onOpenClassic={() => {
-                  // The book on screen when there is one (its chapter and verse
-                  // too, when known; classic has no chapter 0, so intros open
-                  // chapter 1), else where the user last was, else the demo book.
-                  const here = "book" in loc && loc.book ? { ...loc, book: loc.book } : null;
+                onOpenClassic={async () => {
+                  // Candidates in order: the book on screen (its chapter and
+                  // verse when known; classic has no chapter 0, so intros open
+                  // chapter 1) — except on the Books screen, whose selected
+                  // book may not be imported — then where the user last was.
+                  // Only an imported book opens a usable editor, and the last
+                  // position is per-user, not per-workspace (#255), so check
+                  // the workspace's book list; fall back to its first imported
+                  // book. If the list can't load, trust the first candidate.
+                  const candidates: { book: string; chapter: number; verse: number }[] = [];
+                  if ("book" in loc && loc.book && loc.view !== "books") {
+                    candidates.push({
+                      book: loc.book,
+                      chapter: ("chapter" in loc && loc.chapter) || 1,
+                      verse: ("verse" in loc && loc.verse) || 1,
+                    });
+                  }
                   const last =
                     livePosition ??
                     (auth.kind === "ready" && auth.me?.lastBook && auth.me.lastChapter != null && auth.me.lastVerse != null
                       ? { book: auth.me.lastBook, chapter: auth.me.lastChapter, verse: auth.me.lastVerse }
                       : null);
-                  if (here)
-                    navigate(
-                      here.book,
-                      ("chapter" in here && here.chapter) || 1,
-                      ("verse" in here && here.verse) || 1,
-                    );
-                  else navigate(last?.book ?? "OBA", last?.chapter ?? 1, last?.verse ?? 1);
+                  if (last) candidates.push(last);
+                  let target = candidates[0] ?? { book: "OBA", chapter: 1, verse: 1 };
+                  try {
+                    const { books } = await api.getBooks();
+                    const imported = new Set(books.map((b) => b.book));
+                    const hit = candidates.find((c) => imported.has(c.book));
+                    if (hit) target = hit;
+                    else if (books.length > 0) target = { book: books[0].book, chapter: 1, verse: 1 };
+                  } catch {
+                    // keep the optimistic target
+                  }
+                  navigate(target.book, target.chapter, target.verse);
                 }}
               />
             </Stack>
