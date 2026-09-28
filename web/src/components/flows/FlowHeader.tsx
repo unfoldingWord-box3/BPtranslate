@@ -1,0 +1,41 @@
+// One header row for every flow screen (#299).
+//
+// App.tsx renders a single global chrome bar above the flow screens: a flexible
+// slot on the inline-start side, the account/status controls on the inline-end
+// side. A screen's own title row (back chevron, h1, count, actions) or FlowNav
+// renders through <FlowHeader>, which portals it into that slot — so the screen
+// title and the global controls share one row instead of stacking two bars.
+// The bar sits outside the screen's scroll box, so it stays put without the
+// old `position: sticky` wrappers. A screen that renders no <FlowHeader> (phone
+// focus mode hides it on purpose) leaves the slot empty and only the controls
+// show.
+//
+// Outside App's flow chrome (no slot provided), or with `inline` (a header that
+// belongs to a side pane, not the page), it renders the old in-place sticky bar.
+import { createContext, useContext, type ReactNode } from "react";
+import { createPortal } from "react-dom";
+import { Box } from "@mui/material";
+
+export const FlowHeaderSlotContext = createContext<HTMLElement | null>(null);
+
+type Props = { children: ReactNode; inline?: boolean; zIndex?: number };
+
+export function FlowHeader({ children, inline, zIndex = 20 }: Props) {
+  const slot = useContext(FlowHeaderSlotContext);
+  if (slot && !inline) return createPortal(children, slot);
+  return (
+    <Box
+      sx={{
+        position: "sticky",
+        insetBlockStart: 0,
+        zIndex,
+        flex: "none",
+        bgcolor: "background.paper",
+        borderBlockEnd: "1px solid",
+        borderColor: "divider",
+      }}
+    >
+      {children}
+    </Box>
+  );
+}

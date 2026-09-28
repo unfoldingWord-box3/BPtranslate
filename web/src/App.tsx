@@ -4,7 +4,8 @@ import { Alert, Box, Button, Chip, CircularProgress, Link, Snackbar, Stack, Tool
 import RefreshIcon from "@mui/icons-material/Refresh";
 import { Shell } from "./components/Shell";
 import { ArticleWorkspace } from "./components/ArticleWorkspace";
-import { TopBar, UiLanguageControl } from "./components/TopBar";
+import { TopBar } from "./components/TopBar";
+import { FlowHeaderSlotContext } from "./components/flows/FlowHeader";
 import { SyncStatusBar } from "./components/SyncStatusBar";
 import { PipelineStatusBar } from "./components/PipelineStatusBar";
 import { AccountMenu } from "./components/AccountMenu";
@@ -14,6 +15,7 @@ import { PreferencesWorkspace, ALL_SECTIONS as PREFS_SECTIONS, type Section as P
 import { LocalizationInspector } from "./components/LocalizationInspector";
 import { useBook } from "./hooks/useBook";
 import { useAlerts } from "./hooks/useAlerts";
+import { useLayoutBand } from "./hooks/useLayoutBand";
 import { useAppVersion } from "./hooks/useAppVersion";
 import {
   authLogout,
@@ -503,6 +505,11 @@ export function App() {
     navigate(book, chapter, verse);
   };
 
+  // The global flow bar's inline-start slot; screens portal their title row
+  // into it through <FlowHeader> (#299).
+  const [headerSlot, setHeaderSlot] = useState<HTMLElement | null>(null);
+  const isPhone = useLayoutBand().band === "phone";
+
   // Live in-session position for the Books screen's Continue card. `auth.me`
   // is fetched once at boot and never refreshed, so without this the card
   // would keep showing the *previous* session's position after the user
@@ -867,7 +874,33 @@ export function App() {
           // plumbing or a redesign of its in-place Save action — scoped as a
           // separate follow-up rather than risking a silent no-op or a
           // half-working Save button on those screens.
+          //
+          // One row, not two (#299): the screen's own title row portals into the
+          // inline-start slot through <FlowHeader>, beside these controls.
+          <FlowHeaderSlotContext.Provider value={headerSlot}>
           <Stack sx={{ height: "100%", minHeight: 0 }}>
+            <Stack
+              direction="row"
+              alignItems="center"
+              sx={{
+                flex: "none",
+                minHeight: 44,
+                borderBlockEnd: "1px solid",
+                borderColor: "divider",
+                bgcolor: "background.paper",
+              }}
+            >
+              {/* The controls now share the row with the screen title, so on a
+                  phone the title and subtitle truncate instead of wrapping one
+                  word per line. */}
+              <Box
+                ref={setHeaderSlot}
+                sx={{
+                  flex: 1,
+                  minWidth: 0,
+                  "& h1, & h1 + p": { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
+                }}
+              />
             <Stack
               direction="row"
               alignItems="center"
@@ -875,15 +908,7 @@ export function App() {
               spacing={0.5}
               role="toolbar"
               aria-label={t("topbar.chromeStrip.ariaLabel")}
-              sx={{
-                flex: "none",
-                minHeight: 44,
-                paddingInline: 1.5,
-                paddingBlock: 0.5,
-                borderBlockEnd: "1px solid",
-                borderColor: "divider",
-                bgcolor: "background.paper",
-              }}
+              sx={{ flex: "none", paddingInline: 1.5, paddingBlock: 0.5 }}
             >
               {updateAvailable && (
                 <Tooltip title={t("sync.updateAvailableTooltip")}>
@@ -902,13 +927,26 @@ export function App() {
                   />
                 </Tooltip>
               )}
-              <SyncStatusBar onNavigate={navigate} flowRouting />
+              <SyncStatusBar onNavigate={navigate} flowRouting compactSaved={isPhone} />
               <PipelineStatusBar />
-              <UiLanguageControl />
               <AccountMenu
                 username={auth.kind === "ready" ? auth.me?.username ?? null : null}
                 onLogout={handleSignOut}
+                isAdmin={auth.kind === "ready" && auth.role === "admin"}
+                onOpenClassic={() => {
+                  // The passage on screen when there is one, else where the
+                  // user last was, else the demo book.
+                  const here = "book" in loc && loc.book && "chapter" in loc && loc.chapter ? loc : null;
+                  const last =
+                    livePosition ??
+                    (auth.kind === "ready" && auth.me?.lastBook && auth.me.lastChapter != null && auth.me.lastVerse != null
+                      ? { book: auth.me.lastBook, chapter: auth.me.lastChapter, verse: auth.me.lastVerse }
+                      : null);
+                  if (here) navigate(here.book, here.chapter, ("verse" in here && here.verse) || 1);
+                  else navigate(last?.book ?? "OBA", last?.chapter ?? 1, last?.verse ?? 1);
+                }}
               />
+            </Stack>
             </Stack>
             <Box sx={{ flex: 1, minHeight: 0 }}>
           <Suspense
@@ -992,6 +1030,7 @@ export function App() {
           </Suspense>
             </Box>
           </Stack>
+          </FlowHeaderSlotContext.Provider>
         ) : (
           <Shell
             key={loc.book}

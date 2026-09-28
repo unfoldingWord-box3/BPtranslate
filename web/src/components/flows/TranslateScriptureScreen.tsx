@@ -114,6 +114,7 @@
 //     are Continue/Review, not paging.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FlowHeader } from "./FlowHeader";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import {
@@ -1171,21 +1172,11 @@ export default function TranslateScriptureScreen({
           : { overflowY: "auto" }),
       }}
     >
-      {/* topbar (at md+ the root doesn't scroll, so sticky is simply inert).
+      {/* topbar — rendered into the global flow bar via FlowHeader (#299).
           Hidden in phone focus mode (issue #164) to free space for the
           keyboard — same convention as TranslateNotesScreen.tsx. */}
       {!focusMode && (
-        <Box
-          sx={{
-            position: "sticky",
-            insetBlockStart: 0,
-            zIndex: 20,
-            flex: "none",
-            bgcolor: "background.paper",
-            borderBlockEnd: "1px solid",
-            borderColor: "divider",
-          }}
-        >
+        <FlowHeader>
           <Box
             sx={{ maxWidth: wide ? 1440 : COLUMN_PX, mx: "auto", paddingInline: 2, paddingBlock: 1.5 }}
           >
@@ -1259,7 +1250,7 @@ export default function TranslateScriptureScreen({
               />
             </Box>
           </Box>
-        </Box>
+        </FlowHeader>
       )}
 
       {/* md+ desk (the words screen's pattern, after docs/mockups/desktop-first/

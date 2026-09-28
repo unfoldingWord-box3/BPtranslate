@@ -94,6 +94,7 @@
 // chevronFlip convention.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FlowHeader } from "./FlowHeader";
 import {
   Alert,
   Box,
@@ -801,17 +802,7 @@ export default function TranslateAlignScreen({
   );
 
   const topbar = (
-    <Box
-      sx={{
-        position: "sticky",
-        insetBlockStart: 0,
-        zIndex: 20,
-        flex: "none",
-        bgcolor: "background.paper",
-        borderBlockEnd: "1px solid",
-        borderColor: "divider",
-      }}
-    >
+    <FlowHeader>
       <Box sx={{ maxWidth: wide ? 1440 : COLUMN_PX, mx: "auto", paddingInline: 2, paddingBlock: 1.5 }}>
         <Stack direction="row" alignItems="center" spacing={1.25}>
           <IconButton
@@ -916,7 +907,7 @@ export default function TranslateAlignScreen({
           />
         </Box>
       </Box>
-    </Box>
+    </FlowHeader>
   );
 
   // ── loading / error states (topbar chrome + sibling-style body) ──────────
