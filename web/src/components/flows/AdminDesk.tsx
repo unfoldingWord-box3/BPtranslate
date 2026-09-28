@@ -27,6 +27,7 @@ import {
   Typography,
 } from "@mui/material";
 import { alpha, useTheme } from "@mui/material/styles";
+import { FlowHeader } from "./FlowHeader";
 import useMediaQuery from "@mui/material/useMediaQuery";
 import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
 import MenuIcon from "@mui/icons-material/Menu";
@@ -206,45 +207,46 @@ export function AdminDesk({ current, children }: { current: AdminSection; childr
       </MenuItem>
     );
   };
+  // Rendered into the global flow bar (FlowHeader), beside the account
+  // controls, rather than as a card of its own under it (#299).
   const collapsedNav = (
-    <Box
-      component="nav"
-      aria-label={t("adminDesk.a11y.adminSections")}
-      sx={{
-        display: "flex",
-        alignItems: "center",
-        gap: 1,
-        bgcolor: "background.paper",
-        border: "1px solid",
-        borderColor: "divider",
-        borderRadius: "14px",
-        padding: 1,
-      }}
-    >
-      {booksExit}
-      <Button
-        startIcon={<MenuIcon />}
-        onClick={(e) => setAnchorEl(e.currentTarget)}
-        aria-haspopup="menu"
-        aria-expanded={anchorEl ? true : undefined}
+    <FlowHeader>
+      <Box
+        component="nav"
+        aria-label={t("adminDesk.a11y.adminSections")}
         sx={{
-          minHeight: 44,
-          flex: 1,
-          justifyContent: "flex-start",
-          textAlign: "start",
-          color: "text.primary",
-          fontWeight: 600,
+          display: "flex",
+          alignItems: "center",
+          gap: 1,
+          paddingBlock: 0.5,
+          paddingInline: 1,
         }}
       >
-        {t(currentLabelKey)}
-      </Button>
-      <Menu anchorEl={anchorEl} open={Boolean(anchorEl)} onClose={() => setAnchorEl(null)}>
-        <ListSubheader disableSticky>{t("adminDesk.groups.admin")}</ListSubheader>
-        {SECTIONS.map(menuItem)}
-        <ListSubheader disableSticky>{t("adminDesk.groups.moreTools")}</ListSubheader>
-        {TOOLS.map(menuItem)}
-      </Menu>
-    </Box>
+        {booksExit}
+        <Button
+          startIcon={<MenuIcon />}
+          onClick={(e) => setAnchorEl(e.currentTarget)}
+          aria-haspopup="menu"
+          aria-expanded={anchorEl ? true : undefined}
+          sx={{
+            minHeight: 44,
+            flex: 1,
+            justifyContent: "flex-start",
+            textAlign: "start",
+            color: "text.primary",
+            fontWeight: 600,
+          }}
+        >
+          {t(currentLabelKey)}
+        </Button>
+        <Menu anchorEl={anchorEl} open={Boolean(anchorEl)} onClose={() => setAnchorEl(null)}>
+          <ListSubheader disableSticky>{t("adminDesk.groups.admin")}</ListSubheader>
+          {SECTIONS.map(menuItem)}
+          <ListSubheader disableSticky>{t("adminDesk.groups.moreTools")}</ListSubheader>
+          {TOOLS.map(menuItem)}
+        </Menu>
+      </Box>
+    </FlowHeader>
   );
 
   return (
