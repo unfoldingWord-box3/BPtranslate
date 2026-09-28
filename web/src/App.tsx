@@ -942,7 +942,8 @@ export function App() {
                   // Only an imported book opens a usable editor, and the last
                   // position is per-user, not per-workspace (#255), so check
                   // the workspace's book list; fall back to its first imported
-                  // book. If the list can't load, trust the first candidate.
+                  // book, or the Books screen when nothing is imported. If the
+                  // list can't load, trust the first candidate.
                   const candidates: { book: string; chapter: number; verse: number }[] = [];
                   if ("book" in loc && loc.book && loc.view !== "books") {
                     candidates.push({
@@ -964,8 +965,16 @@ export function App() {
                     const hit = candidates.find((c) => imported.has(c.book));
                     if (hit) target = hit;
                     else if (books.length > 0) target = { book: books[0].book, chapter: 1, verse: 1 };
+                    else {
+                      // Nothing imported: classic has nothing to open, so send
+                      // the user to the Books screen to bring one in.
+                      location.hash = "#/books";
+                      return;
+                    }
                   } catch {
-                    // keep the optimistic target
+                    // Offline or a failed read: keep the optimistic target, the
+                    // same trust the Books screen gave the last position before
+                    // its list loaded.
                   }
                   navigate(target.book, target.chapter, target.verse);
                 }}
