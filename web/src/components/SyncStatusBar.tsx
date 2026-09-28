@@ -226,9 +226,12 @@ interface Props {
   // resolves to the classic Shell catch-all and ejects the user out of the new
   // UI (#229). Classic mounts leave this unset and keep the onNavigate path.
   flowRouting?: boolean;
+  // Phone width in the flow header bar, which the chrome shares with the
+  // screen title (#299): the steady-state "saved" chip shrinks to its icon.
+  compactSaved?: boolean;
 }
 
-export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRouting }: Props = {}) {
+export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRouting, compactSaved }: Props = {}) {
   const { t } = useTranslation();
   const { pending, conflicts, failed, effectivelyOffline, online, draftCount, activeDrafts, quarantinedDrafts } =
     useSyncSummary();
@@ -385,6 +388,19 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
           size="small"
           variant="outlined"
           color="primary"
+        />
+      </Tooltip>
+    );
+  } else if (draftCount === 0 && compactSaved) {
+    inline = (
+      <Tooltip title={t("sync.savedTooltip")}>
+        <CloudDoneIcon
+          role="img"
+          tabIndex={0}
+          aria-label={t("sync.saved")}
+          fontSize="small"
+          color="success"
+          sx={{ opacity: 0.6, marginInline: 0.5 }}
         />
       </Tooltip>
     );

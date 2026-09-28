@@ -27,6 +27,7 @@
 // below `md`.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FlowHeader } from "./FlowHeader";
 import { useTranslation } from "react-i18next";
 import {
   Accordion,
@@ -36,12 +37,7 @@ import {
   Box,
   Button,
   CircularProgress,
-  IconButton,
   Link,
-  ListItemIcon,
-  ListItemText,
-  Menu,
-  MenuItem,
   Popover,
   Stack,
   TextField,
@@ -50,9 +46,6 @@ import {
 } from "@mui/material";
 import { useTheme } from "@mui/material/styles";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
-import TuneIcon from "@mui/icons-material/Tune";
-import MenuBookIcon from "@mui/icons-material/MenuBook";
-import AdminPanelSettingsIcon from "@mui/icons-material/AdminPanelSettings";
 import ArrowForwardIcon from "@mui/icons-material/ArrowForward";
 import {
   api,
@@ -550,12 +543,10 @@ function BookDetailPanel({
   );
 }
 
-export default function BooksScreen({ role, onNavigate, lastPosition, book: routeBook }: BooksScreenProps) {
+export default function BooksScreen({ role, lastPosition, book: routeBook }: BooksScreenProps) {
   const { t } = useTranslation();
   const theme = useTheme();
-  const { skip } = theme.palette.flows;
   const gridView = useMediaQuery(theme.breakpoints.up("tablet"));
-  const [menuAnchor, setMenuAnchor] = useState<HTMLElement | null>(null);
   // Shared app-wide config cache (BookDetailPanel below already subscribes to
   // it) — read here only to label the topbar; no new fetch.
   const projectConfig = useProjectConfig();
@@ -651,19 +642,12 @@ export default function BooksScreen({ role, onNavigate, lastPosition, book: rout
       return next;
     });
 
-  // Redesign topbar (PackageHubScreen idiom): sticky, title + sub, quiet icon
-  // buttons. No back chevron — this screen IS the redesign's top-level entry.
+  // Redesign topbar (PackageHubScreen idiom): title + sub, rendered into the
+  // global flow bar. No back chevron — this screen IS the redesign's top-level
+  // entry. The Classic-editor / Admin jumps that used to sit in a Tune menu
+  // here now live in the account menu, on every flow screen (#299).
   const topbar = (
-    <Box
-      sx={{
-        position: "sticky",
-        insetBlockStart: 0,
-        zIndex: 20,
-        bgcolor: "background.paper",
-        borderBlockEnd: "1px solid",
-        borderColor: "divider",
-      }}
-    >
+    <FlowHeader>
       <Box sx={{ maxWidth: 1180, mx: "auto", paddingInline: 2, paddingBlock: 1.5 }}>
         <Stack direction="row" alignItems="center" spacing={1.25}>
           <Box sx={{ minWidth: 0 }}>
@@ -676,55 +660,9 @@ export default function BooksScreen({ role, onNavigate, lastPosition, book: rout
                 : t("flowBooks.subFallback")}
             </Typography>
           </Box>
-          <Box sx={{ flex: 1 }} />
-          <IconButton
-            aria-label={t("flowBooks.menu.open")}
-            title={t("flowBooks.menu.label")}
-            aria-haspopup="menu"
-            aria-expanded={Boolean(menuAnchor)}
-            aria-controls={menuAnchor ? "books-screen-menu" : undefined}
-            onClick={(e) => setMenuAnchor(e.currentTarget)}
-            sx={{ bgcolor: skip.soft, width: 34, height: 34, flex: "none" }}
-          >
-            <TuneIcon fontSize="small" />
-          </IconButton>
-          <Menu id="books-screen-menu" anchorEl={menuAnchor} open={Boolean(menuAnchor)} onClose={() => setMenuAnchor(null)}>
-            <MenuItem
-              onClick={() => {
-                setMenuAnchor(null);
-                // Same live position the Continue card uses — `me` is a
-                // boot-time snapshot, so reading it here would send the user
-                // to last session's verse while the card above showed this
-                // session's.
-                onNavigate(
-                  resolvedLastPosition?.book ?? "OBA",
-                  resolvedLastPosition?.chapter ?? 1,
-                  resolvedLastPosition?.verse ?? 1,
-                );
-              }}
-            >
-              <ListItemIcon>
-                <MenuBookIcon fontSize="small" />
-              </ListItemIcon>
-              <ListItemText>{t("flowBooks.menu.classicEditor")}</ListItemText>
-            </MenuItem>
-            {role === "admin" && (
-              <MenuItem
-                onClick={() => {
-                  setMenuAnchor(null);
-                  location.hash = "#/admin/progress";
-                }}
-              >
-                <ListItemIcon>
-                  <AdminPanelSettingsIcon fontSize="small" />
-                </ListItemIcon>
-                <ListItemText>{t("flowBooks.menu.admin")}</ListItemText>
-              </MenuItem>
-            )}
-          </Menu>
         </Stack>
       </Box>
-    </Box>
+    </FlowHeader>
   );
 
   const listPane =

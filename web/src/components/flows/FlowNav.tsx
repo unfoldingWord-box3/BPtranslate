@@ -7,6 +7,7 @@
 // is always reachable at every width.
 
 import { useState } from "react";
+import { FlowHeader } from "./FlowHeader";
 import { useTranslation } from "react-i18next";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
@@ -101,114 +102,112 @@ export function FlowNav({ current, book, chapter, verse, role }: FlowNavProps) {
 
   if (collapsed) {
     return (
+      <FlowHeader>
+        <Box
+          component="nav"
+          aria-label={t("adminDesk.flowNav.screens")}
+          sx={{
+            display: "flex",
+            alignItems: "center",
+            gap: 1,
+            paddingBlock: 1,
+            paddingInline: 1.5,
+          }}
+        >
+          <Button
+            startIcon={<MenuIcon />}
+            onClick={(e) => setAnchorEl(e.currentTarget)}
+            sx={{ minHeight: 44, textAlign: "start" }}
+            aria-haspopup="menu"
+            aria-expanded={anchorEl ? true : undefined}
+          >
+            {currentItem ? t(currentItem.labelKey) : t("adminDesk.flowNav.screens")}
+          </Button>
+          <Menu anchorEl={anchorEl} open={Boolean(anchorEl)} onClose={() => setAnchorEl(null)}>
+            {groups.flatMap((group) => [
+              <ListSubheader key={`h-${group.labelKey}`} disableSticky>
+                {t(group.labelKey)}
+              </ListSubheader>,
+              ...group.items.map((item) => (
+                <MenuItem
+                  key={item.id}
+                  component="a"
+                  href={item.href}
+                  selected={item.id === current}
+                  aria-current={item.id === current ? "page" : undefined}
+                  onClick={() => setAnchorEl(null)}
+                  sx={{ minHeight: 44 }}
+                >
+                  {t(item.labelKey)}
+                </MenuItem>
+              )),
+            ])}
+          </Menu>
+        </Box>
+      </FlowHeader>
+    );
+  }
+
+  return (
+    <FlowHeader>
       <Box
         component="nav"
         aria-label={t("adminDesk.flowNav.screens")}
         sx={{
           display: "flex",
           alignItems: "center",
-          gap: 1,
+          gap: 1.5,
+          overflowX: "auto",
           paddingBlock: 1,
-          paddingInline: 1.5,
-          bgcolor: "background.paper",
-          borderBlockEnd: "1px solid",
-          borderColor: "divider",
+          paddingInline: 2.25,
         }}
       >
-        <Button
-          startIcon={<MenuIcon />}
-          onClick={(e) => setAnchorEl(e.currentTarget)}
-          sx={{ minHeight: 44, textAlign: "start" }}
-          aria-haspopup="menu"
-          aria-expanded={anchorEl ? true : undefined}
-        >
-          {currentItem ? t(currentItem.labelKey) : t("adminDesk.flowNav.screens")}
-        </Button>
-        <Menu anchorEl={anchorEl} open={Boolean(anchorEl)} onClose={() => setAnchorEl(null)}>
-          {groups.flatMap((group) => [
-            <ListSubheader key={`h-${group.labelKey}`} disableSticky>
+        {groups.map((group) => (
+          <Box key={group.labelKey} sx={{ display: "flex", alignItems: "center", gap: 0.75, flex: "none" }}>
+            <Typography
+              variant="caption"
+              sx={{
+                fontWeight: 700,
+                letterSpacing: "0.1em",
+                textTransform: "uppercase",
+                color: "text.secondary",
+                fontSize: "0.65rem",
+                whiteSpace: "nowrap",
+              }}
+            >
               {t(group.labelKey)}
-            </ListSubheader>,
-            ...group.items.map((item) => (
-              <MenuItem
-                key={item.id}
-                component="a"
-                href={item.href}
-                selected={item.id === current}
-                aria-current={item.id === current ? "page" : undefined}
-                onClick={() => setAnchorEl(null)}
-                sx={{ minHeight: 44 }}
-              >
-                {t(item.labelKey)}
-              </MenuItem>
-            )),
-          ])}
-        </Menu>
+            </Typography>
+            {group.items.map((item) => {
+              const isCurrent = item.id === current;
+              return (
+                <Box
+                  key={item.id}
+                  component="a"
+                  href={item.href}
+                  aria-current={isCurrent ? "page" : undefined}
+                  sx={{
+                    flex: "none",
+                    textDecoration: "none",
+                    fontSize: "0.78rem",
+                    fontWeight: 600,
+                    whiteSpace: "nowrap",
+                    borderRadius: 999,
+                    paddingBlock: 0.625,
+                    paddingInline: 1.375,
+                    border: "1px solid",
+                    borderColor: isCurrent ? "primary.main" : "divider",
+                    bgcolor: isCurrent ? "action.selected" : "action.hover",
+                    color: isCurrent ? "text.primary" : "text.secondary",
+                    "&:hover": { color: "text.primary" },
+                  }}
+                >
+                  {t(item.labelKey)}
+                </Box>
+              );
+            })}
+          </Box>
+        ))}
       </Box>
-    );
-  }
-
-  return (
-    <Box
-      component="nav"
-      aria-label={t("adminDesk.flowNav.screens")}
-      sx={{
-        display: "flex",
-        alignItems: "center",
-        gap: 1.5,
-        overflowX: "auto",
-        paddingBlock: 1,
-        paddingInline: 2.25,
-        bgcolor: "background.paper",
-        borderBlockEnd: "1px solid",
-        borderColor: "divider",
-      }}
-    >
-      {groups.map((group) => (
-        <Box key={group.labelKey} sx={{ display: "flex", alignItems: "center", gap: 0.75, flex: "none" }}>
-          <Typography
-            variant="caption"
-            sx={{
-              fontWeight: 700,
-              letterSpacing: "0.1em",
-              textTransform: "uppercase",
-              color: "text.secondary",
-              fontSize: "0.65rem",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {t(group.labelKey)}
-          </Typography>
-          {group.items.map((item) => {
-            const isCurrent = item.id === current;
-            return (
-              <Box
-                key={item.id}
-                component="a"
-                href={item.href}
-                aria-current={isCurrent ? "page" : undefined}
-                sx={{
-                  flex: "none",
-                  textDecoration: "none",
-                  fontSize: "0.78rem",
-                  fontWeight: 600,
-                  whiteSpace: "nowrap",
-                  borderRadius: 999,
-                  paddingBlock: 0.625,
-                  paddingInline: 1.375,
-                  border: "1px solid",
-                  borderColor: isCurrent ? "primary.main" : "divider",
-                  bgcolor: isCurrent ? "action.selected" : "action.hover",
-                  color: isCurrent ? "text.primary" : "text.secondary",
-                  "&:hover": { color: "text.primary" },
-                }}
-              >
-                {t(item.labelKey)}
-              </Box>
-            );
-          })}
-        </Box>
-      ))}
-    </Box>
+    </FlowHeader>
   );
 }

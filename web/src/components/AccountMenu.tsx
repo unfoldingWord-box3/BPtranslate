@@ -1,12 +1,15 @@
-// Account menu for the new-UI (flow screen) chrome strip.
+// The one menu of the new-UI (flow screen) header bar (#299).
 //
 // The flow screens replaced the classic Shell/TopBar, and with it the whole
 // account cluster: identity, sign out, dark mode and reading text size. Sign
 // out in particular had no replacement anywhere in the new UI, so a user could
 // not leave the session without clearing storage by hand. This is the same set
-// of controls TopBar's avatar menu carries, minus the ones the new UI already
-// hosts elsewhere (interface language sits beside this button in the strip;
-// editor/translator mode lives on the Style screen).
+// of controls TopBar's avatar menu carries, minus editor/translator mode (it lives
+// on the Style screen). It also absorbed the controls that used to sit in
+// their own menus beside it: interface language (was a globe button in the
+// strip) and the jumps to the classic editor and the admin desk (were the
+// Books screen's Tune menu and the package hub's admin button), so every flow
+// screen reaches all of them from the same place.
 //
 // The org switcher is in here too, as WorkspaceSwitcher's "submenuItem"
 // variant: it switches in place (TopBar's "menuItem" variant only links to
@@ -28,6 +31,10 @@ import {
   Typography,
 } from "@mui/material";
 import AddIcon from "@mui/icons-material/Add";
+import AdminPanelSettingsIcon from "@mui/icons-material/AdminPanelSettings";
+import CheckIcon from "@mui/icons-material/Check";
+import LanguageIcon from "@mui/icons-material/Language";
+import MenuBookIcon from "@mui/icons-material/MenuBook";
 import DarkModeIcon from "@mui/icons-material/DarkMode";
 import FormatSizeIcon from "@mui/icons-material/FormatSize";
 import LogoutIcon from "@mui/icons-material/Logout";
@@ -35,6 +42,8 @@ import RemoveIcon from "@mui/icons-material/Remove";
 import { useTranslation } from "react-i18next";
 import { useProjectConfig } from "../hooks/useProjectConfig";
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
+import { UI_LANGUAGES } from "../i18n";
+import { UiLangContext } from "../i18n/UiLangContext";
 import {
   FontScaleContext,
   FONT_SCALE_MAX,
@@ -46,11 +55,15 @@ import {
 type Props = {
   username?: string | null;
   onLogout?: () => void;
+  isAdmin?: boolean;
+  onOpenClassic?: () => void;
 };
 
-export function AccountMenu({ username, onLogout }: Props) {
+export function AccountMenu({ username, onLogout, isAdmin, onOpenClassic }: Props) {
   const { t } = useTranslation();
   const [anchor, setAnchor] = useState<null | HTMLElement>(null);
+  const [langAnchor, setLangAnchor] = useState<null | HTMLElement>(null);
+  const { lang, setLang } = useContext(UiLangContext);
   const { mode: themeMode, toggle: toggleTheme } = useContext(ThemeModeContext);
   const { scale, setScale } = useContext(FontScaleContext);
   const projectConfig = useProjectConfig();
@@ -63,6 +76,8 @@ export function AccountMenu({ username, onLogout }: Props) {
       <Tooltip title={username ? `@${username}` : ""}>
         <IconButton
           size="small"
+          aria-haspopup="menu"
+          aria-expanded={Boolean(anchor)}
           onClick={(e) => setAnchor(e.currentTarget)}
           sx={{
             width: 32,
@@ -81,7 +96,10 @@ export function AccountMenu({ username, onLogout }: Props) {
       <Menu
         anchorEl={anchor}
         open={Boolean(anchor)}
-        onClose={() => setAnchor(null)}
+        onClose={() => {
+          setAnchor(null);
+          setLangAnchor(null);
+        }}
         anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
         transformOrigin={{ vertical: "top", horizontal: "right" }}
         slotProps={{ paper: { sx: { minWidth: 260 } } }}
@@ -113,6 +131,46 @@ export function AccountMenu({ username, onLogout }: Props) {
           <ListItemText primary={t(themeMode === "dark" ? "topbar.switchToLight" : "topbar.switchToDark")} />
           <Switch size="small" checked={themeMode === "dark"} sx={{ pointerEvents: "none" }} />
         </MenuItem>
+
+        {/* Same row + submenu as classic TopBar's More ▸ View ▸ language. */}
+        <MenuItem
+          aria-haspopup="menu"
+          aria-expanded={Boolean(langAnchor)}
+          onClick={(e) => setLangAnchor(e.currentTarget)}
+        >
+          <ListItemIcon>
+            <LanguageIcon fontSize="small" sx={{ color: "text.secondary" }} />
+          </ListItemIcon>
+          <ListItemText
+            primary={t("topbar.uiLanguage")}
+            secondary={UI_LANGUAGES.find((l) => l.code === lang)?.label}
+          />
+        </MenuItem>
+        <Menu
+          anchorEl={langAnchor}
+          open={Boolean(langAnchor)}
+          onClose={() => setLangAnchor(null)}
+          // Same reason as WorkspaceSwitcher's submenu: keys propagate through
+          // the portal, and the account menu's list would also move focus.
+          onKeyDown={(e) => e.stopPropagation()}
+        >
+          {UI_LANGUAGES.map((l) => (
+            <MenuItem
+              key={l.code}
+              selected={l.code === lang}
+              onClick={() => {
+                setLang(l.code);
+                setLangAnchor(null);
+                setAnchor(null);
+              }}
+            >
+              <ListItemIcon sx={{ visibility: l.code === lang ? "visible" : "hidden" }}>
+                <CheckIcon fontSize="small" />
+              </ListItemIcon>
+              <ListItemText>{l.label}</ListItemText>
+            </MenuItem>
+          ))}
+        </Menu>
 
         <Box sx={{ display: "flex", alignItems: "center", gap: 1, px: 2, py: 0.75 }}>
           <FormatSizeIcon fontSize="small" sx={{ color: "text.secondary" }} />
@@ -150,6 +208,33 @@ export function AccountMenu({ username, onLogout }: Props) {
         </Box>
 
         <Divider />
+        {onOpenClassic && (
+          <MenuItem
+            onClick={() => {
+              setAnchor(null);
+              onOpenClassic();
+            }}
+          >
+            <ListItemIcon>
+              <MenuBookIcon fontSize="small" sx={{ color: "text.secondary" }} />
+            </ListItemIcon>
+            <ListItemText primary={t("flowBooks.menu.classicEditor")} />
+          </MenuItem>
+        )}
+        {isAdmin && (
+          <MenuItem
+            onClick={() => {
+              setAnchor(null);
+              location.hash = "#/admin/progress";
+            }}
+          >
+            <ListItemIcon>
+              <AdminPanelSettingsIcon fontSize="small" sx={{ color: "text.secondary" }} />
+            </ListItemIcon>
+            <ListItemText primary={t("flowBooks.menu.admin")} />
+          </MenuItem>
+        )}
+        {(onOpenClassic || isAdmin) && <Divider />}
         <MenuItem
           onClick={() => {
             setAnchor(null);

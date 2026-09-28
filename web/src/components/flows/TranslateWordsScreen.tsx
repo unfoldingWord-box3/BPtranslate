@@ -134,6 +134,7 @@
 // contract ArticlesScreen.tsx:575-586 implements.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FlowHeader } from "./FlowHeader";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import {
@@ -886,18 +887,8 @@ export default function TranslateWordsScreen({ role, book }: TranslateWordsScree
           : { overflowY: "auto" }),
       }}
     >
-      {/* topbar (at md+ the root doesn't scroll, so sticky is simply inert) */}
-      <Box
-        sx={{
-          position: "sticky",
-          insetBlockStart: 0,
-          zIndex: 20,
-          flex: "none",
-          bgcolor: "background.paper",
-          borderBlockEnd: "1px solid",
-          borderColor: "divider",
-        }}
-      >
+      {/* topbar — rendered into the global flow bar via FlowHeader (#299) */}
+      <FlowHeader>
         <Box sx={{ maxWidth: wide ? 1440 : COLUMN_PX, mx: "auto", paddingInline: 2, paddingBlock: 1.5 }}>
           <Stack direction="row" alignItems="center" spacing={1.25}>
             <IconButton
@@ -942,7 +933,7 @@ export default function TranslateWordsScreen({ role, book }: TranslateWordsScree
             />
           </Box>
         </Box>
-      </Box>
+      </FlowHeader>
 
       {wide ? (
         /* desk (docs/mockups/desktop-first/_design.css .desk/.rail/.panel):
@@ -1695,17 +1686,7 @@ function ArticleDetail({
     >
       {/* topbar (pane: the panel-top chrome — title, no back chevron) */}
       {!focusMode && (
-        <Box
-          sx={{
-            position: "sticky",
-            insetBlockStart: 0,
-            zIndex: pane ? 10 : 20,
-            flex: "none",
-            bgcolor: "background.paper",
-            borderBlockEnd: "1px solid",
-            borderColor: "divider",
-          }}
-        >
+        <FlowHeader inline={pane} zIndex={10}>
           <Box
             sx={{
               maxWidth: pane ? "none" : COLUMN_PX,
@@ -1741,7 +1722,7 @@ function ArticleDetail({
               </Box>
             </Stack>
           </Box>
-        </Box>
+        </FlowHeader>
       )}
 
       <Box

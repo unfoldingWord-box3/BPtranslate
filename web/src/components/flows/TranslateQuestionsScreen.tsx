@@ -68,6 +68,7 @@
 // another editor changed the row, with a reload affordance.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FlowHeader } from "./FlowHeader";
 import { useTranslation } from "react-i18next";
 import {
   Alert,
@@ -1519,21 +1520,11 @@ export default function TranslateQuestionsScreen({
           : { overflowY: "auto" }),
       }}
     >
-      {/* topbar (at md+ the root doesn't scroll, so sticky is simply inert).
+      {/* topbar — rendered into the global flow bar via FlowHeader (#299).
           Hidden in phone focus mode — an active edit on a narrow viewport
           gets the keyboard-constrained screen to itself. */}
       {!focusMode && (
-      <Box
-        sx={{
-          position: "sticky",
-          insetBlockStart: 0,
-          zIndex: 20,
-          flex: "none",
-          bgcolor: "background.paper",
-          borderBlockEnd: "1px solid",
-          borderColor: "divider",
-        }}
-      >
+      <FlowHeader>
         <Box sx={{ maxWidth: wide ? 1440 : COLUMN_PX, mx: "auto", paddingInline: 2, paddingBlock: 1.5 }}>
           <Stack direction="row" alignItems="center" spacing={1.25}>
             <IconButton
@@ -1624,7 +1615,7 @@ export default function TranslateQuestionsScreen({
             />
           </Box>
         </Box>
-      </Box>
+      </FlowHeader>
       )}
 
       {wide ? (

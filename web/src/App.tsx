@@ -4,7 +4,8 @@ import { Alert, Box, Button, Chip, CircularProgress, Link, Snackbar, Stack, Tool
 import RefreshIcon from "@mui/icons-material/Refresh";
 import { Shell } from "./components/Shell";
 import { ArticleWorkspace } from "./components/ArticleWorkspace";
-import { TopBar, UiLanguageControl } from "./components/TopBar";
+import { TopBar } from "./components/TopBar";
+import { FlowHeaderSlotContext } from "./components/flows/FlowHeader";
 import { SyncStatusBar } from "./components/SyncStatusBar";
 import { PipelineStatusBar } from "./components/PipelineStatusBar";
 import { AccountMenu } from "./components/AccountMenu";
@@ -14,6 +15,7 @@ import { PreferencesWorkspace, ALL_SECTIONS as PREFS_SECTIONS, type Section as P
 import { LocalizationInspector } from "./components/LocalizationInspector";
 import { useBook } from "./hooks/useBook";
 import { useAlerts } from "./hooks/useAlerts";
+import { useLayoutBand } from "./hooks/useLayoutBand";
 import { useAppVersion } from "./hooks/useAppVersion";
 import {
   authLogout,
@@ -28,6 +30,7 @@ import {
   type Role,
 } from "./sync/api";
 import { setPipelineUser } from "./sync/pipelineStore";
+import { api } from "./sync/api";
 import { getWorkspaceSlug, setWorkspaceSlug, setWorkspaceIsFallback } from "./sync/workspace";
 import {
   WorkspaceChoiceDialog,
@@ -503,6 +506,11 @@ export function App() {
     navigate(book, chapter, verse);
   };
 
+  // The global flow bar's inline-start slot; screens portal their title row
+  // into it through <FlowHeader> (#299).
+  const [headerSlot, setHeaderSlot] = useState<HTMLElement | null>(null);
+  const isPhone = useLayoutBand().band === "phone";
+
   // Live in-session position for the Books screen's Continue card. `auth.me`
   // is fetched once at boot and never refreshed, so without this the card
   // would keep showing the *previous* session's position after the user
@@ -867,7 +875,33 @@ export function App() {
           // plumbing or a redesign of its in-place Save action — scoped as a
           // separate follow-up rather than risking a silent no-op or a
           // half-working Save button on those screens.
+          //
+          // One row, not two (#299): the screen's own title row portals into the
+          // inline-start slot through <FlowHeader>, beside these controls.
+          <FlowHeaderSlotContext.Provider value={headerSlot}>
           <Stack sx={{ height: "100%", minHeight: 0 }}>
+            <Stack
+              direction="row"
+              alignItems="center"
+              sx={{
+                flex: "none",
+                minHeight: 44,
+                borderBlockEnd: "1px solid",
+                borderColor: "divider",
+                bgcolor: "background.paper",
+              }}
+            >
+              {/* The controls now share the row with the screen title, so on a
+                  phone the title and subtitle truncate instead of wrapping one
+                  word per line. */}
+              <Box
+                ref={setHeaderSlot}
+                sx={{
+                  flex: 1,
+                  minWidth: 0,
+                  "& h1, & h1 + p": { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
+                }}
+              />
             <Stack
               direction="row"
               alignItems="center"
@@ -875,15 +909,7 @@ export function App() {
               spacing={0.5}
               role="toolbar"
               aria-label={t("topbar.chromeStrip.ariaLabel")}
-              sx={{
-                flex: "none",
-                minHeight: 44,
-                paddingInline: 1.5,
-                paddingBlock: 0.5,
-                borderBlockEnd: "1px solid",
-                borderColor: "divider",
-                bgcolor: "background.paper",
-              }}
+              sx={{ flex: "none", paddingInline: 1.5, paddingBlock: 0.5 }}
             >
               {updateAvailable && (
                 <Tooltip title={t("sync.updateAvailableTooltip")}>
@@ -902,13 +928,58 @@ export function App() {
                   />
                 </Tooltip>
               )}
-              <SyncStatusBar onNavigate={navigate} flowRouting />
+              <SyncStatusBar onNavigate={navigate} flowRouting compactSaved={isPhone} />
               <PipelineStatusBar />
-              <UiLanguageControl />
               <AccountMenu
                 username={auth.kind === "ready" ? auth.me?.username ?? null : null}
                 onLogout={handleSignOut}
+                isAdmin={auth.kind === "ready" && auth.role === "admin"}
+                onOpenClassic={async () => {
+                  // Candidates in order: the book on screen (its chapter and
+                  // verse when known; classic has no chapter 0, so intros open
+                  // chapter 1) — except on the Books screen, whose selected
+                  // book may not be imported — then where the user last was.
+                  // Only an imported book opens a usable editor, and the last
+                  // position is per-user, not per-workspace (#255), so check
+                  // the workspace's book list; fall back to its first imported
+                  // book, or the Books screen when nothing is imported. If the
+                  // list can't load, trust the first candidate.
+                  const candidates: { book: string; chapter: number; verse: number }[] = [];
+                  if ("book" in loc && loc.book && loc.view !== "books") {
+                    candidates.push({
+                      book: loc.book,
+                      chapter: ("chapter" in loc && loc.chapter) || 1,
+                      verse: ("verse" in loc && loc.verse) || 1,
+                    });
+                  }
+                  const last =
+                    livePosition ??
+                    (auth.kind === "ready" && auth.me?.lastBook && auth.me.lastChapter != null && auth.me.lastVerse != null
+                      ? { book: auth.me.lastBook, chapter: auth.me.lastChapter, verse: auth.me.lastVerse }
+                      : null);
+                  if (last) candidates.push(last);
+                  let target = candidates[0] ?? { book: "OBA", chapter: 1, verse: 1 };
+                  try {
+                    const { books } = await api.getBooks();
+                    const imported = new Set(books.map((b) => b.book));
+                    const hit = candidates.find((c) => imported.has(c.book));
+                    if (hit) target = hit;
+                    else if (books.length > 0) target = { book: books[0].book, chapter: 1, verse: 1 };
+                    else {
+                      // Nothing imported: classic has nothing to open, so send
+                      // the user to the Books screen to bring one in.
+                      location.hash = "#/books";
+                      return;
+                    }
+                  } catch {
+                    // Offline or a failed read: keep the optimistic target, the
+                    // same trust the Books screen gave the last position before
+                    // its list loaded.
+                  }
+                  navigate(target.book, target.chapter, target.verse);
+                }}
               />
+            </Stack>
             </Stack>
             <Box sx={{ flex: 1, minHeight: 0 }}>
           <Suspense
@@ -992,6 +1063,7 @@ export function App() {
           </Suspense>
             </Box>
           </Stack>
+          </FlowHeaderSlotContext.Provider>
         ) : (
           <Shell
             key={loc.book}

@@ -1801,8 +1801,6 @@
     "refresh": "تحديث",
     "refreshStatus": "تحديث الحالة",
     "menu": {
-      "open": "فتح قائمة الأسفار",
-      "label": "القائمة",
       "classicEditor": "المحرر الكلاسيكي",
       "admin": "المسؤول"
     },
@@ -4003,7 +4001,6 @@
       "questionCount_other": "{{count}} سؤال",
       "noNotesIn": "لا ملاحظات في {{book}}",
       "noQuestionsIn": "لا أسئلة في {{book}}",
-      "openAdminDesk": "فتح لوحة المسؤول",
       "sectionChapters": "أصحاحًا بأصحاح",
       "sectionWholeBook": "السفر بأكمله",
       "alignmentSub": "اربط الكلمات المترجمة بالنص المصدر",
