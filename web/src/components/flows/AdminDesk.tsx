@@ -231,13 +231,21 @@ export function AdminDesk({ current, children }: { current: AdminSection; childr
           sx={{
             minHeight: 44,
             flex: 1,
+            minWidth: 0,
             justifyContent: "flex-start",
             textAlign: "start",
             color: "text.primary",
             fontWeight: 600,
           }}
         >
-          {t(currentLabelKey)}
+          {/* It shares the row with the account controls, so a long section
+              name truncates rather than pushing into them. */}
+          <Box
+            component="span"
+            sx={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+          >
+            {t(currentLabelKey)}
+          </Box>
         </Button>
         <Menu anchorEl={anchorEl} open={Boolean(anchorEl)} onClose={() => setAnchorEl(null)}>
           <ListSubheader disableSticky>{t("adminDesk.groups.admin")}</ListSubheader>
