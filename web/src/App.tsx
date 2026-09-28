@@ -934,15 +934,21 @@ export function App() {
                 onLogout={handleSignOut}
                 isAdmin={auth.kind === "ready" && auth.role === "admin"}
                 onOpenClassic={() => {
-                  // The passage on screen when there is one, else where the
-                  // user last was, else the demo book.
-                  const here = "book" in loc && loc.book && "chapter" in loc && loc.chapter ? loc : null;
+                  // The book on screen when there is one (its chapter and verse
+                  // too, when known; classic has no chapter 0, so intros open
+                  // chapter 1), else where the user last was, else the demo book.
+                  const here = "book" in loc && loc.book ? { ...loc, book: loc.book } : null;
                   const last =
                     livePosition ??
                     (auth.kind === "ready" && auth.me?.lastBook && auth.me.lastChapter != null && auth.me.lastVerse != null
                       ? { book: auth.me.lastBook, chapter: auth.me.lastChapter, verse: auth.me.lastVerse }
                       : null);
-                  if (here) navigate(here.book, here.chapter, ("verse" in here && here.verse) || 1);
+                  if (here)
+                    navigate(
+                      here.book,
+                      ("chapter" in here && here.chapter) || 1,
+                      ("verse" in here && here.verse) || 1,
+                    );
                   else navigate(last?.book ?? "OBA", last?.chapter ?? 1, last?.verse ?? 1);
                 }}
               />

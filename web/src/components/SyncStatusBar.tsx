@@ -396,6 +396,7 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
       <Tooltip title={t("sync.savedTooltip")}>
         <CloudDoneIcon
           role="img"
+          tabIndex={0}
           aria-label={t("sync.saved")}
           fontSize="small"
           color="success"

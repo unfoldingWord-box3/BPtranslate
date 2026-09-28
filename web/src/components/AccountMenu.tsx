@@ -77,6 +77,7 @@ export function AccountMenu({ username, onLogout, isAdmin, onOpenClassic }: Prop
         <IconButton
           size="small"
           aria-haspopup="menu"
+          aria-expanded={Boolean(anchor)}
           onClick={(e) => setAnchor(e.currentTarget)}
           sx={{
             width: 32,
@@ -95,7 +96,10 @@ export function AccountMenu({ username, onLogout, isAdmin, onOpenClassic }: Prop
       <Menu
         anchorEl={anchor}
         open={Boolean(anchor)}
-        onClose={() => setAnchor(null)}
+        onClose={() => {
+          setAnchor(null);
+          setLangAnchor(null);
+        }}
         anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
         transformOrigin={{ vertical: "top", horizontal: "right" }}
         slotProps={{ paper: { sx: { minWidth: 260 } } }}
@@ -129,7 +133,11 @@ export function AccountMenu({ username, onLogout, isAdmin, onOpenClassic }: Prop
         </MenuItem>
 
         {/* Same row + submenu as classic TopBar's More ▸ View ▸ language. */}
-        <MenuItem onClick={(e) => setLangAnchor(e.currentTarget)}>
+        <MenuItem
+          aria-haspopup="menu"
+          aria-expanded={Boolean(langAnchor)}
+          onClick={(e) => setLangAnchor(e.currentTarget)}
+        >
           <ListItemIcon>
             <LanguageIcon fontSize="small" sx={{ color: "text.secondary" }} />
           </ListItemIcon>
@@ -138,7 +146,14 @@ export function AccountMenu({ username, onLogout, isAdmin, onOpenClassic }: Prop
             secondary={UI_LANGUAGES.find((l) => l.code === lang)?.label}
           />
         </MenuItem>
-        <Menu anchorEl={langAnchor} open={Boolean(langAnchor)} onClose={() => setLangAnchor(null)}>
+        <Menu
+          anchorEl={langAnchor}
+          open={Boolean(langAnchor)}
+          onClose={() => setLangAnchor(null)}
+          // Same reason as WorkspaceSwitcher's submenu: keys propagate through
+          // the portal, and the account menu's list would also move focus.
+          onKeyDown={(e) => e.stopPropagation()}
+        >
           {UI_LANGUAGES.map((l) => (
             <MenuItem
               key={l.code}
