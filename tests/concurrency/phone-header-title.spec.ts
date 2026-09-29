@@ -37,15 +37,22 @@ for (const uiLang of ["en", "ar"]) {
           await page.goto(`/${route}`);
           const h1 = page.locator("h1").first();
           await expect(h1, route).toHaveText("ZEC 6", { timeout: 15_000 });
-          const box = await h1.evaluate((el) => {
-            const r = el.getBoundingClientRect();
-            return { width: r.width, left: r.left, right: r.right, clipped: el.scrollWidth > el.clientWidth + 1 };
-          });
-          expect(box.clipped, `${route}: h1 is ellipsized`).toBe(false);
-          expect(box.width, `${route}: h1 width`).toBeGreaterThan(40);
+          // Every screen's phone title is "ZEC 6", so the text alone can match
+          // the previous route's header mid-navigation: poll the layout until
+          // it settles instead of reading it once.
+          await expect
+            .poll(
+              () =>
+                h1.evaluate((el) => {
+                  const r = el.getBoundingClientRect();
+                  return { wide: r.width > 40, clipped: el.scrollWidth > el.clientWidth + 1 };
+                }),
+              { message: `${route}: h1 is at least 40px wide and not ellipsized`, timeout: 10_000 },
+            )
+            .toEqual({ wide: true, clipped: false });
 
           // No header control may overlap the account/status toolbar.
-          const overlaps = await page.evaluate(() => {
+          const overlaps = () => page.evaluate(() => {
             const bar = document.querySelector('[role="toolbar"]');
             const row = bar?.previousElementSibling;
             if (!bar || !row) return ["toolbar or header slot not found"];
@@ -60,7 +67,7 @@ for (const uiLang of ["en", "ar"]) {
             });
             return hits;
           });
-          expect(overlaps, `${route}: elements under the toolbar`).toEqual([]);
+          await expect.poll(overlaps, { message: `${route}: elements under the toolbar`, timeout: 10_000 }).toEqual([]);
         }
       } finally {
         await context.close();
