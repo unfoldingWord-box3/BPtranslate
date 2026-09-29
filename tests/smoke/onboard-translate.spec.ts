@@ -128,8 +128,8 @@ test.describe.serial("onboarding + AI translate smoke", () => {
         await apply.click({ timeout: ACTION_MS });
 
         // Step 5 — "Done". Setup no longer imports a book (that moved to the
-        // Books screen), so reaching Done is the end of the UI path; the import
-        // below always goes through the API.
+        // Books screen); its "Go to Import" button hands off there, and the
+        // next step drives that hand-off.
         await expect(wizard.getByRole("button", { name: /go to import/i })).toBeVisible({
           timeout: NETWORK_MS,
         });
@@ -171,14 +171,66 @@ test.describe.serial("onboarding + AI translate smoke", () => {
       }
     });
 
-    await test.step("import OBA and populate articles", async () => {
-      // Always via the API: the redesigned wizard configures only — importing
-      // moved out of Setup and onto the Books screen.
-      const importRes = await context.request.post(`/api/books/${BOOK}/import`, {
-        headers: { "x-csrf-token": auth.csrf },
-        timeout: 120_000,
-      });
-      expect(importRes.ok(), `import ${BOOK}: ${importRes.status()} ${await importRes.text()}`).toBeTruthy();
+    // Same contract as fallbackReason, for the import UI (#499): set when the
+    // Books-screen drive throws and the direct API import takes over.
+    let importFallbackReason: string | null = null;
+
+    await test.step("import OBA via Go to Import → Books → Bring in this book, then populate articles", async () => {
+      try {
+        // The wizard's Done step hands off to the Books screen. If the wizard
+        // drive already fell back (so Done never rendered), open the Books
+        // screen directly so the import UI still gets exercised on its own.
+        if (fallbackReason === null) {
+          await page
+            .locator('section[aria-labelledby="setup-wizard-heading"]')
+            .getByRole("button", { name: /go to import/i })
+            .click({ timeout: ACTION_MS });
+        } else {
+          await page.goto("/#/books");
+        }
+        await expect(page).toHaveURL(/#\/books$/, { timeout: ACTION_MS });
+
+        // Select OBA in the book grid (defaults to GEN), then open its
+        // "Bring in this book" sheet. The tile's accessible name starts with
+        // the book code; "Bring in OBA…" starts with "Bring", so no clash.
+        await page.getByRole("button", { name: new RegExp(`^${BOOK}\\b`) }).click({ timeout: NETWORK_MS });
+        await page.getByRole("button", { name: `Bring in ${BOOK}…` }).click({ timeout: ACTION_MS });
+        const sheet = page.getByRole("dialog", { name: `Bring in ${BOOK}` });
+        await expect(sheet).toBeVisible({ timeout: ACTION_MS });
+
+        // "Load my existing work" = no translateFromSource, the same request
+        // body the direct API import below (and this spec before #499) sends,
+        // so every later step sees the same imported data either way.
+        await sheet.getByRole("button", { name: /load my existing work/i }).click({ timeout: ACTION_MS });
+
+        // Project-default sources for tn/tq are the sheet's defaults, so
+        // confirming writes no overrides and goes straight to the import POST.
+        // Wait on that POST so the run proves the UI actually sent it.
+        const importResponse = page.waitForResponse(
+          (r) => r.request().method() === "POST" && new URL(r.url()).pathname === `/api/books/${BOOK}/import`,
+          { timeout: 120_000 },
+        );
+        await sheet.getByRole("button", { name: `Bring in ${BOOK}`, exact: true }).click({ timeout: ACTION_MS });
+        const res = await importResponse;
+        expect(res.ok(), `UI import ${BOOK}: ${res.status()} ${await res.text()}`).toBeTruthy();
+
+        // The sheet closes on success and the detail panel reports the import.
+        await expect(sheet).toBeHidden({ timeout: ACTION_MS });
+        await expect(page.getByRole("alert").filter({ hasText: new RegExp(`^Imported ${BOOK}\\b`) })).toBeVisible({
+          timeout: ACTION_MS,
+        });
+      } catch (e) {
+        // Keep the downstream round trip running (translate → approve) so a
+        // Books-screen regression still reports what else broke — the final
+        // step turns this red.
+        importFallbackReason = String(e);
+        console.warn(`[smoke] UI import drive failed (${e}); falling back to API import`);
+        const importRes = await context.request.post(`/api/books/${BOOK}/import`, {
+          headers: { "x-csrf-token": auth.csrf },
+          timeout: 120_000,
+        });
+        expect(importRes.ok(), `import ${BOOK}: ${importRes.status()} ${await importRes.text()}`).toBeTruthy();
+      }
       for (let round = 0; round < 60; round++) {
         const r = await context.request.post("/api/articles/populate", {
           headers: { "x-csrf-token": auth.csrf, "Content-Type": "application/json" },
@@ -300,6 +352,16 @@ test.describe.serial("onboarding + AI translate smoke", () => {
       expect(
         fallbackReason,
         `Setup wizard UI drive failed and the suite continued via the API fallback, so the wizard itself is unverified: ${fallbackReason}`,
+      ).toBeNull();
+    });
+
+    // Same reasoning for the import UI (#499): without this, a broken
+    // "Go to Import" hand-off or "Bring in this book" sheet would fall back to
+    // the API import and the run would still pass.
+    await test.step("the Books-screen import UI path was actually exercised", async () => {
+      expect(
+        importFallbackReason,
+        `Books-screen import UI drive failed and the suite continued via the API import, so the import UI is unverified: ${importFallbackReason}`,
       ).toBeNull();
     });
   });
