@@ -174,6 +174,8 @@ test.describe.serial("onboarding + AI translate smoke", () => {
     // Same contract as fallbackReason, for the import UI (#499): set when the
     // Books-screen drive throws and the direct API import takes over.
     let importFallbackReason: string | null = null;
+    // True once the UI's own import POST returned 200.
+    let uiImportSucceeded = false;
 
     await test.step("import OBA via Go to Import → Books → Bring in this book, then populate articles", async () => {
       try {
@@ -206,13 +208,26 @@ test.describe.serial("onboarding + AI translate smoke", () => {
         // Project-default sources for tn/tq are the sheet's defaults, so
         // confirming writes no overrides and goes straight to the import POST.
         // Wait on that POST so the run proves the UI actually sent it.
-        const importResponse = page.waitForResponse(
-          (r) => r.request().method() === "POST" && new URL(r.url()).pathname === `/api/books/${BOOK}/import`,
-          { timeout: 120_000 },
-        );
-        await sheet.getByRole("button", { name: `Bring in ${BOOK}`, exact: true }).click({ timeout: ACTION_MS });
-        const res = await importResponse;
+        // Promise.all puts a handler on the response wait, so a failed click
+        // can't leave it to reject later as an unhandled rejection.
+        const [res] = await Promise.all([
+          page.waitForResponse(
+            (r) => r.request().method() === "POST" && new URL(r.url()).pathname === `/api/books/${BOOK}/import`,
+            { timeout: 120_000 },
+          ),
+          sheet.getByRole("button", { name: `Bring in ${BOOK}`, exact: true }).click({ timeout: ACTION_MS }),
+        ]);
+        const body = res.request().postDataJSON() as Record<string, unknown> | null;
         expect(res.ok(), `UI import ${BOOK}: ${res.status()} ${await res.text()}`).toBeTruthy();
+        uiImportSucceeded = true;
+
+        // The book is now imported either way, so nothing below re-imports.
+        // If "Load my existing work" stopped setting the intent, the sheet
+        // would have sent translateFromSource and imported upstream content.
+        expect(
+          body?.translateFromSource,
+          `UI import request body ${JSON.stringify(body)}: "Load my existing work" must not send translateFromSource`,
+        ).toBeUndefined();
 
         // The sheet closes on success and the detail panel reports the import.
         await expect(sheet).toBeHidden({ timeout: ACTION_MS });
@@ -223,13 +238,20 @@ test.describe.serial("onboarding + AI translate smoke", () => {
         // Keep the downstream round trip running (translate → approve) so a
         // Books-screen regression still reports what else broke — the final
         // step turns this red.
-        importFallbackReason = String(e);
-        console.warn(`[smoke] UI import drive failed (${e}); falling back to API import`);
-        const importRes = await context.request.post(`/api/books/${BOOK}/import`, {
-          headers: { "x-csrf-token": auth.csrf },
-          timeout: 120_000,
-        });
-        expect(importRes.ok(), `import ${BOOK}: ${importRes.status()} ${await importRes.text()}`).toBeTruthy();
+        if (uiImportSucceeded) {
+          // The UI's import POST already returned 200; only a check after it
+          // failed. Re-importing via the API would just answer alreadyImported.
+          importFallbackReason = `the UI sent the import and it succeeded, but a later check failed (no API re-import): ${e}`;
+          console.warn(`[smoke] UI import check failed after a successful import (${e})`);
+        } else {
+          importFallbackReason = `the UI import failed, so the suite continued via the API import: ${e}`;
+          console.warn(`[smoke] UI import drive failed (${e}); falling back to API import`);
+          const importRes = await context.request.post(`/api/books/${BOOK}/import`, {
+            headers: { "x-csrf-token": auth.csrf },
+            timeout: 120_000,
+          });
+          expect(importRes.ok(), `import ${BOOK}: ${importRes.status()} ${await importRes.text()}`).toBeTruthy();
+        }
       }
       for (let round = 0; round < 60; round++) {
         const r = await context.request.post("/api/articles/populate", {
@@ -361,7 +383,7 @@ test.describe.serial("onboarding + AI translate smoke", () => {
     await test.step("the Books-screen import UI path was actually exercised", async () => {
       expect(
         importFallbackReason,
-        `Books-screen import UI drive failed and the suite continued via the API import, so the import UI is unverified: ${importFallbackReason}`,
+        `Books-screen import UI path failed, so the import UI is unverified: ${importFallbackReason}`,
       ).toBeNull();
     });
   });
