@@ -472,17 +472,29 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
     </FlowHeader>
   );
 
+  // Below md the verse picker and the Read/Audit switch sit above the body in
+  // EVERY load state (loading, retrying, error, ready), exactly as they did in
+  // the old toolbar — a phone user must never lose them while a chapter loads.
+  const narrowControls = !isDesktop && (
+    <Box
+      sx={{
+        display: "flex",
+        alignItems: "center",
+        gap: 1,
+        paddingBlockStart: 2,
+        paddingInline: { xs: 1.5, tablet: 2.5 },
+      }}
+    >
+      {verseSelect}
+      <Box sx={{ flex: 1 }} />
+      {modeToggle}
+    </Box>
+  );
+
   // The mode hint and the observation chips open the text column, instead of
   // stacking a second bordered band under the title row.
   const modeLine = (
     <Box sx={{ display: "flex", alignItems: "center", gap: 1.25, flexWrap: "wrap", marginBlockEnd: 2 }}>
-      {!isDesktop && (
-        <Box sx={{ display: "flex", alignItems: "center", gap: 1, inlineSize: "100%" }}>
-          {verseSelect}
-          <Box sx={{ flex: 1 }} />
-          {modeToggle}
-        </Box>
-      )}
       <Typography variant="body2" color="text.secondary" sx={{ fontSize: "0.78rem" }}>
         {mode === "read" ? t("flowVerse.verse.readHint") : t("flowVerse.verse.auditHint")}
       </Typography>
@@ -651,6 +663,7 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", minBlockSize: "100%" }}>
       {header}
+      {narrowControls}
       {body}
       <Typography
         variant="caption"
@@ -785,14 +798,17 @@ function ReadMode({
   return (
     <Box sx={{ marginBlockEnd: 3 }}>
       {/* The original is the SOURCE the two lanes below translate, not a third
-          translation: a tinted panel with a rule under it and a wider gap
-          (32px against the 20px between the lanes) keeps it from reading as
-          just another lane (#477). */}
+          translation: a bordered panel with a heavier rule under it and a
+          wider gap (32px against the 20px between the lanes) keeps it from
+          reading as just another lane (#477). The panel is deliberately NOT
+          tinted with action.hover — that is the word buttons' hover/focus
+          colour, and the feedback would vanish inside it. */}
       <Box
         sx={{
-          bgcolor: "action.hover",
+          bgcolor: "background.paper",
           borderRadius: 1.5,
-          borderBlockEnd: "2px solid",
+          border: "1px solid",
+          borderBlockEndWidth: 2,
           borderColor: "divider",
           paddingBlock: 1.5,
           paddingInline: 1.5,
@@ -1066,11 +1082,15 @@ function AuditMode({
             <Box component="th" sx={{ ...th, inlineSize: "34%" }}>
               {t("flowVerse.section.simplified", { label: simLabel })}
             </Box>
+            {/* Visible on tablet+. On a phone the column holds only a bare
+                count and the words "Notes and terms" would push the table past
+                360px, so there it keeps the accessible name without a label. */}
             <Box
               component="th"
-              sx={{ ...th, inlineSize: "12%", textAlign: "end", whiteSpace: "nowrap" }}
+              sx={{ ...th, inlineSize: "12%", textAlign: "end" }}
+              aria-label={compact ? t("flowVerse.verse.notesAndTermsAria") : undefined}
             >
-              {t("flowVerse.verse.notesAndTermsAria")}
+              {compact ? null : t("flowVerse.verse.notesAndTermsAria")}
             </Box>
           </tr>
         </thead>
@@ -1300,7 +1320,7 @@ function ResourceList({
                 {/* The original-language quote sits on its own line above the
                     English summary: different script, font and direction, so
                     running them together on one line left no visible seam. */}
-                <Box component="span" data-resource-col="text" sx={{ minInlineSize: 0 }}>
+                <Box component="span" data-resource-col="text" sx={{ minInlineSize: 0, overflowWrap: "anywhere" }}>
                   {r.quote && (
                     // The block line follows the page direction, so the quote
                     // starts where the summary starts; the inner span isolates
