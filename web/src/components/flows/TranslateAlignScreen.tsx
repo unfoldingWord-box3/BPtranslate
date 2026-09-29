@@ -94,7 +94,7 @@
 // chevronFlip convention.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { FlowHeader, PHONE_TITLE_SX } from "./FlowHeader";
+import { FlowHeader, PHONE_COUNT_SX, PHONE_TITLE_SX } from "./FlowHeader";
 import {
   Alert,
   Box,
@@ -803,7 +803,7 @@ export default function TranslateAlignScreen({
 
   const topbar = (
     <FlowHeader>
-      <Box sx={{ maxWidth: wide ? 1440 : COLUMN_PX, mx: "auto", paddingInline: 2, paddingBlock: 1.5 }}>
+      <Box sx={{ maxWidth: wide ? 1440 : COLUMN_PX, mx: "auto", paddingInline: isTabletUp ? 2 : 1, paddingBlock: 1.5 }}>
         {/* Phone: tighter gaps and no "fully aligned" caption, so the row
             fits beside the account controls it now shares (#299). */}
         <Stack direction="row" alignItems="center" spacing={isTabletUp ? 1.25 : 0.5}>
@@ -851,11 +851,11 @@ export default function TranslateAlignScreen({
             aria-label={t("flowScripture.prevVerse")}
             onClick={() => goVerse(prevVerse)}
             disabled={prevVerse == null}
-            sx={{ width: 34, height: 34, flex: "none" }}
+            sx={{ width: isTabletUp ? 34 : 30, height: isTabletUp ? 34 : 30, flex: "none" }}
           >
             <ChevronLeftIcon fontSize="small" sx={chevronFlip} />
           </IconButton>
-          <Box sx={{ textAlign: "end" }}>
+          <Box sx={{ textAlign: "end", minWidth: isTabletUp ? undefined : 0 }}>
             <Typography
               variant="body2"
               sx={{
@@ -863,6 +863,7 @@ export default function TranslateAlignScreen({
                 color: "text.secondary",
                 fontVariantNumeric: "tabular-nums",
                 whiteSpace: "nowrap",
+                ...(isTabletUp ? {} : PHONE_COUNT_SX),
               }}
             >
               {t("flowScripture.verseOfTotal", {
@@ -885,7 +886,7 @@ export default function TranslateAlignScreen({
             aria-label={t("flowScripture.nextVerse")}
             onClick={() => goVerse(nextVerse)}
             disabled={nextVerse == null}
-            sx={{ width: 34, height: 34, flex: "none" }}
+            sx={{ width: isTabletUp ? 34 : 30, height: isTabletUp ? 34 : 30, flex: "none" }}
           >
             <ChevronRightIcon fontSize="small" sx={chevronFlip} />
           </IconButton>

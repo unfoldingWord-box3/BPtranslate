@@ -77,7 +77,7 @@
 // the authoring screen.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { FlowHeader, PHONE_TITLE_SX } from "./FlowHeader";
+import { FlowHeader, PHONE_COUNT_SX, PHONE_TITLE_SX } from "./FlowHeader";
 import {
   Alert,
   Box,
@@ -2132,7 +2132,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
           gets the keyboard-constrained screen to itself. */}
       {!focusMode && (
       <FlowHeader>
-        <Box sx={{ maxWidth: wide ? 1440 : COLUMN_PX, mx: "auto", paddingInline: 2, paddingBlock: 1.5 }}>
+        <Box sx={{ maxWidth: wide ? 1440 : COLUMN_PX, mx: "auto", paddingInline: isTabletUp ? 2 : 1, paddingBlock: 1.5 }}>
           <Stack direction="row" alignItems="center" spacing={isTabletUp ? 1.25 : 0.5}>
             <IconButton
               aria-label={t("flowTranslate.backToPackage", { book })}
@@ -2159,6 +2159,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
                 color: "text.secondary",
                 fontVariantNumeric: "tabular-nums",
                 whiteSpace: "nowrap",
+                ...(isTabletUp ? {} : PHONE_COUNT_SX),
               }}
             >
               {headerCount}

@@ -114,7 +114,7 @@
 //     are Continue/Review, not paging.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { FlowHeader, PHONE_TITLE_SX } from "./FlowHeader";
+import { FlowHeader, PHONE_COUNT_SX, PHONE_TITLE_SX } from "./FlowHeader";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import {
@@ -1182,7 +1182,7 @@ export default function TranslateScriptureScreen({
       {!focusMode && (
         <FlowHeader>
           <Box
-            sx={{ maxWidth: wide ? 1440 : COLUMN_PX, mx: "auto", paddingInline: 2, paddingBlock: 1.5 }}
+            sx={{ maxWidth: wide ? 1440 : COLUMN_PX, mx: "auto", paddingInline: isTabletUp ? 2 : 1, paddingBlock: 1.5 }}
           >
             <Stack direction="row" alignItems="center" spacing={isTabletUp ? 1.25 : 0.5}>
               <IconButton
@@ -1210,6 +1210,7 @@ export default function TranslateScriptureScreen({
                   color: "text.secondary",
                   fontVariantNumeric: "tabular-nums",
                   whiteSpace: "nowrap",
+                  ...(isTabletUp ? {} : PHONE_COUNT_SX),
                 }}
               >
                 {done

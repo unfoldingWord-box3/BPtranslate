@@ -893,7 +893,9 @@ export function App() {
             >
               {/* The controls now share the row with the screen title, so on a
                   phone the title and subtitle truncate instead of wrapping one
-                  word per line. */}
+                  word per line. The work screens swap in a short passage
+                  reference there so it stays whole (PHONE_TITLE_SX, #517), and
+                  the controls' padding tightens to leave the row more room. */}
               <Box
                 ref={setHeaderSlot}
                 sx={{
@@ -909,7 +911,7 @@ export function App() {
               spacing={0.5}
               role="toolbar"
               aria-label={t("topbar.chromeStrip.ariaLabel")}
-              sx={{ flex: "none", paddingInline: 1.5, paddingBlock: 0.5 }}
+              sx={{ flex: "none", paddingInline: isPhone ? 0.75 : 1.5, paddingBlock: 0.5 }}
             >
               {updateAvailable && (
                 <Tooltip title={t("sync.updateAvailableTooltip")}>

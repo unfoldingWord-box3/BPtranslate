@@ -25,6 +25,11 @@ export const FlowHeaderSlotContext = createContext<HTMLElement | null>(null);
 // the row has left and ellipsizes under App's header-slot rule.
 export const PHONE_TITLE_SX = { flex: "1 0 auto", minWidth: 0, "& > p": { contain: "inline-size" } } as const;
 
+// Phone count text ("Verse 12 of 15"): the one header item allowed to give up
+// width when a long count would otherwise push the row under the account
+// controls. It ellipsizes rather than the passage reference.
+export const PHONE_COUNT_SX = { minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" } as const;
+
 type Props = { children: ReactNode; inline?: boolean; zIndex?: number };
 
 export function FlowHeader({ children, inline, zIndex = 20 }: Props) {

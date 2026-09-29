@@ -68,7 +68,7 @@
 // another editor changed the row, with a reload affordance.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { FlowHeader, PHONE_TITLE_SX } from "./FlowHeader";
+import { FlowHeader, PHONE_COUNT_SX, PHONE_TITLE_SX } from "./FlowHeader";
 import { useTranslation } from "react-i18next";
 import {
   Alert,
@@ -1529,7 +1529,7 @@ export default function TranslateQuestionsScreen({
           gets the keyboard-constrained screen to itself. */}
       {!focusMode && (
       <FlowHeader>
-        <Box sx={{ maxWidth: wide ? 1440 : COLUMN_PX, mx: "auto", paddingInline: 2, paddingBlock: 1.5 }}>
+        <Box sx={{ maxWidth: wide ? 1440 : COLUMN_PX, mx: "auto", paddingInline: isTabletUp ? 2 : 1, paddingBlock: 1.5 }}>
           <Stack direction="row" alignItems="center" spacing={isTabletUp ? 1.25 : 0.5}>
             <IconButton
               aria-label={t("flowQuestions.backToPackage", { book })}
@@ -1556,6 +1556,7 @@ export default function TranslateQuestionsScreen({
                 color: "text.secondary",
                 fontVariantNumeric: "tabular-nums",
                 whiteSpace: "nowrap",
+                ...(isTabletUp ? {} : PHONE_COUNT_SX),
               }}
             >
               {done
