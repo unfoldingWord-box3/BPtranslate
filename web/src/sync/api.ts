@@ -3,6 +3,7 @@
 // from the same origin as the Worker).
 
 import type { LayoutSpec } from "../lib/layoutSpec";
+import type { ReviewSweepBody, ReviewSweepResource, ReviewSweepTarget } from "../lib/reviewStateSweep";
 import { getWorkspaceSlug, setWorkspaceSlug } from "./workspace";
 
 export type RowKind = "tn" | "tq" | "twl";
@@ -972,6 +973,31 @@ export interface ReimportResponse {
   totals: ReimportCounts;
 }
 
+// Responses of POST /api/books/:book/review-state (api/src/reviewState.ts).
+export interface ReviewSweepDryRunResponse {
+  ok: true;
+  dryRun: true;
+  book: string;
+  resource: ReviewSweepResource;
+  state: ReviewSweepTarget;
+  translationState: "validated" | "edited";
+  /** Chapters in scope that hold live rows. */
+  chapters: number[];
+  wouldChange: number;
+}
+
+export interface ReviewSweepApplyResponse {
+  ok: true;
+  book: string;
+  resource: ReviewSweepResource;
+  state: ReviewSweepTarget;
+  translationState: "validated" | "edited";
+  chapters: number[];
+  changed: number;
+  changedChapters: number[];
+  broadcastChapters: number;
+}
+
 // Error bodies for the admin-only `force` re-import (POST
 // /api/books/:book/import with { force: true }). 403 when the caller is not an
 // admin; 409 when the book carries local note/question edits and the request
@@ -1849,6 +1875,21 @@ export const api = {
         body: JSON.stringify(body),
         timeoutMs: 120_000,
       },
+    ),
+
+  // Admin bulk review-state sweep (#296): set the baseline state of every live
+  // tn or tq row in a chapter / range / whole book. `dryRun` writes nothing and
+  // reports how many rows the sweep WOULD write, so the page can confirm with a
+  // real number. Server-side: api/src/reviewState.ts (admin only, 403 otherwise).
+  reviewStateDryRun: (book: string, body: ReviewSweepBody) =>
+    request<ReviewSweepDryRunResponse>(
+      `/api/books/${encodeURIComponent(book)}/review-state?dryRun=1`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  reviewStateApply: (book: string, body: ReviewSweepBody) =>
+    request<ReviewSweepApplyResponse>(
+      `/api/books/${encodeURIComponent(book)}/review-state`,
+      { method: "POST", body: JSON.stringify(body), timeoutMs: 120_000 },
     ),
 
   setVerseDone: (book: string, chapter: number, verse: number, done: boolean) =>
