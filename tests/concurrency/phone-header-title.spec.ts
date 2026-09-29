@@ -36,6 +36,9 @@ function screenName(lang: string, key: string): string {
 for (const uiLang of ["en", "ar"]) {
   for (const width of [360, 400]) {
     test(`phone header shows the passage reference at ${width}px (${uiLang})`, async ({ browser }) => {
+      // Four routes, each with up to ~35s of waits: the suite's 30s default
+      // would fail a correct layout on a cold runner.
+      test.setTimeout(120_000);
       const { context } = await newUserContext(browser, "dev");
       await context.addInitScript((lang) => {
         try {
