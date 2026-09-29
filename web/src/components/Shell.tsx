@@ -59,6 +59,7 @@ import {
 import { buildVerseIndex, concatSourceRange, formatVerseLabel, noteCoveredVerses } from "../lib/verseRange";
 import { buildTnQuickRequest } from "../lib/tnQuickRequest";
 import { isApprovableRow } from "../lib/reviewApproval";
+import { reviewStatePatches } from "../lib/reviewStateSweep";
 import { versionLabel } from "../lib/versionLabels";
 import { findSourceForTargetText, extractTargetSelectionText, type HighlightKey, type ReorderHighlight } from "../lib/highlight";
 import { buildQuoteFromSelection, collectSourceWordNodes, selectionFromQuote } from "../lib/quoteBuilder";
@@ -365,6 +366,25 @@ export function Shell({
       // stays stuck and the completion toast doesn't fire until the next poll
       // or a manual reload. reload() is idempotent and self-dedupes the toast.
       void pipelineStore.reload();
+    },
+    onReviewStateSwept: (event) => {
+      // An admin bulk-set this chapter's review state (#296/#395). The sweep
+      // changes translation_state only — never content or version — so patch
+      // just that field onto the rows on screen instead of a full refetch that
+      // would flash the chapter and replace rows a translator is looking at.
+      void api
+        .getChapter(event.book, event.chapter)
+        .then((fresh) => {
+          const cur = dataRef.current;
+          if (!cur || cur.book !== fresh.book || cur.chapter !== fresh.chapter) return;
+          const kind = event.resource;
+          for (const p of reviewStatePatches(cur[kind], fresh[kind])) {
+            applyLocalRowPatch(kind, p.id, { translation_state: p.translation_state });
+          }
+        })
+        .catch(() => {
+          // A hint, never the source of truth: the next load picks the state up.
+        });
     },
     onLaneFreeze: (event) => laneFreezeRef.current(event),
     onLaneSettled: (event) => laneSettledRef.current(event),

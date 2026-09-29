@@ -19,7 +19,7 @@
 // The sweep's own safety rules (never touches content, deleted or trashed rows;
 // stamps admin_bulk_state so AI few-shot examples exclude it) live server-side
 // in reviewState.ts; this page only explains them.
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
 import {
@@ -95,10 +95,23 @@ export default function AdminReviewStateScreen({ role, me }: FlowScreenContext) 
   const [to, setTo] = useState<number | null>(null);
 
   const [checking, setChecking] = useState(false);
-  const [pending, setPending] = useState<{ body: ReviewSweepBody; preview: ReviewSweepDryRunResponse } | null>(null);
+  // The confirmed sweep: the book is stored WITH the body so Apply writes exactly
+  // what the dialog showed, never whatever the book picker says now.
+  const [pending, setPending] = useState<{
+    book: string;
+    body: ReviewSweepBody;
+    preview: ReviewSweepDryRunResponse;
+  } | null>(null);
   const [applying, setApplying] = useState(false);
   const [result, setResult] = useState<ReviewSweepApplyResponse | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  // The book currently selected, readable from async callbacks so a late
+  // response for a previously selected book can be dropped.
+  const bookRef = useRef(book);
+  bookRef.current = book;
+  // While a dry run is in flight, the dialog is open, or a sweep is running,
+  // every scope control is locked so the scope cannot drift from what is shown.
+  const locked = checking || pending != null || applying;
 
   // Workspace books — one request (GET /api/books).
   useEffect(() => {
@@ -111,7 +124,13 @@ export default function AdminReviewStateScreen({ role, me }: FlowScreenContext) 
         const sorted = [...res.books].sort(canonSort);
         setBooks(sorted);
         const last = me?.lastBook?.toUpperCase();
-        setBook(sorted.find((b) => b.book === last)?.book ?? sorted[0]?.book ?? "");
+        // Default only on first init: a re-run (e.g. me.lastBook changing) must
+        // not override a book the admin already picked.
+        setBook((prev) =>
+          prev && sorted.some((b) => b.book === prev)
+            ? prev
+            : (sorted.find((b) => b.book === last)?.book ?? sorted[0]?.book ?? ""),
+        );
       })
       .catch((err) => {
         // i18n.t (singleton), not the hook's t, so a language switch can't refire this.
@@ -127,10 +146,10 @@ export default function AdminReviewStateScreen({ role, me }: FlowScreenContext) 
     return api
       .getBookSummary(code, signal)
       .then((data) => {
-        if (!signal?.aborted) setSummary(data);
+        if (!signal?.aborted && bookRef.current === code) setSummary(data);
       })
       .catch((err) => {
-        if (signal?.aborted) return;
+        if (signal?.aborted || bookRef.current !== code) return;
         setSummaryError(err instanceof Error ? err.message : i18n.t("adminPages.common.loadFailed"));
       });
   }, []);
@@ -144,6 +163,7 @@ export default function AdminReviewStateScreen({ role, me }: FlowScreenContext) 
     setTo(null);
     setResult(null);
     setActionError(null);
+    setPending(null);
     void loadSummary(book, ctrl.signal);
     return () => ctrl.abort();
   }, [book, loadSummary]);
@@ -182,12 +202,16 @@ export default function AdminReviewStateScreen({ role, me }: FlowScreenContext) 
 
   const onReview = async () => {
     if (!built.ok || !book) return;
+    const requested = book;
+    const body = built.body;
     setChecking(true);
     setActionError(null);
     setResult(null);
     try {
-      const preview = await api.reviewStateDryRun(book, built.body);
-      setPending({ body: built.body, preview });
+      const preview = await api.reviewStateDryRun(requested, body);
+      // Drop a preview for a book that is no longer selected.
+      if (bookRef.current !== requested || preview.book !== requested) return;
+      setPending({ book: requested, body, preview });
     } catch (e) {
       setActionError(errorText(e));
     } finally {
@@ -197,17 +221,19 @@ export default function AdminReviewStateScreen({ role, me }: FlowScreenContext) 
 
   const onApply = async () => {
     if (!pending) return;
+    const { book: target, body } = pending;
     setApplying(true);
     setActionError(null);
     try {
-      const res = await api.reviewStateApply(book, pending.body);
+      const res = await api.reviewStateApply(target, body);
       setResult(res);
-      setPending(null);
-      await loadSummary(book);
     } catch (e) {
-      setActionError(errorText(e));
-      setPending(null);
+      // A timeout or dropped connection can land AFTER the server committed, so
+      // say it may have partly applied and reload the counts either way.
+      setActionError(t("adminPages.reviewState.errMaybeApplied", { detail: errorText(e) }));
     } finally {
+      setPending(null);
+      await loadSummary(target);
       setApplying(false);
     }
   };
@@ -228,7 +254,7 @@ export default function AdminReviewStateScreen({ role, me }: FlowScreenContext) 
       size="small"
       label={label}
       value={value ?? ""}
-      disabled={wholeBook || !chapters.length}
+      disabled={wholeBook || !chapters.length || locked}
       onChange={(e) => onChange(Number(e.target.value))}
       sx={{ minWidth: 120 }}
     >
@@ -261,7 +287,7 @@ export default function AdminReviewStateScreen({ role, me }: FlowScreenContext) 
               size="small"
               label={t("adminPages.reviewState.bookLabel")}
               value={book}
-              disabled={!books?.length}
+              disabled={!books?.length || locked}
               onChange={(e) => setBook(e.target.value)}
               sx={{ minWidth: 180 }}
             >
@@ -276,6 +302,7 @@ export default function AdminReviewStateScreen({ role, me }: FlowScreenContext) 
               size="small"
               label={t("adminPages.reviewState.resourceLabel")}
               value={resource}
+              disabled={locked}
               onChange={(e) => setResource(e.target.value as ReviewSweepResource)}
               sx={{ minWidth: 200 }}
             >
@@ -287,6 +314,7 @@ export default function AdminReviewStateScreen({ role, me }: FlowScreenContext) 
               size="small"
               label={t("adminPages.reviewState.targetLabel")}
               value={target}
+              disabled={locked}
               onChange={(e) => setTarget(e.target.value as ReviewSweepTarget)}
               sx={{ minWidth: 160 }}
             >
@@ -301,7 +329,7 @@ export default function AdminReviewStateScreen({ role, me }: FlowScreenContext) 
             })}
             {chapterPicker(t("adminPages.reviewState.toLabel"), to, setTo)}
             <FormControlLabel
-              control={<Checkbox checked={wholeBook} onChange={(e) => setWholeBook(e.target.checked)} />}
+              control={<Checkbox checked={wholeBook} disabled={locked} onChange={(e) => setWholeBook(e.target.checked)} />}
               label={t("adminPages.reviewState.wholeBookLabel")}
             />
           </Stack>
@@ -313,7 +341,7 @@ export default function AdminReviewStateScreen({ role, me }: FlowScreenContext) 
           <Button
             variant="contained"
             sx={{ mt: 2 }}
-            disabled={!built.ok || !book || !chapters.length || checking || applying}
+            disabled={!built.ok || !book || !chapters.length || locked}
             onClick={() => void onReview()}
           >
             {checking ? t("adminPages.reviewState.checking") : t("adminPages.reviewState.reviewButton")}

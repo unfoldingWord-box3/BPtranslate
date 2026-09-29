@@ -35,3 +35,45 @@ export function buildReviewSweepBody(form: ReviewSweepForm): ReviewSweepBuild {
   if (form.from === form.to) return { ok: true, body: { ...common, chapter: form.from } };
   return { ok: true, body: { ...common, chapterStart: form.from, chapterEnd: form.to } };
 }
+
+// ── Live update for open chapter tabs (#395) ─────────────────────────────────
+// After a sweep the server broadcasts one `chapter.review_state_swept` hint per
+// changed chapter (api/src/reviewState.ts broadcastSweep; event type in
+// api/src/wsEvents.ts). It names no rows, so an open chapter refetches and
+// patches ONLY translation_state onto the rows it already holds: the sweep never
+// changes content or version, so leaving content alone means the refetch cannot
+// clobber what a translator has on screen mid-edit.
+
+export interface ReviewStateSweptEvent {
+  book: string;
+  chapter: number;
+  resource: ReviewSweepResource;
+  state: ReviewSweepTarget;
+}
+
+export function parseReviewStateSwept(raw: unknown): ReviewStateSweptEvent | null {
+  if (!raw || typeof raw !== "object") return null;
+  const ev = raw as Record<string, unknown>;
+  if (ev.type !== "chapter.review_state_swept") return null;
+  if (typeof ev.book !== "string" || typeof ev.chapter !== "number") return null;
+  if (ev.resource !== "tn" && ev.resource !== "tq") return null;
+  if (ev.state !== "approved" && ev.state !== "needs_review") return null;
+  return { book: ev.book, chapter: ev.chapter, resource: ev.resource, state: ev.state };
+}
+
+type RowState = "ai_draft" | "edited" | "validated" | null;
+
+/** State-only patches for rows held locally whose translation_state moved. */
+export function reviewStatePatches(
+  local: ReadonlyArray<{ id: string; translation_state?: RowState }>,
+  fresh: ReadonlyArray<{ id: string; translation_state?: RowState }>,
+): Array<{ id: string; translation_state: RowState }> {
+  const byId = new Map(fresh.map((r) => [r.id, r.translation_state ?? null]));
+  const out: Array<{ id: string; translation_state: RowState }> = [];
+  for (const r of local) {
+    if (!byId.has(r.id)) continue;
+    const next = byId.get(r.id) ?? null;
+    if ((r.translation_state ?? null) !== next) out.push({ id: r.id, translation_state: next });
+  }
+  return out;
+}

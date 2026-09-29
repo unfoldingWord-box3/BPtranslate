@@ -2797,7 +2797,8 @@
       "cancel": "Cancel",
       "apply": "Apply",
       "applying": "Applying…",
-      "errForbidden": "Only admins can change review state in bulk."
+      "errForbidden": "Only admins can change review state in bulk.",
+      "errMaybeApplied": "The change could not be confirmed ({{detail}}). It may have been partly or fully applied, so check the counts below before trying again."
     }
   },
   "widgets": {

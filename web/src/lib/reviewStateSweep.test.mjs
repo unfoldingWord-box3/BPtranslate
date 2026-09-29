@@ -4,7 +4,7 @@
 // whole book, and never silently widen to the whole book.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildReviewSweepBody } from "./reviewStateSweep.ts";
+import { buildReviewSweepBody, parseReviewStateSwept, reviewStatePatches } from "./reviewStateSweep.ts";
 // The real server-side parser: every body the page builds must be accepted by
 // it and mean the same scope, so the page and the route cannot drift apart.
 import { parseSweepRequest } from "../../../api/src/reviewState.ts";
@@ -53,4 +53,42 @@ test("every body the page builds is accepted by the server parser with the same 
     assert.equal(parsed.target, form.target);
     assert.deepEqual(parsed.range, range);
   }
+});
+
+// ── Live update for open chapter tabs (#395) ─────────────────────────────────
+
+test("parseReviewStateSwept accepts the server's chapter.review_state_swept shape", () => {
+  const ev = { type: "chapter.review_state_swept", book: "ZEC", chapter: 1, resource: "tn", state: "approved" };
+  assert.deepEqual(parseReviewStateSwept(ev), { book: "ZEC", chapter: 1, resource: "tn", state: "approved" });
+});
+
+test("parseReviewStateSwept rejects other events and malformed ones", () => {
+  assert.equal(parseReviewStateSwept({ type: "chapter.pipeline_applied", book: "ZEC", chapter: 1 }), null);
+  assert.equal(
+    parseReviewStateSwept({ type: "chapter.review_state_swept", book: "ZEC", chapter: 1, resource: "twl", state: "approved" }),
+    null,
+  );
+  assert.equal(
+    parseReviewStateSwept({ type: "chapter.review_state_swept", book: "ZEC", chapter: "1", resource: "tn", state: "approved" }),
+    null,
+  );
+  assert.equal(parseReviewStateSwept(null), null);
+});
+
+test("reviewStatePatches returns only rows whose state moved, and never touches content", () => {
+  const local = [
+    { id: "a", note: "local text", translation_state: null },
+    { id: "b", note: "x", translation_state: "validated" },
+    { id: "c", note: "y", translation_state: "edited" },
+  ];
+  const fresh = [
+    { id: "a", note: "server text", translation_state: "validated" },
+    { id: "b", note: "x", translation_state: "validated" },
+    { id: "c", note: "y", translation_state: "validated" },
+    { id: "new", note: "z", translation_state: "validated" },
+  ];
+  assert.deepEqual(reviewStatePatches(local, fresh), [
+    { id: "a", translation_state: "validated" },
+    { id: "c", translation_state: "validated" },
+  ]);
 });
