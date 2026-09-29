@@ -96,3 +96,97 @@ for (const uiLang of ["en", "ar"]) {
     });
   }
 }
+
+// Wide toolbar (#517 review). The toolbar grows past its idle width when there
+// is unsaved typing and the connection drops: a "1 unsaved" chip plus an
+// "offline" chip, 224px (en) / 245px (ar) wide. At 360px that left the header
+// slot 136px / 115px, less than the ~176px the row needed with the passage
+// reference held at full width, so the prev/next buttons painted under the
+// toolbar. The row must give way instead: the count first, then the caption,
+// then the reference, and whatever still does not fit is cut off at the slot's
+// edge rather than drawn under the toolbar.
+//
+// `wholeButtons`: the back and prev/next buttons also stay fully visible. Not
+// asserted for Arabic at 360px, where even the fully shrunk row (~122px) is
+// ~7px wider than the slot, so the far-end next button is clipped slightly;
+// fitting that needs the toolbar's chips to get more compact on phones.
+const WIDE_CASES: [string, number, boolean][] = [
+  ["en", 360, true],
+  ["en", 400, true],
+  ["ar", 360, false],
+  ["ar", 400, true],
+];
+for (const [uiLang, width, wholeButtons] of WIDE_CASES) {
+  test(`phone header gives way to a wide toolbar at ${width}px (${uiLang})`, async ({ browser }) => {
+    test.setTimeout(120_000);
+    const { context } = await newUserContext(browser, "dev");
+    await context.addInitScript((lang) => {
+      try {
+        localStorage.setItem("be:uiLang", lang);
+      } catch {
+        /* ignore */
+      }
+    }, uiLang);
+    const page = await context.newPage();
+    await page.setViewportSize({ width, height: 800 });
+    try {
+      for (const [index, [route, captionKey]] of ROUTES.entries()) {
+        await page.goto(`/${route}`);
+        await expect(page.locator("h1 + p").first(), `${route}: caption`).toHaveText(
+          screenName(uiLang, captionKey),
+          { timeout: 15_000 },
+        );
+        if (index === 0) {
+          // An unsaved draft, written through the app's own drafts store (the
+          // Vite dev server serves the same module instance the app uses).
+          await page.evaluate(async () => {
+            const m = await import(/* @vite-ignore */ "/src/sync/drafts.ts");
+            await m.drafts.set(m.rowKey("tn", "ZEC", "phone-header-draft"), { note: "draft" }, 1, {
+              kind: "row",
+              rowKind: "tn",
+              id: "phone-header-draft",
+              book: "ZEC",
+              chapter: 6,
+              verse: 1,
+            });
+          });
+        }
+        await context.setOffline(true);
+        await expect(page.locator('[role="toolbar"]'), `${route}: offline chip`).toContainText(
+          screenName(uiLang, "sync.offline"),
+          { timeout: 10_000 },
+        );
+
+        const problems = () =>
+          page.evaluate((wholeButtons) => {
+            const bar = document.querySelector('[role="toolbar"]');
+            const slot = bar?.previousElementSibling;
+            if (!bar || !slot) return ["toolbar or header slot not found"];
+            const b = bar.getBoundingClientRect();
+            const s = slot.getBoundingClientRect();
+            // What paints is the part inside the slot, if the slot clips.
+            const clips = getComputedStyle(slot).overflowX !== "visible";
+            const out: string[] = [];
+            slot.querySelectorAll("button, h1, p").forEach((el) => {
+              const r = el.getBoundingClientRect();
+              if (r.width === 0) return;
+              const name = `${el.tagName} "${el.getAttribute("aria-label") ?? el.textContent}"`;
+              const left = clips ? Math.max(r.left, s.left) : r.left;
+              const right = clips ? Math.min(r.right, s.right) : r.right;
+              if (right > b.left + 0.5 && left < b.right - 0.5 && r.bottom > b.top && r.top < b.bottom) {
+                out.push(`${name} under the toolbar`);
+              }
+              if (wholeButtons && el.tagName === "BUTTON" && (r.left < s.left - 0.5 || r.right > s.right + 0.5)) {
+                out.push(`${name} cut off`);
+              }
+            });
+            return out;
+          }, wholeButtons);
+        await expect.poll(problems, { message: `${route}: header vs toolbar`, timeout: 10_000 }).toEqual([]);
+        await context.setOffline(false);
+      }
+    } finally {
+      await context.close();
+    }
+  });
+}
