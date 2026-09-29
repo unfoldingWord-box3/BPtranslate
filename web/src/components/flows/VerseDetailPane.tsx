@@ -6,8 +6,9 @@
 // What the mockup had and this does NOT: inline translationAcademy and
 // translationWords PROSE. The mockup shipped a build-time snapshot of the
 // en_ta / en_tw checkouts inside its fixture; the app fetches articles from
-// Door43 in its own viewer, so this pane links to that viewer rather than
-// re-implementing (and possibly contradicting) it.
+// Door43, so this pane only asks the screen to open the article
+// (`onOpenArticle`) and VerseScreen shows it in place of the resource list
+// with the shared AssociatedArticlePanel (issue #478).
 
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
@@ -52,6 +53,15 @@ export interface VerseDetailPaneProps {
   lexicon: Map<string, LexiconEntry | null>;
   rtl: boolean;
   onSelect: (sel: VerseSelection) => void;
+  /** Open a tA / tW article in place on the verse screen (issue #478). */
+  onOpenArticle: (article: VerseArticle) => void;
+}
+
+/** The article the verse screen shows in place of its resource list. */
+export interface VerseArticle {
+  resource: "ta" | "tw";
+  /** Short id: "kt/god" for tW, "translate/figs-idiom" for tA. */
+  id: string;
 }
 
 // ─── small shared bits ──────────────────────────────────────────────────────
@@ -377,6 +387,7 @@ export function VerseDetailPane({
   lexicon,
   rtl,
   onSelect,
+  onOpenArticle,
 }: VerseDetailPaneProps) {
   const theme = useTheme();
   const { t } = useTranslation();
@@ -534,7 +545,12 @@ export function VerseDetailPane({
           </Box>
         </Box>
         {id ? (
-          <Link href={`#/articles/tw/${encodeURIComponent(id)}`} sx={{ fontSize: "0.84rem" }}>
+          <Link
+            component="button"
+            type="button"
+            onClick={() => onOpenArticle({ resource: "tw", id })}
+            sx={{ fontSize: "0.84rem" }}
+          >
             {t("flowVerse.detail.readTwArticle")}
           </Link>
         ) : (
@@ -598,7 +614,12 @@ export function VerseDetailPane({
       )}
 
       {slug ? (
-        <Link href={`#/articles/ta/${encodeURIComponent(short)}`} sx={{ fontSize: "0.84rem" }}>
+        <Link
+          component="button"
+          type="button"
+          onClick={() => onOpenArticle({ resource: "ta", id: short })}
+          sx={{ fontSize: "0.84rem" }}
+        >
           {t("flowVerse.detail.readTaArticle")}
         </Link>
       ) : (
