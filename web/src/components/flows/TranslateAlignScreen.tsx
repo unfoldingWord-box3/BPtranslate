@@ -855,7 +855,7 @@ export default function TranslateAlignScreen({
           >
             <ChevronLeftIcon fontSize="small" sx={chevronFlip} />
           </IconButton>
-          <Box sx={{ textAlign: "end", minWidth: isTabletUp ? undefined : 0 }}>
+          <Box sx={{ textAlign: "end", ...(isTabletUp ? {} : { minWidth: 0, flexShrink: PHONE_COUNT_SX.flexShrink }) }}>
             <Typography
               variant="body2"
               sx={{

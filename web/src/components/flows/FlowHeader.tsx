@@ -20,15 +20,18 @@ export const FlowHeaderSlotContext = createContext<HTMLElement | null>(null);
 
 // Phone title box (#517). Below the tablet band a work screen's h1 is the short
 // passage reference ("ZEC 6") and its caption the screen name. The box is sized
-// by the h1 alone and never shrinks below it, so the reference always shows in
-// full; the caption (inline-size contained, so it adds no width) fills whatever
-// the row has left and ellipsizes under App's header-slot rule.
-export const PHONE_TITLE_SX = { flex: "1 0 auto", minWidth: 0, "& > p": { contain: "inline-size" } } as const;
+// by the h1 alone; the caption (inline-size contained, so it adds no width)
+// fills whatever the row has left and ellipsizes under App's header-slot rule.
+// When the toolbar is wider than idle (an "N unsaved" chip plus "offline", the
+// update chip) the row gives way in order: the count first (PHONE_COUNT_SX's
+// much larger flexShrink), then the caption, then the reference itself, so the
+// back and prev/next buttons stay whole and clear of the toolbar.
+export const PHONE_TITLE_SX = { flex: "1 1 auto", minWidth: 0, "& > p": { contain: "inline-size" } } as const;
 
-// Phone count text ("Verse 12 of 15"): the one header item allowed to give up
-// width when a long count would otherwise push the row under the account
-// controls. It ellipsizes rather than the passage reference.
-export const PHONE_COUNT_SX = { minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" } as const;
+// Phone count text ("Verse 12 of 15"): the first header item to give up width
+// when the row would otherwise run under the account controls. Put it on the
+// count's flex item (the element that is a direct child of the header row).
+export const PHONE_COUNT_SX = { minWidth: 0, flexShrink: 1000, overflow: "hidden", textOverflow: "ellipsis" } as const;
 
 type Props = { children: ReactNode; inline?: boolean; zIndex?: number };
 
