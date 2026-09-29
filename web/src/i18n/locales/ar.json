@@ -1,6 +1,7 @@
 {
   "common": {
     "approve": "اعتماد",
+    "passageRef": "{{book}} {{chapter}}",
     "approveAll": "اعتماد الكل",
     "cancel": "إلغاء",
     "close": "إغلاق",
@@ -3138,7 +3139,6 @@
       "title": "المحاذاة",
       "sub": "{{book}} {{chapter}} · من {{source}} إلى {{target}}",
       "backToPackage": "العودة إلى حزمة {{book}}",
-      "backToScripture": "العودة إلى النص الكتابي",
       "fullyAligned": "{{n}} من {{total}} مُحاذاة بالكامل",
       "notDrafted": "غير مُصاغة",
       "sourceGaps": "فجوات في المصدر",

@@ -94,7 +94,7 @@
 // chevronFlip convention.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { FlowHeader } from "./FlowHeader";
+import { FlowHeader, PHONE_TITLE_SX } from "./FlowHeader";
 import {
   Alert,
   Box,
@@ -816,18 +816,22 @@ export default function TranslateAlignScreen({
           >
             <ChevronLeftIcon fontSize="small" sx={chevronFlip} />
           </IconButton>
-          <Box sx={{ minWidth: 0 }}>
+          {/* Phone: the passage reference is the title and the screen name the
+              caption, so the row keeps its orientation beside the account
+              controls (#517). */}
+          <Box sx={isTabletUp ? { minWidth: 0 } : PHONE_TITLE_SX}>
             <Typography component="h1" sx={{ fontSize: "1.0625rem", fontWeight: 700, m: 0 }}>
-              {t("flowAlign.desk.title")}
+              {isTabletUp ? t("flowAlign.desk.title") : t("common.passageRef", { book, chapter })}
             </Typography>
             <Typography variant="caption" color="text.secondary" component="p" sx={{ m: 0 }}>
-              {sub}
+              {isTabletUp ? sub : t("flowAlign.desk.title")}
             </Typography>
           </Box>
           {/* jump to the scripture screen for this chapter — the package
               back-chevron above only returns to the package hub, not
-              scripture itself */}
-          {isTabletUp ? (
+              scripture itself. Dropped on phones, where the row has no room
+              for it; the package hub still reaches scripture (#517). */}
+          {isTabletUp && (
             <Button
               size="small"
               startIcon={<MenuBookIcon fontSize="small" />}
@@ -838,16 +842,6 @@ export default function TranslateAlignScreen({
             >
               {t("flowScripture.title")}
             </Button>
-          ) : (
-            <IconButton
-              aria-label={t("flowAlign.desk.backToScripture")}
-              onClick={() => {
-                location.hash = `#/scripture/${book}/${chapter}`;
-              }}
-              sx={{ width: 34, height: 34, flex: "none" }}
-            >
-              <MenuBookIcon fontSize="small" />
-            </IconButton>
           )}
           <Box sx={{ flex: 1 }} />
           {/* compact prev/next flanking the count (top-and-bottom controls,

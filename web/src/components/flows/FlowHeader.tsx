@@ -18,6 +18,13 @@ import { Box } from "@mui/material";
 
 export const FlowHeaderSlotContext = createContext<HTMLElement | null>(null);
 
+// Phone title box (#517). Below the tablet band a work screen's h1 is the short
+// passage reference ("ZEC 6") and its caption the screen name. The box is sized
+// by the h1 alone and never shrinks below it, so the reference always shows in
+// full; the caption (inline-size contained, so it adds no width) fills whatever
+// the row has left and ellipsizes under App's header-slot rule.
+export const PHONE_TITLE_SX = { flex: "1 0 auto", minWidth: 0, "& > p": { contain: "inline-size" } } as const;
+
 type Props = { children: ReactNode; inline?: boolean; zIndex?: number };
 
 export function FlowHeader({ children, inline, zIndex = 20 }: Props) {
