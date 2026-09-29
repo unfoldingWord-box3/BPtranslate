@@ -23,8 +23,8 @@
 //     never verdicts — a word the simplified text does not render is often
 //     correct.
 //
-// `me` / `onNavigate` arrive with the shared flow-screen contract; verse
-// movement stays on this screen's own hash route, so neither is read here.
+// `role` / `me` / `onNavigate` arrive with the shared flow-screen contract;
+// verse movement stays on this screen's own hash route, so none is read here.
 
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
@@ -35,6 +35,7 @@ import IconButton from "@mui/material/IconButton";
 import MenuItem from "@mui/material/MenuItem";
 import Select from "@mui/material/Select";
 import Skeleton from "@mui/material/Skeleton";
+import Stack from "@mui/material/Stack";
 import ToggleButton from "@mui/material/ToggleButton";
 import ToggleButtonGroup from "@mui/material/ToggleButtonGroup";
 import Tooltip from "@mui/material/Tooltip";
@@ -44,7 +45,7 @@ import { alpha, useTheme } from "@mui/material/styles";
 import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 
-import { FlowNav } from "./FlowNav";
+import { FlowHeader } from "./FlowHeader";
 import { ORIGINAL_FONT_STACK, VerseDetailPane, type VerseSelection } from "./VerseDetailPane";
 import {
   buildLane,
@@ -61,7 +62,7 @@ import type { FlowScreenContext } from "./types";
 
 import { useChapter } from "../../hooks/useChapter";
 import { useLexicon } from "../../hooks/useLexicon";
-import { useProjectConfig } from "../../hooks/useProjectConfig";
+import { isTranslationProject, useProjectConfig } from "../../hooks/useProjectConfig";
 import { SCRIPTURE_FONT_STACK } from "../../theme";
 import type { VerseDto } from "../../sync/api";
 import { isHebrewBook } from "../../lib/sourceSearch";
@@ -127,7 +128,7 @@ function activeGroupIds(lane: LaneModel, positions: Set<number>): Set<string> {
   return out;
 }
 
-export default function VerseScreen({ role, book, chapter, verse }: VerseScreenProps) {
+export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) {
   const theme = useTheme();
   const { t } = useTranslation();
   // System bands only (web/src/lib/layoutBands.ts): tablet=560, md=900.
@@ -339,102 +340,149 @@ export default function VerseScreen({ role, book, chapter, verse }: VerseScreenP
   // "ZEC 1:15-16" when a row bridges — the label must name what is on screen.
   const refLabel = `${book} ${chapter}:${bridged ? `${span.start}-${span.end}` : verse}`;
 
-  const header = (
-    <Box
-      sx={{
-        display: "flex",
-        alignItems: "center",
-        gap: 1,
-        flexWrap: "wrap",
-        paddingBlock: 1,
-        paddingInline: { xs: 1.5, tablet: 2.5 },
-        borderBlockEnd: "1px solid",
-        borderColor: "divider",
-        bgcolor: "background.paper",
+  const { skip } = theme.palette.flows;
+  // Chevrons point along the reading direction, so they flip under an RTL UI
+  // (the scripture screen's scaleX pattern).
+  const chevronFlip = theme.direction === "rtl" ? { transform: "scaleX(-1)" } : undefined;
+  // "ZEC 1:3 · EN to العربية" — the shared flow-screen subtitle, with the verse
+  // (or the bridged span) in the chapter slot so the title row names what is
+  // on screen.
+  const chapterVerse = `${chapter}:${bridged ? `${span.start}-${span.end}` : verse}`;
+  const targetLabel = projectConfig?.languageName || t("flowTranslate.targetFallback");
+  const sub = isTranslationProject(projectConfig)
+    ? t("flowTranslate.subtitleTranslation", {
+        book,
+        chapter: chapterVerse,
+        source: (projectConfig?.translationSource?.languageCode ?? "en").toUpperCase(),
+        target: targetLabel,
+      })
+    : t("flowTranslate.subtitle", { book, chapter: chapterVerse, target: targetLabel });
+  const verseIndex = verseNums.indexOf(span.start);
+
+  const verseSelect = (
+    <Select
+      size="small"
+      value={verseNums.includes(verse) ? String(verse) : ""}
+      onChange={(e) => {
+        const v = Number(e.target.value);
+        if (v) location.hash = `#/verse/${book}/${chapter}/${v}`;
       }}
+      displayEmpty
+      inputProps={{ "aria-label": t("flowVerse.verse.goToVerse") }}
+      sx={{ flex: "none", fontSize: "0.82rem", "& .MuiSelect-select": { paddingBlock: 0.5 } }}
     >
-      <IconButton
-        aria-label={t("flowScripture.prevVerse")}
-        title={t("flowVerse.verse.prevTitle")}
-        size="small"
-        onClick={() => go(-1)}
-        disabled={verseNums.length === 0 || span.start <= verseNums[0]}
-        sx={{ minInlineSize: 32, minBlockSize: 32 }}
-      >
-        <ChevronLeftIcon fontSize="small" />
-      </IconButton>
-      <Typography
-        component="span"
-        sx={{ fontWeight: 700, fontSize: "1.05rem", fontVariantNumeric: "tabular-nums" }}
-      >
-        {refLabel}
-      </Typography>
-      <IconButton
-        aria-label={t("flowScripture.nextVerse")}
-        title={t("flowVerse.verse.nextTitle")}
-        size="small"
-        onClick={() => go(1)}
-        disabled={verseNums.length === 0 || span.end >= verseNums[verseNums.length - 1]}
-        sx={{ minInlineSize: 32, minBlockSize: 32 }}
-      >
-        <ChevronRightIcon fontSize="small" />
-      </IconButton>
-      <Select
-        size="small"
-        value={verseNums.includes(verse) ? String(verse) : ""}
-        onChange={(e) => {
-          const v = Number(e.target.value);
-          if (v) location.hash = `#/verse/${book}/${chapter}/${v}`;
-        }}
-        displayEmpty
-        inputProps={{ "aria-label": t("flowVerse.verse.goToVerse") }}
-        sx={{ fontSize: "0.82rem", "& .MuiSelect-select": { paddingBlock: 0.5 } }}
-      >
-        {verseNums.length === 0 && (
-          <MenuItem value="">
-            <em>{t("flowVerse.verse.noVersesLoaded")}</em>
-          </MenuItem>
-        )}
-        {verseNums.map((v) => (
-          <MenuItem key={v} value={String(v)}>
-            {book} {chapter}:{v}
-          </MenuItem>
-        ))}
-      </Select>
-
-      <Box sx={{ flex: 1 }} />
-
-      <ToggleButtonGroup
-        size="small"
-        exclusive
-        value={mode}
-        onChange={(_e, v) => v && setMode(v as Mode)}
-        aria-label={t("flowVerse.verse.viewAria")}
-      >
-        <ToggleButton value="read" sx={{ minBlockSize: 32, paddingInline: 1.5, fontSize: "0.78rem" }}>
-          {t("flowVerse.verse.modeRead")}
-        </ToggleButton>
-        <ToggleButton value="audit" sx={{ minBlockSize: 32, paddingInline: 1.5, fontSize: "0.78rem" }}>
-          {t("flowVerse.verse.modeAudit")}
-        </ToggleButton>
-      </ToggleButtonGroup>
-    </Box>
+      {verseNums.length === 0 && (
+        <MenuItem value="">
+          <em>{t("flowVerse.verse.noVersesLoaded")}</em>
+        </MenuItem>
+      )}
+      {verseNums.map((v) => (
+        <MenuItem key={v} value={String(v)}>
+          {book} {chapter}:{v}
+        </MenuItem>
+      ))}
+    </Select>
   );
 
-  const modeLine = (
-    <Box
-      sx={{
-        display: "flex",
-        alignItems: "center",
-        gap: 1.25,
-        flexWrap: "wrap",
-        paddingBlock: 1,
-        paddingInline: { xs: 1.5, tablet: 2.5 },
-        borderBlockEnd: "1px solid",
-        borderColor: "divider",
-        bgcolor: "background.paper",
-      }}
+  const modeToggle = (
+    <ToggleButtonGroup
+      size="small"
+      exclusive
+      value={mode}
+      onChange={(_e, v) => v && setMode(v as Mode)}
+      aria-label={t("flowVerse.verse.viewAria")}
+      sx={{ flex: "none" }}
     >
+      <ToggleButton value="read" sx={{ minBlockSize: 32, paddingInline: 1.5, fontSize: "0.78rem" }}>
+        {t("flowVerse.verse.modeRead")}
+      </ToggleButton>
+      <ToggleButton value="audit" sx={{ minBlockSize: 32, paddingInline: 1.5, fontSize: "0.78rem" }}>
+        {t("flowVerse.verse.modeAudit")}
+      </ToggleButton>
+    </ToggleButtonGroup>
+  );
+
+  // One title row, rendered into the global flow bar via FlowHeader (#299) —
+  // the same idiom as TranslateNotesScreen / PackageHubScreen, replacing the
+  // retired pill-bar nav and the old bespoke toolbar. The verse stepper stays in
+  // the row at every width; the verse picker and the Read/Audit switch join it
+  // on the desk (md+) and move to the top of the text column below that, where
+  // the shared row has no room to spare.
+  const header = (
+    <FlowHeader>
+      <Box sx={{ maxWidth: 1440, mx: "auto", paddingInline: 2, paddingBlock: 1.5 }}>
+        <Stack direction="row" alignItems="center" spacing={1.25}>
+          <IconButton
+            aria-label={t("flowTranslate.backToPackage", { book })}
+            onClick={() => {
+              location.hash = `#/package/${book}`;
+            }}
+            sx={{ bgcolor: skip.soft, width: 34, height: 34, flex: "none" }}
+          >
+            <ChevronLeftIcon fontSize="small" sx={chevronFlip} />
+          </IconButton>
+          <Box sx={{ minWidth: 0 }}>
+            <Typography component="h1" sx={{ fontSize: "1.0625rem", fontWeight: 700, m: 0 }}>
+              {t("flowVerse.hub.verseView")}
+            </Typography>
+            <Typography variant="caption" color="text.secondary" component="p" sx={{ m: 0 }}>
+              {sub}
+            </Typography>
+          </Box>
+          <Box sx={{ flex: 1 }} />
+          {isTablet && verseIndex >= 0 && (
+            <Typography
+              variant="body2"
+              sx={{
+                fontWeight: 600,
+                color: "text.secondary",
+                fontVariantNumeric: "tabular-nums",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {t("flowScripture.verseOfTotal", { n: verseIndex + 1, total: verseNums.length })}
+            </Typography>
+          )}
+          <Stack direction="row" spacing={0.75} alignItems="center" sx={{ flex: "none" }}>
+            <IconButton
+              aria-label={t("flowScripture.prevVerse")}
+              title={t("flowVerse.verse.prevTitle")}
+              size="small"
+              onClick={() => go(-1)}
+              disabled={verseNums.length === 0 || span.start <= verseNums[0]}
+              sx={{ bgcolor: skip.soft, width: 30, height: 30, flex: "none" }}
+            >
+              <ChevronLeftIcon fontSize="small" sx={chevronFlip} />
+            </IconButton>
+            {isDesktop && verseSelect}
+            <IconButton
+              aria-label={t("flowScripture.nextVerse")}
+              title={t("flowVerse.verse.nextTitle")}
+              size="small"
+              onClick={() => go(1)}
+              disabled={verseNums.length === 0 || span.end >= verseNums[verseNums.length - 1]}
+              sx={{ bgcolor: skip.soft, width: 30, height: 30, flex: "none" }}
+            >
+              <ChevronRightIcon fontSize="small" sx={chevronFlip} />
+            </IconButton>
+          </Stack>
+          {isDesktop && modeToggle}
+        </Stack>
+      </Box>
+    </FlowHeader>
+  );
+
+  // The mode hint and the observation chips open the text column, instead of
+  // stacking a second bordered band under the title row.
+  const modeLine = (
+    <Box sx={{ display: "flex", alignItems: "center", gap: 1.25, flexWrap: "wrap", marginBlockEnd: 2 }}>
+      {!isDesktop && (
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1, inlineSize: "100%" }}>
+          {verseSelect}
+          <Box sx={{ flex: 1 }} />
+          {modeToggle}
+        </Box>
+      )}
       <Typography variant="body2" color="text.secondary" sx={{ fontSize: "0.78rem" }}>
         {mode === "read" ? t("flowVerse.verse.readHint") : t("flowVerse.verse.auditHint")}
       </Typography>
@@ -489,6 +537,7 @@ export default function VerseScreen({ role, book, chapter, verse }: VerseScreenP
           paddingBlockEnd: 5,
         }}
       >
+        {modeLine}
         {bridged && (
           <Alert severity="info" sx={{ mb: 2 }}>
             {t("flowVerse.verse.bridgedNotice", { start: span.start, end: span.end })}
@@ -537,6 +586,7 @@ export default function VerseScreen({ role, book, chapter, verse }: VerseScreenP
           resources={resources}
           selection={selection}
           rtl={rtl}
+          compact={!isTablet}
           onSelect={setSelection}
         />
       </Box>
@@ -582,7 +632,9 @@ export default function VerseScreen({ role, book, chapter, verse }: VerseScreenP
           display: "grid",
           gridTemplateColumns: "minmax(0, 1fr) 440px",
           minBlockSize: 520,
-          blockSize: "calc(100dvh - 200px)",
+          // The shared title bar (~70px) and the footer note sit outside this
+          // grid; the two bands that used to stack above it are gone (#477).
+          blockSize: "calc(100dvh - 150px)",
         }}
       >
         {textColumn}
@@ -598,9 +650,7 @@ export default function VerseScreen({ role, book, chapter, verse }: VerseScreenP
 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", minBlockSize: "100%" }}>
-      <FlowNav current="verse" book={book} chapter={chapter} verse={verse} role={role} />
       {header}
-      {modeLine}
       {body}
       <Typography
         variant="caption"
@@ -734,52 +784,67 @@ function ReadMode({
 
   return (
     <Box sx={{ marginBlockEnd: 3 }}>
-      <LaneLabel>{t("flowVerse.section.original", { label: originalLabel })}</LaneLabel>
-      {words.length === 0 ? (
-        <Typography variant="body2" color="text.secondary" sx={{ fontStyle: "italic", mb: 2.5 }}>
-          {t("flowVerse.verse.noOriginalWords")}
-        </Typography>
-      ) : (
-        <Box
-          dir={rtl ? "rtl" : "ltr"}
-          sx={{
-            fontFamily: ORIGINAL_FONT_STACK,
-            fontSize: "1.55rem",
-            lineHeight: 2.05,
-            textAlign: "start",
-            marginBlockEnd: 2.5,
-          }}
-        >
-          {words.map((w) => (
-            <Box
-              key={w.position}
-              component="button"
-              type="button"
-              onClick={() => onSelectWord([w.position])}
-              title={[w.lemma, w.glosses.join(" · ")].filter(Boolean).join("  ·  ")}
-              sx={{
-                appearance: "none",
-                border: 0,
-                background: selectedPositions.has(w.position) ? hl : "transparent",
-                boxShadow: selectedPositions.has(w.position)
-                  ? `inset 0 -2px 0 ${theme.palette.primary.main}`
-                  : markedPositions.has(w.position)
-                    ? `inset 0 -2px 0 ${theme.palette.flows.ok.main}`
-                    : "none",
-                font: "inherit",
-                color: "text.primary",
-                cursor: "pointer",
-                borderRadius: 1,
-                paddingInline: 0.375,
-                marginInlineEnd: 0.5,
-                "&:hover, &:focus-visible": { bgcolor: "action.hover" },
-              }}
-            >
-              {w.text}
-            </Box>
-          ))}
-        </Box>
-      )}
+      {/* The original is the SOURCE the two lanes below translate, not a third
+          translation: a tinted panel with a rule under it and a wider gap
+          (32px against the 20px between the lanes) keeps it from reading as
+          just another lane (#477). */}
+      <Box
+        sx={{
+          bgcolor: "action.hover",
+          borderRadius: 1.5,
+          borderBlockEnd: "2px solid",
+          borderColor: "divider",
+          paddingBlock: 1.5,
+          paddingInline: 1.5,
+          marginBlockEnd: 4,
+        }}
+      >
+        <LaneLabel>{t("flowVerse.section.original", { label: originalLabel })}</LaneLabel>
+        {words.length === 0 ? (
+          <Typography variant="body2" color="text.secondary" sx={{ fontStyle: "italic" }}>
+            {t("flowVerse.verse.noOriginalWords")}
+          </Typography>
+        ) : (
+          <Box
+            dir={rtl ? "rtl" : "ltr"}
+            sx={{
+              fontFamily: ORIGINAL_FONT_STACK,
+              fontSize: "1.55rem",
+              lineHeight: 2.05,
+              textAlign: "start",
+            }}
+          >
+            {words.map((w) => (
+              <Box
+                key={w.position}
+                component="button"
+                type="button"
+                onClick={() => onSelectWord([w.position])}
+                title={[w.lemma, w.glosses.join(" · ")].filter(Boolean).join("  ·  ")}
+                sx={{
+                  appearance: "none",
+                  border: 0,
+                  background: selectedPositions.has(w.position) ? hl : "transparent",
+                  boxShadow: selectedPositions.has(w.position)
+                    ? `inset 0 -2px 0 ${theme.palette.primary.main}`
+                    : markedPositions.has(w.position)
+                      ? `inset 0 -2px 0 ${theme.palette.flows.ok.main}`
+                      : "none",
+                  font: "inherit",
+                  color: "text.primary",
+                  cursor: "pointer",
+                  borderRadius: 1,
+                  paddingInline: 0.375,
+                  marginInlineEnd: 0.5,
+                  "&:hover, &:focus-visible": { bgcolor: "action.hover" },
+                }}
+              >
+                {w.text}
+              </Box>
+            ))}
+          </Box>
+        )}
+      </Box>
 
       <LaneLabel>{t("flowVerse.section.literal", { label: litLabel })}</LaneLabel>
       <Prose lane={lit} on={litOn} onSelectGroup={onSelectGroup} laneName={litLabel} rtl={litRtl} />
@@ -943,6 +1008,15 @@ function AuditMode({
     borderBlockEnd: `1px solid ${theme.palette.divider}`,
     verticalAlign: "baseline" as const,
   };
+  // The original column is the source the other two translate: a rule and
+  // extra room on the side facing the literal column set it apart (#477).
+  // That side is the TABLE's inline-end, but a cell carrying its own `dir`
+  // (the original column does) resolves logical sides against that dir — so
+  // when the cell's direction differs from the page's, the side flips.
+  const sourceCol = (cellRtl: boolean) =>
+    cellRtl === (theme.direction === "rtl")
+      ? { borderInlineEnd: `1px solid ${theme.palette.divider}`, paddingInlineEnd: 2 }
+      : { borderInlineStart: `1px solid ${theme.palette.divider}`, paddingInlineStart: 2 };
 
   let prevLit: string | null = null;
   let prevSim: string | null = null;
@@ -983,7 +1057,7 @@ function AuditMode({
       <Box component="table" sx={{ inlineSize: "100%", borderCollapse: "collapse", fontSize: "0.85rem" }}>
         <thead>
           <tr>
-            <Box component="th" sx={{ ...th, inlineSize: "24%" }}>
+            <Box component="th" sx={{ ...th, ...sourceCol(theme.direction === "rtl"), inlineSize: "24%" }}>
               {t("flowVerse.verse.colOriginal")}
             </Box>
             <Box component="th" sx={{ ...th, inlineSize: "30%" }}>
@@ -994,9 +1068,10 @@ function AuditMode({
             </Box>
             <Box
               component="th"
-              sx={{ ...th, inlineSize: "12%" }}
-              aria-label={t("flowVerse.verse.notesAndTermsAria")}
-            />
+              sx={{ ...th, inlineSize: "12%", textAlign: "end", whiteSpace: "nowrap" }}
+            >
+              {t("flowVerse.verse.notesAndTermsAria")}
+            </Box>
           </tr>
         </thead>
         <tbody>
@@ -1026,6 +1101,7 @@ function AuditMode({
                   dir={rtl ? "rtl" : "ltr"}
                   sx={{
                     ...td,
+                    ...sourceCol(rtl),
                     fontFamily: ORIGINAL_FONT_STACK,
                     fontSize: "1.18rem",
                     lineHeight: 1.7,
@@ -1113,11 +1189,13 @@ function ResourceList({
   resources,
   selection,
   rtl,
+  compact,
   onSelect,
 }: {
   resources: ResourceItem[];
   selection: VerseSelection | null;
   rtl: boolean;
+  compact: boolean;
   onSelect: (sel: VerseSelection) => void;
 }) {
   const theme = useTheme();
@@ -1142,28 +1220,52 @@ function ResourceList({
   }
 
   return (
-    <Box sx={{ mt: 3 }}>
+    // ONE grid for the whole list, not one per row (#477): the tag, text and
+    // warning tracks are defined once here and every row lays its cells into
+    // them through `subgrid`, so the tag, the note text and the trailing
+    // warning start at the same x on every row of every group, whatever the
+    // width of one row's tag. Group labels span all three tracks. On a phone
+    // the warning track is capped so its text wraps instead of taking the
+    // note text's width from every row.
+    <Box
+      sx={{
+        mt: 3,
+        display: "grid",
+        gridTemplateColumns: `max-content minmax(0, 1fr) ${compact ? "fit-content(72px)" : "auto"}`,
+        columnGap: 1.25,
+      }}
+    >
       {groups.map(({ kind, labelKey }) => {
         const list = resources.filter((r) => r.kind === kind);
         if (list.length === 0) return null;
         return (
-          <Box key={kind} sx={{ marginBlockEnd: 2.5 }}>
-            <LaneLabel>
-              {t("flowVerse.verse.groupHeading", { label: t(labelKey), n: list.length })}
-            </LaneLabel>
+          <Box
+            key={kind}
+            sx={{
+              gridColumn: "1 / -1",
+              display: "grid",
+              gridTemplateColumns: "subgrid",
+              marginBlockEnd: 2.5,
+            }}
+          >
+            <Box sx={{ gridColumn: "1 / -1" }}>
+              <LaneLabel>
+                {t("flowVerse.verse.groupHeading", { label: t(labelKey), n: list.length })}
+              </LaneLabel>
+            </Box>
             {list.map((r) => (
               <Box
                 key={r.key}
                 component="button"
                 type="button"
+                data-resource-row=""
                 onClick={() => onSelect({ kind: "resource", key: r.key })}
                 aria-current={currentKey === r.key}
                 sx={{
+                  gridColumn: "1 / -1",
                   display: "grid",
-                  gridTemplateColumns: "auto minmax(0, 1fr) auto",
-                  gap: 1.25,
+                  gridTemplateColumns: "subgrid",
                   alignItems: "baseline",
-                  inlineSize: "100%",
                   textAlign: "start",
                   appearance: "none",
                   border: 0,
@@ -1184,33 +1286,42 @@ function ResourceList({
               >
                 <Box
                   component="span"
+                  data-resource-col="tag"
                   sx={{
                     fontSize: "0.66rem",
                     fontWeight: 700,
                     letterSpacing: "0.05em",
                     textTransform: "uppercase",
                     color: "text.secondary",
-                    minInlineSize: 46,
                   }}
                 >
                   {r.tag}
                 </Box>
-                <Box component="span" sx={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+                {/* The original-language quote sits on its own line above the
+                    English summary: different script, font and direction, so
+                    running them together on one line left no visible seam. */}
+                <Box component="span" data-resource-col="text" sx={{ minInlineSize: 0 }}>
                   {r.quote && (
-                    <Box
-                      component="span"
-                      dir={rtl ? "rtl" : "ltr"}
-                      sx={{ fontFamily: ORIGINAL_FONT_STACK, fontSize: "1rem" }}
-                    >
-                      {r.quote.replace(/&/g, " … ")}{" "}
+                    // The block line follows the page direction, so the quote
+                    // starts where the summary starts; the inner span isolates
+                    // the original's own direction.
+                    <Box component="span" sx={{ display: "block", marginBlockEnd: 0.25 }}>
+                      <Box
+                        component="span"
+                        dir={rtl ? "rtl" : "ltr"}
+                        sx={{ fontFamily: ORIGINAL_FONT_STACK, fontSize: "1rem" }}
+                      >
+                        {r.quote.replace(/&/g, " … ")}
+                      </Box>
                     </Box>
                   )}
-                  <Box component="span" dir="auto" sx={{ color: "text.secondary" }}>
+                  <Box component="span" dir="auto" sx={{ display: "block", color: "text.secondary" }}>
                     {r.summary}
                   </Box>
                 </Box>
                 <Box
                   component="span"
+                  data-resource-col="warn"
                   sx={{ fontSize: "0.72rem", color: theme.palette.flows.warn.ink }}
                 >
                   {r.kind !== "tq" && r.quote && r.positions.length === 0
