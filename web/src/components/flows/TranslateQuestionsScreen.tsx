@@ -68,7 +68,7 @@
 // another editor changed the row, with a reload affordance.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { FlowHeader } from "./FlowHeader";
+import { FlowHeader, PHONE_COUNT_SX, PHONE_TITLE_SX } from "./FlowHeader";
 import { useTranslation } from "react-i18next";
 import {
   Alert,
@@ -441,6 +441,10 @@ export default function TranslateQuestionsScreen({
   // md+ (>=900px, the words screen's breakpoint): master-detail side by side
   // instead of the phone's single centred column.
   const wide = useMediaQuery(theme.breakpoints.up("md"));
+  // Phone (<560): the title row shares one bar with the account controls
+  // (#299), so it shows the passage reference instead of the long title and
+  // drops secondary icons (#517).
+  const isTabletUp = useMediaQuery(theme.breakpoints.up("tablet"));
   // Chevron glyphs don't flip with CSS direction on their own — mirror them
   // under RTL so "previous"/"next" keep pointing the right way (the scripture
   // screen's chevronFlip pattern).
@@ -1525,8 +1529,8 @@ export default function TranslateQuestionsScreen({
           gets the keyboard-constrained screen to itself. */}
       {!focusMode && (
       <FlowHeader>
-        <Box sx={{ maxWidth: wide ? 1440 : COLUMN_PX, mx: "auto", paddingInline: 2, paddingBlock: 1.5 }}>
-          <Stack direction="row" alignItems="center" spacing={1.25}>
+        <Box sx={{ maxWidth: wide ? 1440 : COLUMN_PX, mx: "auto", paddingInline: isTabletUp ? 2 : 1, paddingBlock: 1.5 }}>
+          <Stack direction="row" alignItems="center" spacing={isTabletUp ? 1.25 : 0.5}>
             <IconButton
               aria-label={t("flowQuestions.backToPackage", { book })}
               onClick={() => {
@@ -1536,12 +1540,12 @@ export default function TranslateQuestionsScreen({
             >
               <ChevronLeftIcon fontSize="small" />
             </IconButton>
-            <Box sx={{ minWidth: 0 }}>
+            <Box sx={isTabletUp ? { minWidth: 0 } : PHONE_TITLE_SX}>
               <Typography component="h1" sx={{ fontSize: "1.0625rem", fontWeight: 700, m: 0 }}>
-                {t("flowQuestions.title")}
+                {isTabletUp ? t("flowQuestions.title") : t("common.passageRef", { book, chapter })}
               </Typography>
               <Typography variant="caption" color="text.secondary" component="p" sx={{ m: 0 }}>
-                {sub}
+                {isTabletUp ? sub : t("flowQuestions.title")}
               </Typography>
             </Box>
             <Box sx={{ flex: 1 }} />
@@ -1552,6 +1556,7 @@ export default function TranslateQuestionsScreen({
                 color: "text.secondary",
                 fontVariantNumeric: "tabular-nums",
                 whiteSpace: "nowrap",
+                ...(isTabletUp ? {} : PHONE_COUNT_SX),
               }}
             >
               {done
@@ -1563,17 +1568,19 @@ export default function TranslateQuestionsScreen({
                 the done state or on an empty chapter; on an intro question
                 (chapter or verse 0) it clamps to verse 1 of that chapter rather
                 than no-opping (#453). */}
-            <IconButton
-              size="small"
-              aria-label={t("flowQuestions.openVerseView")}
-              disabled={!row}
-              onClick={() => {
-                if (row) location.hash = `#/verse/${book}/${Math.max(1, row.chapter)}/${Math.max(1, row.verse)}`;
-              }}
-              sx={{ flex: "none" }}
-            >
-              <ViewColumnIcon fontSize="small" />
-            </IconButton>
+            {isTabletUp && (
+              <IconButton
+                size="small"
+                aria-label={t("flowQuestions.openVerseView")}
+                disabled={!row}
+                onClick={() => {
+                  if (row) location.hash = `#/verse/${book}/${Math.max(1, row.chapter)}/${Math.max(1, row.verse)}`;
+                }}
+                sx={{ flex: "none" }}
+              >
+                <ViewColumnIcon fontSize="small" />
+              </IconButton>
+            )}
             {/* compact prev/next — the same cursor and disabled logic as the
                 bottom Previous/Next buttons */}
             <Stack direction="row" spacing={0.25} sx={{ flex: "none" }}>
