@@ -69,6 +69,17 @@ test.describe("verse view in-place articles (#478)", () => {
       await expect(panel).toHaveCount(0);
       await expect(twRow).toBeVisible();
       await expect(twRow).toHaveAttribute("aria-current", "true");
+      // Focus goes back to the control that opened the article, not <body>.
+      await expect(page.getByRole("button", { name: "Read the translationWords article" })).toBeFocused();
+
+      // Selecting something else closes the article: no stale article beside a
+      // new selection.
+      await page.getByText("Read the translationWords article").click();
+      await expect(panel).toBeVisible();
+      await page.locator("[data-original-word]").first().click();
+      await expect(panel).toHaveCount(0);
+      await expect(page.locator("[data-resource-row]").first()).toBeVisible();
+      await expect(twRow).not.toHaveAttribute("aria-current", "true");
 
       // --- tA, from a note row; Escape closes the panel but keeps the selection ---
       const tnRow = resourceRow(page, "idiom");

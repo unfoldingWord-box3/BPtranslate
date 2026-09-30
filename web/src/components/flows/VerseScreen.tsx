@@ -161,6 +161,44 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
     setArticle(null);
   }, [book, chapter, verse]);
 
+  // The article belongs to the selection it was opened from: picking any other
+  // word or resource closes it, so a stale article never sits beside a new
+  // selection. Opening the article does not change the selection.
+  const selectionKey = !selection
+    ? ""
+    : selection.kind === "word"
+      ? `w:${selection.positions.join(",")}`
+      : `r:${selection.key}`;
+  useEffect(() => {
+    setArticle(null);
+  }, [selectionKey]);
+
+  // Closing the article (Back or Escape) hands focus back to the control that
+  // opened it, or to the selected resource row if that control is gone, instead
+  // of dropping it to <body>.
+  const articleOpenerRef = useRef<HTMLElement | null>(null);
+  const restoreFocusRef = useRef(false);
+  const openArticle = useCallback((a: VerseArticle) => {
+    const el = document.activeElement;
+    articleOpenerRef.current = el instanceof HTMLElement && el !== document.body ? el : null;
+    setArticle(a);
+  }, []);
+  const closeArticle = useCallback(() => {
+    restoreFocusRef.current = true;
+    setArticle(null);
+  }, []);
+  useEffect(() => {
+    if (article || !restoreFocusRef.current) return;
+    restoreFocusRef.current = false;
+    const opener = articleOpenerRef.current;
+    articleOpenerRef.current = null;
+    const target =
+      opener && opener.isConnected
+        ? opener
+        : document.querySelector<HTMLElement>('[data-resource-row][aria-current="true"]');
+    target?.focus();
+  }, [article]);
+
   const sourceLane = isHebrewBook(book) ? "UHB" : "UGNT";
   const rtl = sourceLane === "UHB";
   const originalLabel = versionLabel(projectConfig, sourceLane);
@@ -305,7 +343,7 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
         go(1);
       } else if (e.key === "Escape") {
         // Escape backs out one step: an open article first, then the selection.
-        if (article) setArticle(null);
+        if (article) closeArticle();
         else setSelection(null);
       } else if (e.key === "r" || e.key === "a") {
         setMode(e.key === "a" ? "audit" : "read");
@@ -313,7 +351,7 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [go, article]);
+  }, [go, article, closeArticle]);
 
   // --- selection → highlight sets ------------------------------------------
   const selectedPositions = useMemo(() => {
@@ -612,7 +650,7 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
           />
         )}
         {article ? (
-          <VerseArticleView article={article} onClose={() => setArticle(null)} />
+          <VerseArticleView article={article} stacked={!isDesktop} onClose={closeArticle} />
         ) : (
           <ResourceList
             resources={resources}
@@ -654,7 +692,7 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
           lexicon={lexicon}
           rtl={rtl}
           onSelect={setSelection}
-          onOpenArticle={setArticle}
+          onOpenArticle={openArticle}
         />
       </Box>
     );
@@ -857,6 +895,7 @@ function ReadMode({
                 key={w.position}
                 component="button"
                 type="button"
+                data-original-word=""
                 onClick={() => onSelectWord([w.position])}
                 title={[w.lemma, w.glosses.join(" · ")].filter(Boolean).join("  ·  ")}
                 sx={{
@@ -1230,7 +1269,16 @@ function AuditMode({
 // The tA / tW article opened from the detail pane, in the resource list's spot
 // at every width band (issue #478): read-only, with a way back to the list and
 // a link on to the full article editor for anyone who wants to edit it.
-function VerseArticleView({ article, onClose }: { article: VerseArticle; onClose: () => void }) {
+function VerseArticleView({
+  article,
+  stacked,
+  onClose,
+}: {
+  article: VerseArticle;
+  /** Below md: the detail column (and the link) sits stacked under this spot. */
+  stacked: boolean;
+  onClose: () => void;
+}) {
   const theme = useTheme();
   const { t } = useTranslation();
   const backRef = useRef<HTMLButtonElement>(null);
@@ -1238,11 +1286,13 @@ function VerseArticleView({ article, onClose }: { article: VerseArticle; onClose
   const heading =
     article.resource === "ta" ? t("flowVerse.article.headingTa") : t("flowVerse.article.headingTw");
 
-  // Below md the link sits in the detail column stacked under this spot, so
-  // bring the article into view and put focus on its way back.
+  // Put focus on the way back. Below md the link sits in the detail column
+  // stacked under this spot, so also bring the article into view there; on the
+  // desk both columns are on screen and the text column must not jump.
   useEffect(() => {
-    backRef.current?.scrollIntoView({ block: "nearest" });
+    if (stacked) backRef.current?.scrollIntoView({ block: "nearest" });
     backRef.current?.focus({ preventScroll: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [article.resource, article.id]);
 
   return (
