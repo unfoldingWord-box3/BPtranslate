@@ -11,6 +11,7 @@ import { MarkdownView } from "./MarkdownView";
 import { fetchTwArticle, twArticleDcsUrl, type TwArticleSource } from "../lib/twArticle";
 import { fetchTaArticle, taArticleDcsUrl, type TaArticleSource } from "../lib/taArticle";
 import { resolveSourceRef } from "../lib/sourceRef";
+import { directionForLang } from "../lib/isoLanguages";
 import { useProjectConfig } from "../hooks/useProjectConfig";
 
 interface Props {
@@ -43,6 +44,11 @@ export function AssociatedArticlePanel({ resource, articleRef, selected }: Props
         : undefined
     : undefined;
   const noSource = !!cfg && !source;
+  // Direction follows the language the article is READ in (issue #523): the
+  // translationSource's language when set, else the project's own direction.
+  const articleDir = cfg?.translationSource
+    ? directionForLang(cfg.translationSource.languageCode)
+    : (cfg?.direction ?? "ltr");
   const sourceKey = source ? `${source.org}/${source.repo}` : "";
 
   const [title, setTitle] = useState<string | null>(null);
@@ -110,14 +116,14 @@ export function AssociatedArticlePanel({ resource, articleRef, selected }: Props
           <CircularProgress size={24} />
         </Box>
       ) : (
-        <>
+        <Box dir={articleDir}>
           {resource === "ta" && title != null && (
             <Typography variant="subtitle2" sx={{ mb: 1 }}>
               {title}
             </Typography>
           )}
-          <MarkdownView markdown={markdown} baseUrl={dcsUrl || undefined} dir="ltr" />
-        </>
+          <MarkdownView markdown={markdown} baseUrl={dcsUrl || undefined} dir={articleDir} />
+        </Box>
       )}
     </Box>
   );
