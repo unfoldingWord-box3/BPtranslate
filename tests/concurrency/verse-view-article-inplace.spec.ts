@@ -96,4 +96,64 @@ test.describe("verse view in-place articles (#478)", () => {
       await context.close();
     });
   }
+
+  // Article direction follows the language the panel actually READS (issue
+  // #523): the translationSource's language when one is set, else the
+  // project's own direction. The title and the body must agree.
+  const cases = [
+    {
+      name: "Arabic project reading an English translationSource is ltr",
+      patch: {
+        languageCode: "ar",
+        direction: "rtl",
+        translationSource: {
+          org: "unfoldingWord",
+          languageCode: "en",
+          repos: { ta: "en_ta", tw: "en_tw" },
+        },
+      },
+      expected: "ltr",
+    },
+    {
+      name: "RTL project with no translationSource is rtl",
+      patch: { direction: "rtl", translationSource: null },
+      expected: "rtl",
+    },
+  ] as const;
+  for (const c of cases) {
+    test(`tA article direction (#523): ${c.name}`, async ({ browser }) => {
+      const { context } = await newUserContext(browser, `verse-article-dir-${c.expected}`);
+      const page = await context.newPage();
+      await mockDoor43(page);
+      await page.route("**/api/project-config", async (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        const res = await route.fetch();
+        const json = await res.json();
+        json.config = { ...json.config, ...c.patch };
+        return route.fulfill({ response: res, json });
+      });
+      await page.setViewportSize({ width: 1280, height: 900 });
+      await page.goto("/#/verse/ZEC/1/1");
+
+      const tnRow = resourceRow(page, "idiom");
+      await expect(tnRow).toBeVisible({ timeout: 15_000 });
+      await tnRow.click();
+      await page.getByText("Read the translationAcademy article").click();
+
+      const panel = page.locator("[data-verse-article]");
+      const body = panel.getByText(TA_BODY);
+      const title = panel.getByText("Idiom", { exact: true });
+      await expect(body).toBeVisible();
+      await expect(title).toBeVisible();
+      const dirOf = (el: Element) => getComputedStyle(el as HTMLElement).direction;
+      await expect.poll(() => body.evaluate(dirOf)).toBe(c.expected);
+      await expect.poll(() => title.evaluate(dirOf)).toBe(c.expected);
+
+      const shots = process.env.ARTICLE_DIR_SHOTS;
+      if (shots) await panel.screenshot({ path: `${shots}/article-${c.expected}.png` });
+      // A config refetch can still be in the route when the context closes.
+      await page.unrouteAll({ behavior: "ignoreErrors" });
+      await context.close();
+    });
+  }
 });
