@@ -894,12 +894,19 @@ export function App() {
             >
               {/* The controls now share the row with the screen title, so on a
                   phone the title and subtitle truncate instead of wrapping one
-                  word per line. */}
+                  word per line. The work screens swap in a short passage
+                  reference there so it stays whole (PHONE_TITLE_SX, #517), and
+                  the controls' padding tightens to leave the row more room.
+                  overflow: hidden is the last resort for a toolbar too wide for
+                  even the shrunken row (the update chip on a phone): the row
+                  is cut off at the slot's edge instead of painting under the
+                  toolbar, where its buttons could not be clicked anyway. */}
               <Box
                 ref={setHeaderSlot}
                 sx={{
                   flex: 1,
                   minWidth: 0,
+                  overflow: "hidden",
                   "& h1, & h1 + p": { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
                 }}
               />
@@ -910,7 +917,7 @@ export function App() {
               spacing={0.5}
               role="toolbar"
               aria-label={t("topbar.chromeStrip.ariaLabel")}
-              sx={{ flex: "none", paddingInline: 1.5, paddingBlock: 0.5 }}
+              sx={{ flex: "none", paddingInline: isPhone ? 0.75 : 1.5, paddingBlock: 0.5 }}
             >
               {updateAvailable && (
                 <Tooltip title={t("sync.updateAvailableTooltip")}>

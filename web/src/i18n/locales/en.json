@@ -1,6 +1,7 @@
 {
   "common": {
     "approve": "Approve",
+    "passageRef": "{{book}} {{chapter}}",
     "approveAll": "Approve all",
     "cancel": "Cancel",
     "close": "Close",
@@ -2933,7 +2934,6 @@
       "title": "Alignment",
       "sub": "{{book}} {{chapter}} · {{source}} → {{target}}",
       "backToPackage": "Back to the {{book}} package",
-      "backToScripture": "Back to scripture",
       "fullyAligned": "{{n}} of {{total}} fully aligned",
       "notDrafted": "Not drafted",
       "sourceGaps": "Source gaps",
@@ -3451,6 +3451,12 @@
   },
   "flowVerse": {
     "notRendered": "not rendered",
+    "article": {
+      "headingTw": "translationWords article",
+      "headingTa": "translationAcademy article",
+      "back": "Back to the list",
+      "openInEditor": "Open in the article editor"
+    },
     "lexStrip": {
       "aria": "Original-language reference",
       "noWords": "No original-language words loaded for this verse.",

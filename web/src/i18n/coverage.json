@@ -45,6 +45,7 @@
   "sameAsEnglish": [
     "appShell.scripture.errorSuffix",
     "appShell.scripture.wordListSuffix",
+    "common.passageRef",
     "dialogs.findReplace.tnScope",
     "flowQuestions.subAuthoring",
     "flowScripture.subPlain",
