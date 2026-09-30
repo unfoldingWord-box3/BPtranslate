@@ -177,13 +177,16 @@ for (const [uiLang, width, wholeButtons] of WIDE_CASES) {
         await expect(toolbar, `${route}: offline chip`).toContainText(screenName(uiLang, "sync.offline"), {
           timeout: 10_000,
         });
-        // Measured 224px (en) / 245px (ar) with both chips; idle is 68px.
+        // Measured 224px (en) / 245px (ar) with both chips on agentbox and
+        // 210px (en) on CI's fonts; idle is 68px and either chip alone stays
+        // under ~155px. 180 proves both chips are counted without tying the
+        // case to one machine's font metrics.
         await expect
           .poll(() => toolbar.evaluate((el) => Math.round(el.getBoundingClientRect().width)), {
             message: `${route}: toolbar at its wide width`,
             timeout: 10_000,
           })
-          .toBeGreaterThanOrEqual(220);
+          .toBeGreaterThanOrEqual(180);
 
         const problems = () => headerProblems(page, wholeButtons);
         await expect.poll(problems, { message: `${route}: header vs toolbar`, timeout: 10_000 }).toEqual([]);
