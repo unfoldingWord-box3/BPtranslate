@@ -146,8 +146,8 @@ test.describe("verse view in-place articles (#478)", () => {
       await expect(body).toBeVisible();
       await expect(title).toBeVisible();
       const dirOf = (el: Element) => getComputedStyle(el as HTMLElement).direction;
-      expect(await body.evaluate(dirOf)).toBe(c.expected);
-      expect(await title.evaluate(dirOf)).toBe(c.expected);
+      await expect.poll(() => body.evaluate(dirOf)).toBe(c.expected);
+      await expect.poll(() => title.evaluate(dirOf)).toBe(c.expected);
 
       const shots = process.env.ARTICLE_DIR_SHOTS;
       if (shots) await panel.screenshot({ path: `${shots}/article-${c.expected}.png` });
