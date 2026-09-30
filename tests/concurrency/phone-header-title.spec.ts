@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,6 +31,36 @@ function screenName(lang: string, key: string): string {
   const value = key.split(".").reduce((node, part) => node?.[part], dict);
   if (typeof value !== "string") throw new Error(`no ${lang} string for ${key}`);
   return value;
+}
+
+// Header problems against the account/status toolbar, as a list (empty = OK).
+// Only the part of an element inside the header slot paints when the slot
+// clips (App's overflow: hidden), so that clipped rect is what is compared.
+// `wholeButtons` also reports any header button cut off at the slot's edge.
+function headerProblems(page: Page, wholeButtons: boolean): Promise<string[]> {
+  return page.evaluate((wholeButtons) => {
+    const bar = document.querySelector('[role="toolbar"]');
+    const slot = bar?.previousElementSibling;
+    if (!bar || !slot) return ["toolbar or header slot not found"];
+    const b = bar.getBoundingClientRect();
+    const s = slot.getBoundingClientRect();
+    const clips = getComputedStyle(slot).overflowX !== "visible";
+    const out: string[] = [];
+    slot.querySelectorAll("button, h1, p").forEach((el) => {
+      const r = el.getBoundingClientRect();
+      if (r.width === 0) return;
+      const name = `${el.tagName} "${el.getAttribute("aria-label") ?? el.textContent}"`;
+      const left = clips ? Math.max(r.left, s.left) : r.left;
+      const right = clips ? Math.min(r.right, s.right) : r.right;
+      if (right > b.left + 0.5 && left < b.right - 0.5 && r.bottom > b.top && r.top < b.bottom) {
+        out.push(`${name} under the toolbar`);
+      }
+      if (wholeButtons && el.tagName === "BUTTON" && (r.left < s.left - 0.5 || r.right > s.right + 0.5)) {
+        out.push(`${name} cut off`);
+      }
+    });
+    return out;
+  }, wholeButtons);
 }
 
 for (const uiLang of ["en", "ar"]) {
@@ -72,22 +102,8 @@ for (const uiLang of ["en", "ar"]) {
             )
             .toEqual({ wide: true, clipped: false });
 
-          // No header control may overlap the account/status toolbar.
-          const overlaps = () => page.evaluate(() => {
-            const bar = document.querySelector('[role="toolbar"]');
-            const row = bar?.previousElementSibling;
-            if (!bar || !row) return ["toolbar or header slot not found"];
-            const b = bar.getBoundingClientRect();
-            const hits: string[] = [];
-            row.querySelectorAll("button, h1, p").forEach((el) => {
-              const r = el.getBoundingClientRect();
-              if (r.width === 0) return;
-              if (r.right > b.left + 0.5 && r.left < b.right - 0.5 && r.bottom > b.top && r.top < b.bottom) {
-                hits.push(`${el.tagName} "${el.getAttribute("aria-label") ?? el.textContent}"`);
-              }
-            });
-            return hits;
-          });
+          // No header control may paint under the account/status toolbar.
+          const overlaps = () => headerProblems(page, false);
           await expect.poll(overlaps, { message: `${route}: elements under the toolbar`, timeout: 10_000 }).toEqual([]);
         }
       } finally {
@@ -152,36 +168,24 @@ for (const [uiLang, width, wholeButtons] of WIDE_CASES) {
           });
         }
         await context.setOffline(true);
-        await expect(page.locator('[role="toolbar"]'), `${route}: offline chip`).toContainText(
-          screenName(uiLang, "sync.offline"),
-          { timeout: 10_000 },
-        );
+        const toolbar = page.locator('[role="toolbar"]');
+        // Both chips must be up before measuring, or the case would pass
+        // against a narrower toolbar than the one it describes.
+        await expect(toolbar, `${route}: unsaved chip`).toContainText(`1 ${screenName(uiLang, "sync.unsaved")}`, {
+          timeout: 10_000,
+        });
+        await expect(toolbar, `${route}: offline chip`).toContainText(screenName(uiLang, "sync.offline"), {
+          timeout: 10_000,
+        });
+        // Measured 224px (en) / 245px (ar) with both chips; idle is 68px.
+        await expect
+          .poll(() => toolbar.evaluate((el) => Math.round(el.getBoundingClientRect().width)), {
+            message: `${route}: toolbar at its wide width`,
+            timeout: 10_000,
+          })
+          .toBeGreaterThanOrEqual(220);
 
-        const problems = () =>
-          page.evaluate((wholeButtons) => {
-            const bar = document.querySelector('[role="toolbar"]');
-            const slot = bar?.previousElementSibling;
-            if (!bar || !slot) return ["toolbar or header slot not found"];
-            const b = bar.getBoundingClientRect();
-            const s = slot.getBoundingClientRect();
-            // What paints is the part inside the slot, if the slot clips.
-            const clips = getComputedStyle(slot).overflowX !== "visible";
-            const out: string[] = [];
-            slot.querySelectorAll("button, h1, p").forEach((el) => {
-              const r = el.getBoundingClientRect();
-              if (r.width === 0) return;
-              const name = `${el.tagName} "${el.getAttribute("aria-label") ?? el.textContent}"`;
-              const left = clips ? Math.max(r.left, s.left) : r.left;
-              const right = clips ? Math.min(r.right, s.right) : r.right;
-              if (right > b.left + 0.5 && left < b.right - 0.5 && r.bottom > b.top && r.top < b.bottom) {
-                out.push(`${name} under the toolbar`);
-              }
-              if (wholeButtons && el.tagName === "BUTTON" && (r.left < s.left - 0.5 || r.right > s.right + 0.5)) {
-                out.push(`${name} cut off`);
-              }
-            });
-            return out;
-          }, wholeButtons);
+        const problems = () => headerProblems(page, wholeButtons);
         await expect.poll(problems, { message: `${route}: header vs toolbar`, timeout: 10_000 }).toEqual([]);
         await context.setOffline(false);
       }
