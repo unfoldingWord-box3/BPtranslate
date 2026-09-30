@@ -23,12 +23,12 @@
 
 import type { TFunction } from "i18next";
 
-import { parseAlignment, type SourceWord } from "../../lib/alignment";
-import { matchNorm, matchSourceTokens } from "../../lib/highlight";
-import { collectSourceWordNodes } from "../../lib/quoteBuilder";
-import { decodeMorph, morphemeText, type DecodedMorph } from "../../lib/morph";
-import { parseTaRef } from "../../lib/taArticle";
-import { twShort } from "../../lib/twArticle";
+import { parseAlignment, type SourceWord } from "../../lib/alignment.ts";
+import { matchNorm, matchSourceTokens } from "../../lib/highlight.ts";
+import { collectSourceWordNodes } from "../../lib/quoteBuilder.ts";
+import { decodeMorph, morphemeText, type DecodedMorph } from "../../lib/morph.ts";
+import { parseTaRef } from "../../lib/taArticle.ts";
+import { twShort } from "../../lib/twArticle.ts";
 import type { TnRow, TqRow, TwlRow } from "../../sync/api";
 
 // ─── original words ─────────────────────────────────────────────────────────
@@ -174,6 +174,11 @@ export interface ProseWord {
   text: string;
   /** null = supplied: this word has no original word behind it. */
   groupId: string | null;
+  /**
+   * The token's own `x-occurrence` (1 when absent). With `text` it forms the
+   * `text|occurrence` key the note-quote highlighter marks (#431).
+   */
+  occurrence: number;
 }
 export interface ProseText {
   kind: "text";
@@ -226,7 +231,13 @@ export function buildLane(
   let wordIndex = 0;
   for (const item of state.stream) {
     if (item.kind === "word") {
-      prose.push({ kind: "word", id: item.word.id, text: item.word.text, groupId: item.alignedTo });
+      prose.push({
+        kind: "word",
+        id: item.word.id,
+        text: item.word.text,
+        groupId: item.alignedTo,
+        occurrence: parseInt(item.word.occurrence, 10) || 1,
+      });
       if (item.alignedTo && !orderOfGroup.has(item.alignedTo)) {
         orderOfGroup.set(item.alignedTo, wordIndex);
       }
@@ -342,14 +353,13 @@ function firstBit(text: string | null | undefined, limit = 110): string {
  * indices — so we map its result back through `(matchNorm(text), occurrence)`,
  * the same identity the source words carry.
  *
- * KNOWN LIMITATION, measured not assumed: UHB `\w` tokens do NOT carry
- * `x-occurrence` — 3400 of 3400 in docs/samples/hbo_uhb_38-ZEC.usfm and 18487
- * of 18487 in hbo_uhb_23-ISA.usfm have no such attribute (an earlier version of
- * this comment claimed the opposite). Both sides of the join default to 1
- * identically, so nothing mis-fires, but a verse repeating the same pointed
- * form collapses every repeat onto the FIRST position: a quote on the second
- * occurrence underlines the first. It never invents an anchor that does not
- * exist, and it is confined to this read-only screen's highlighting.
+ * Depends on SERVED source trees: the raw UHB files stamp no `x-occurrence`
+ * on `\w` (3400 of 3400 in docs/samples/hbo_uhb_38-ZEC.usfm), which would key
+ * every repeat as `text|1` and collapse a second-occurrence quote onto the
+ * first. GET /api/chapters renumbers source occurrences by position
+ * (api/src/chapters.ts) before the client sees them, so repeats resolve
+ * correctly here — pinned on ZEC 1:1's two בֶּן in alignmentStripModel.test.mjs
+ * (#431 review). A raw, unrenumbered tree would still collapse.
  */
 export function anchorPositions(
   sourceVerseObjects: unknown[] | null,

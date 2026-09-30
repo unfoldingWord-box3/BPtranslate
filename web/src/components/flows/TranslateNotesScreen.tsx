@@ -106,6 +106,8 @@ import { LockBanner } from "./FlowBanners";
 import { FlowStatusChip, type FlowStatusKind } from "./FlowStatusChip";
 import { isAquiferDraftRow, unescapeNewlines, waitForOp } from "./translateShared";
 import { useSwipeNav } from "./useSwipeNav";
+import { UltAlignmentStrip } from "./UltAlignmentStrip";
+import { buildAlignmentStrip } from "./alignmentStripModel";
 import type { FlowScreenContext } from "./types";
 
 import { useBook } from "../../hooks/useBook";
@@ -114,7 +116,7 @@ import { useProjectConfig, isTranslationProject } from "../../hooks/useProjectCo
 import { useSourceNotes } from "../../hooks/useSourceNotes";
 import { useSourceScripture } from "../../hooks/useSourceScripture";
 import { useUnsavedGuard } from "../../hooks/useUnsavedGuard";
-import { useShowSourceUlt } from "../../lib/editorPrefs";
+import { useShowSourceUlt, useShowSourceUltAlignment } from "../../lib/editorPrefs";
 import { resolveSourceRef } from "../../lib/sourceRef";
 import {
   buildVerseIndex,
@@ -317,6 +319,10 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   const [showSourceUlt, setShowSourceUlt] = useShowSourceUlt();
   const sourceUltOn = sourceUltAvailable && showSourceUlt;
   const sourceUlt = useSourceScripture(sourceUltOn ? book : null, chapter, sourceLitRef, "SOURCE_LIT");
+  // Second toggle (#431): draw that lane as a read-only alignment strip. Only
+  // offered, and only effective, while the lane itself is on.
+  const [showUltAlignment, setShowUltAlignment] = useShowSourceUltAlignment();
+  const ultAlignmentOn = sourceUltOn && showUltAlignment;
 
   const { status, data, refetch, applyLocalRowPatch, applyLocalRowReplacement } = useChapter(
     book,
@@ -812,6 +818,21 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   const sourceUltSegments = useMemo(
     () => flowLaneSegmentsAcross(sourceUltLane.slices, rowQuote, rowOccurrence),
     [sourceUltLane, rowQuote, rowOccurrence],
+  );
+  // The same slices, joined word-by-word onto the original (#431). Computed
+  // only while the alignment strip is shown, so #430's plain lane pays nothing.
+  const sourceUltStrip = useMemo(
+    () =>
+      ultAlignmentOn
+        ? buildAlignmentStrip(
+            // A bridged en_ult row can't be joined verse-by-verse; the model
+            // says so (null) and the plain lane shows instead.
+            sourceUltLane.slices.map((s) => ({ ...s, verseEnd: sourceUltIndex[s.verse]?.verse_end ?? null })),
+            rowQuote,
+            rowOccurrence,
+          )
+        : [],
+    [ultAlignmentOn, sourceUltLane, sourceUltIndex, rowQuote, rowOccurrence],
   );
 
   const mark = useCallback(
@@ -1676,16 +1697,59 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
                     sx={{ flex: "none", fontWeight: 700, letterSpacing: "0.04em" }}
                   />
                 )}
+                {sourceUltOn && (
+                  // Second toggle (#431), beside the lane toggle it depends on:
+                  // swaps that lane for the read-only alignment strip.
+                  <Chip
+                    size="small"
+                    clickable
+                    variant={showUltAlignment ? "filled" : "outlined"}
+                    color={showUltAlignment ? "primary" : "default"}
+                    label={t("flowTranslate.alignmentChip")}
+                    aria-pressed={showUltAlignment}
+                    // The visible text is the accessible name (label-in-name);
+                    // the longer explanation is a description, not a rename.
+                    title={t("flowTranslate.toggleSourceUltAlignment", { label: sourceUltLabel })}
+                    onClick={() => setShowUltAlignment(!showUltAlignment)}
+                    sx={{ flex: "none", fontWeight: 700 }}
+                  />
+                )}
               </Stack>
               {sourceUltOn &&
                 (sourceUlt.status === "ready" && sourceUltText ? (
-                  <Lane
-                    label={sourceUltLabel}
-                    text={sourceUltText}
-                    segments={sourceUltSegments}
-                    labelFontFamily={theme.typography.fontFamily}
-                    mark={mark}
-                  />
+                  ultAlignmentOn && sourceUltStrip && sourceUltStrip.length > 0 ? (
+                    <UltAlignmentStrip
+                      // A new note is a new strip: remount drops the old
+                      // hover/pinned focus (object identity of the slices
+                      // alone is not a note change).
+                      key={row.id}
+                      label={sourceUltLabel}
+                      slices={sourceUltStrip}
+                      originalLabel={sourceLabel}
+                      originalDir={sourceDir}
+                      labelFontFamily={theme.typography.fontFamily}
+                      quoteBg={HL}
+                    />
+                  ) : (
+                    <>
+                      {ultAlignmentOn && sourceUltStrip === null && (
+                        <Typography
+                          variant="caption"
+                          data-align-bridged=""
+                          sx={{ display: "block", mb: 0.5, color: "text.secondary", fontStyle: "italic" }}
+                        >
+                          {t("flowTranslate.alignmentBridged", { label: sourceUltLabel })}
+                        </Typography>
+                      )}
+                      <Lane
+                        label={sourceUltLabel}
+                        text={sourceUltText}
+                        segments={sourceUltSegments}
+                        labelFontFamily={theme.typography.fontFamily}
+                        mark={mark}
+                      />
+                    </>
+                  )
                 ) : (
                   // Not the Lane's own empty state: that copy talks about an
                   // undrafted TARGET lane "in this workspace", which is the wrong
