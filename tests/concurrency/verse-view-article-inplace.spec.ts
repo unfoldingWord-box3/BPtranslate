@@ -151,6 +151,8 @@ test.describe("verse view in-place articles (#478)", () => {
 
       const shots = process.env.ARTICLE_DIR_SHOTS;
       if (shots) await panel.screenshot({ path: `${shots}/article-${c.expected}.png` });
+      // A config refetch can still be in the route when the context closes.
+      await page.unrouteAll({ behavior: "ignoreErrors" });
       await context.close();
     });
   }
