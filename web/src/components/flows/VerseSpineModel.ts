@@ -174,6 +174,11 @@ export interface ProseWord {
   text: string;
   /** null = supplied: this word has no original word behind it. */
   groupId: string | null;
+  /**
+   * The token's own `x-occurrence` (1 when absent). With `text` it forms the
+   * `text|occurrence` key the note-quote highlighter marks (#431).
+   */
+  occurrence: number;
 }
 export interface ProseText {
   kind: "text";
@@ -226,7 +231,13 @@ export function buildLane(
   let wordIndex = 0;
   for (const item of state.stream) {
     if (item.kind === "word") {
-      prose.push({ kind: "word", id: item.word.id, text: item.word.text, groupId: item.alignedTo });
+      prose.push({
+        kind: "word",
+        id: item.word.id,
+        text: item.word.text,
+        groupId: item.alignedTo,
+        occurrence: parseInt(item.word.occurrence, 10) || 1,
+      });
       if (item.alignedTo && !orderOfGroup.has(item.alignedTo)) {
         orderOfGroup.set(item.alignedTo, wordIndex);
       }
