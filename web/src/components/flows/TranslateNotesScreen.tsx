@@ -822,8 +822,17 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   // The same slices, joined word-by-word onto the original (#431). Computed
   // only while the alignment strip is shown, so #430's plain lane pays nothing.
   const sourceUltStrip = useMemo(
-    () => (ultAlignmentOn ? buildAlignmentStrip(sourceUltLane.slices, rowQuote, rowOccurrence) : []),
-    [ultAlignmentOn, sourceUltLane, rowQuote, rowOccurrence],
+    () =>
+      ultAlignmentOn
+        ? buildAlignmentStrip(
+            // A bridged en_ult row can't be joined verse-by-verse; the model
+            // says so (null) and the plain lane shows instead.
+            sourceUltLane.slices.map((s) => ({ ...s, verseEnd: sourceUltIndex[s.verse]?.verse_end ?? null })),
+            rowQuote,
+            rowOccurrence,
+          )
+        : [],
+    [ultAlignmentOn, sourceUltLane, sourceUltIndex, rowQuote, rowOccurrence],
   );
 
   const mark = useCallback(
@@ -1698,7 +1707,9 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
                     color={showUltAlignment ? "primary" : "default"}
                     label={t("flowTranslate.alignmentChip")}
                     aria-pressed={showUltAlignment}
-                    aria-label={t("flowTranslate.toggleSourceUltAlignment", { label: sourceUltLabel })}
+                    // The visible text is the accessible name (label-in-name);
+                    // the longer explanation is a description, not a rename.
+                    title={t("flowTranslate.toggleSourceUltAlignment", { label: sourceUltLabel })}
                     onClick={() => setShowUltAlignment(!showUltAlignment)}
                     sx={{ flex: "none", fontWeight: 700 }}
                   />
@@ -1706,8 +1717,12 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
               </Stack>
               {sourceUltOn &&
                 (sourceUlt.status === "ready" && sourceUltText ? (
-                  ultAlignmentOn && sourceUltStrip.length > 0 ? (
+                  ultAlignmentOn && sourceUltStrip && sourceUltStrip.length > 0 ? (
                     <UltAlignmentStrip
+                      // A new note is a new strip: remount drops the old
+                      // hover/pinned focus (object identity of the slices
+                      // alone is not a note change).
+                      key={row.id}
                       label={sourceUltLabel}
                       slices={sourceUltStrip}
                       originalLabel={sourceLabel}
@@ -1716,13 +1731,24 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
                       quoteBg={HL}
                     />
                   ) : (
-                    <Lane
-                      label={sourceUltLabel}
-                      text={sourceUltText}
-                      segments={sourceUltSegments}
-                      labelFontFamily={theme.typography.fontFamily}
-                      mark={mark}
-                    />
+                    <>
+                      {ultAlignmentOn && sourceUltStrip === null && (
+                        <Typography
+                          variant="caption"
+                          data-align-bridged=""
+                          sx={{ display: "block", mb: 0.5, color: "text.secondary", fontStyle: "italic" }}
+                        >
+                          {t("flowTranslate.alignmentBridged", { label: sourceUltLabel })}
+                        </Typography>
+                      )}
+                      <Lane
+                        label={sourceUltLabel}
+                        text={sourceUltText}
+                        segments={sourceUltSegments}
+                        labelFontFamily={theme.typography.fontFamily}
+                        mark={mark}
+                      />
+                    </>
                   )
                 ) : (
                   // Not the Lane's own empty state: that copy talks about an

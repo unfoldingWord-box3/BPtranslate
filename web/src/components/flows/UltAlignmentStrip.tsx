@@ -11,7 +11,7 @@
 // Nothing here edits or writes. Words wrap (#202); the strip never scrolls
 // sideways.
 
-import { useEffect, useState, type PointerEvent } from "react";
+import { useState, type PointerEvent } from "react";
 import { useTranslation } from "react-i18next";
 import Box from "@mui/material/Box";
 import { alpha, useTheme } from "@mui/material/styles";
@@ -49,12 +49,9 @@ export function UltAlignmentStrip({
   const theme = useTheme();
   const litBg = alpha(KINDLE, theme.palette.mode === "dark" ? 0.4 : 0.28);
   const [hover, setHover] = useState<StripFocus>(null);
+  // The caller keys this component by note id, so a different note remounts
+  // it with no focus; a re-derived `slices` for the same note keeps it.
   const [pinned, setPinned] = useState<StripFocus>(null);
-  // A different note (or verse) is a different strip: drop the old focus.
-  useEffect(() => {
-    setHover(null);
-    setPinned(null);
-  }, [slices]);
   const focus = hover ?? pinned;
   const toggle = (next: StripFocus) => setPinned((cur) => (sameFocus(cur, next) ? null : next));
 
@@ -124,6 +121,7 @@ export function UltAlignmentStrip({
             <Box
               dir={originalDir}
               lang={originalDir === "rtl" ? "hbo" : "grc"}
+              role="group"
               aria-label={originalLabel}
               sx={{ fontFamily: ORIGINAL_FONT_STACK, fontSize: "1.3rem", lineHeight: 1.9, textAlign: "start" }}
             >
@@ -155,6 +153,8 @@ export function UltAlignmentStrip({
                 even inside the Arabic UI. */}
             <Box
               dir="auto"
+              role="group"
+              aria-label={label}
               sx={{ fontFamily: SCRIPTURE_FONT_STACK, fontSize: "1.03rem", lineHeight: 1.7, textAlign: "start", mt: 0.5 }}
             >
               {slice.lane.prose.map((tok, i) => {

@@ -23,6 +23,8 @@ import {
 /** One verse of the lane, as coveredLaneSlices produces it. */
 export interface StripSliceInput {
   verse: number;
+  /** The lane row's `verse_end` — set (> verse) when the ULT row is a bridge. */
+  verseEnd?: number | null;
   verseObjects: unknown[] | null | undefined;
   sourceVerseObjects?: unknown[] | null;
 }
@@ -45,12 +47,20 @@ export interface AlignmentStripSlice {
  * Build one strip slice per covered verse. A bridged note (#341) gets one
  * slice per verse because occurrence numbers and alignment groups are per
  * verse; the caller separates the slices with verse markers.
+ *
+ * Returns null — "show the plain lane instead" — when any ULT row is a USFM
+ * verse bridge (`\v 6-9`). The lane then hands over the whole bridge as the
+ * target but only the covered UHB/UGNT verses as the source, and the bridge's
+ * `x-occurrence` numbering does not line up with a per-verse source walk, so
+ * milestones from another verse would resolve onto the wrong original word.
+ * Lighting nothing is honest; lighting the wrong word is not.
  */
 export function buildAlignmentStrip(
   slices: readonly StripSliceInput[],
   quote: string | null | undefined,
   occurrence: number | null | undefined,
-): AlignmentStripSlice[] {
+): AlignmentStripSlice[] | null {
+  if (slices.some((s) => s.verseEnd != null && s.verseEnd > s.verse)) return null;
   const out: AlignmentStripSlice[] = [];
   for (const slice of slices) {
     const target = Array.isArray(slice.verseObjects) ? slice.verseObjects : null;

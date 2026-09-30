@@ -12,6 +12,8 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { parseSourceUsfm } from "../../lib/sourceUsfm.ts";
+import { buildVerseIndex, coveredLaneSlices } from "../../lib/verseRange.ts";
+import { recomputeTargetOccurrences } from "../../../../api/src/importParsers.ts";
 import { buildAlignmentStrip, litUp, sameFocus } from "./alignmentStripModel.ts";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
@@ -149,4 +151,55 @@ test("a bridged note gets one slice per verse; a verse with no ULT tree is skipp
     1,
   );
   assert.deepEqual(strip.map((s) => s.verse), [1, 3]);
+});
+
+test("a quote on the 2nd occurrence of a repeated Hebrew word marks the 2nd, not the 1st", () => {
+  // ZEC 1:1 has בֶּן twice (positions 10 and 12). The raw UHB file stamps no
+  // x-occurrence on \w, but the screen never sees it raw: GET /api/chapters
+  // renumbers source occurrences by position (api/src/chapters.ts, the
+  // "two כָל in ZEC 5:3" comment). Build the source the way it is served.
+  const served = structuredClone(uhb[1][1].content.verseObjects);
+  recomputeTargetOccurrences(served);
+  const [s] = buildAlignmentStrip(
+    [{ verse: 1, verseObjects: ult[1][1].content.verseObjects, sourceVerseObjects: served }],
+    "בֶּן",
+    2,
+  );
+  assert.deepEqual([...s.quotedPositions], [12]);
+  const marked = wordsOf(s).filter((t) => s.quotedWordIds.has(t.id));
+  assert.deepEqual(marked.map((t) => t.text), ["son", "of"]);
+  assert.equal(marked[0].groupId, groupOf(s, "son", 2), "the second 'son of', not the first");
+});
+
+// A published ULT verse bridge (\v 1-2) whose note covers only verse 2. The
+// lane hands over the whole bridge as the target but only UHB verse 2 as the
+// source, so the bridge's verse-1 "Yahweh" would resolve onto verse 2's
+// יְהוָה — lighting a word it does not translate. Hand-built, real USFM syntax.
+const BRIDGED_ULT = String.raw`\id ZEC
+\c 1
+\p
+\v 1-2 \zaln-s |x-strong="H1696" x-lemma="דָּבַר" x-morph="He,C:Vpw3ms" x-occurrence="1" x-occurrences="1" x-content="וַיְדַבֵּר"\*\w Then|x-occurrence="1" x-occurrences="1"\w* \w spoke|x-occurrence="1" x-occurrences="1"\w*\zaln-e\* \zaln-s |x-strong="H3068" x-lemma="יְהֹוָה" x-morph="He,Np" x-occurrence="1" x-occurrences="2" x-content="יְהוָה"\*\w Yahweh|x-occurrence="1" x-occurrences="2"\w*\zaln-e\*. \zaln-s |x-strong="H0559" x-lemma="אָמַר" x-morph="He,C:Vqw3ms" x-occurrence="1" x-occurrences="1" x-content="וַיֹּאמֶר"\*\w And|x-occurrence="1" x-occurrences="1"\w* \w said|x-occurrence="1" x-occurrences="1"\w*\zaln-e\* \zaln-s |x-strong="H3068" x-lemma="יְהֹוָה" x-morph="He,Np" x-occurrence="2" x-occurrences="2" x-content="יְהוָה"\*\w Yahweh|x-occurrence="2" x-occurrences="2"\w*\zaln-e\*.
+`;
+const BRIDGED_UHB = String.raw`\id ZEC
+\c 1
+\p
+\v 1 \w וַיְדַבֵּר|lemma="דָּבַר" strong="c:H1696" x-morph="He,C:Vpw3ms"\w* \w יְהוָה|lemma="יְהֹוָה" strong="H3068" x-morph="He,Np"\w*׃
+\v 2 \w וַיֹּאמֶר|lemma="אָמַר" strong="c:H0559" x-morph="He,C:Vqw3ms"\w* \w יְהוָה|lemma="יְהֹוָה" strong="H3068" x-morph="He,Np"\w*׃
+`;
+
+test("a bridged ULT verse is not aligned (falls back to the plain lane) rather than lighting wrong words", () => {
+  const ultIdx = buildVerseIndex(parseSourceUsfm(BRIDGED_ULT, "ZEC", "SOURCE_LIT")[1]);
+  const uhbIdx = buildVerseIndex(parseSourceUsfm(BRIDGED_UHB, "ZEC", "UHB")[1]);
+  assert.equal(ultIdx[2].verse_end, 2, "fixture really is a \\v 1-2 bridge");
+  for (const covered of [[2], [1, 2]]) {
+    const { slices } = coveredLaneSlices(ultIdx, uhbIdx, covered);
+    const strip = buildAlignmentStrip(
+      slices.map((s) => ({ ...s, verseEnd: ultIdx[s.verse]?.verse_end ?? null })),
+      null,
+      1,
+    );
+    assert.equal(strip, null, `covered ${covered}: bridged lane must not be aligned`);
+  }
+  // A plain (unbridged) slice list still aligns.
+  assert.ok(Array.isArray(buildAlignmentStrip([{ verse: 1, verseEnd: null, verseObjects: ult[1][1].content.verseObjects, sourceVerseObjects: uhb[1][1].content.verseObjects }], null, 1)));
 });

@@ -65,7 +65,7 @@ test.describe("notes screen ULT alignment strip (#431)", () => {
   test("desktop: hovering either side lights the aligned group on both", async ({ browser }) => {
     const { context, page } = await openNotes(browser, "ult-align-desk", 1280, false, "/#/notes/ZEC/1/1");
     await expect(strip(page)).toBeVisible({ timeout: 20_000 });
-    await expect(page.getByRole("button", { name: /Show which ULT words translate/ })).toHaveAttribute(
+    await expect(page.getByRole("button", { name: "Alignment", exact: true })).toHaveAttribute(
       "aria-pressed",
       "true",
     );
@@ -98,7 +98,7 @@ test.describe("notes screen ULT alignment strip (#431)", () => {
     await expect(litOrig(page)).toHaveCount(0);
 
     // Alignment off → back to #430's plain lane.
-    await page.getByRole("button", { name: /Show which ULT words translate/ }).click();
+    await page.getByRole("button", { name: "Alignment", exact: true }).click();
     await expect(strip(page)).toHaveCount(0);
     await context.close();
   });
