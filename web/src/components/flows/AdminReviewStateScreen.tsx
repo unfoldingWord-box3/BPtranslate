@@ -224,13 +224,18 @@ export default function AdminReviewStateScreen({ role, me }: FlowScreenContext) 
     const { book: target, body } = pending;
     setApplying(true);
     setActionError(null);
+    setResult(null);
     try {
       const res = await api.reviewStateApply(target, body);
       setResult(res);
     } catch (e) {
-      // A timeout or dropped connection can land AFTER the server committed, so
-      // say it may have partly applied and reload the counts either way.
-      setActionError(t("adminPages.reviewState.errMaybeApplied", { detail: errorText(e) }));
+      // A timeout, dropped connection or 5xx can land AFTER the server
+      // committed, so say it may have partly applied. A 4xx is a refusal before
+      // any write. Reload the counts either way.
+      const refused = e instanceof ApiError && e.status >= 400 && e.status < 500;
+      setActionError(
+        refused ? errorText(e) : t("adminPages.reviewState.errMaybeApplied", { detail: errorText(e) }),
+      );
     } finally {
       setPending(null);
       await loadSummary(target);

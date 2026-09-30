@@ -4,7 +4,7 @@
 // whole book, and never silently widen to the whole book.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildReviewSweepBody, parseReviewStateSwept, reviewStatePatches } from "./reviewStateSweep.ts";
+import { buildReviewSweepBody, parseReviewStateSwept, reviewStatePatches, reviewStateSnapshot } from "./reviewStateSweep.ts";
 // The real server-side parser: every body the page builds must be accepted by
 // it and mean the same scope, so the page and the route cannot drift apart.
 import { parseSweepRequest } from "../../../api/src/reviewState.ts";
@@ -91,4 +91,25 @@ test("reviewStatePatches returns only rows whose state moved, and never touches 
     { id: "a", translation_state: "validated" },
     { id: "c", translation_state: "validated" },
   ]);
+});
+
+test("reviewStatePatches skips rows whose local state changed while the refetch was in flight", () => {
+  const atEvent = [
+    { id: "a", translation_state: "edited" },
+    { id: "b", translation_state: "edited" },
+  ];
+  const since = reviewStateSnapshot(atEvent);
+  // The translator approved "b" by hand after the refetch started; the server
+  // read predates that click.
+  const local = [
+    { id: "a", translation_state: "edited" },
+    { id: "b", translation_state: "validated" },
+    { id: "late", translation_state: null },
+  ];
+  const fresh = [
+    { id: "a", translation_state: "validated" },
+    { id: "b", translation_state: "edited" },
+    { id: "late", translation_state: "validated" },
+  ];
+  assert.deepEqual(reviewStatePatches(local, fresh, since), [{ id: "a", translation_state: "validated" }]);
 });

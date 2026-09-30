@@ -63,17 +63,32 @@ export function parseReviewStateSwept(raw: unknown): ReviewStateSweptEvent | nul
 
 type RowState = "ai_draft" | "edited" | "validated" | null;
 
-/** State-only patches for rows held locally whose translation_state moved. */
+/** Each local row's translation_state, captured when a sweep refetch starts. */
+export function reviewStateSnapshot(
+  rows: ReadonlyArray<{ id: string; translation_state?: RowState }>,
+): Map<string, RowState> {
+  return new Map(rows.map((r) => [r.id, r.translation_state ?? null]));
+}
+
+/**
+ * State-only patches for rows held locally whose translation_state moved.
+ * `since` is the snapshot taken when the refetch started: a row whose local
+ * state changed while the refetch was in flight (a translator's own approve)
+ * is newer than the server read, so it is left alone.
+ */
 export function reviewStatePatches(
   local: ReadonlyArray<{ id: string; translation_state?: RowState }>,
   fresh: ReadonlyArray<{ id: string; translation_state?: RowState }>,
+  since?: ReadonlyMap<string, RowState>,
 ): Array<{ id: string; translation_state: RowState }> {
   const byId = new Map(fresh.map((r) => [r.id, r.translation_state ?? null]));
   const out: Array<{ id: string; translation_state: RowState }> = [];
   for (const r of local) {
     if (!byId.has(r.id)) continue;
+    const cur = r.translation_state ?? null;
+    if (since && (!since.has(r.id) || since.get(r.id) !== cur)) continue;
     const next = byId.get(r.id) ?? null;
-    if ((r.translation_state ?? null) !== next) out.push({ id: r.id, translation_state: next });
+    if (cur !== next) out.push({ id: r.id, translation_state: next });
   }
   return out;
 }

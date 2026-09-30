@@ -59,7 +59,7 @@ import {
 import { buildVerseIndex, concatSourceRange, formatVerseLabel, noteCoveredVerses } from "../lib/verseRange";
 import { buildTnQuickRequest } from "../lib/tnQuickRequest";
 import { isApprovableRow } from "../lib/reviewApproval";
-import { reviewStatePatches } from "../lib/reviewStateSweep";
+import { reviewStatePatches, reviewStateSnapshot } from "../lib/reviewStateSweep";
 import { versionLabel } from "../lib/versionLabels";
 import { findSourceForTargetText, extractTargetSelectionText, type HighlightKey, type ReorderHighlight } from "../lib/highlight";
 import { buildQuoteFromSelection, collectSourceWordNodes, selectionFromQuote } from "../lib/quoteBuilder";
@@ -298,6 +298,7 @@ export function Shell({
   // toast state declared after this hook), so the WS handler reaches it through
   // a ref, mirroring dataRef above.
   const promptRefreshRef = useRef<(pipelineType: string) => void>(() => {});
+  const sweepSeqRef = useRef(0);
   // Lane freeze/settled handlers reach state declared further down (toast,
   // aligner) through refs, same as promptRefreshRef above.
   const laneFreezeRef = useRef<(event: LaneReplacementEvent) => void>(() => {});
@@ -372,13 +373,18 @@ export function Shell({
       // changes translation_state only — never content or version — so patch
       // just that field onto the rows on screen instead of a full refetch that
       // would flash the chapter and replace rows a translator is looking at.
+      // Only the newest sweep's refetch may patch: an older one can resolve
+      // last with a pre-sweep read (approve, then reopen in quick succession).
+      const seq = ++sweepSeqRef.current;
+      const kind = event.resource;
+      const since = reviewStateSnapshot(dataRef.current?.[kind] ?? []);
       void api
         .getChapter(event.book, event.chapter)
         .then((fresh) => {
+          if (seq !== sweepSeqRef.current) return;
           const cur = dataRef.current;
           if (!cur || cur.book !== fresh.book || cur.chapter !== fresh.chapter) return;
-          const kind = event.resource;
-          for (const p of reviewStatePatches(cur[kind], fresh[kind])) {
+          for (const p of reviewStatePatches(cur[kind], fresh[kind], since)) {
             applyLocalRowPatch(kind, p.id, { translation_state: p.translation_state });
           }
         })
