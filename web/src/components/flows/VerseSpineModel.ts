@@ -23,12 +23,12 @@
 
 import type { TFunction } from "i18next";
 
-import { parseAlignment, type SourceWord } from "../../lib/alignment";
-import { matchNorm, matchSourceTokens } from "../../lib/highlight";
-import { collectSourceWordNodes } from "../../lib/quoteBuilder";
-import { decodeMorph, morphemeText, type DecodedMorph } from "../../lib/morph";
-import { parseTaRef } from "../../lib/taArticle";
-import { twShort } from "../../lib/twArticle";
+import { parseAlignment, type SourceWord } from "../../lib/alignment.ts";
+import { matchNorm, matchSourceTokens } from "../../lib/highlight.ts";
+import { collectSourceWordNodes } from "../../lib/quoteBuilder.ts";
+import { decodeMorph, morphemeText, type DecodedMorph } from "../../lib/morph.ts";
+import { parseTaRef } from "../../lib/taArticle.ts";
+import { twShort } from "../../lib/twArticle.ts";
 import type { TnRow, TqRow, TwlRow } from "../../sync/api";
 
 // ─── original words ─────────────────────────────────────────────────────────
