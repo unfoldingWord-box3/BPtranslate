@@ -131,6 +131,18 @@ export const ADMIN_SURFACES: AdminSurfaceEntry[] = [
       "\"Run export now\" confirm dialog: scope a manual export to one resource (tn/tq/twl/ult/ust) and, for tn/tq/twl on a specific book, a chapter range — e.g. \"Mark 13-14 translation notes\" instead of the whole book.",
   },
   {
+    id: "reviewState",
+    label: "Review state (bulk-approve or reopen a chapter range for tn / tq)",
+    classic: null,
+    desk: {
+      page: "review",
+      file: "src/components/flows/AdminReviewStateScreen.tsx",
+      anchor: "function AdminReviewStateScreen",
+    },
+    notes:
+      "Desk-only by design (#296): new admin features land on the desk, and classic #/preferences is slated to retire (#173), so no classic port is planned. Calls POST /api/books/:book/review-state — dry run first, then an explicit confirm.",
+  },
+  {
     id: "aiPipelines",
     label: "AI studio (run AI pipelines)",
     classic: null,

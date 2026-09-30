@@ -63,7 +63,7 @@ type Location =
   | { view: "translateWords"; book: string }
   | { view: "translateScripture"; book: string; chapter: number; verse: number | null }
   | { view: "translateAlign"; book: string; chapter: number; verse: number; mode: "single" | "dual" }
-  | { view: "admin"; section: "team" | "setup" | "workflow" | "progress" };
+  | { view: "admin"; section: "team" | "setup" | "workflow" | "progress" | "review" };
 
 // The position (book/chapter/verse) a route represents, for recording the
 // user's last location so the Books "Continue" card can jump them back. Returns
@@ -117,6 +117,7 @@ const AdminTeamScreen = lazy(() => import("./components/flows/AdminTeamScreen"))
 const AdminSetupScreen = lazy(() => import("./components/flows/AdminSetupScreen"));
 const AdminWorkflowScreen = lazy(() => import("./components/flows/AdminWorkflowScreen"));
 const AdminProgressScreen = lazy(() => import("./components/flows/AdminProgressScreen"));
+const AdminReviewStateScreen = lazy(() => import("./components/flows/AdminReviewStateScreen"));
 
 // OBA (Obadiah) is the shortest book in the canon — one chapter, 21 verses.
 // Used as the fallback book code for partial routes (e.g. a hash with a
@@ -277,9 +278,9 @@ function parseHash(): Location {
     };
   }
   // Redesigned admin desk (#/admin/{section}); AdminDesk renders the rail.
-  const ad = location.hash.match(/^#\/admin\/(team|setup|workflow|progress)$/);
+  const ad = location.hash.match(/^#\/admin\/(team|setup|workflow|progress|review)$/);
   if (ad) {
-    return { view: "admin", section: ad[1] as "team" | "setup" | "workflow" | "progress" };
+    return { view: "admin", section: ad[1] as "team" | "setup" | "workflow" | "progress" | "review" };
   }
   // #/alignment (redesign) is distinct from the old 3-segment #/align, which
   // still flows to the fv catch-all below. Must sit above the final book-code
@@ -1061,6 +1062,8 @@ export function App() {
                 <AdminSetupScreen role={auth.role} me={auth.me} onNavigate={navigate} />
               ) : loc.section === "workflow" ? (
                 <AdminWorkflowScreen role={auth.role} me={auth.me} onNavigate={navigate} />
+              ) : loc.section === "review" ? (
+                <AdminReviewStateScreen role={auth.role} me={auth.me} onNavigate={navigate} />
               ) : (
                 <AdminProgressScreen role={auth.role} me={auth.me} onNavigate={navigate} />
               )
