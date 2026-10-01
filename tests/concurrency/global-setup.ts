@@ -4,24 +4,70 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // Synthetic RTL fixture for the direction-guard spec (rtl-direction.spec.ts,
-// issue #293). The seed applied in globalSetup below does three things: pins the
+// issues #293 and #486). The seed applied in globalSetup below pins the
 // workspace to the `en-unfoldingword` preset (so the ULT/UST scripture lanes are
-// actually served — see the seed comment), and overwrites ONE ZEC verse's ULT
-// plain_text with the Arabic string here so the flows notes/questions lanes have
-// real right-to-left content while the UST lane stays English — a mixed screen to
-// assert both `rtl` and `ltr` on. ZEC 6:1 is chosen because it already carries
-// both a tn note and a tq question in the sample bundle, so both flows surfaces
-// have a row to select. Only ULT plain_text is rewritten (not content_json), and
-// the Hebrew UHB original — which the classic + book-view surfaces render RTL by
+// actually served — see the seed comment), overwrites ONE ZEC verse's ULT text
+// with the Arabic sentence here so the scripture surfaces have real
+// right-to-left content while the UST lane stays English (a mixed screen to
+// assert both `rtl` and `ltr` on), and overwrites ONE tn note with an Arabic
+// sentence for the note surfaces. ZEC 6:1 is chosen for scripture because it
+// already carries both a tn note and a tq question in the sample bundle, so both
+// flows surfaces have a row to select.
+//
+// The verse is rewritten in BOTH plain_text and content_json (#486): most
+// scripture surfaces (VerseScreen, DocColumn, BookView, the aligners, the
+// classic active verse) render from content_json, so an Arabic plain_text alone
+// never reaches them. content_json becomes plain unaligned \w words (no
+// alignment milestones); no other spec reads ULT alignment at 6:1.
+//
+// The Arabic note goes on ZEC 6:11, not 6:1, because s1/s2/s5/s6/s7/s8 rewrite
+// the ZEC 6:1 notes; no other spec touches 6:11.
+//
+// Both sentences end in a sentence-final period and embed one Latin token
+// ("AVD"), the two things a bidi bug visibly breaks: in RTL the period paints at
+// the LEFT end of the line, and the Latin run keeps its own left-to-right letter
+// order while sitting in right-to-left word order. rtl-paint.ts measures that.
+// The Hebrew UHB original — which the classic + book-view surfaces render RTL by
 // script (versionIsRtl) — is left completely alone.
 export const RTL_FIXTURE = {
   book: "ZEC",
   chapter: 6,
   verse: 1,
-  // "This is Arabic text for testing the text direction." — a distinctive,
+  // "This is Arabic text AVD for testing the text direction." — a distinctive,
   // first-strong-RTL string so `dir="auto"` resolves the lane to rtl.
-  arabicUlt: "هَٰذَا نَصٌّ عَرَبِيٌّ لِاخْتِبَارِ ٱتِّجَاهِ ٱلنَّصِّ.",
+  arabicUlt: "هَٰذَا نَصٌّ عَرَبِيٌّ AVD لِاخْتِبَارِ ٱتِّجَاهِ ٱلنَّصِّ.",
+  // The Latin token embedded in both Arabic sentences.
+  latin: "AVD",
+  // tn row whose note becomes Arabic: sample row f66i, ZEC 6:11 ("Jehozadak").
+  noteId: "f66i",
+  noteVerse: 11,
+  // "This is the name of a man AVD in the translation."
+  arabicNote: "هَٰذَا ٱسْمُ رَجُلٍ AVD فِي ٱلتَّرْجَمَةِ.",
 } as const;
+
+/** usfm-js verse object for `text`: unaligned \w words, spaces, a final "." as text. */
+function verseObjectsFor(text: string): { verseObjects: unknown[] } {
+  const body = text.replace(/\.$/, "");
+  const words = body.split(" ");
+  const total = new Map<string, number>();
+  for (const w of words) total.set(w, (total.get(w) ?? 0) + 1);
+  const seen = new Map<string, number>();
+  const verseObjects: unknown[] = [];
+  words.forEach((w, i) => {
+    if (i > 0) verseObjects.push({ type: "text", text: " " });
+    const occ = (seen.get(w) ?? 0) + 1;
+    seen.set(w, occ);
+    verseObjects.push({
+      text: w,
+      tag: "w",
+      type: "word",
+      occurrence: String(occ),
+      occurrences: String(total.get(w)),
+    });
+  });
+  if (body !== text) verseObjects.push({ type: "text", text: "." });
+  return { verseObjects };
+}
 
 // Runs once before any test. Re-imports ZEC from docs/samples into the local
 // D1 instance so every test starts against a known fixture. We pick ZEC
@@ -77,12 +123,13 @@ export default async function globalSetup() {
     );
   }
 
-  // Seed the synthetic Arabic ULT verse for the RTL direction guard (#293).
-  // Written to a SQL file (rather than passed inline) so the Arabic string is
-  // never split/mangled by the shell. Runs AFTER the ZEC import so it wins.
-  console.log("[setup] seeding RTL fixture verse…");
+  // Seed the synthetic Arabic ULT verse + tn note for the RTL direction guard
+  // (#293, #486). Written to a SQL file (rather than passed inline) so the
+  // Arabic strings are never split/mangled by the shell. Runs AFTER the ZEC
+  // import so it wins.
+  console.log("[setup] seeding RTL fixture verse + note…");
   const seedSqlPath = resolve(repoRoot, "scripts/out/seed-rtl-fixture.sql");
-  const esc = RTL_FIXTURE.arabicUlt.replace(/'/g, "''");
+  const sq = (v: string) => v.replace(/'/g, "''");
   writeFileSync(
     seedSqlPath,
     // Pin the test workspace to the standard English uW project (the canonical
@@ -101,11 +148,16 @@ export default async function globalSetup() {
       // the en preset with replacement_required = 0 (its INSERT OR IGNORE never
       // resets an existing row, so a stale ar-bsoj-quarantined row would linger).
       `DELETE FROM scripture_lane_state WHERE lane IN ('lit', 'sim');\n` +
-      // Overwrite ONE ULT verse with Arabic so the `dir="auto"` flows lanes have
-      // real RTL content to render, while UST stays English for the `ltr` half.
-      `UPDATE verses SET plain_text = '${esc}' ` +
+      // Overwrite ONE ULT verse with Arabic (plain_text AND content_json) so the
+      // scripture surfaces have real RTL content to render, while UST stays
+      // English for the `ltr` half.
+      `UPDATE verses SET plain_text = '${sq(RTL_FIXTURE.arabicUlt)}', ` +
+      `content_json = '${sq(JSON.stringify(verseObjectsFor(RTL_FIXTURE.arabicUlt)))}' ` +
       `WHERE book = '${RTL_FIXTURE.book}' AND chapter = ${RTL_FIXTURE.chapter} ` +
-      `AND verse = ${RTL_FIXTURE.verse} AND bible_version = 'ULT';\n`,
+      `AND verse = ${RTL_FIXTURE.verse} AND bible_version = 'ULT';\n` +
+      // ...and ONE tn note with Arabic for the note surfaces (#486).
+      `UPDATE tn_rows SET note = '${sq(RTL_FIXTURE.arabicNote)}' ` +
+      `WHERE book = '${RTL_FIXTURE.book}' AND id = '${RTL_FIXTURE.noteId}';\n`,
   );
   const seed = spawnSync(
     "npx",
