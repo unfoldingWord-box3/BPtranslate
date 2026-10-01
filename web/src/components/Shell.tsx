@@ -246,10 +246,10 @@ interface Props {
   book: string;
   chapter: number;
   initialVerse?: number;
-  // A word-links (twl) row to open on mount (#/{book}/{ch}/{vs}?twl={id}): the
-  // resource column starts on its Words tab with that row active. Read only at
-  // mount — App keys Shell on book, and the jumps that set it (the drafts menu
-  // in the new UI, retired #/words bookmarks, #173) arrive from outside Shell.
+  // A word-links (twl) row to select (#/{book}/{ch}/{vs}?twl={id}), set by the
+  // drafts menu in the new UI and by retired #/words bookmarks (#173). On mount
+  // the resource column also starts on its Words tab; a later change while
+  // mounted selects the row through the chapter-reset effect but leaves the tab.
   initialWordId?: string | null;
   onNavigate?: (book: string, chapter: number, verse?: number) => void;
   bookHook?: UseBookReturn;
@@ -466,8 +466,13 @@ export function Shell({
   const [activeVerse, setActiveVerse] = useState(initialVerse);
   const [activeNoteId, setActiveNoteId] = useState<string | null>(null);
   const [activeWordId, setActiveWordId] = useState<string | null>(initialWordId);
-  // Captured once so the Words tab is only the *initial* tab for this mount.
-  const [openOnWords] = useState(initialWordId !== null);
+  // One-shot: the resource column first renders once `data` arrives (the
+  // early return below), and reads initialTab only then. Clear the flag after
+  // that commit so a later remount (e.g. a layout switch) opens as usual.
+  const [openOnWords, setOpenOnWords] = useState(initialWordId !== null);
+  useEffect(() => {
+    if (data && openOnWords) setOpenOnWords(false);
+  }, [data, openOnWords]);
   // Transient hover preview: hovering a Words row's "locate" spot lights up where
   // its Hebrew/Greek word sits in the scripture, without clicking (no active
   // switch, no verse jump). Feeds the same activeQuote/activeOccurrence highlight
@@ -2144,15 +2149,19 @@ export function Shell({
   // and this won't clobber it. Skips the initial mount by comparing against the
   // mounted position rather than a "has run" flag: StrictMode's dev-only second
   // effect pass would otherwise read as a navigation and reset the mount state,
-  // including a row seeded from initialWordId.
-  const chapterResetKey = useRef(`${chapter}:${initialVerse}`);
+  // including a row seeded from initialWordId. initialWordId is part of the key
+  // and becomes the active word, so a ?twl= navigation while Shell is already
+  // mounted (back/forward, or a hash that changes only ?twl=) selects that row
+  // instead of clearing it. The resource tab is not switched on such a change:
+  // ResourceColumn reads initialTab only when it mounts.
+  const chapterResetKey = useRef(`${chapter}:${initialVerse}:${initialWordId ?? ""}`);
   useEffect(() => {
-    const key = `${chapter}:${initialVerse}`;
+    const key = `${chapter}:${initialVerse}:${initialWordId ?? ""}`;
     if (chapterResetKey.current === key) return;
     chapterResetKey.current = key;
     setActiveVerse(initialVerse);
     setActiveNoteId(null);
-    setActiveWordId(null);
+    setActiveWordId(initialWordId);
     setAlignerTarget(null);
     setDualTarget(null);
     setPanelMode("resources");
@@ -2163,7 +2172,7 @@ export function Shell({
     setDualRightReadingDirty(false);
     setPendingNav(null);
     setPendingDualAction(null);
-  }, [chapter, initialVerse]);
+  }, [chapter, initialVerse, initialWordId]);
 
   // A front-matter / intro chapter (chapter 0) has only the intro tile (verse 0)
   // and no real verses. Navigation defaults activeVerse to 1, which doesn't

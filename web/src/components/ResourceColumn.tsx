@@ -660,7 +660,8 @@ export function ResourceColumn({
     if (activeNoteId) {
       target = root.querySelector<HTMLElement>(`[data-note-id="${activeNoteId}"]`);
     } else if (activeWordId) {
-      target = root.querySelector<HTMLElement>(`[data-word-id="${activeWordId}"]`);
+      // Escaped: activeWordId can come from the URL (#/{book}/{ch}/{vs}?twl=).
+      target = root.querySelector<HTMLElement>(`[data-word-id="${CSS.escape(activeWordId)}"]`);
     }
     if (navTriggered && !target && (pinned.notes || pinned.words || pinned.questions)) {
       target = root.querySelector<HTMLElement>(`[data-verse-group="${activeVerse}"]`);

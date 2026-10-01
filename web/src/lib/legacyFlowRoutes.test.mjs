@@ -20,6 +20,9 @@ const redirects = [
   ["#/words/zec/6/3", "#/ZEC/6/3"],
   ["#/words/ZEC/6/3?row=rqe5", "#/ZEC/6/3?twl=rqe5"],
   ["#/words/ZEC/6/3?row=abc%20d", "#/ZEC/6/3?twl=abc%20d"],
+  // Selector-breaking characters stay percent-encoded in the hash; the
+  // consumer (ResourceColumn) CSS-escapes the decoded id.
+  ["#/words/ZEC/6/3?row=%22%5D", "#/ZEC/6/3?twl=%22%5D"],
   // A mangled percent sequence must not throw.
   ["#/words/ZEC/6/3?row=%E0", `#/ZEC/6/3?twl=${encodeURIComponent("�")}`],
 ];
