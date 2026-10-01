@@ -191,7 +191,22 @@ test.describe("notes screen ULT alignment strip (#431)", () => {
     // A word with no entry says so; still no new request (prefetched).
     await orig(page, 0).hover();
     await expect(lexPopover(page)).toContainText("No lexicon entry loaded for");
+    // Popover copy: the plain line only, no developer import-script hint.
+    await expect(lexPopover(page)).not.toContainText("import-lexicon");
     await page.mouse.move(2, 2);
+    await expect(lexPopover(page)).toHaveCount(0);
+
+    // A pinned popover stays after the mouse leaves; Escape closes it…
+    await orig(page, 7).click();
+    await page.mouse.move(2, 2);
+    await expect(lexPopover(page)).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(lexPopover(page)).toHaveCount(0);
+    // …and so does a press outside the popover and its word.
+    await orig(page, 7).click();
+    await page.mouse.move(2, 2);
+    await expect(lexPopover(page)).toBeVisible();
+    await page.mouse.click(2, 400);
     await expect(lexPopover(page)).toHaveCount(0);
     expect(lexCalls).toHaveLength(1);
     await context.close();

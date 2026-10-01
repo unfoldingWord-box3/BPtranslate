@@ -19,7 +19,7 @@
 // muted but open the popover too: "what is this word nobody translated?" is
 // exactly when a reader needs the dictionary.
 
-import { useMemo, useRef, useState, type PointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
 import { useTranslation } from "react-i18next";
 import Box from "@mui/material/Box";
 import Paper from "@mui/material/Paper";
@@ -84,6 +84,33 @@ export function UltAlignmentStrip({
   // Hover-only (desktop, not pinned): let the pointer pass through the
   // popover, so it never sits between the mouse and the next line of words.
   const lexHoverOnly = hover?.side === "original" && !sameFocus(hover, pinned);
+  const lexPaper = useRef<HTMLDivElement>(null);
+
+  // A pinned popover covers the words under it, so it also closes on Escape
+  // and on a press outside both the popover and its word (#432). Pressing the
+  // word itself keeps the existing toggle; pressing another word moves the pin
+  // there (its own click re-pins after this clears).
+  const pinnedOrig = pinned?.side === "original" ? pinned : null;
+  const pinnedKey = pinnedOrig ? origKey(pinnedOrig.slice, pinnedOrig.position) : null;
+  useEffect(() => {
+    if (!pinnedKey) return;
+    const onPointerDown = (e: globalThis.PointerEvent) => {
+      const target = e.target as Node | null;
+      if (target && (lexPaper.current?.contains(target) || origEls.current.get(pinnedKey)?.contains(target))) return;
+      setPinned(null);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      setPinned(null);
+      setHover(null);
+    };
+    document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [pinnedKey]);
 
   const wordSx = (lit: boolean, quoted: boolean, muted: boolean) => ({
     appearance: "none",
@@ -239,7 +266,7 @@ export function UltAlignmentStrip({
         sx={{ zIndex: theme.zIndex.tooltip, pointerEvents: lexHoverOnly ? "none" : "auto" }}
       >
         {lexWord && (
-          <Paper data-lex-popover="" elevation={6} sx={{ maxWidth: 300, borderRadius: 1.5 }}>
+          <Paper ref={lexPaper} data-lex-popover="" elevation={6} sx={{ maxWidth: 300, borderRadius: 1.5 }}>
             <WordCard
               word={lexWord}
               entry={lexicon.get(lexWord.strong) ?? null}
