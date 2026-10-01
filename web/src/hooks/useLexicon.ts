@@ -54,6 +54,9 @@ async function ensure(rawStrongs: string[]) {
 
     const url = `/api/lexicon?strongs=${encodeURIComponent(want.join(","))}`;
     const res = await fetch(url);
+    // A 400/5xx is not an answer: caching its misses would turn every key
+    // into a permanent null (memory + IndexedDB). Release them for a retry.
+    if (!res.ok) return;
     const data = (await res.json()) as { entries?: LexiconEntry[] };
     const byStrong = new Map((data.entries ?? []).map((e) => [e.strong, e]));
     const fresh = new Map<string, LexiconEntry | null>();
