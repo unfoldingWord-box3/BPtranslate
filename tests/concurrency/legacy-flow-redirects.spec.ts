@@ -75,14 +75,21 @@ async function expectLandmark(page: Page, { tag, text }: Landmark) {
   await expect(page.locator(tag).filter({ hasText: text }).first()).toBeVisible({ timeout: 20_000 });
 }
 
-// The id of a seeded ZEC 6:3 word-link row.
-async function zec63TwlId(page: Page): Promise<string> {
+// The ids of the seeded ZEC 6:3 word-link rows (the fixture has two).
+async function zec63TwlIds(page: Page): Promise<string[]> {
   const res = await page.request.get("/api/chapters/ZEC/6");
   expect(res.ok()).toBe(true);
   const body = (await res.json()) as { twl: { id: string; verse: number }[] };
-  const row = body.twl.find((r) => r.verse === 3);
-  expect(row, "seeded ZEC 6:3 has a word link").toBeTruthy();
-  return row!.id;
+  const ids = body.twl.filter((r) => r.verse === 3).map((r) => r.id);
+  expect(ids.length, "seeded ZEC 6:3 has two word links").toBeGreaterThan(1);
+  return ids;
+}
+const zec63TwlId = async (page: Page) => (await zec63TwlIds(page))[0];
+
+async function expectRowInactive(page: Page, id: string) {
+  await expect
+    .poll(() => page.locator(`[data-word-id="${id}"]`).evaluate((el) => getComputedStyle(el).boxShadow))
+    .not.toContain("inset");
 }
 
 // Classic editor opened with ?twl=: the resource column is on its Words tab
@@ -136,6 +143,36 @@ test.describe("retired flows routes (#173)", () => {
       .poll(() => new URL(page.url()).hash, { timeout: 15_000 })
       .toBe(`#/ZEC/6/3?twl=${encodeURIComponent(id)}`);
     await expectWordsTabWithRow(page, id);
+    expect(errors, errors.join("\n")).toEqual([]);
+    await context.close();
+  });
+
+  test("a ?twl= change while the classic editor is mounted selects that row", async ({ browser }) => {
+    const { context } = await newUserContext(browser, "dev");
+    const page = await context.newPage();
+    const errors: string[] = [];
+    page.on("pageerror", (e) => errors.push(e.message));
+    const [first, second] = await zec63TwlIds(page);
+    await page.goto(`/#/ZEC/6/3?twl=${encodeURIComponent(first)}`);
+    await expectWordsTabWithRow(page, first);
+    // Same book, same verse, only ?twl= changes: no remount, no reload.
+    await page.evaluate((id) => {
+      location.hash = `#/ZEC/6/3?twl=${encodeURIComponent(id)}`;
+    }, second);
+    await expectWordsTabWithRow(page, second);
+    await expectRowInactive(page, first);
+    expect(errors, errors.join("\n")).toEqual([]);
+    await context.close();
+  });
+
+  test("a ?twl= id with selector characters does not break the editor", async ({ browser }) => {
+    const { context } = await newUserContext(browser, "dev");
+    const page = await context.newPage();
+    const errors: string[] = [];
+    page.on("pageerror", (e) => errors.push(e.message));
+    await page.goto("/#/ZEC/6/3?twl=%22%5D");
+    await expectLandmark(page, h6("TWLinks"));
+    await expect(page.locator("[data-word-id]").first()).toBeVisible();
     expect(errors, errors.join("\n")).toEqual([]);
     await context.close();
   });
