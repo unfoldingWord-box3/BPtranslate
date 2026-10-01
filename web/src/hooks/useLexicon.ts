@@ -8,6 +8,7 @@
 
 import { useEffect, useState } from "react";
 
+import { lexiconKeys } from "../lib/lexiconKeys";
 import { getEntries as getCachedEntries, putEntries as putCachedEntries } from "../sync/lexiconCache";
 
 export interface LexiconEntry {
@@ -23,43 +24,39 @@ const cache = new Map<string, LexiconEntry | null>();
 const inFlight = new Set<string>();
 const subscribers = new Set<() => void>();
 
-// Reduce 'b:H2320', 'H2148a', etc. to the keys the API can resolve. Returns
-// the exact form and an alpha-stripped fallback ('H2148a' → ['H2148a','H2148']).
-export function normalizeStrong(raw: string): string[] {
-  if (!raw) return [];
-  const m = raw.match(/[HG]\d+[a-z]?/i);
-  if (!m) return [];
-  const exact = m[0].toUpperCase().replace(/^([HG])0+/, "$1");
-  const base = exact.replace(/[A-Z]$/, "");
-  return exact === base ? [exact] : [exact, base];
-}
-
 async function ensure(rawStrongs: string[]) {
   const candidates: string[] = [];
   for (const s of rawStrongs) {
-    const keys = normalizeStrong(s);
-    for (const k of keys) {
-      if (!cache.has(k) && !inFlight.has(k)) candidates.push(k);
+    for (const k of lexiconKeys(s)) {
+      if (cache.has(k) || inFlight.has(k)) continue;
+      // Claimed BEFORE the IndexedDB await below, so a second caller in the
+      // same tick (React StrictMode's double effect, two components mounting
+      // together) skips these keys instead of sending the same batch again.
+      inFlight.add(k);
+      candidates.push(k);
     }
   }
   if (candidates.length === 0) return;
 
-  // Try the persistent cache first — every IDB hit is one less network call,
-  // and the only path that works while offline.
-  const cached = await getCachedEntries(candidates);
-  for (const [k, entry] of cached) {
-    cache.set(k, entry);
-  }
-  const want = candidates.filter((k) => !cache.has(k));
-  if (cached.size > 0) {
-    for (const fn of subscribers) fn();
-  }
-  if (want.length === 0) return;
-
-  for (const k of want) inFlight.add(k);
+  let want: string[] = [];
   try {
+    // Try the persistent cache first — every IDB hit is one less network
+    // call, and the only path that works while offline.
+    const cached = await getCachedEntries(candidates);
+    for (const [k, entry] of cached) {
+      cache.set(k, entry);
+    }
+    want = candidates.filter((k) => !cache.has(k));
+    if (cached.size > 0) {
+      for (const fn of subscribers) fn();
+    }
+    if (want.length === 0) return;
+
     const url = `/api/lexicon?strongs=${encodeURIComponent(want.join(","))}`;
     const res = await fetch(url);
+    // A 400/5xx is not an answer: caching its misses would turn every key
+    // into a permanent null (memory + IndexedDB). Release them for a retry.
+    if (!res.ok) return;
     const data = (await res.json()) as { entries?: LexiconEntry[] };
     const byStrong = new Map((data.entries ?? []).map((e) => [e.strong, e]));
     const fresh = new Map<string, LexiconEntry | null>();
@@ -75,8 +72,8 @@ async function ensure(rawStrongs: string[]) {
     // Network failure (offline, fetch threw, server down) — don't poison the
     // in-memory cache with nulls so a later online retry can succeed.
   } finally {
-    for (const k of want) inFlight.delete(k);
-    for (const fn of subscribers) fn();
+    for (const k of candidates) inFlight.delete(k);
+    if (want.length > 0) for (const fn of subscribers) fn();
   }
 }
 
@@ -97,7 +94,7 @@ export function useLexicon(rawStrongs: string[]): Map<string, LexiconEntry | nul
   }, [joined]);
   const out = new Map<string, LexiconEntry | null>();
   for (const raw of rawStrongs) {
-    const keys = normalizeStrong(raw);
+    const keys = lexiconKeys(raw);
     let hit: LexiconEntry | null = null;
     for (const k of keys) {
       const v = cache.get(k);
