@@ -268,8 +268,25 @@ function ResourceRowButton({
 
 // ─── word detail ────────────────────────────────────────────────────────────
 
-function WordCard({ word, entry }: { word: OriginalWord; entry: LexiconEntry | null }) {
+export interface WordCardProps {
+  word: OriginalWord;
+  entry: LexiconEntry | null;
+  /**
+   * Set by the notes-screen lexicon popover (#432), which portals out of any
+   * dir'd container: the original word and lemma take this direction (Hebrew
+   * RTL, Greek LTR) and the English lexicon/morph lines resolve with
+   * dir="auto", so an Arabic UI does not flip them. Unset → no dir attributes,
+   * the pane's existing behaviour.
+   */
+  originalDir?: "ltr" | "rtl";
+  /** Drop the card's own bottom margin when it is the only thing in a popover. */
+  flush?: boolean;
+}
+
+export function WordCard({ word, entry, originalDir, flush }: WordCardProps) {
   const { t } = useTranslation();
+  const origLang = originalDir ? (originalDir === "rtl" ? "hbo" : "grc") : undefined;
+  const autoDir = originalDir ? "auto" : undefined;
   return (
     <Box
       sx={{
@@ -279,7 +296,7 @@ function WordCard({ word, entry }: { word: OriginalWord; entry: LexiconEntry | n
         bgcolor: "action.hover",
         paddingBlock: 1,
         paddingInline: 1.25,
-        marginBlockEnd: 1,
+        marginBlockEnd: flush ? 0 : 1,
       }}
     >
       <Box
@@ -290,12 +307,19 @@ function WordCard({ word, entry }: { word: OriginalWord; entry: LexiconEntry | n
           gap: 1.25,
         }}
       >
-        <Box component="span" sx={{ fontFamily: ORIGINAL_FONT_STACK, fontSize: "1.3rem" }}>
+        <Box
+          component="span"
+          dir={originalDir}
+          lang={origLang}
+          sx={{ fontFamily: ORIGINAL_FONT_STACK, fontSize: "1.3rem" }}
+        >
           {word.text}
         </Box>
         {word.lemma && (
           <Box
             component="span"
+            dir={originalDir}
+            lang={origLang}
             sx={{ fontFamily: ORIGINAL_FONT_STACK, fontSize: "0.95rem", color: "text.secondary" }}
           >
             {word.lemma}
@@ -304,7 +328,7 @@ function WordCard({ word, entry }: { word: OriginalWord; entry: LexiconEntry | n
       </Box>
 
       {word.glosses.length > 0 ? (
-        <Typography variant="caption" component="p" color="text.secondary" sx={{ mt: 0.375 }}>
+        <Typography variant="caption" component="p" dir={autoDir} color="text.secondary" sx={{ mt: 0.375 }}>
           {word.glosses.join("  +  ")}
         </Typography>
       ) : (
@@ -327,6 +351,7 @@ function WordCard({ word, entry }: { word: OriginalWord; entry: LexiconEntry | n
       <Typography
         variant="caption"
         component="p"
+        dir={autoDir}
         color="text.secondary"
         sx={{ mt: 0.375, fontFamily: "monospace" }}
       >
@@ -341,17 +366,17 @@ function WordCard({ word, entry }: { word: OriginalWord; entry: LexiconEntry | n
         ) : entry ? (
           <>
             {entry.gloss && (
-              <Typography variant="body2" sx={{ fontSize: "0.84rem" }}>
+              <Typography variant="body2" dir={autoDir} sx={{ fontSize: "0.84rem" }}>
                 {entry.gloss}
               </Typography>
             )}
             {entry.part_of_speech && (
-              <Typography variant="caption" component="p" color="text.secondary">
+              <Typography variant="caption" component="p" dir={autoDir} color="text.secondary">
                 {entry.part_of_speech}
               </Typography>
             )}
             {entry.definition && (
-              <Typography variant="body2" sx={{ fontSize: "0.82rem", mt: 0.375 }}>
+              <Typography variant="body2" dir={autoDir} sx={{ fontSize: "0.82rem", mt: 0.375 }}>
                 {entry.definition}
               </Typography>
             )}

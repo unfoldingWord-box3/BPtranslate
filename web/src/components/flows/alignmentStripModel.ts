@@ -86,6 +86,21 @@ export function buildAlignmentStrip(
 }
 
 /**
+ * The Strong's numbers to prefetch for the lexicon popover (#432): every
+ * original word's raw `strong` across all of the note's slices, once each, in
+ * document order. Handing useLexicon the whole set at mount is what makes the
+ * popover instant and keeps it to one batched /api/lexicon call per note.
+ * Words without a Strong's are skipped; the popover shows lemma/morph alone.
+ */
+export function stripStrongs(slices: readonly AlignmentStripSlice[]): string[] {
+  const seen = new Set<string>();
+  for (const slice of slices) {
+    for (const w of slice.words) if (w.strong) seen.add(w.strong);
+  }
+  return [...seen];
+}
+
+/**
  * What the reader is pointing at: an English word's group, or one original
  * word by position. Supplied English words (no group) are never a focus —
  * there is nothing behind them to light.

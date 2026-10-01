@@ -10,14 +10,31 @@
 //
 // Nothing here edits or writes. Words wrap (#202); the strip never scrolls
 // sideways.
+//
+// Lexicon (#432): pointing at an ORIGINAL word also opens a small popover
+// under it with the word's lemma, morphology and UHAL/UGL entry — the verse
+// screen's WordCard, fed by useLexicon. Every Strong's in the note's verses is
+// requested once when the strip mounts, so the popover is instant and the
+// note costs one batched /api/lexicon call. Unrendered original words stay
+// muted but open the popover too: "what is this word nobody translated?" is
+// exactly when a reader needs the dictionary.
 
-import { useState, type PointerEvent } from "react";
+import { useMemo, useRef, useState, type PointerEvent } from "react";
 import { useTranslation } from "react-i18next";
 import Box from "@mui/material/Box";
+import Paper from "@mui/material/Paper";
+import Popper from "@mui/material/Popper";
 import { alpha, useTheme } from "@mui/material/styles";
 
-import { litUp, sameFocus, type AlignmentStripSlice, type StripFocus } from "./alignmentStripModel";
-import { ORIGINAL_FONT_STACK } from "./VerseDetailPane";
+import {
+  litUp,
+  sameFocus,
+  stripStrongs,
+  type AlignmentStripSlice,
+  type StripFocus,
+} from "./alignmentStripModel";
+import { ORIGINAL_FONT_STACK, WordCard } from "./VerseDetailPane";
+import { useLexicon } from "../../hooks/useLexicon";
 import { SCRIPTURE_FONT_STACK } from "../../theme";
 
 // Kindle — the "linked partner" tone the classic aligner's hover glow uses
@@ -54,6 +71,19 @@ export function UltAlignmentStrip({
   const [pinned, setPinned] = useState<StripFocus>(null);
   const focus = hover ?? pinned;
   const toggle = (next: StripFocus) => setPinned((cur) => (sameFocus(cur, next) ? null : next));
+
+  // Prefetch the whole note's Strong's in one batch (#432).
+  const strongs = useMemo(() => stripStrongs(slices), [slices]);
+  const lexicon = useLexicon(strongs);
+  // The popover anchors on the focused original word's button.
+  const origEls = useRef(new Map<string, HTMLElement>());
+  const origKey = (slice: number, position: number) => `${slice}:${position}`;
+  const lexFocus = focus?.side === "original" ? focus : null;
+  const lexWord = lexFocus ? slices[lexFocus.slice]?.words[lexFocus.position] ?? null : null;
+  const lexAnchor = lexFocus ? origEls.current.get(origKey(lexFocus.slice, lexFocus.position)) ?? null : null;
+  // Hover-only (desktop, not pinned): let the pointer pass through the
+  // popover, so it never sits between the mouse and the next line of words.
+  const lexHoverOnly = hover?.side === "original" && !sameFocus(hover, pinned);
 
   const wordSx = (lit: boolean, quoted: boolean, muted: boolean) => ({
     appearance: "none",
@@ -129,20 +159,32 @@ export function UltAlignmentStrip({
                 const muted = !slice.alignedPositions.has(w.position);
                 const on = lit.positions.has(w.position);
                 const here: StripFocus = { slice: si, side: "original", position: w.position };
+                const key = origKey(si, w.position);
                 return (
                   <Box
                     key={w.position}
+                    ref={(el: HTMLElement | null) => {
+                      if (el) origEls.current.set(key, el);
+                      else origEls.current.delete(key);
+                    }}
                     component="button"
                     type="button"
                     data-align-orig={w.position}
                     data-lit={on ? "true" : undefined}
                     data-quoted={slice.quotedPositions.has(w.position) ? "true" : undefined}
+                    data-unrendered={muted ? "true" : undefined}
                     aria-pressed={sameFocus(pinned, here)}
-                    disabled={muted}
+                    aria-describedby={sameFocus(lexFocus, here) ? "ult-align-lex" : undefined}
+                    // Not disabled when muted (#432): an unrendered word lights
+                    // nothing, but still opens its lexicon popover.
                     onPointerEnter={(e: PointerEvent) => isMouse(e) && setHover(here)}
                     onPointerLeave={(e: PointerEvent) => isMouse(e) && setHover(null)}
                     onClick={() => toggle(here)}
-                    sx={{ ...wordSx(on, slice.quotedPositions.has(w.position), muted), marginInlineEnd: "0.3em" }}
+                    sx={{
+                      ...wordSx(on, slice.quotedPositions.has(w.position), muted),
+                      cursor: "pointer",
+                      marginInlineEnd: "0.3em",
+                    }}
                   >
                     {w.text}
                   </Box>
@@ -189,6 +231,24 @@ export function UltAlignmentStrip({
           </Box>
         );
       })}
+      <Popper
+        id="ult-align-lex"
+        open={Boolean(lexWord && lexAnchor)}
+        anchorEl={lexAnchor}
+        placement="bottom"
+        sx={{ zIndex: theme.zIndex.tooltip, pointerEvents: lexHoverOnly ? "none" : "auto" }}
+      >
+        {lexWord && (
+          <Paper data-lex-popover="" elevation={6} sx={{ maxWidth: 300, borderRadius: 1.5 }}>
+            <WordCard
+              word={lexWord}
+              entry={lexicon.get(lexWord.strong) ?? null}
+              originalDir={originalDir}
+              flush
+            />
+          </Paper>
+        )}
+      </Popper>
     </Box>
   );
 }

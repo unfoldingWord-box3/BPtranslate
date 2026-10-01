@@ -27,27 +27,31 @@ const subscribers = new Set<() => void>();
 async function ensure(rawStrongs: string[]) {
   const candidates: string[] = [];
   for (const s of rawStrongs) {
-    const keys = lexiconKeys(s);
-    for (const k of keys) {
-      if (!cache.has(k) && !inFlight.has(k)) candidates.push(k);
+    for (const k of lexiconKeys(s)) {
+      if (cache.has(k) || inFlight.has(k)) continue;
+      // Claimed BEFORE the IndexedDB await below, so a second caller in the
+      // same tick (React StrictMode's double effect, two components mounting
+      // together) skips these keys instead of sending the same batch again.
+      inFlight.add(k);
+      candidates.push(k);
     }
   }
   if (candidates.length === 0) return;
 
-  // Try the persistent cache first — every IDB hit is one less network call,
-  // and the only path that works while offline.
-  const cached = await getCachedEntries(candidates);
-  for (const [k, entry] of cached) {
-    cache.set(k, entry);
-  }
-  const want = candidates.filter((k) => !cache.has(k));
-  if (cached.size > 0) {
-    for (const fn of subscribers) fn();
-  }
-  if (want.length === 0) return;
-
-  for (const k of want) inFlight.add(k);
+  let want: string[] = [];
   try {
+    // Try the persistent cache first — every IDB hit is one less network
+    // call, and the only path that works while offline.
+    const cached = await getCachedEntries(candidates);
+    for (const [k, entry] of cached) {
+      cache.set(k, entry);
+    }
+    want = candidates.filter((k) => !cache.has(k));
+    if (cached.size > 0) {
+      for (const fn of subscribers) fn();
+    }
+    if (want.length === 0) return;
+
     const url = `/api/lexicon?strongs=${encodeURIComponent(want.join(","))}`;
     const res = await fetch(url);
     const data = (await res.json()) as { entries?: LexiconEntry[] };
@@ -65,8 +69,8 @@ async function ensure(rawStrongs: string[]) {
     // Network failure (offline, fetch threw, server down) — don't poison the
     // in-memory cache with nulls so a later online retry can succeed.
   } finally {
-    for (const k of want) inFlight.delete(k);
-    for (const fn of subscribers) fn();
+    for (const k of candidates) inFlight.delete(k);
+    if (want.length > 0) for (const fn of subscribers) fn();
   }
 }
 

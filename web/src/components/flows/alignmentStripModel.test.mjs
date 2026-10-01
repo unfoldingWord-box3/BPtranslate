@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import { parseSourceUsfm } from "../../lib/sourceUsfm.ts";
 import { buildVerseIndex, coveredLaneSlices } from "../../lib/verseRange.ts";
 import { recomputeTargetOccurrences } from "../../../../api/src/importParsers.ts";
-import { buildAlignmentStrip, litUp, sameFocus } from "./alignmentStripModel.ts";
+import { buildAlignmentStrip, litUp, sameFocus, stripStrongs } from "./alignmentStripModel.ts";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
 const ult = parseSourceUsfm(
@@ -202,4 +202,33 @@ test("a bridged ULT verse is not aligned (falls back to the plain lane) rather t
   }
   // A plain (unbridged) slice list still aligns.
   assert.ok(Array.isArray(buildAlignmentStrip([{ verse: 1, verseEnd: null, verseObjects: ult[1][1].content.verseObjects, sourceVerseObjects: uhb[1][1].content.verseObjects }], null, 1)));
+});
+
+test("lexicon prefetch (#432): every covered verse's Strong's, once each, words without one skipped", () => {
+  const strip = buildAlignmentStrip(
+    [
+      { verse: 1, verseObjects: ult[1][1].content.verseObjects, sourceVerseObjects: uhb[1][1].content.verseObjects },
+      { verse: 2, verseObjects: ult[1][2].content.verseObjects, sourceVerseObjects: uhb[1][2].content.verseObjects },
+    ],
+    null,
+    1,
+  );
+  const strongs = stripStrongs(strip);
+  const all = strip.flatMap((s) => s.words.map((w) => w.strong)).filter(Boolean);
+  // One entry per distinct Strong's across BOTH verses, in document order.
+  assert.deepEqual(strongs, [...new Set(all)]);
+  // ZEC 1:1 repeats בֶּן (positions 10 and 12), so the set is strictly
+  // smaller than the word count.
+  assert.ok(strongs.length < all.length, "repeated Strong's are deduped");
+  assert.equal(strongs[0], strip[0].words[0].strong);
+  for (const w of strip[1].words) if (w.strong) assert.ok(strongs.includes(w.strong));
+
+  // A word without a Strong's contributes nothing (the popover then shows
+  // lemma/morph only); an empty strip asks for nothing.
+  const first = strip[0].words[0].strong;
+  const bare = [{ ...strip[0], words: strip[0].words.map((w, i) => (i === 0 ? { ...w, strong: "" } : w)) }];
+  const bareStrongs = stripStrongs(bare);
+  assert.ok(!bareStrongs.includes(""));
+  assert.equal(bareStrongs.includes(first), strip[0].words.slice(1).some((w) => w.strong === first));
+  assert.deepEqual(stripStrongs([]), []);
 });

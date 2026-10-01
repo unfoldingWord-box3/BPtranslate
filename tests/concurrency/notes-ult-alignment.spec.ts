@@ -16,7 +16,14 @@ import { mintToken } from "./helpers";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const EN_ULT = readFileSync(resolve(repoRoot, "docs/samples/en_ult_38-ZEC.usfm"), "utf8");
 
-async function openNotes(browser: Browser, name: string, width: number, touch: boolean, hash: string) {
+async function openNotes(
+  browser: Browser,
+  name: string,
+  width: number,
+  touch: boolean,
+  hash: string,
+  beforeGoto?: (page: Page) => Promise<void>,
+) {
   const context = await browser.newContext({
     viewport: { width, height: 900 },
     hasTouch: touch,
@@ -51,6 +58,7 @@ async function openNotes(browser: Browser, name: string, width: number, touch: b
     }
     return route.fulfill({ status: 404, body: "not mocked" });
   });
+  if (beforeGoto) await beforeGoto(page);
   await page.goto(hash);
   return { context, page };
 }
@@ -60,6 +68,7 @@ const en = (page: Page, word: string) => strip(page).locator(`[data-align-en="${
 const orig = (page: Page, pos: number) => strip(page).locator(`[data-align-orig="${pos}"]`);
 const litOrig = (page: Page) => strip(page).locator("[data-align-orig][data-lit]");
 const litEn = (page: Page) => strip(page).locator("[data-align-en][data-lit]");
+const lexPopover = (page: Page) => page.locator("[data-lex-popover]");
 
 test.describe("notes screen ULT alignment strip (#431)", () => {
   test("desktop: hovering either side lights the aligned group on both", async ({ browser }) => {
@@ -123,12 +132,68 @@ test.describe("notes screen ULT alignment strip (#431)", () => {
     await orig(page, 0).tap();
     await expect(en(page, "month")).toHaveAttribute("data-lit", "true");
     await expect(en(page, "Yahweh")).not.toHaveAttribute("data-lit", "true");
+    // The tapped Hebrew word's lexicon popover (#432) opens with it…
+    await expect(lexPopover(page)).toBeVisible();
     await orig(page, 0).tap();
     await expect(litOrig(page)).toHaveCount(0);
+    // …and the second tap closes it.
+    await expect(lexPopover(page)).toHaveCount(0);
     const overflow = await page.evaluate(
       () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
     );
     expect(overflow).toBeLessThanOrEqual(0);
+    await context.close();
+  });
+
+  test("lexicon (#432): a Hebrew word shows lemma, morph and its entry; one batched call", async ({ browser }) => {
+    // The suite's D1 has no lexicon, so serve a known entry for יְהוָה and
+    // nothing else, and count the calls.
+    const lexCalls: string[] = [];
+    const { context, page } = await openNotes(browser, "ult-align-lex", 1280, false, "/#/notes/ZEC/1/1", (p) =>
+      p.route("**/api/lexicon?**", (route) => {
+        lexCalls.push(route.request().url());
+        return route.fulfill({
+          json: {
+            entries: [
+              {
+                strong: "H3068",
+                resource: "uhal",
+                lemma: "יהוה",
+                part_of_speech: "Noun Proper Deity",
+                gloss: "Yahweh",
+                definition: "the proper name of the God of Israel",
+              },
+            ],
+          },
+        });
+      }),
+    );
+    await expect(strip(page)).toBeVisible({ timeout: 20_000 });
+    // The whole note's Strong's are prefetched in one request at mount.
+    await expect.poll(() => lexCalls.length).toBe(1);
+    expect(decodeURIComponent(lexCalls[0])).toContain("H3068");
+
+    // יְהוָה (7): its lemma, decoded morph, Strong's, and the UHAL entry.
+    await orig(page, 7).hover();
+    await expect(lexPopover(page)).toBeVisible();
+    await expect(lexPopover(page)).toContainText("H3068 · He,Np");
+    await expect(lexPopover(page)).toContainText("proper name");
+    await expect(lexPopover(page)).toContainText("Yahweh");
+    await expect(lexPopover(page)).toContainText("the proper name of the God of Israel");
+    // Hebrew reads RTL inside the popover; the English entry LTR.
+    expect(
+      await lexPopover(page).locator('span[lang="hbo"]').first().evaluate((el) => getComputedStyle(el).direction),
+    ).toBe("rtl");
+    expect(
+      await lexPopover(page).getByText("Yahweh", { exact: true }).evaluate((el) => getComputedStyle(el).direction),
+    ).toBe("ltr");
+
+    // A word with no entry says so; still no new request (prefetched).
+    await orig(page, 0).hover();
+    await expect(lexPopover(page)).toContainText("No lexicon entry loaded for");
+    await page.mouse.move(2, 2);
+    await expect(lexPopover(page)).toHaveCount(0);
+    expect(lexCalls).toHaveLength(1);
     await context.close();
   });
 });
