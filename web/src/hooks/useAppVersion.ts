@@ -56,8 +56,18 @@ export function useAppVersion(): UseAppVersionReturn {
 
   useEffect(() => {
     // No version.json is emitted by `vite` dev, and a stale-prompt during
-    // hot-reload development is just noise — skip the whole mechanism.
-    if (import.meta.env.DEV) return;
+    // hot-reload development is just noise — skip the whole mechanism. One
+    // dev-only seam: `be:devUpdateAvailable=1` in localStorage raises the
+    // prompt, so the phone-header spec (#522) can lay out the update control.
+    // Dead code in a production build.
+    if (import.meta.env.DEV) {
+      try {
+        if (localStorage.getItem("be:devUpdateAvailable") === "1") setUpdateAvailable(true);
+      } catch {
+        /* storage blocked: no prompt */
+      }
+      return;
+    }
     // An "unknown" build can't be meaningfully compared; don't cry wolf.
     if (APP_VERSION.commit === "unknown") return;
 
