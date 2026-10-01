@@ -2141,13 +2141,15 @@ export function Shell({
   // remount used to: reset the per-chapter transient state. Keyed on
   // [chapter, initialVerse] — internal same-chapter verse selection sets
   // activeVerse directly without an URL push, so initialVerse doesn't change
-  // and this won't clobber it. Skips the initial mount.
-  const chapterResetMounted = useRef(false);
+  // and this won't clobber it. Skips the initial mount by comparing against the
+  // mounted position rather than a "has run" flag: StrictMode's dev-only second
+  // effect pass would otherwise read as a navigation and reset the mount state,
+  // including a row seeded from initialWordId.
+  const chapterResetKey = useRef(`${chapter}:${initialVerse}`);
   useEffect(() => {
-    if (!chapterResetMounted.current) {
-      chapterResetMounted.current = true;
-      return;
-    }
+    const key = `${chapter}:${initialVerse}`;
+    if (chapterResetKey.current === key) return;
+    chapterResetKey.current = key;
     setActiveVerse(initialVerse);
     setActiveNoteId(null);
     setActiveWordId(null);
