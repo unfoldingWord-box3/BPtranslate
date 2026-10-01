@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Alert, Box, Button, Chip, CircularProgress, Link, Snackbar, Stack, Tooltip, Typography } from "@mui/material";
+import { Alert, Box, Button, Chip, CircularProgress, IconButton, Link, Snackbar, Stack, Tooltip, Typography } from "@mui/material";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import { Shell } from "./components/Shell";
 import { ArticleWorkspace } from "./components/ArticleWorkspace";
@@ -919,7 +919,31 @@ export function App() {
               aria-label={t("topbar.chromeStrip.ariaLabel")}
               sx={{ flex: "none", paddingInline: isPhone ? 0.75 : 1.5, paddingBlock: 0.5 }}
             >
-              {updateAvailable && (
+              {/* On a phone the update prompt is a small orange refresh
+                  button with its name as label and tooltip (#522): the
+                  full-text chip alone took ~330px of a 360px bar. */}
+              {updateAvailable && isPhone && (
+                <Tooltip
+                  title={
+                    <Stack spacing={0.25}>
+                      <Typography variant="caption" sx={{ fontWeight: 600 }}>
+                        {t("sync.updateAvailable")}
+                      </Typography>
+                      <Typography variant="caption">{t("sync.updateAvailableTooltip")}</Typography>
+                    </Stack>
+                  }
+                >
+                  <IconButton
+                    size="small"
+                    aria-label={t("sync.updateAvailable")}
+                    onClick={() => window.location.reload()}
+                    sx={{ color: "#E59D33", border: "1px solid #E59D33", padding: "3px" }}
+                  >
+                    <RefreshIcon sx={{ fontSize: 16 }} />
+                  </IconButton>
+                </Tooltip>
+              )}
+              {updateAvailable && !isPhone && (
                 <Tooltip title={t("sync.updateAvailableTooltip")}>
                   <Chip
                     size="small"
@@ -936,7 +960,7 @@ export function App() {
                   />
                 </Tooltip>
               )}
-              <SyncStatusBar onNavigate={navigate} flowRouting compactSaved={isPhone} />
+              <SyncStatusBar onNavigate={navigate} flowRouting compact={isPhone} />
               <PipelineStatusBar />
               <AccountMenu
                 username={auth.kind === "ready" ? auth.me?.username ?? null : null}

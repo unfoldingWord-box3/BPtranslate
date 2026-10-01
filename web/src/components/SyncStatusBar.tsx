@@ -227,11 +227,25 @@ interface Props {
   // UI (#229). Classic mounts leave this unset and keep the onNavigate path.
   flowRouting?: boolean;
   // Phone width in the flow header bar, which the chrome shares with the
-  // screen title (#299): the steady-state "saved" chip shrinks to its icon.
-  compactSaved?: boolean;
+  // screen title (#299): the steady-state "saved" and the offline chips shrink
+  // to their icons, and "N unsaved" to its icon and number (#522). Each keeps
+  // its name as an aria-label and a tooltip (hold to see it on touch).
+  compact?: boolean;
 }
 
-export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRouting, compactSaved }: Props = {}) {
+// Tooltip body for a compact chip: its name on top, the longer hint under it.
+function namedTip(name: string, hint: string): ReactNode {
+  return (
+    <Stack spacing={0.25}>
+      <Typography variant="caption" sx={{ fontWeight: 600 }}>
+        {name}
+      </Typography>
+      <Typography variant="caption">{hint}</Typography>
+    </Stack>
+  );
+}
+
+export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRouting, compact }: Props = {}) {
   const { t } = useTranslation();
   const { pending, conflicts, failed, effectivelyOffline, online, draftCount, activeDrafts, quarantinedDrafts } =
     useSyncSummary();
@@ -364,7 +378,17 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
     // Kindle warning accent (#E59D33 from CLAUDE.md brand palette) — offline
     // is a transient state, not a failure, so the MUI default error red is
     // wrong tone.
-    inline = (
+    inline = compact ? (
+      <Tooltip title={namedTip(offlineLabel, offlineTooltip)}>
+        <CloudQueueIcon
+          role="img"
+          tabIndex={0}
+          aria-label={offlineLabel}
+          fontSize="small"
+          sx={{ color: "#E59D33", marginInline: 0.5 }}
+        />
+      </Tooltip>
+    ) : (
       <Tooltip title={offlineTooltip}>
         <Chip
           icon={<CloudQueueIcon />}
@@ -391,7 +415,7 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
         />
       </Tooltip>
     );
-  } else if (draftCount === 0 && compactSaved) {
+  } else if (draftCount === 0 && compact) {
     inline = (
       <Tooltip title={t("sync.savedTooltip")}>
         <CloudDoneIcon
@@ -482,13 +506,19 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
     setDraftMenuEl(null);
   };
 
+  // Compact form keeps the number and moves the word into the name.
+  const unsavedName = `${draftCount} ${t("sync.unsaved")}`;
+  const draftsLabel = compact ? String(draftCount) : unsavedName;
+  const draftsAria = compact ? { "aria-label": unsavedName } : {};
+
   let draftsChip: ReactNode = null;
   if (draftCount > 0 && onNavigate) {
     draftsChip = (
-      <Tooltip title={t("sync.jumpToUnsaved")}>
+      <Tooltip title={compact ? namedTip(unsavedName, t("sync.jumpToUnsaved")) : t("sync.jumpToUnsaved")}>
         <Chip
           icon={<EditNoteIcon />}
-          label={`${draftCount} ${t("sync.unsaved")}`}
+          label={draftsLabel}
+          {...draftsAria}
           size="small"
           variant="outlined"
           clickable
@@ -518,7 +548,8 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
       <Tooltip title={draftsTooltip}>
         <Chip
           icon={<EditNoteIcon />}
-          label={`${draftCount} ${t("sync.unsaved")}`}
+          label={draftsLabel}
+          {...draftsAria}
           size="small"
           variant="outlined"
           sx={draftDirtyColorSx}
