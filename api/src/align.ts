@@ -29,18 +29,20 @@ function strongLookupKeys(raw: string): string[] {
   return exact === base ? [exact] : [exact, base];
 }
 
-// Map an align_freq Strong's key to candidate lexicon_entries keys. Hebrew and
-// classic Greek resolve directly; unfoldingWord Greek is Strong's-Plus
-// (classic × 10, 5+ digits — e.g. G23160 = θεός = classic G2316), but
-// lexicon_entries is keyed by classic Strong's, so also offer the /10 form.
-function lexiconKeysFor(strong: string): string[] {
-  const out = [strong];
-  const m = strong.match(/^G(\d{5,})$/);
-  if (m) {
-    const classic = Math.floor(parseInt(m[1], 10) / 10);
-    if (classic > 0) out.push(`G${classic}`);
+// Map a raw source Strong's token to candidate lexicon_entries keys.
+// lexicon_entries is keyed by classic Strong's. unfoldingWord Greek (UGNT) is
+// Strong's-Plus: classic × 10, zero-padded to 5 digits (G01910 = ἀκούω =
+// classic G191, G23160 = θεός = classic G2316). Decide that from the RAW digit
+// count, before zero-stripping: stripping G01910 first leaves "G1910", which is
+// a different classic word (issue #529). Strong's-Plus maps only to its /10
+// classic key. Hebrew and classic (≤4-digit) Greek use strongLookupKeys as-is.
+export function lexiconLookupKeys(raw: string): string[] {
+  const plus = raw?.match(/[HG]\d+[a-z]?/i)?.[0].match(/^G(\d{5,})[a-z]?$/i);
+  if (plus) {
+    const classic = Math.floor(parseInt(plus[1], 10) / 10);
+    return classic > 0 ? [`G${classic}`] : [];
   }
-  return out;
+  return strongLookupKeys(raw);
 }
 
 interface Candidate {
@@ -123,7 +125,8 @@ export const MAX_ALIGN_KEYS = 2000;
 interface SuggestReq {
   key: string; // echoed back to the client
   mc: string; // morph class ("" = none)
-  normKeys: string[]; // normalized Strong's lookup keys
+  normKeys: string[]; // normalized Strong's lookup keys (align_freq)
+  lexKeys: string[]; // lexicon_entries keys, from the raw token (Strong's-Plus aware)
 }
 
 align.get("/suggest", async (c) => {
@@ -146,7 +149,7 @@ align.get("/suggest", async (c) => {
     const mc = t >= 0 ? key.slice(t + 1) : "";
     const normKeys = strongLookupKeys(rawStrong);
     if (normKeys.length === 0) continue;
-    reqs.push({ key, mc, normKeys });
+    reqs.push({ key, mc, normKeys, lexKeys: lexiconLookupKeys(rawStrong) });
     for (const k of normKeys) allKeys.add(k);
   }
   const keys = [...allKeys];
@@ -195,16 +198,11 @@ align.get("/suggest", async (c) => {
     // align_freq_morph not present — fall back to strong-only ranking.
   }
 
-  // 2) Lexicon fallback for strongs the corpus never aligned (Greek
-  // Strong's-Plus -> classic), keyed to the original normalized key.
-  const missing = keys.filter((k) => !memByKey.has(k));
-  const lexKeyToOrig = new Map<string, string>();
-  for (const k of missing) {
-    for (const lk of lexiconKeysFor(k)) {
-      if (!lexKeyToOrig.has(lk)) lexKeyToOrig.set(lk, k);
-    }
-  }
-  const lexKeys = [...lexKeyToOrig.keys()];
+  // 2) Lexicon fallback for requests the corpus never aligned, keyed by the
+  // lexicon key itself (Greek Strong's-Plus -> classic, decided per raw token).
+  const lexKeys = [
+    ...new Set(reqs.filter((r) => !r.normKeys.some((k) => memByKey.has(k))).flatMap((r) => r.lexKeys)),
+  ];
   const lexByKey = new Map<string, Candidate[]>();
   for (let i = 0; i < lexKeys.length; i += STRONG_CHUNK) {
     const chunk = lexKeys.slice(i, i + STRONG_CHUNK);
@@ -216,10 +214,9 @@ align.get("/suggest", async (c) => {
       .bind(...chunk)
       .all<{ strong: string; gloss: string | null; definition: string | null }>();
     for (const row of rs.results ?? []) {
-      const orig = lexKeyToOrig.get(row.strong);
-      if (!orig || lexByKey.has(orig)) continue;
+      if (lexByKey.has(row.strong)) continue;
       const cands = lexiconCandidates(row.gloss, row.definition);
-      if (cands.length > 0) lexByKey.set(orig, cands);
+      if (cands.length > 0) lexByKey.set(row.strong, cands);
     }
   }
 
@@ -261,7 +258,7 @@ align.get("/suggest", async (c) => {
         .slice(0, MAX_PHRASES);
       if (words.length > 0 || phrases.length > 0) suggestions[req.key] = { words, phrases };
     } else {
-      const lexKey = req.normKeys.find((k) => lexByKey.has(k));
+      const lexKey = req.lexKeys.find((k) => lexByKey.has(k));
       if (lexKey) suggestions[req.key] = { words: lexByKey.get(lexKey)!.slice(0, MAX_CANDIDATES), phrases: [] };
     }
   }
