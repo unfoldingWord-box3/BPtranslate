@@ -494,8 +494,10 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
         } else {
           // twl row: the new UI has no word-links editor since the old flows
           // words screen retired (#173), so open the classic editor at that
-          // verse, whose word-links table restores and saves the draft.
-          onNavigate?.(m.book, m.chapter, m.verse);
+          // verse. ?twl= starts its resource column on the Words tab with this
+          // row active; the row's WordsTable entry restores the draft from the
+          // drafts store (same rowKey).
+          location.hash = `#/${m.book}/${m.chapter}/${m.verse}?twl=${encodeURIComponent(m.id)}`;
         }
       } else {
         onNavigate?.(m.book, m.chapter, m.verse);

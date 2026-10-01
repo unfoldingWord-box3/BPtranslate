@@ -40,7 +40,7 @@ import {
 } from "./components/WorkspaceChoiceDialog";
 
 type Location =
-  | { view: "chapter"; book: string; chapter: number; verse: number }
+  | { view: "chapter"; book: string; chapter: number; verse: number; twlRowId?: string | null }
   | { view: "article"; resource: "tw" | "ta"; articleId: string | null }
   | { view: "templates"; templateId: string | null }
   | { view: "preferences"; section: PrefsSection }
@@ -141,8 +141,10 @@ function parseHash(): Location {
   // Hashes of the old flows screens retired in #173 (bookmarks, history) are
   // rewritten to the screen that does that job now, then parsed as that hash.
   // replaceState doesn't fire hashchange, so the parse below is what renders.
+  // Keep the query string: the boot flags (?_choose_ws, ?_auth_denied) are read
+  // from it after this runs.
   const legacy = legacyFlowRedirect(location.hash);
-  if (legacy) history.replaceState(null, "", location.pathname + legacy);
+  if (legacy) history.replaceState(null, "", location.pathname + location.search + legacy);
   const pm = location.hash.match(/^#\/preferences(?:\/(\w+))?$/);
   if (pm) {
     const s = pm[1] as PrefsSection | undefined;
@@ -273,11 +275,16 @@ function parseHash(): Location {
   }
   const m = location.hash.match(/^#\/?([A-Za-z0-9]+)(?:\/(\d+))?(?:\/(\d+))?/);
   if (!m) return { view: "books", book: null };
+  // Optional ?twl={id} tail: open the word-links tab with that row selected.
+  // The drafts jump menu and the retired #/words/{book}/{ch}/{vs} bookmarks
+  // use it, since the classic editor is where word links are edited (#173).
+  const tw = location.hash.match(/[?&]twl=([^&]+)/);
   return {
     view: "chapter",
     book: m[1].toUpperCase(),
     chapter: m[2] ? parseInt(m[2], 10) : 1,
     verse: m[3] ? parseInt(m[3], 10) : 1,
+    twlRowId: tw ? safeDecode(tw[1]) : null,
   };
 }
 
@@ -1048,6 +1055,7 @@ export function App() {
             book={loc.book}
             chapter={loc.chapter}
             initialVerse={loc.verse}
+            initialWordId={loc.twlRowId ?? null}
             onNavigate={navigate}
             bookHook={bookHook}
             onLogout={handleSignOut}

@@ -14,12 +14,41 @@ const redirects = [
   ["#/align/ZEC", "#/alignment/ZEC/1"],
   ["#/align/zec/6", "#/alignment/ZEC/6"],
   ["#/align/ZEC/6/3", "#/alignment/ZEC/6/3"],
-  ["#/words/ZEC/6", "#/verse/ZEC/6/1"],
-  ["#/words/zec/6/3", "#/verse/ZEC/6/3"],
-  ["#/words/ZEC/6/3?row=abc%20d", "#/verse/ZEC/6/3"],
+  // The old word-links editor → the classic editor at that verse, carrying
+  // the row so its word-links tab opens with that link selected.
+  ["#/words/ZEC/6", "#/ZEC/6/1"],
+  ["#/words/zec/6/3", "#/ZEC/6/3"],
+  ["#/words/ZEC/6/3?row=rqe5", "#/ZEC/6/3?twl=rqe5"],
+  ["#/words/ZEC/6/3?row=abc%20d", "#/ZEC/6/3?twl=abc%20d"],
+  // A mangled percent sequence must not throw.
+  ["#/words/ZEC/6/3?row=%E0", `#/ZEC/6/3?twl=${encodeURIComponent("�")}`],
 ];
 
-for (const [from, to] of redirects) {
+// Near-misses: trailing slash, case of the route word, any query tail.
+const nearMisses = [
+  ["#/home/", "#/books"],
+  ["#/Home", "#/books"],
+  ["#/HOME", "#/books"],
+  ["#/home?x=1", "#/books"],
+  ["#/Setup/", "#/admin/setup"],
+  ["#/team?tab=roles", "#/admin/team"],
+  ["#/Articles", "#/articles/tw"],
+  ["#/Scripture/", "#/books"],
+  ["#/align/ZEC/6/3/", "#/alignment/ZEC/6/3"],
+  ["#/Align/ZEC/6/3?x=1", "#/alignment/ZEC/6/3"],
+  ["#/words/ZEC/6/3/", "#/ZEC/6/3"],
+  ["#/Words/ZEC/6/3", "#/ZEC/6/3"],
+  ["#/words/ZEC/6/3?row=a&b=1", "#/ZEC/6/3?twl=a"],
+  ["#/words/ZEC/6/3?b=1&row=a", "#/ZEC/6/3?twl=a"],
+  ["#/words/ZEC/6/3?b=1", "#/ZEC/6/3"],
+  // #/words/{book} is the kept Words & Articles screen; a near-miss of it is
+  // normalized onto that screen rather than read as book "WORDS".
+  ["#/words/ZEC?row=x", "#/words/ZEC"],
+  ["#/words/zec/", "#/words/ZEC"],
+  ["#/Words/ZEC", "#/words/ZEC"],
+];
+
+for (const [from, to] of [...redirects, ...nearMisses]) {
   test(`${from} redirects to ${to}`, () => {
     assert.equal(legacyFlowRedirect(from), to);
   });
@@ -46,6 +75,8 @@ const kept = [
   "#/admin/setup",
   "#/review/ZEC/1",
   "#/ZEC/6/3",
+  "#/ZEC/6/3?twl=rqe5",
+  "#/1SA/1",
   "",
 ];
 

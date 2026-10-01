@@ -246,6 +246,11 @@ interface Props {
   book: string;
   chapter: number;
   initialVerse?: number;
+  // A word-links (twl) row to open on mount (#/{book}/{ch}/{vs}?twl={id}): the
+  // resource column starts on its Words tab with that row active. Read only at
+  // mount — App keys Shell on book, and the jumps that set it (the drafts menu
+  // in the new UI, retired #/words bookmarks, #173) arrive from outside Shell.
+  initialWordId?: string | null;
   onNavigate?: (book: string, chapter: number, verse?: number) => void;
   bookHook?: UseBookReturn;
   onLogout?: () => void;
@@ -259,6 +264,7 @@ export function Shell({
   book,
   chapter,
   initialVerse = 1,
+  initialWordId = null,
   onNavigate,
   bookHook,
   onLogout,
@@ -459,7 +465,9 @@ export function Shell({
   }, [scheduleLintRefetch]);
   const [activeVerse, setActiveVerse] = useState(initialVerse);
   const [activeNoteId, setActiveNoteId] = useState<string | null>(null);
-  const [activeWordId, setActiveWordId] = useState<string | null>(null);
+  const [activeWordId, setActiveWordId] = useState<string | null>(initialWordId);
+  // Captured once so the Words tab is only the *initial* tab for this mount.
+  const [openOnWords] = useState(initialWordId !== null);
   // Transient hover preview: hovering a Words row's "locate" spot lights up where
   // its Hebrew/Greek word sits in the scripture, without clicking (no active
   // switch, no verse jump). Feeds the same activeQuote/activeOccurrence highlight
@@ -3446,7 +3454,11 @@ export function Shell({
   };
 
   const renderResources = (visibleTabs?: ResourceTab[]) => (
-    <ResourceColumn {...resourceColumnProps} visibleTabs={visibleTabs} initialTab={visibleTabs?.[0]} />
+    <ResourceColumn
+      {...resourceColumnProps}
+      visibleTabs={visibleTabs}
+      initialTab={openOnWords && (!visibleTabs || visibleTabs.includes("words")) ? "words" : visibleTabs?.[0]}
+    />
   );
 
   // ── Arrangeable layouts: tiled docking (drag a panel between regions) ──
