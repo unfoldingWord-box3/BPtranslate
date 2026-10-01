@@ -1,7 +1,7 @@
 // PackageHubScreen — the book-package navigation hub at #/package/{book}.
-// This screen REPLACES the FlowNav pill bar: it is where a translator lands
+// This screen REPLACES the old flows pill bar: it is where a translator lands
 // after picking a book, and the "Back to {book} package" chevron on every
-// work screen points here. It renders no FlowNav, no tabs, no pills — tappable
+// work screen points here. It renders no pill bar, no tabs, no pills — tappable
 // surface rows in the visual language TranslateNotesScreen calibrated (same
 // COLUMN_PX, topbar, card tokens, back chevron).
 //
@@ -865,7 +865,7 @@ export default function PackageHubScreen({ book, role, lastPosition }: PackageHu
 
             {/* Verse view (#447): the alignment-joined original/literal/
                 simplified fidelity surface (VerseScreen, #/verse) was built but
-                left unreachable once FlowNav retires (#173) — relink it here.
+                left unreachable once the old pill bar retired (#173) — relink it here.
                 It opens at the last worked verse in this book when known
                 (#453), else 1:1; the screen's own topbar pages between verses
                 from there. */}

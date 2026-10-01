@@ -2,7 +2,7 @@
 // every AdminDesk page. Extracted from the copy-pasted `.admin-head` block
 // (and its re-declared INSPIRE/INSPIRE_DEEP accent) duplicated across
 // AdminProgressScreen, AdminWorkflowScreen, AdminTeamScreen, AdminSetupScreen,
-// and now the four former-FlowNav "More tools" screens (#186).
+// and now the four former pill-bar "More tools" screens (#186).
 import { Box, Typography } from "@mui/material";
 import { useTheme } from "@mui/material/styles";
 

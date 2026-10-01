@@ -10,8 +10,8 @@
 // Route: #/words/{book} (list + detail are internal state, like the artifact's
 // two views — no sub-route). The back chevron aims at #/package/{book}, the
 // per-book hub screen. Translation-primary by construction: NO authoring
-// chrome (no populate / add-by-id / search rail — those live on ArticlesScreen
-// and ArticleWorkspace), no FlowNav, hash nav + back-chevrons only.
+// chrome (no populate / add-by-id / search rail — those live on
+// ArticleWorkspace), no pill bar, hash nav + back-chevrons only.
 //
 // ── 2026-08-10 list restructure + responsive layouts (Benjamin) ─────────────
 //

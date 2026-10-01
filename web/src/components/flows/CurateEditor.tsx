@@ -1,6 +1,6 @@
 // Editor pane for CurateScreen.tsx (l3-templates). Reuses the exact server
 // contract and drafts-store wiring TemplateWorkspace.tsx already established
-// for note templates — this is a re-skin (FlowNav chrome, mobile Back arrow,
+// for note templates — this is a re-skin (flows chrome, mobile Back arrow,
 // always-visible-but-honestly-disabled Approve) rather than a second
 // implementation of the save/draft/approve machinery.
 //

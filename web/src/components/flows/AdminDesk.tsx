@@ -8,7 +8,7 @@
 //     docs/mockups/desktop-first/_design.css translated to the MUI/sx idiom
 //     the flows screens already use.
 //   * <900px: the rail collapses into a tap-to-open menu at the top (the same
-//     pattern the old FlowNav used, which Benjamin found more intuitive on
+//     pattern the old flows pill bar used, which Benjamin found more intuitive on
 //     mobile than a horizontal scroll strip — 2026-08-17).
 //
 // Sections navigate by hash (#/admin/* and the More-tools hashes) so
