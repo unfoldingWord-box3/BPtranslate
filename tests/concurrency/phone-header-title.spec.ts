@@ -63,6 +63,12 @@ function headerProblems(page: Page, wholeButtons: boolean): Promise<string[]> {
   }, wholeButtons);
 }
 
+function updateButton(page: Page, lang: string) {
+  return page
+    .locator('[role="toolbar"]')
+    .getByRole("button", { name: screenName(lang, "sync.updateAvailable"), exact: true });
+}
+
 for (const uiLang of ["en", "ar"]) {
   for (const width of [360, 400]) {
     test(`phone header shows the passage reference at ${width}px (${uiLang})`, async ({ browser }) => {
@@ -113,36 +119,47 @@ for (const uiLang of ["en", "ar"]) {
   }
 }
 
-// Wide toolbar (#517 review). The toolbar grows past its idle width when there
-// is unsaved typing and the connection drops: a "1 unsaved" chip plus an
-// "offline" chip, 224px (en) / 245px (ar) wide. At 360px that left the header
-// slot 136px / 115px, less than the ~176px the row needed with the passage
-// reference held at full width, so the prev/next buttons painted under the
-// toolbar. The row must give way instead: the count first, then the caption,
-// then the reference, and whatever still does not fit is cut off at the slot's
-// edge rather than drawn under the toolbar.
+// Wide toolbar (#517 review, #522). The toolbar grows past its idle width when
+// there is unsaved typing and the connection drops, and again when a deploy
+// raises the "update available" control. As full-text chips ("1 unsaved",
+// "offline", "App update available — refresh") they reached 224px (en) / 245px
+// (ar), and ~330px with the update chip, at 360px. That left the header slot
+// too little room: prev/next painted under the toolbar, then (#519) were cut
+// off at the slot's edge. Below the tablet band the chips are now symbols: the
+// unsaved chip keeps its number, offline and update are icon-only, and each
+// keeps its name as an accessible label and a tooltip. The header row also
+// gives way on its own (the count, then the caption, then the reference). With
+// both, every case here shows back, prev and next whole and nothing under the
+// toolbar.
 //
-// `wholeButtons`: the back and prev/next buttons also stay fully visible. Not
-// asserted for Arabic at 360px, where even the fully shrunk row (~122px) is
-// ~7px wider than the slot, so the far-end next button is clipped slightly;
-// fitting that needs the toolbar's chips to get more compact on phones.
+// `update` also raises the update control through a dev-only seam in
+// useAppVersion (`vite` dev never polls /version.json), on top of the unsaved
+// draft and offline chips: the widest toolbar a phone shows day to day.
 const WIDE_CASES: [string, number, boolean][] = [
-  ["en", 360, true],
-  ["en", 400, true],
+  ["en", 360, false],
+  ["en", 400, false],
   ["ar", 360, false],
-  ["ar", 400, true],
+  ["ar", 400, false],
+  ["en", 360, true],
+  ["ar", 360, true],
 ];
-for (const [uiLang, width, wholeButtons] of WIDE_CASES) {
-  test(`phone header gives way to a wide toolbar at ${width}px (${uiLang})`, async ({ browser }) => {
+for (const [uiLang, width, update] of WIDE_CASES) {
+  const extra = update ? " with the update control" : "";
+  test(`phone header gives way to a wide toolbar${extra} at ${width}px (${uiLang})`, async ({ browser }) => {
     test.setTimeout(120_000);
     const { context } = await newUserContext(browser, "dev");
-    await context.addInitScript((lang) => {
-      try {
-        localStorage.setItem("be:uiLang", lang);
-      } catch {
-        /* ignore */
-      }
-    }, uiLang);
+    await context.addInitScript(
+      ({ lang, update }) => {
+        try {
+          localStorage.setItem("be:uiLang", lang);
+          if (update) localStorage.setItem("be:devUpdateAvailable", "1");
+          else localStorage.removeItem("be:devUpdateAvailable");
+        } catch {
+          /* ignore */
+        }
+      },
+      { lang: uiLang, update },
+    );
     const page = await context.newPage();
     await page.setViewportSize({ width, height: 800 });
     try {
@@ -169,28 +186,38 @@ for (const [uiLang, width, wholeButtons] of WIDE_CASES) {
         }
         await context.setOffline(true);
         const toolbar = page.locator('[role="toolbar"]');
-        // Both chips must be up before measuring, or the case would pass
-        // against a narrower toolbar than the one it describes.
-        await expect(toolbar, `${route}: unsaved chip`).toContainText(`1 ${screenName(uiLang, "sync.unsaved")}`, {
-          timeout: 10_000,
-        });
-        await expect(toolbar, `${route}: offline chip`).toContainText(screenName(uiLang, "sync.offline"), {
-          timeout: 10_000,
-        });
-        // Measured 224px (en) / 245px (ar) with both chips on agentbox and
-        // 210px (en) on CI's fonts; idle is 68px and either chip alone stays
-        // under ~155px. 180 proves both chips are counted without tying the
-        // case to one machine's font metrics.
-        await expect
-          .poll(() => toolbar.evaluate((el) => Math.round(el.getBoundingClientRect().width)), {
-            message: `${route}: toolbar at its wide width`,
+        // Every chip must be up before measuring, or the case would pass
+        // against a narrower toolbar than the one it describes. Found by icon,
+        // which the full-text and the compact forms both carry.
+        const icons = ["EditNoteIcon", "CloudQueueIcon", ...(update ? ["RefreshIcon"] : [])];
+        for (const icon of icons) {
+          await expect(toolbar.locator(`[data-testid="${icon}"]`), `${route}: ${icon} chip`).toBeVisible({
             timeout: 10_000,
-          })
-          .toBeGreaterThanOrEqual(180);
+          });
+        }
 
-        const problems = () => headerProblems(page, wholeButtons);
+        const problems = () => headerProblems(page, true);
         await expect.poll(problems, { message: `${route}: header vs toolbar`, timeout: 10_000 }).toEqual([]);
+
+        // Each symbol keeps its name for screen readers (and as its tooltip).
+        await expect(
+          toolbar.getByLabel(`1 ${screenName(uiLang, "sync.unsaved")}`, { exact: true }),
+          `${route}: unsaved label`,
+        ).toBeVisible();
+        await expect(
+          toolbar.getByLabel(screenName(uiLang, "sync.offline"), { exact: true }),
+          `${route}: offline label`,
+        ).toBeVisible();
+        if (update) {
+          await expect(updateButton(page, uiLang), `${route}: update label`).toBeVisible();
+        }
         await context.setOffline(false);
+      }
+      if (update) {
+        // Still the refresh: tapping the symbol reloads the page.
+        const reloaded = page.waitForEvent("load");
+        await updateButton(page, uiLang).click();
+        await reloaded;
       }
     } finally {
       await context.close();
