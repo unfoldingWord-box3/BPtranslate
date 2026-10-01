@@ -8,6 +8,7 @@
 
 import { useEffect, useState } from "react";
 
+import { lexiconKeys } from "../lib/lexiconKeys";
 import { getEntries as getCachedEntries, putEntries as putCachedEntries } from "../sync/lexiconCache";
 
 export interface LexiconEntry {
@@ -23,21 +24,10 @@ const cache = new Map<string, LexiconEntry | null>();
 const inFlight = new Set<string>();
 const subscribers = new Set<() => void>();
 
-// Reduce 'b:H2320', 'H2148a', etc. to the keys the API can resolve. Returns
-// the exact form and an alpha-stripped fallback ('H2148a' → ['H2148a','H2148']).
-export function normalizeStrong(raw: string): string[] {
-  if (!raw) return [];
-  const m = raw.match(/[HG]\d+[a-z]?/i);
-  if (!m) return [];
-  const exact = m[0].toUpperCase().replace(/^([HG])0+/, "$1");
-  const base = exact.replace(/[A-Z]$/, "");
-  return exact === base ? [exact] : [exact, base];
-}
-
 async function ensure(rawStrongs: string[]) {
   const candidates: string[] = [];
   for (const s of rawStrongs) {
-    const keys = normalizeStrong(s);
+    const keys = lexiconKeys(s);
     for (const k of keys) {
       if (!cache.has(k) && !inFlight.has(k)) candidates.push(k);
     }
@@ -97,7 +87,7 @@ export function useLexicon(rawStrongs: string[]): Map<string, LexiconEntry | nul
   }, [joined]);
   const out = new Map<string, LexiconEntry | null>();
   for (const raw of rawStrongs) {
-    const keys = normalizeStrong(raw);
+    const keys = lexiconKeys(raw);
     let hit: LexiconEntry | null = null;
     for (const k of keys) {
       const v = cache.get(k);
