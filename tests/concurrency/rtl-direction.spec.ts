@@ -50,42 +50,42 @@ const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
 // (versionIsRtl / projectConfig.direction) are opened with the client's view of
 // /api/project-config switched to `direction: "rtl"` — an Arabic target project
 // — without touching the shared DB row other specs rely on. Surfaces using
-// `dir="auto"` follow the content and need no switch. UI chrome surfaces (home,
-// admin desk) are opened with the Arabic UI language (be:uiLang = "ar").
+// `dir="auto"` follow the content and need no switch. UI chrome surfaces (books
+// screen, admin desk) are opened with the Arabic UI language (be:uiLang = "ar").
 //
 // Surfaces NOT covered here, by name, with the reason (#486 asks for this list
 // instead of silent skips):
 //
-//   - flows/ScriptureScreen + ScriptureLane — unreachable for the fixture book:
-//     #/scripture/ZEC/... routes to TranslateScriptureScreen; only a bare
-//     #/scripture reaches the old screen, and it opens OBA, which is not seeded.
+//   - The old flows screens deleted in #534 (HomeScreen, ScriptureScreen +
+//     ScriptureLane, AlignScreen, ArticlesScreen, WordsScreen, SetupScreen,
+//     TeamScreen) — gone; their hashes redirect (legacy-flow-redirects.spec.ts).
 //   - WordsLexiconStrip, UhbStrip, QuoteBuilderPopper, ReviewSourceStrip,
 //     OriginalLanguagePanel — show only the Hebrew original + English glosses,
 //     never target-language text; the Hebrew `versionIsRtl("UHB")` path is
 //     already guarded by the classic + book-view cases below.
 //   - flows/UltAlignmentStrip — shows the published English en_ult source, not
 //     project content (direction of its lane is `dir="auto"`).
-//   - TranslateWordsScreen, ArticlesScreen, ArticleWorkspace, MarkdownView,
+//   - TranslateWordsScreen, ArticleWorkspace, MarkdownView,
 //     TerminologySection — need Arabic tW/tA article drafts or target terms; the
 //     fixture seeds none yet (TODO, #486). The VerseScreen tA article panel's
 //     direction is covered by verse-view-article-inplace.spec.ts (#523).
 //   - VerseScreen audit mode — its cells show only ALIGNED fragments of each
 //     lane, and the fixture verse is deliberately unaligned, so they are empty.
 //   - NoteHistoryDialog (its note field hardcodes dir="ltr"; needs seeded edit
-//     history), the ReviewQueue draft field and "Q:" line, the WordsScreen phone
-//     "This verse" drawer, QuestionCard (classic translation mode), and the
+//     history), the ReviewQueue draft field and "Q:" line, the classic Words
+//     tab (WordsTable), QuestionCard (classic translation mode), and the
 //     NoteCard note in AUTHORING mode (its dir is unset by design for the
 //     English root project) — not yet covered (TODO, #486).
 //   - TemplateWorkspace / TemplateHistoryDialog — note templates are English
 //     authoring scaffolds, never target-language content.
 //   - TopBar — UI chrome only; it sets no `dir` of its own and inherits <html dir>,
-//     which the home/admin cases below already exercise.
+//     which the books/admin cases below already exercise.
 //
 // Known open bugs pinned as `test.fail` (an unexpected pass means the bug was
 // fixed — drop the `.fail`):
 //   - #451 — VerseScreen target lanes render LTR while projectConfig is null.
 //   - #532 — the desktop drag aligner lays Arabic target words out LTR.
-//   - #533 — ReviewContextPanel and WordsScreen verse lanes set no `dir`.
+//   - #533 — ReviewContextPanel verse lanes set no `dir`.
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const AR_UI = JSON.parse(
@@ -542,21 +542,6 @@ test.describe("RTL paint on Arabic surfaces (#486)", () => {
     await context.close();
   });
 
-  // KNOWN BUG (#533): WordsScreen's "In target (ULT)" context and its
-  // phone "This verse" drawer set no `dir`, so the Arabic verse inherits the
-  // LTR UI and paints with the period on the right. Remove `.fail` once fixed.
-  test.fail("words screen: Arabic ULT verse context paints rtl", async ({ browser }) => {
-    const { context, page } = await open(browser, "rtl-words", `/#/words/${V}`, {
-      project: RTL_PROJECT,
-      viewport: { width: 1280, height: 900 },
-    });
-    // The fixture verse is unaligned, so "In target (ULT)" falls back to the
-    // verse's plain_text followed by an English "no milestone match" hint.
-    const ctx = containing(page, RTL_FIXTURE.arabicUlt);
-    await expectRtlSentence(ctx, "WordsScreen target context", RTL_FIXTURE.arabicUlt);
-    await context.close();
-  });
-
   // KNOWN BUG (#533): ReviewContextPanel's ULT/UST lanes set no `dir`,
   // so the Arabic verse inherits the LTR UI (period on the right). Remove
   // `.fail` once fixed.
@@ -589,10 +574,13 @@ test.describe("RTL paint on Arabic surfaces (#486)", () => {
     await expect(hits.first()).toBeVisible({ timeout: 15_000 });
     const n = await hits.count();
     expect(n, "expected the note body AND its list preview").toBeGreaterThanOrEqual(2);
+    let checked = 0;
     for (let i = 0; i < n; i++) {
       if (!(await hits.nth(i).isVisible())) continue;
       await expectRtlSentence(hits.nth(i), `TranslateNotes note #${i}`);
+      checked++;
     }
+    expect(checked, "expected the note body AND its list preview visible").toBeGreaterThanOrEqual(2);
     await context.close();
   });
 
@@ -625,16 +613,19 @@ test.describe("RTL paint on Arabic surfaces (#486)", () => {
 
   // ── Arabic UI chrome (be:uiLang = "ar") ─────────────────────────────────
 
-  test("home (Arabic UI): queue card description paints rtl", async ({ browser }) => {
-    const { context, page } = await open(browser, "rtl-home", "/#/home", {
+  // The books screen is the app's landing page since #534 retired HomeScreen
+  // (#/home now redirects here).
+  test("books screen (Arabic UI): list subtitle paints rtl", async ({ browser }) => {
+    const { context, page } = await open(browser, "rtl-books", "/#/books", {
       uiLang: "ar",
       viewport: { width: 1280, height: 900 },
     });
-    // "من ULT إلى GLT (حرفية) ومن UST إلى GST (مبسّطة)، آية بآية." — Latin tokens + final period.
-    const desc = sentence(page, arUi("flowHome.descScripture"));
-    await expect(desc).toBeVisible({ timeout: 15_000 });
-    expect(await computedDirection(desc)).toBe("rtl");
-    await expectRtlPaint(desc, "HomeScreen descScripture", { latin: "GLT" });
+    // "قانون الأسفار الكامل المؤلف من 66 سفرًا، … «غير مستورد»." — two sentences,
+    // embedded digits, final period. No Latin token in this string.
+    const sub = sentence(page, arUi("flowBooks.list.sub"));
+    await expect(sub).toBeVisible({ timeout: 15_000 });
+    expect(await computedDirection(sub)).toBe("rtl");
+    await expectRtlPaint(sub, "BooksScreen list subtitle");
     await context.close();
   });
 
