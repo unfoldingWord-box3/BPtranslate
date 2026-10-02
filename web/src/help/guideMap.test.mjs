@@ -117,11 +117,34 @@ test("parseArticle front-matter subset", () => {
   assert.deepEqual(a.roles, []);
   assert.deepEqual(a.keywords, ["tn", "save"]);
   assert.deepEqual(a.screenshots, [
-    { name: "notes-1", hash: "#/notes/ZEC/1/1", phone: false },
-    { name: "notes-phone", hash: "#/notes/ZEC/1/1", phone: true },
+    { name: "notes-1", hash: "#/notes/ZEC/1/1", phone: false, top: false },
+    { name: "notes-phone", hash: "#/notes/ZEC/1/1", phone: true, top: false },
   ]);
   assert.deepEqual(a.headings, ["Open a note", "Sub"]);
   assert.equal(a.body, "Intro.\n## Open a note\n### Sub");
+});
+
+test("parseArticle reads the phone and top screenshot flags in any order", () => {
+  const a = parseArticle(
+    [
+      "---",
+      "id: a",
+      "title: T",
+      "screenshots:",
+      "  - one #/x top",
+      "  - two #/y phone top",
+      "  - three #/z top phone",
+      "---",
+      "",
+    ].join("\n"),
+    "x.md",
+  );
+  assert.deepEqual(a.screenshots, [
+    { name: "one", hash: "#/x", phone: false, top: true },
+    { name: "two", hash: "#/y", phone: true, top: true },
+    { name: "three", hash: "#/z", phone: true, top: true },
+  ]);
+  assert.throws(() => parseArticle("---\nid: a\ntitle: T\nscreenshots:\n  - one top\n---\n", "q.md"), /q\.md.*malformed screenshot/);
 });
 
 test("parseArticle errors name the file", () => {

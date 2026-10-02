@@ -57,10 +57,18 @@ export function parseArticle(text, file) {
   if (!fm.title) fail("missing title");
   const screenshots = (fm.screenshots ?? []).map((item) => {
     const parts = item.split(/\s+/);
-    const phone = parts[parts.length - 1] === "phone";
-    if (phone) parts.pop();
-    if (parts.length !== 2) fail(`malformed screenshot line "${item}" (want: <name> <hash> [phone])`);
-    return { name: parts[0], hash: parts[1], phone };
+    let phone = false;
+    let top = false;
+    // Trailing flags, any order: `phone`, `top`.
+    for (;;) {
+      const last = parts[parts.length - 1];
+      if (last === "phone") phone = true;
+      else if (last === "top") top = true;
+      else break;
+      parts.pop();
+    }
+    if (parts.length !== 2) fail(`malformed screenshot line "${item}" (want: <name> <hash> [phone] [top])`);
+    return { name: parts[0], hash: parts[1], phone, top };
   });
   const body = lines.slice(end + 1).join("\n").replace(/^\n+/, "");
   const headings = [];
