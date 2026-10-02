@@ -25,6 +25,15 @@ const redirects = [
   ["#/words/ZEC/6/3?row=%22%5D", "#/ZEC/6/3?twl=%22%5D"],
   // A mangled percent sequence must not throw.
   ["#/words/ZEC/6/3?row=%E0", `#/ZEC/6/3?twl=${encodeURIComponent("�")}`],
+  // The four desk More-tools screens moved under #/admin/* (#537).
+  ["#/ai", "#/admin/ai"],
+  ["#/style", "#/admin/style"],
+  ["#/curate", "#/admin/curate"],
+  ["#/observe", "#/admin/observe"],
+  // #/curate/{templateId} was the only one with a tail; the id is carried
+  // over exactly as encoded (template ids are free text, not [A-Za-z0-9]).
+  ["#/curate/figs-metaphor-1", "#/admin/curate/figs-metaphor-1"],
+  ["#/curate/a%20b%2Fc", "#/admin/curate/a%20b%2Fc"],
 ];
 
 // Near-misses: trailing slash, case of the route word, any query tail.
@@ -49,6 +58,16 @@ const nearMisses = [
   ["#/words/ZEC?row=x", "#/words/ZEC"],
   ["#/words/zec/", "#/words/ZEC"],
   ["#/Words/ZEC", "#/words/ZEC"],
+  ["#/ai/", "#/admin/ai"],
+  ["#/AI", "#/admin/ai"],
+  ["#/ai?x=1", "#/admin/ai"],
+  ["#/Style/", "#/admin/style"],
+  ["#/observe?tab=exports", "#/admin/observe"],
+  ["#/Observe", "#/admin/observe"],
+  ["#/curate/", "#/admin/curate"],
+  ["#/Curate?x=1", "#/admin/curate"],
+  ["#/curate/figs-metaphor-1/", "#/admin/curate/figs-metaphor-1"],
+  ["#/Curate/figs-metaphor-1?x=1", "#/admin/curate/figs-metaphor-1"],
 ];
 
 for (const [from, to] of [...redirects, ...nearMisses]) {
@@ -71,11 +90,12 @@ const kept = [
   "#/verse/ZEC/1/1",
   "#/articles/tw",
   "#/articles/ta/figs-metaphor",
-  "#/ai",
-  "#/style",
-  "#/curate",
-  "#/observe",
   "#/admin/setup",
+  "#/admin/ai",
+  "#/admin/style",
+  "#/admin/curate",
+  "#/admin/curate/figs-metaphor-1",
+  "#/admin/observe",
   "#/review/ZEC/1",
   "#/ZEC/6/3",
   "#/ZEC/6/3?twl=rqe5",

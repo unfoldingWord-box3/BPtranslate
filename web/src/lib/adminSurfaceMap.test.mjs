@@ -43,7 +43,7 @@ function parseClassicSections() {
 // Every AdminDesk rail entry (both the top-4 admin sections and the four
 // former pill-bar "More tools" pages, unified onto AdminSection in #186) is now
 // keyed by one AdminSection member — the union is the single source of nav
-// identities. Each still routes to its own hash (#/admin/progress, #/ai, …),
+// identities. Each routes to its own hash (#/admin/progress, #/admin/ai, …),
 // but that's a routing detail, not a separate coverage identity.
 function parseDeskPages() {
   const src = readStripped("src/components/flows/AdminDesk.tsx");

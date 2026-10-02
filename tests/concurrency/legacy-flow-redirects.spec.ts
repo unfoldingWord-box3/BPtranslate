@@ -4,8 +4,10 @@ import { newUserContext } from "./helpers";
 // Retired flows routes (#173).
 //
 // The old flows screens (home, scripture, align, articles, words, setup, team)
-// and their pill-bar nav were deleted. Their hashes must still land somewhere
-// real: each one is rewritten to the screen that does that job now. This spec
+// and their pill-bar nav were deleted, and the desk More-tools screens moved
+// from #/ai, #/style, #/curate and #/observe to #/admin/* (#537). The old
+// hashes must still land somewhere real: each one is rewritten to the screen
+// that does that job now. This spec
 // loads every old hash and asserts the URL it settles on and a landmark of the
 // destination screen (its heading), with no uncaught page error. It also loads
 // every entry point that survives (hub surfaces, desk tools, classic menu
@@ -22,6 +24,10 @@ const h6 = (text: string): Landmark => ({ tag: "h6", text });
 
 const BOOKS = h1("Books");
 const CLASSIC_NOTES = h6("Notes");
+const AI_STUDIO = h1("AI studio");
+const STYLE = h1("Style");
+const TEMPLATES = h1("Templates");
+const OBSERVE = h1("Observe");
 
 const redirects: [from: string, to: string, landmark: Landmark][] = [
   ["#/home", "#/books", BOOKS],
@@ -39,6 +45,17 @@ const redirects: [from: string, to: string, landmark: Landmark][] = [
   // The old word-links editor → the classic editor at that verse.
   ["#/words/ZEC/6", "#/ZEC/6/1", CLASSIC_NOTES],
   ["#/words/ZEC?row=x", "#/words/ZEC", { tag: "body", text: /Words & Articles/ }],
+  // The desk More-tools screens moved under #/admin/* (#537).
+  ["#/ai", "#/admin/ai", AI_STUDIO],
+  ["#/style", "#/admin/style", STYLE],
+  ["#/curate", "#/admin/curate", TEMPLATES],
+  ["#/observe", "#/admin/observe", OBSERVE],
+  ["#/AI/", "#/admin/ai", AI_STUDIO],
+  ["#/style?x=1", "#/admin/style", STYLE],
+  ["#/Observe/", "#/admin/observe", OBSERVE],
+  ["#/curate/", "#/admin/curate", TEMPLATES],
+  ["#/curate/figs-metaphor-1", "#/admin/curate/figs-metaphor-1", TEMPLATES],
+  ["#/Curate/a%20b/?x=1", "#/admin/curate/a%20b", TEMPLATES],
 ];
 
 // Every surviving destination reachable from the package hub, the admin desk
@@ -60,10 +77,10 @@ const kept: [hash: string, landmark: Landmark][] = [
   ["#/admin/review", h1("Review state")],
   ["#/admin/team", h1("Team & roles")],
   ["#/admin/setup", h1("Setup & preferences")],
-  ["#/ai", h1("AI studio")],
-  ["#/style", h1("Style")],
-  ["#/curate", h1("Templates")],
-  ["#/observe", h1("Observe")],
+  ["#/admin/ai", AI_STUDIO],
+  ["#/admin/style", STYLE],
+  ["#/admin/curate", TEMPLATES],
+  ["#/admin/observe", OBSERVE],
   ["#/articles/tw", h6("Articles")],
   ["#/templates", h6("Note Templates")],
   ["#/preferences", h6("Preferences & Memory")],
@@ -211,6 +228,41 @@ test.describe("retired flows routes (#173)", () => {
     await page.goto("/#/ZEC/6/3?twl=%22%5D");
     await expectLandmark(page, h6("TWLinks"));
     await expect(page.locator("[data-word-id]").first()).toBeVisible();
+    expect(errors, errors.join("\n")).toEqual([]);
+    await context.close();
+  });
+
+  // The desk rail's More-tools links must point at the #/admin/* hashes
+  // directly, not lean on the legacy redirect (#537). Every hashchange is
+  // recorded, so a link still set to #/ai would show up even though the
+  // redirect then lands on the right screen.
+  test("desk More-tools links go straight to #/admin/*", async ({ browser }) => {
+    const { context } = await newUserContext(browser, "dev");
+    const page = await context.newPage();
+    const errors: string[] = [];
+    page.on("pageerror", (e) => errors.push(e.message));
+    await page.goto("/#/admin/progress");
+    await expectLandmark(page, h1("Progress"));
+    await page.evaluate(() => {
+      const w = window as unknown as { __hashes: string[] };
+      w.__hashes = [];
+      addEventListener("hashchange", (e) => w.__hashes.push(new URL(e.newURL).hash));
+    });
+    const tools: [label: string, hash: string, landmark: Landmark][] = [
+      ["AI studio", "#/admin/ai", AI_STUDIO],
+      ["Style", "#/admin/style", STYLE],
+      ["Templates", "#/admin/curate", TEMPLATES],
+      ["Observe", "#/admin/observe", OBSERVE],
+    ];
+    for (const [label, hash, landmark] of tools) {
+      // Scoped to the desk rail: Style's own section list also has a
+      // "Templates" button.
+      await page.getByLabel("Admin sections").getByRole("button", { name: label, exact: true }).click();
+      await expect.poll(() => new URL(page.url()).hash).toBe(hash);
+      await expectLandmark(page, landmark);
+    }
+    const seen = await page.evaluate(() => (window as unknown as { __hashes: string[] }).__hashes);
+    expect(seen).toEqual(tools.map(([, hash]) => hash));
     expect(errors, errors.join("\n")).toEqual([]);
     await context.close();
   });

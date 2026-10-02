@@ -476,7 +476,7 @@ export default function ObserveScreen({ role, me, onNavigate }: ObserveScreenPro
           sub={
             <>
               {t("moreTools.observe.jobsSub")}{" "}
-              <Link component="button" type="button" variant="caption" onClick={() => { location.hash = "#/ai"; }}>
+              <Link component="button" type="button" variant="caption" onClick={() => { location.hash = "#/admin/ai"; }}>
                 {t("moreTools.observe.openAiStudio")}
               </Link>
             </>

@@ -973,7 +973,7 @@ function TemplatesSection() {
       intro={t("moreTools.style.templatesIntro")}
       footState={t("moreTools.style.curateFoot")}
       footActions={
-        <Button size="small" variant="contained" href="#/curate">
+        <Button size="small" variant="contained" href="#/admin/curate">
           {t("moreTools.style.openCuration")}
         </Button>
       }

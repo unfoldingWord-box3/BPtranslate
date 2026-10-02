@@ -476,7 +476,7 @@ function BookDetailPanel({
                     </Button>
                   </>
                 )}
-                {/* "AI Translate whole book" moved to the AI studio (#/ai),
+                {/* "AI Translate whole book" moved to the AI studio (#/admin/ai),
                     disabled pending a product decision (issue #480). It fans
                     out to two pipeline jobs per chapter, so it does not belong
                     next to the ordinary Open / Re-pull actions. */}

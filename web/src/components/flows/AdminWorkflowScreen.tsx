@@ -1216,7 +1216,7 @@ export default function AdminWorkflowScreen({ role, me }: AdminWorkflowScreenPro
             done: jobCounts.done,
           })}
         </Typography>
-        <Link component="button" type="button" variant="body2" onClick={() => { location.hash = "#/ai"; }} sx={{ mt: 1, display: "inline-block" }}>
+        <Link component="button" type="button" variant="body2" onClick={() => { location.hash = "#/admin/ai"; }} sx={{ mt: 1, display: "inline-block" }}>
           {t("adminPages.workflow.openAiStudio")}
         </Link>
       </Panel>
