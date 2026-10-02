@@ -45,7 +45,7 @@ import type { FlowScreenContext } from "./types";
 import { PipelineMenu } from "../PipelineMenu";
 import { AiServiceSection } from "../AiServiceSection";
 import { pipelineStore, type PipelineJob } from "../../sync/pipelineStore";
-import { useProjectConfig } from "../../hooks/useProjectConfig";
+import { useProjectConfig, isTranslationProject } from "../../hooks/useProjectConfig";
 import {
   api,
   ApiError,
@@ -466,14 +466,21 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
             confirmation (mirror PipelineMenu's confirm pattern) and its
             enable-conditions: role === "admin", book imported, translation
             project. startBookAiTranslate (web/src/lib/aiTranslate.ts) is kept
-            intact for that day; the control is unreachable until then. */}
-        <Tooltip title={t("aiStudio.translateWholeBookDisabled")}>
-          <span>
-            <Button size="small" variant="outlined" color="secondary" disabled>
-              {t("aiStudio.translateWholeBook")}
-            </Button>
-          </span>
-        </Tooltip>
+            intact for that day; the control is unreachable until then.
+
+            Gated on isTranslationProject(cfg) (#497): a source-language
+            (authoring) workspace should not advertise a greyed-out action that
+            can never apply to it — matching the mode-gate on the button this
+            replaced. */}
+        {isTranslationProject(cfg) && (
+          <Tooltip title={t("aiStudio.translateWholeBookDisabled")}>
+            <span>
+              <Button size="small" variant="outlined" color="secondary" disabled>
+                {t("aiStudio.translateWholeBook")}
+              </Button>
+            </span>
+          </Tooltip>
+        )}
       </Stack>
 
       <Box
