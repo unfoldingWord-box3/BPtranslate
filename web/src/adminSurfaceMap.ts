@@ -102,7 +102,7 @@ export const ADMIN_SURFACES: AdminSurfaceEntry[] = [
   },
   {
     id: "aiService",
-    label: "AI service (provider / model / API key)",
+    label: "AI service (provider / model / API key, help-assistant switch)",
     classic: { section: "aiService", file: PREFS },
     desk: { page: "ai", file: "src/components/flows/AiScreen.tsx", anchor: "<AiServiceSection" },
     notes: "Moved from the admin Setup desk to the AI studio (#/admin/ai; #/ai until #537) under #479 so config and use share one screen. Classic #/preferences keeps its copy until classic retires (#173).",

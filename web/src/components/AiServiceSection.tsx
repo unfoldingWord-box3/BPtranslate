@@ -18,13 +18,16 @@ import {
   MenuItem,
   Snackbar,
   Stack,
+  Switch,
+  FormControlLabel,
+  FormHelperText,
   TextField,
   Typography,
 } from "@mui/material";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import SaveIcon from "@mui/icons-material/Save";
 import { useTranslation } from "react-i18next";
-import { api, ApiError, type AiProviderSettings } from "../sync/api";
+import { api, ApiError, type AiProviderSettings, type HelpStatus } from "../sync/api";
 
 // Temporary: hide the shared uW subscription ("default") from the picker and
 // steer orgs toward Gemini (bsoj has a key; Gemini/Grok have been strongest for
@@ -59,6 +62,10 @@ export function AiServiceSection() {
   const [settings, setSettings] = useState<AiProviderSettings | null>(null);
   const [loadError, setLoadError] = useState(false);
   const save = useSaveState();
+  // Help-assistant switch (api/src/help/helpRoutes.ts). Independent of the
+  // provider row, so it loads and saves on its own.
+  const [help, setHelp] = useState<HelpStatus | null>(null);
+  const [helpSaving, setHelpSaving] = useState(false);
 
   // Draft form state, seeded from `settings` once loaded.
   const [draftProvider, setDraftProvider] = useState<string>(UI_DEFAULT_PROVIDER);
@@ -93,7 +100,20 @@ export function AiServiceSection() {
 
   useEffect(() => {
     void load();
+    api.getHelpStatus().then(setHelp).catch(() => setHelp(null));
   }, []);
+
+  const onHelpToggle = async (enabled: boolean) => {
+    setHelpSaving(true);
+    try {
+      const res = await api.setHelpChatEnabled(enabled);
+      setHelp((h) => (h ? { ...h, enabled: res.enabled } : h));
+    } catch {
+      save.setMsg(t("preferences.saveFailed"));
+    } finally {
+      setHelpSaving(false);
+    }
+  };
 
   if (settings === null) {
     return loadError ? (
@@ -304,6 +324,25 @@ export function AiServiceSection() {
             {t("preferences.save")}
           </Button>
         </Box>
+
+        {help && (
+          <Box>
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={help.enabled}
+                  disabled={helpSaving}
+                  onChange={(e) => void onHelpToggle(e.target.checked)}
+                />
+              }
+              label={t("preferences.aiService.helpChat.label")}
+            />
+            <FormHelperText sx={{ mx: 0 }}>
+              {t("preferences.aiService.helpChat.helper", { cap: help.capUsd })}{" "}
+              {t("preferences.aiService.helpChat.needsKey")}
+            </FormHelperText>
+          </Box>
+        )}
       </Stack>
 
       <Dialog open={clearOpen} onClose={() => !clearing && setClearOpen(false)} maxWidth="xs" fullWidth>
