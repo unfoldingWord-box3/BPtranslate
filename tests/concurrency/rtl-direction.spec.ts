@@ -410,7 +410,11 @@ test.describe("RTL paint on Arabic surfaces (#486)", () => {
     await expectRtlSentence(sentence(page, RTL_FIXTURE.arabicUlt), "TranslateScripture verse snippet");
     // The ULT lane editor is a textarea (content_json): a Range cannot measure
     // a form control's value, so this one is computed direction only.
-    const editor = page.locator('section[aria-label="ULT lane"] textarea').first();
+    // Skip MUI multiline's aria-hidden autosize mirror, which never gets
+    // inputProps.dir (same exclusion as helpers.ts noteTextarea).
+    const editor = page
+      .locator('section[aria-label="ULT lane"] textarea:not([aria-hidden="true"])')
+      .first();
     await expect(editor).toHaveValue(RTL_FIXTURE.arabicUlt, { timeout: 15_000 });
     expect(await computedDirection(editor)).toBe("rtl");
     await context.close();
@@ -572,8 +576,12 @@ test.describe("RTL paint on Arabic surfaces (#486)", () => {
     );
     const hits = page.getByText(RTL_FIXTURE.arabicNote, { exact: true });
     await expect(hits.first()).toBeVisible({ timeout: 15_000 });
+    // The list preview and the note body can commit on different renders, so
+    // poll for both rather than reading the count once.
+    await expect
+      .poll(() => hits.count(), { message: "expected the note body AND its list preview", timeout: 15_000 })
+      .toBeGreaterThanOrEqual(2);
     const n = await hits.count();
-    expect(n, "expected the note body AND its list preview").toBeGreaterThanOrEqual(2);
     let checked = 0;
     for (let i = 0; i < n; i++) {
       if (!(await hits.nth(i).isVisible())) continue;
@@ -603,7 +611,7 @@ test.describe("RTL paint on Arabic surfaces (#486)", () => {
     });
     // NoteCard's note is a textarea: computed direction only (see header).
     const editor = page
-      .locator(`[data-note-id="${RTL_FIXTURE.noteId}"] textarea`)
+      .locator(`[data-note-id="${RTL_FIXTURE.noteId}"] textarea:not([aria-hidden="true"])`)
       .filter({ hasText: RTL_FIXTURE.arabicNote })
       .first();
     await expect(editor).toBeVisible({ timeout: 15_000 });
