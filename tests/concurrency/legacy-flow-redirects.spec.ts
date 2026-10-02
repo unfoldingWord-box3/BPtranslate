@@ -165,6 +165,32 @@ test.describe("retired flows routes (#173)", () => {
     await context.close();
   });
 
+  // #535: the resource column's tab is its own state, read from initialTab only
+  // at mount. A ?twl= link reached while the editor is already open on another
+  // tab (back/forward, a typed link) must still switch it to Words.
+  test("a ?twl= link reached while the editor shows Notes switches to the Words tab", async ({ browser }) => {
+    const { context } = await newUserContext(browser, "dev");
+    const page = await context.newPage();
+    const errors: string[] = [];
+    page.on("pageerror", (e) => errors.push(e.message));
+    const id = await zec63TwlId(page);
+    await page.goto("/#/ZEC/6/3");
+    await expectLandmark(page, CLASSIC_NOTES);
+    // Go to Words, then back to Notes, so the tab is a user choice, not the default.
+    await page.getByRole("button", { name: /^TWLinks/ }).click();
+    await expectLandmark(page, h6("TWLinks"));
+    await page.getByRole("button", { name: /^Notes/ }).click();
+    await expectLandmark(page, CLASSIC_NOTES);
+    await expect(page.locator("h6").filter({ hasText: "TWLinks" })).toHaveCount(0);
+    // Same book and verse, only ?twl= is added: no remount, no reload.
+    await page.evaluate((rowId) => {
+      location.hash = `#/ZEC/6/3?twl=${encodeURIComponent(rowId)}`;
+    }, id);
+    await expectWordsTabWithRow(page, id);
+    expect(errors, errors.join("\n")).toEqual([]);
+    await context.close();
+  });
+
   test("a ?twl= id with selector characters does not break the editor", async ({ browser }) => {
     const { context } = await newUserContext(browser, "dev");
     const page = await context.newPage();
