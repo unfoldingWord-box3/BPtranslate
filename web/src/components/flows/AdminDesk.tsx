@@ -11,7 +11,7 @@
 //     pattern the old flows pill bar used, which Benjamin found more intuitive on
 //     mobile than a horizontal scroll strip — 2026-08-17).
 //
-// Sections navigate by hash (#/admin/* and the More-tools hashes) so
+// Sections navigate by hash (#/admin/*, More tools included) so
 // back/forward work; the active section is tinted with the Inspire highlight
 // like every other selected row in the redesign. Screens render inside as
 // children — this file owns ONLY the chrome, never data.
@@ -66,14 +66,15 @@ const SECTIONS: NavItem[] = [
   { key: "setup", labelKey: "adminDesk.nav.setup", icon: <TuneIcon fontSize="small" />, hash: "#/admin/setup" },
 ];
 
-// More-tools sections — same first-class treatment as SECTIONS above, but each
-// keeps its own pre-existing hash (#/ai etc.) rather than the #/admin/{key}
-// pattern, so bookmarks and links into these pages keep working (#186).
+// More-tools sections — same first-class treatment as SECTIONS above (#186).
+// They moved from their own hashes (#/ai, #/style, #/curate, #/observe) under
+// #/admin/* in #537; the old hashes redirect (lib/legacyFlowRoutes.ts) so
+// bookmarks keep working. Templates keeps its screen's "curate" slug.
 const TOOLS: NavItem[] = [
-  { key: "ai", labelKey: "adminDesk.nav.ai", icon: <AutoAwesomeIcon fontSize="small" />, hash: "#/ai" },
-  { key: "style", labelKey: "adminDesk.nav.style", icon: <PaletteIcon fontSize="small" />, hash: "#/style" },
-  { key: "templates", labelKey: "adminDesk.nav.templates", icon: <ArticleIcon fontSize="small" />, hash: "#/curate" },
-  { key: "observe", labelKey: "adminDesk.nav.observe", icon: <VisibilityIcon fontSize="small" />, hash: "#/observe" },
+  { key: "ai", labelKey: "adminDesk.nav.ai", icon: <AutoAwesomeIcon fontSize="small" />, hash: "#/admin/ai" },
+  { key: "style", labelKey: "adminDesk.nav.style", icon: <PaletteIcon fontSize="small" />, hash: "#/admin/style" },
+  { key: "templates", labelKey: "adminDesk.nav.templates", icon: <ArticleIcon fontSize="small" />, hash: "#/admin/curate" },
+  { key: "observe", labelKey: "adminDesk.nav.observe", icon: <VisibilityIcon fontSize="small" />, hash: "#/admin/observe" },
 ];
 
 export function AdminDesk({ current, children }: { current: AdminSection; children: ReactNode }) {

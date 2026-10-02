@@ -216,15 +216,8 @@ function parseHash(): Location {
   }
   // Flow screens. Parameterless routes are single reserved tokens; none
   // collide with 3-letter USFM book codes in the catch-all below.
-  if (/^#\/ai$/.test(location.hash)) return { view: "ai" };
-  if (/^#\/style$/.test(location.hash)) return { view: "style" };
   const bk = location.hash.match(/^#\/books(?:\/([A-Za-z0-9]+))?$/);
   if (bk) return { view: "books", book: bk[1] ? bk[1].toUpperCase() : null };
-  if (/^#\/observe$/.test(location.hash)) return { view: "observe" };
-  const cu = location.hash.match(/^#\/curate(?:\/(.+))?$/);
-  if (cu) {
-    return { view: "curate", templateId: decodeURIComponent(cu[1] ?? "") || null };
-  }
   // Titus-redesign routes. They must sit above the book-code catch-all at the
   // end, which is unanchored and would read "package" or "words" as a book.
   // TranslateScriptureScreen seeks to a deep-linked verse on mount (#389).
@@ -249,6 +242,15 @@ function parseHash(): Location {
   const ad = location.hash.match(/^#\/admin\/(team|setup|workflow|progress|review)$/);
   if (ad) {
     return { view: "admin", section: ad[1] as "team" | "setup" | "workflow" | "progress" | "review" };
+  }
+  // The desk More-tools screens, under #/admin/* since #537 (their old
+  // #/ai, #/style, #/curate, #/observe hashes redirect via legacyFlowRedirect).
+  if (location.hash === "#/admin/ai") return { view: "ai" };
+  if (location.hash === "#/admin/style") return { view: "style" };
+  if (location.hash === "#/admin/observe") return { view: "observe" };
+  const cu = location.hash.match(/^#\/admin\/curate(?:\/(.+))?$/);
+  if (cu) {
+    return { view: "curate", templateId: safeDecode(cu[1] ?? "") || null };
   }
   // #/alignment (redesign). Must sit above the final book-code catch-all,
   // which is unanchored and would swallow "alignment" as a book.

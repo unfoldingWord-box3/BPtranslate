@@ -1,4 +1,5 @@
-// Redirects for the hashes of the old flows screens retired in #173.
+// Redirects for the hashes of the old flows screens retired in #173, and of
+// the desk More-tools screens moved under #/admin/* in #537.
 //
 // The old flows mode (HomeScreen, ScriptureScreen, AlignScreen, ArticlesScreen,
 // WordsScreen, SetupScreen, TeamScreen and their pill-bar nav) was replaced by
@@ -11,12 +12,24 @@
 // the route word (#/Home), a trailing slash (#/home/), and any query tail
 // (#/home?x=1). Only the old word-links screen's ?row= is carried over.
 //
+// The four admin desk More-tools screens (AI studio, Style, Templates, Observe)
+// kept their own hashes through #173, then moved under the desk in #537:
+// #/ai, #/style, #/curate[/{templateId}] and #/observe now redirect to
+// #/admin/ai, #/admin/style, #/admin/curate[/{templateId}] and #/admin/observe.
+//
 // Pure (string in, string out) so the table is unit-tested in
 // legacyFlowRoutes.test.mjs; App.tsx's parseHash applies the result with
 // history.replaceState. Returns null when the hash is not a retired route,
 // including every form a kept screen still owns (#/scripture/{book}/…,
-// #/verse/…, #/articles/{tw|ta}/…, #/ai, #/style, #/curate, #/observe).
+// #/verse/…, #/articles/{tw|ta}/…, #/admin/…).
 export function legacyFlowRedirect(hash: string): string | null {
+  // #/curate/{templateId}: a template id is free text (percent-encoded in the
+  // hash), so it can't go through the [A-Za-z0-9] segment matcher below. Carry
+  // it over exactly as encoded; drop a trailing slash and any raw query tail
+  // (the in-app link encodes "?" and "/", so neither is part of a real id).
+  const cu = hash.match(/^#\/curate\/([^?/][^?]*?)\/?(?:\?.*)?$/i);
+  if (cu) return `#/admin/curate/${cu[1]}`;
+
   const m = hash.match(/^#\/([A-Za-z]+)((?:\/[A-Za-z0-9]+)*)\/?(?:\?(.*))?$/);
   if (!m) return null;
   const route = m[1].toLowerCase();
@@ -32,6 +45,12 @@ export function legacyFlowRedirect(hash: string): string | null {
         return "#/admin/setup";
       case "team":
         return "#/admin/team";
+      // The desk More-tools screens (#537).
+      case "ai":
+      case "style":
+      case "curate":
+      case "observe":
+        return `#/admin/${route}`;
       // The flows tW/tA article browser → the article workspace, which keeps
       // the populate / add-by-id / search tools that screen had.
       case "articles":

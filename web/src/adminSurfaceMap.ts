@@ -1,6 +1,7 @@
 // Admin surface parity map — the one registry linking the classic admin surface
-// (#/preferences, PreferencesWorkspace.tsx) to the new admin desk (#/admin/* +
-// the desk rail's More-tools pages). Nothing imports this at runtime; it is
+// (#/preferences, PreferencesWorkspace.tsx) to the new admin desk (#/admin/*,
+// which since #537 includes the desk rail's More-tools pages: #/admin/ai,
+// #/admin/style, #/admin/curate, #/admin/observe). Nothing imports this at runtime; it is
 // documentation-as-data, enforced by adminSurfaceMap.test.mjs.
 //
 // THE RULE: when you add, move, or remove an admin-facing feature or section in
@@ -104,7 +105,7 @@ export const ADMIN_SURFACES: AdminSurfaceEntry[] = [
     label: "AI service (provider / model / API key)",
     classic: { section: "aiService", file: PREFS },
     desk: { page: "ai", file: "src/components/flows/AiScreen.tsx", anchor: "<AiServiceSection" },
-    notes: "Moved from the admin Setup desk to the AI studio (#/ai) under #479 so config and use share one screen. Classic #/preferences keeps its copy until classic retires (#173).",
+    notes: "Moved from the admin Setup desk to the AI studio (#/admin/ai; #/ai until #537) under #479 so config and use share one screen. Classic #/preferences keeps its copy until classic retires (#173).",
   },
   {
     id: "progress",
@@ -160,6 +161,7 @@ export const ADMIN_SURFACES: AdminSurfaceEntry[] = [
     label: "Templates (note template curation)",
     classic: null,
     desk: { page: "templates", file: "src/components/flows/CurateScreen.tsx", anchor: "function CurateScreen" },
+    notes: "Desk key \"templates\", hash #/admin/curate[/{templateId}] (#/curate until #537). Not the classic #/templates note-template workspace.",
   },
   {
     id: "observe",

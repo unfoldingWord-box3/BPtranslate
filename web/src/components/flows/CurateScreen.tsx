@@ -75,7 +75,7 @@ export default function CurateScreen({ role, templateId }: CurateScreenProps) {
   const [aiDisabled, setAiDisabled] = useState(false);
 
   const selectTemplate = useCallback((id: string) => {
-    location.hash = `#/curate/${encodeURIComponent(id)}`;
+    location.hash = `#/admin/curate/${encodeURIComponent(id)}`;
     setMobileView("editor");
   }, []);
   const backToRail = useCallback(() => setMobileView("rail"), []);
