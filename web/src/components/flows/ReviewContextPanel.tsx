@@ -47,6 +47,13 @@ function Lane({ label, text }: { label: string; text: string | null }) {
       </Typography>
       <Typography
         variant="body2"
+        // Lane direction follows the *content* (dir="auto"), like the
+        // Translate notes/questions lanes (#292, #256): an Arabic verse reads
+        // RTL under an LTR UI (#533), while an English (still untranslated)
+        // lane in an RTL project keeps its period on the right. The project
+        // direction (versionIsRtl) would flip that English text too. The "no
+        // text" placeholder is UI chrome and keeps the UI's direction.
+        dir={text != null ? "auto" : undefined}
         sx={{
           bgcolor: "action.hover",
           borderRadius: 1,

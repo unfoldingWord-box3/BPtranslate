@@ -1225,7 +1225,13 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
   const verseTwl = selectedRow ? data.twl.filter((w) => w.verse === selectedRow.verse) : [];
   const sourceText =
     selectedRow && activeKind === "tq"
-      ? t("flowReview.queue.questionPrefix", { question: (selectedRow as TqRow).question ?? "" })
+      ? t("flowReview.queue.questionPrefix", {
+          // The "Q:" prefix is UI language; the question is target language.
+          // Wrap the question in a first-strong isolate (U+2068…U+2069, the
+          // text form of <bdi dir="auto">) so an Arabic question lays out RTL
+          // inside an LTR line and English keeps its order (#533, #256).
+          question: `\u2068${(selectedRow as TqRow).question ?? ""}\u2069`,
+        })
       : null;
 
   const showGrid = isAuthoringMode && activeKind === "tq" && gridView;
@@ -1623,7 +1629,10 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
                   value={draftValue}
                   onChange={(e) => setDraftValue(e.target.value)}
                   disabled={saveLocked || isTrashed}
-                  inputProps={{ "data-dirty": hasDiff ? "true" : "false" }}
+                  // Direction follows the *content* (dir="auto"), as in the
+                  // Translate notes/questions editors (#256): an Arabic draft
+                  // reads RTL under an LTR UI, English placeholder stays LTR (#533).
+                  inputProps={{ dir: "auto", "data-dirty": hasDiff ? "true" : "false" }}
                 />
 
                 <Stack direction="row" spacing={1} flexWrap="wrap" sx={{ mt: 1.5 }}>

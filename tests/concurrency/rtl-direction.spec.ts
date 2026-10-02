@@ -544,9 +544,9 @@ test.describe("RTL paint on Arabic surfaces (#486)", () => {
     await context.close();
   });
 
-  // #533: ReviewContextPanel's ULT/UST lanes take their direction from the
-  // project language (versionIsRtl), so the Arabic verse paints RTL under the
-  // LTR UI; the card's draft field follows its content (dir="auto", #256).
+  // #533: ReviewContextPanel's ULT/UST lanes and the card's draft field
+  // follow their content (dir="auto", as #256/#292), so the Arabic verse and
+  // note paint RTL under the LTR UI.
   test("review queue: Arabic ULT context lane paints rtl", async ({ browser }) => {
     const { context, page } = await open(
       browser,
@@ -577,6 +577,10 @@ test.describe("RTL paint on Arabic surfaces (#486)", () => {
     await page.getByText(ref, { exact: true }).first().click({ timeout: 15_000 });
     const lane = containing(page, RTL_FIXTURE.arabicUlt);
     await expectRtlSentence(lane, "ReviewContextPanel ULT lane", RTL_FIXTURE.arabicUlt);
+    // The English UST lane must not flip just because the project is RTL.
+    const englishLane = containing(page, await ustSnippet());
+    await expect(englishLane).toBeVisible();
+    expect(await computedDirection(englishLane), "ReviewContextPanel UST lane").toBe("ltr");
     await context.close();
   });
 
