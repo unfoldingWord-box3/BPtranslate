@@ -5,12 +5,12 @@ routes: [verse]
 roles: [editor, admin, viewer]
 keywords: [verse view, original, hebrew, greek, literal, simplified, audit, read, check, morphology, lexicon, notes, word links, fidelity]
 screenshots:
-  - verse-view-1 #/verse/ZEC/6/1
+  - verse-view-1 #/verse/OBA/1/1
 ---
 
 The **Verse view** helps you check one verse. It shows the original text (Hebrew or Greek), the literal text (ULT) and the simplified text (UST) joined on the same words. If you click a word in one text, the same place lights up in the other two. **Nothing on this screen changes your work.** It is for reading and checking.
 
-![The Verse view at Zechariah 6:1 in Read mode with the detail panel](../screenshots/en/verse-view-1.png)
+![The Verse view at Obadiah 1:1 in Read mode with the detail panel](../screenshots/en/verse-view-1.png)
 
 ## Open it
 1. Open a book from [Books](#help:books).
@@ -21,7 +21,7 @@ The back arrow returns to the package.
 ## Move between verses
 - Select **Previous verse** or **Next verse**. The arrow keys (← →) do the same.
 - Use **Go to verse** to jump to a verse in the same chapter.
-- The count, for example **Verse 1 of 8**, shows where you are.
+- The count, for example **Verse 1 of 21**, shows where you are.
 
 ## Read mode and Audit mode
 At the top, choose **Read** or **Audit**.

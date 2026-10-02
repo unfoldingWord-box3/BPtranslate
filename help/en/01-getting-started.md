@@ -4,13 +4,11 @@ title: Getting started
 routes: []
 roles: [editor, admin, viewer]
 keywords: [sign in, login, door43, dcs, access, not authorized, organization, workspace, language, interface, top bar, help, account, read-only, viewer]
-screenshots:
-  - getting-started-1 #/books
 ---
 
 BPtranslate is a web app where your team translates scripture and the translation helps. You sign in with your Door43 account. This page covers signing in, the top bar, and the settings you reach from your account button.
 
-![The Books screen with the top bar and the account button at the top right](../screenshots/en/getting-started-1.png)
+![The Books screen with the top bar and the account button at the top right](../screenshots/en/books-1.png)
 
 ## Sign in
 1. Open the app. If you are not signed in, you see **Sign in to continue**.

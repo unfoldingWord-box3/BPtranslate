@@ -5,7 +5,7 @@ routes: [preferences]
 roles: [admin]
 keywords: [preferences, settings, memory, brief, instructions, terminology, examples, setup, localization, users, ai service, change scripture source, replace source, lane]
 screenshots:
-  - preferences-1 #/preferences/setup
+  - preferences-1 #/preferences/setup top
 ---
 
 **Preferences & Memory** (`#/preferences`) is the classic settings page. Almost all of it also lives in the admin desk, which is the newer place for these settings. Use whichever you prefer.

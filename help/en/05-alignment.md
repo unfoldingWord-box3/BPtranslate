@@ -5,19 +5,19 @@ routes: [translateAlign]
 roles: [editor, admin]
 keywords: [alignment, align, word alignment, drag, tap, pair, ult, ust, dual, side by side, unaligned, hebrew, greek, source words]
 screenshots:
-  - alignment-1 #/alignment/ZEC/6/1
-  - alignment-2 #/alignment/ZEC/6/1/dual
+  - alignment-1 #/alignment/OBA/1/1
+  - alignment-2 #/alignment/OBA/1/1/dual
 ---
 
 **What is word alignment?** Alignment links each word in your translation to the word or words in the original Hebrew or Greek that it translates. These links let the other tools show which note belongs to which words, and let a reader see where a word comes from. A word with no link is **unaligned**. Alignment is saved with the verse.
 
-![The Alignment screen at Zechariah 6:1 with the verse list and the aligner](../screenshots/en/alignment-1.png)
+![The Alignment screen at Obadiah 1:1 with the verse list and the aligner](../screenshots/en/alignment-1.png)
 
 ## Open the screen
 - From the package, select **Alignment** and choose a chapter. Or:
 - On the [Scripture](#help:scripture) screen, select **Align** (one text) or **Align both** (both texts).
 
-The title is **Alignment**. Under it you see the book and chapter and an arrow from the original text to the text you are aligning, for example `ZEC 6 · UHB → ULT`. The count **N of M fully aligned** shows the progress of the chapter. The verse list has a chip for each verse: **Aligned**, **N unaligned**, **Source gaps** (original words with nothing linked to them) or **Not drafted**.
+The title is **Alignment**. Under it you see the book and chapter and an arrow from the original text to the text you are aligning, for example `OBA 1 · UHB → ULT`. The count **N of M fully aligned** shows the progress of the chapter. The verse list has a chip for each verse: **Aligned**, **N unaligned**, **Source gaps** (original words with nothing linked to them) or **Not drafted**.
 
 ## Single or dual
 Two buttons choose the view:

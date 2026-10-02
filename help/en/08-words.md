@@ -5,13 +5,13 @@ routes: [translateWords, article]
 roles: [editor, admin]
 keywords: [words, articles, tw, ta, translationwords, translationacademy, key terms, names, academy, article, translate article, source, target, redo, approve, populate]
 screenshots:
-  - words-1 #/words/ZEC
+  - words-1 #/words/OBA
   - words-2 #/articles/tw
 ---
 
 Two kinds of helps articles go with every book. **translationWords (tW)** explains key terms and names, such as "covenant". **translationAcademy (tA)** teaches translation principles, such as how to handle a metaphor. This guide covers two screens: **Words & Articles**, where you translate the articles a book uses, and the **Articles** screen, where you can read and edit any article.
 
-![The Words & Articles screen for Zechariah](../screenshots/en/words-1.png)
+![The Words & Articles screen for Obadiah](../screenshots/en/words-1.png)
 
 Article translation is only for projects that translate from a gateway language. Other projects see a message that it does not apply.
 
@@ -19,7 +19,7 @@ Article translation is only for projects that translate from a gateway language.
 1. Open a book from [Books](#help:books).
 2. In the package, under **Whole book**, select **Words & Articles**.
 
-The list has two parts: **Words** and **Academy articles**. The words are in groups: **Key terms**, **Names** and **Other**. Each group shows how many articles are approved, for example **3 of 10 approved**. Inside a group, the articles used most in this book come first. Each row shows how often it is used (**N occurrences in ZEC**, or **linked from N notes in ZEC**) and a chip: **Not started**, **AI draft**, **Edited** or **Approved**.
+The list has two parts: **Words** and **Academy articles**. The words are in groups: **Key terms**, **Names** and **Other**. Each group shows how many articles are approved, for example **3 of 10 approved**. Inside a group, the articles used most in this book come first. Each row shows how often it is used (**N occurrences in OBA**, or **linked from N notes in OBA**) and a chip: **Not started**, **AI draft**, **Edited** or **Approved**.
 
 An article that says **source not populated in this workspace** has no text to translate yet. An admin can fill it from the Articles screen.
 

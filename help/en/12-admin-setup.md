@@ -5,7 +5,7 @@ routes: [admin/setup]
 roles: [admin]
 keywords: [setup, wizard, organization, org, door43, sources, upstream, lanes, glt, gst, apply, configuration, override, localization, workspace]
 screenshots:
-  - admin-setup-1 #/admin/setup
+  - admin-setup-1 #/admin/setup top
 ---
 
 Setup tells the app where your project's text comes from and where your team's work is saved. Only an admin can open it. It has three parts: the **Setup wizard**, **Source overrides (advanced)**, and **Localization**. Door43 is the git server where unfoldingWord resources are published.

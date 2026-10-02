@@ -5,16 +5,16 @@ routes: [chapter]
 roles: [editor, admin]
 keywords: [classic, editor, three columns, scripture column, resources, notes, words, twlinks, questions, alignment, timeline, verse list, rows, columns, book, find, replace, layouts, export, usfm, board]
 screenshots:
-  - classic-editor-1 #/ZEC/6/1
+  - classic-editor-1 #/OBA/1/1
 ---
 
 The **Classic editor** shows a whole chapter at once: the verses, and all the helps for the active verse, in three columns. Use it when you want to see scripture, notes, word links and questions together, or to edit word links (TWLinks), which are edited in this editor. For translating one note or one question at a time, the [Notes](#help:notes) and [Questions](#help:questions) screens are simpler.
 
-![The classic editor at Zechariah 6:1 with the verse rail, the scripture and the resources](../screenshots/en/classic-editor-1.png)
+![The classic editor at Obadiah 1:1 with the verse rail, the scripture and the resources](../screenshots/en/classic-editor-1.png)
 
 ## Open it
 - Open your account menu (the round button in the top bar) and select **Classic editor**. It opens the book you were on, at your last verse.
-- Or type the address `#/ZEC/6/1` (book, chapter, verse) after the app's address.
+- Or type the address `#/OBA/1/1` (book, chapter, verse) after the app's address.
 
 ## The three columns
 1. **Verse rail** (left). One tile per verse. Select a tile to make that verse active. **hide verse list** and **show verse list** in the top bar hide and show this rail. The tiles show a mark for each kind of work (text, notes, TWLinks, questions). The **Board** button above them opens the chapter checkoff board, where you mark which parts of each verse you have checked.
@@ -31,7 +31,7 @@ On a narrow screen the columns are shown one at a time.
 Notes work the same way: edit the note, then save it. A note card also has a button to discard unsaved edits. Your typing is kept in the browser until you save. See [Saving and working offline](#help:save-and-sync).
 
 ## The top bar
-- A book picker, chapter arrows (**previous chapter**, **next chapter**) and a **go to ref** box. Type `5`, `5:5`, `zec 5:5` or `ps 1:4` and press Enter.
+- A book picker, chapter arrows (**previous chapter**, **next chapter**) and a **go to ref** box. Type `5`, `5:5`, `oba 1:5` or `ps 1:4` and press Enter.
 - The save status, the AI run menu and **Layouts**, which switch between arrangements of the three columns.
 - **More**: **Import from Door43** and **Export USFM** under **Content**; **Articles** and **Note Templates** under **Resources**; text size and interface language under **View**.
 - Your account menu.

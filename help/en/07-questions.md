@@ -5,12 +5,12 @@ routes: [questions]
 roles: [editor, admin]
 keywords: [questions, tq, translation questions, answer, expected answer, translate question, approve, save, draft, queue]
 screenshots:
-  - questions-1 #/questions/ZEC/6/1
+  - questions-1 #/questions/OBA/1/1
 ---
 
 The **Translation Questions** screen is where you translate the questions (tQ) of one chapter. A translation question checks that the reader understood a verse. Each one has a **Question** and an **Expected answer**. You see the English text and write the same thing in your language.
 
-![The Translation Questions screen at Zechariah 6:1 with the question list and the two fields](../screenshots/en/questions-1.png)
+![The Translation Questions screen at Obadiah 1:1 with the question list and the two fields](../screenshots/en/questions-1.png)
 
 ## Open the screen
 1. Open a book from [Books](#help:books).
@@ -35,7 +35,7 @@ There is only one decision here: **Save & Approve**. Questions are changed, not 
 If the English source for a question is not available, the screen says so. This can happen for a question that was added in this project and not translated from the published questions.
 
 ## When you finish a chapter
-You see **ZEC 6 questions reviewed**, with a count of questions **Approved as-is**, **Edited** and the **Total**. Select **Continue to chapter 7** or **Review again**.
+You see **OBA 1 questions reviewed**, with a count of questions **Approved as-is**, **Edited** and the **Total**. Select **Continue to chapter 2** or **Review again**.
 
 ## Good to know
 - Your typing is kept in your browser until you select **Save**. The top bar shows **N unsaved**. See [Saving and working offline](#help:save-and-sync).

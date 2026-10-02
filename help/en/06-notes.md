@@ -5,13 +5,13 @@ routes: [notes]
 roles: [editor, admin]
 keywords: [notes, tn, translation notes, translate note, draft, approve, save, redo, ai, not needed, quote, support reference, ta, academy, queue]
 screenshots:
-  - notes-1 #/notes/ZEC/6/1
-  - notes-phone #/notes/ZEC/6/1 phone
+  - notes-1 #/notes/OBA/1/1
+  - notes-phone #/notes/OBA/1/1 phone
 ---
 
 The **Translation Notes** screen is where you translate the notes (tN) of one chapter. A translation note explains a hard place in a verse. Each note has a quote from the original text, a link to a translationAcademy (tA) article, and the note text. You see the English note and write your own version next to it.
 
-![The Translation Notes screen at Zechariah 6:1 with the note list and the draft](../screenshots/en/notes-1.png)
+![The Translation Notes screen at Obadiah 1:1 with the note list and the draft](../screenshots/en/notes-1.png)
 
 ## Open the screen
 1. Open a book from [Books](#help:books).
@@ -39,7 +39,7 @@ The other two buttons at the bottom:
 An icon next to the verse opens the verse view. See [Verse view](#help:verse-view).
 
 ## When you finish a chapter
-You see **ZEC 6 notes complete** with a count of approved, edited and not-needed notes. Select **Continue to chapter 7** or **Review again**.
+You see **OBA 1 notes complete** with a count of approved, edited and not-needed notes. Select **Continue to chapter 2** or **Review again**.
 
 ## Good to know
 - Your text is kept in your browser while you type. The top bar shows **N unsaved** until you save. See [Saving and working offline](#help:save-and-sync).

@@ -5,19 +5,19 @@ routes: [translateScripture]
 roles: [editor, admin]
 keywords: [scripture, verse, ult, ust, literal, simplified, draft, approve, bible text, edit verse, translate verse]
 screenshots:
-  - scripture-1 #/scripture/ZEC/6/1
-  - scripture-phone #/scripture/ZEC/6/1 phone
+  - scripture-1 #/scripture/OBA/1/1
+  - scripture-phone #/scripture/OBA/1/1 phone
 ---
 
 The **Scripture** screen is where you write and approve the verses of one chapter, one verse at a time. Each verse has two boxes: **ULT** (the literal text, which follows the original words closely) and **UST** (the simplified text, which says the meaning in plain words). In a translation project, both boxes hold your own language.
 
-![The Scripture screen at Zechariah 6:1 with the verse list and the two text boxes](../screenshots/en/scripture-1.png)
+![The Scripture screen at Obadiah 1:1 with the verse list and the two text boxes](../screenshots/en/scripture-1.png)
 
 ## Open the screen
 1. Open a book from [Books](#help:books).
 2. In the package, select **Scripture**, then choose a chapter.
 
-The title shows the book and chapter, for example `ZEC 6`. Next to it you see **Verse 1 of 8** and the arrows **Previous verse** and **Next verse**. A thin bar shows how far you have come.
+The title shows the book and chapter, for example `OBA 1`. Next to it you see **Verse 1 of 21** and the arrows **Previous verse** and **Next verse**. A thin bar shows how far you have come.
 
 On a wide screen, the list of verses is on the left. Each verse can show a chip: **Approved** or **Draft saved**. On a phone you see one verse at a time. You can also swipe sideways to move to the next or previous verse (not when you start in a text box).
 
@@ -33,7 +33,7 @@ On a wide screen, the list of verses is on the left. Each verse can show a chip:
 Each box has a chip: **Imported** (nobody changed it), **Edited**, or **Approved**.
 
 ## When you finish a chapter
-After the last verse, you see **ZEC 6 scripture complete** with the number of verses approved. Select **Continue to ZEC 7** or **Review again**.
+After the last verse, you see **OBA 1 scripture complete** with the number of verses approved. Select **Continue to OBA 2** or **Review again**.
 
 ## Alignment
 Alignment connects your words to the original words. Editing a verse keeps the alignment of the words you did not touch. If a save would remove the alignment of words you did not change, a window **This save would unalign words it didn't touch** lists them. Choose **Cancel** to go back, or **Save anyway**. Your typing is kept either way. Fix the unaligned words afterwards.

@@ -5,15 +5,15 @@ routes: [review]
 roles: [editor, admin]
 keywords: [review, queue, approve, approve all, notes, questions, trash, restore, history, retarget, preserve, hint, template, suggest, grid, conflict]
 screenshots:
-  - review-1 #/review/ZEC/6
+  - review-1 #/review/OBA/1
 ---
 
 The **Review queue** is a work screen for the notes and questions of one chapter. You read each item, fix it, and approve it. It is also where you can add, move, trash and restore notes and see an item's history. Only approved items are published to Door43.
 
-![The review queue for Zechariah 6 with the queue rail and the work card](../screenshots/en/review-1.png)
+![The review queue for Obadiah 1 with the queue rail and the work card](../screenshots/en/review-1.png)
 
 ## Open it
-This screen has no button in the menus yet. Open it by its address: add `#/review/ZEC/6` (book and chapter) after the app's address.
+This screen has no button in the menus yet. Open it by its address: add `#/review/OBA/1` (book and chapter) after the app's address.
 
 The top bar of this screen has no book or chapter controls. To leave, use the **More** menu (**Import from Door43** goes to Books) or change the address.
 

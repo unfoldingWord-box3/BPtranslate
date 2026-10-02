@@ -31,8 +31,8 @@ routes: [notes]
 roles: [editor, admin]
 keywords: [note, tn, translation notes, save, draft]
 screenshots:
-  - notes-1 #/notes/ZEC/1/1
-  - notes-phone #/notes/ZEC/1/1 phone
+  - notes-1 #/notes/OBA/1/1
+  - notes-phone #/notes/OBA/1/1 phone
 ---
 
 Intro paragraph: what this screen is for, in one or two sentences.
@@ -53,7 +53,7 @@ Front-matter fields (a small fixed subset of YAML: `key: value`,
 | `routes` | Route keys this article explains. A route key is a `view` from `Location` in `web/src/App.tsx`, or `admin/<section>` for the admin desk. The Help panel opens to the article that lists the current screen's key. Each key belongs to exactly one article. |
 | `roles` | Who the article is for: any of `editor`, `admin`, `viewer`. |
 | `keywords` | Extra words for search, including words a user might type that the text doesn't use. |
-| `screenshots` | English articles only. One line per picture: `<name> <hash> [phone]`. The capture run opens `<hash>` on the seeded test data (book ZEC) in each language and saves `screenshots/<lang>/<name>.png`. `phone` captures at phone width instead of desktop. |
+| `screenshots` | English articles only. One line per picture: `<name> <hash> [phone] [top]` (flags in any order). The capture run opens `<hash>` on the seeded test data (book OBA) in each language and saves `screenshots/<lang>/<name>.png`. `phone` captures at phone width instead of desktop. `top` scrolls the page and every scrollable area back to the top before the picture, for screens that open part-way down. |
 
 Body rules:
 
@@ -67,11 +67,20 @@ Body rules:
 ## Screenshots
 
 `npm run guide:screenshots` starts its own API + web servers on free ports
-against a throwaway local database seeded with ZEC, signs in as a dev admin, and
-captures every `screenshots:` line in each language. The PNGs are committed.
+against throwaway local databases, signs in as a dev admin, and captures every
+`screenshots:` line in each language. A Playwright `setup` project first
+onboards two translation-mode workspaces and imports OBA into them through the
+app's own API (`tests/guide/seed.setup.ts`, `tests/guide/target.ts`): English
+pictures come from the `mltest` workspace (preset `en-bible-editor-ml-test`,
+English pulled from unfoldingWord), Arabic pictures from `bsoj` (preset
+`ar-bsoj`). It fails loudly if onboarding or import fails. The PNGs are committed.
 The run needs the same local setup as the e2e suites (see
 `playwright.guide.config.ts`). On Ubuntu 26.04 set
 `PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64`.
+Scripture renders right only with a Hebrew font that has cantillation marks and
+an Arabic font that has alef wasla: on Debian/Ubuntu install `fonts-sil-ezra`
+and `fonts-noto-core`. The capture maps the app's reading-font names to them
+for those scripts only (`tests/guide/capture.spec.ts`).
 
 ## Arabic status
 

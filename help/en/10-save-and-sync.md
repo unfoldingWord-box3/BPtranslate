@@ -4,13 +4,11 @@ title: Saving and working offline
 routes: []
 roles: [editor, admin, viewer]
 keywords: [save, saved, unsaved, draft, offline, sync, queue, conflict, merge, publish, door43, nightly, lost, internet, connection, discard, failed, retry]
-screenshots:
-  - save-and-sync-1 #/notes/ZEC/6/1
 ---
 
 Your work is safe if you follow one rule: **notes, questions and articles save only when you select Save** (or **Save & Approve**). While you type, the text is also kept in your browser as a draft. This page explains where your work goes and what the status marks in the top bar mean.
 
-![The top bar of the Notes screen with the save status at the right](../screenshots/en/save-and-sync-1.png)
+![The top bar of the Notes screen with the save status at the right](../screenshots/en/notes-1.png)
 
 ## Where your work goes
 1. You type. The text is kept in your browser right away.
