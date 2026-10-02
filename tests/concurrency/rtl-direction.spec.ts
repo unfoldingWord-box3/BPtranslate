@@ -544,18 +544,35 @@ test.describe("RTL paint on Arabic surfaces (#486)", () => {
     await context.close();
   });
 
-  // KNOWN BUG (#533): ReviewContextPanel's ULT/UST lanes set no `dir`,
-  // so the Arabic verse inherits the LTR UI (period on the right). Remove
-  // `.fail` once fixed.
-  test.fail("review queue: Arabic ULT context lane paints rtl", async ({ browser }) => {
+  // #533: ReviewContextPanel's ULT/UST lanes take their direction from the
+  // project language (versionIsRtl), so the Arabic verse paints RTL under the
+  // LTR UI; the card's draft field follows its content (dir="auto", #256).
+  test("review queue: Arabic ULT context lane paints rtl", async ({ browser }) => {
     const { context, page } = await open(
       browser,
       "rtl-review",
       `/#/review/${RTL_FIXTURE.book}/${RTL_FIXTURE.chapter}`,
       { project: RTL_PROJECT, viewport: { width: 1280, height: 900 } },
     );
-    // The queue opens on the chapter intro; pick the first ZEC 6:1 card so the
-    // "This verse" panel shows the fixture verse.
+    // Draft field first: select the Arabic tn row (f66i, ZEC 6:11) by trying
+    // each 6:11 card. A textarea is asserted on computed direction (header).
+    const noteRef = `${RTL_FIXTURE.book} ${RTL_FIXTURE.chapter}:${RTL_FIXTURE.noteVerse}`;
+    const noteCards = page.getByRole("button").filter({ hasText: noteRef });
+    await expect(noteCards.first()).toBeVisible({ timeout: 15_000 });
+    const draft = page
+      .locator('textarea:not([aria-hidden="true"])')
+      .filter({ hasText: RTL_FIXTURE.arabicNote })
+      .first();
+    const cardCount = await noteCards.count();
+    for (let i = 0; i < cardCount && !(await draft.isVisible()); i++) {
+      await noteCards.nth(i).click();
+      await page.waitForTimeout(300);
+    }
+    await expect(draft).toBeVisible({ timeout: 5_000 });
+    expect(await computedDirection(draft), "ReviewQueue draft field").toBe("rtl");
+
+    // Then the lanes: pick the first ZEC 6:1 card so the "This verse" panel
+    // shows the fixture verse.
     const ref = `${RTL_FIXTURE.book} ${RTL_FIXTURE.chapter}:${RTL_FIXTURE.verse}`;
     await page.getByText(ref, { exact: true }).first().click({ timeout: 15_000 });
     const lane = containing(page, RTL_FIXTURE.arabicUlt);
