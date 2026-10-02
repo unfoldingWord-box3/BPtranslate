@@ -37,10 +37,13 @@ const WRITE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 // - own reading position (auth.ts updateLastLocation)
 // - workspace switch (workspaceRoutes.ts — per-user cookie + role re-mint)
 // - dismiss own banner alert (alerts.ts — username-scoped UPDATE)
+// - ask the help assistant (help/helpRoutes.ts — writes only the caller's own
+//   spend row; the admin-only PUT /api/help/settings is deliberately not here)
 const VIEWER_WRITABLE: Array<{ method: string; pattern: RegExp }> = [
   { method: "PUT", pattern: /^\/api\/users\/me\/location$/ },
   { method: "POST", pattern: /^\/api\/workspaces\/[A-Za-z0-9._-]+$/ },
   { method: "POST", pattern: /^\/api\/alerts\/\d+\/dismiss$/ },
+  { method: "POST", pattern: /^\/api\/help\/ask$/ },
 ];
 
 export function isViewerWritable(method: string, path: string): boolean {
