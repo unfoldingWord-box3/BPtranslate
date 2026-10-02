@@ -51,7 +51,8 @@ import { lostAlignedWords } from "../lib/alignmentDelta";
 import { useLexicon, type LexiconEntry } from "../hooks/useLexicon";
 import { useAlignmentSuggestions } from "../hooks/useAlignmentSuggestions";
 import { useProjectConfig } from "../hooks/useProjectConfig";
-import { versionLabel } from "../lib/versionLabels";
+import { versionIsRtl, versionLabel } from "../lib/versionLabels";
+import { isHebrewBook } from "../lib/sourceSearch";
 import {
   computeGhosts,
   dismissedGhostKey,
@@ -736,6 +737,15 @@ export const AlignmentPanel = forwardRef<AlignmentPanelHandle, Props>(
       [hoverLink, hover, posMaps, posOffset],
     );
 
+    // Reading direction of each side, set as `dir` on the word containers so
+    // the chips lay out in reading order regardless of the UI language (#532).
+    // Target words follow the project's language (an Arabic ULT is RTL even
+    // under an English UI); source words follow the book's original language
+    // (Hebrew OT RTL, Greek NT LTR).
+    const projectConfig = useProjectConfig();
+    const targetDir: "rtl" | "ltr" = versionIsRtl(projectConfig, bibleVersion) ? "rtl" : "ltr";
+    const sourceDir: "rtl" | "ltr" = isHebrewBook(book) ? "rtl" : "ltr";
+
     const hctx: HighlightCtx = useMemo(
       () => ({
         colorize,
@@ -972,6 +982,7 @@ export const AlignmentPanel = forwardRef<AlignmentPanelHandle, Props>(
               onToggleColorize={toggleColorize}
               onToggleHoverLink={toggleHoverLink}
               hctx={hctx}
+              targetDir={targetDir}
             />
             <SectionHeader count={displayGroups.length} />
             <Box
@@ -1007,6 +1018,8 @@ export const AlignmentPanel = forwardRef<AlignmentPanelHandle, Props>(
                 hctx={hctx}
                 sourcePos={posMaps.sourcePosById}
                 posOffset={posOffset}
+                sourceDir={sourceDir}
+                targetDir={targetDir}
               />
             </Box>
             <ActionBar
@@ -1087,6 +1100,7 @@ function InventoryStrip({
   onToggleColorize,
   onToggleHoverLink,
   hctx,
+  targetDir,
 }: {
   state: AlignmentState;
   bibleVersion: string;
@@ -1102,6 +1116,7 @@ function InventoryStrip({
   onToggleColorize: () => void;
   onToggleHoverLink: () => void;
   hctx: HighlightCtx;
+  targetDir: "rtl" | "ltr";
 }) {
   const { t } = useTranslation();
   const projectConfig = useProjectConfig();
@@ -1231,6 +1246,7 @@ function InventoryStrip({
         </Button>
       </Stack>
       <Box
+        dir={targetDir}
         sx={{
           display: "flex",
           flexWrap: "wrap",
@@ -1536,6 +1552,8 @@ function AlignmentCards({
   hctx,
   sourcePos,
   posOffset,
+  sourceDir,
+  targetDir,
 }: {
   groups: AlignmentGroup[];
   ghostByGroup: Map<string, Ghost>;
@@ -1560,6 +1578,8 @@ function AlignmentCards({
   // union offset — for card keys and the position-keyed hover identity.
   sourcePos: Map<string, number>;
   posOffset: number;
+  sourceDir: "rtl" | "ltr";
+  targetDir: "rtl" | "ltr";
 }) {
   const { t } = useTranslation();
   // Precompute the per-verse TWL hint lookup once (see buildTwHintMap) so each
@@ -1570,15 +1590,15 @@ function AlignmentCards({
   );
   return (
     <Box
-      dir="rtl"
+      dir={sourceDir}
       sx={{
         display: "flex",
         flexWrap: "wrap",
         gap: 1,
         alignContent: "flex-start",
-        // Card visual order follows Hebrew reading flow (RTL) — the cards
-        // are sorted by source position by displayGroups, and RTL lays the
-        // first card to the right.
+        // Card visual order follows the source's reading flow — the cards
+        // are sorted by source position by displayGroups, so Hebrew (RTL)
+        // lays the first card to the right and Greek (LTR) to the left.
         pt: 0.5,
       }}
     >
@@ -1602,7 +1622,7 @@ function AlignmentCards({
           onGroupDragEnd={onGroupDragEnd}
         >
           <Box
-            dir="rtl"
+            dir={sourceDir}
             sx={{
               display: "flex",
               flexWrap: "wrap",
@@ -1652,7 +1672,10 @@ function AlignmentCards({
               </IconButton>
             </Tooltip>
           )}
-          <Stack direction="row" spacing={0.5} flexWrap="wrap" rowGap={0.5} dir="ltr">
+          {/* useFlexGap: Stack's default spacing is a one-sided margin, which
+              lands on the wrong side when this row's dir differs from the
+              UI's (the RTL emotion cache mirrors it by UI language). */}
+          <Stack direction="row" spacing={0.5} useFlexGap flexWrap="wrap" dir={targetDir}>
             {g.targets.length === 0 ? (
               ghost ? (
                 <GhostChip
