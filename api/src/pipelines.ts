@@ -1233,6 +1233,37 @@ async function terminateTranslateInstance(env: Env, jobId: string): Promise<void
   }
 }
 
+// #456: given job ids captured (while still non-terminal) under a force-fail
+// predicate, terminate the Workflow instance of ONLY the rows this sweep
+// actually force-failed — now state='failed', error_kind='interrupted'. The
+// capture SELECT and the force-fail UPDATE are two separate statements, so a
+// still-live Worker can rescue a captured row in between (dispatchNext's
+// promote-to-'running' UPDATE, or a poll landing the job 'done'); re-reading
+// state after the UPDATE excludes it, so a legitimately-live paid instance is
+// never killed out from under a surviving row (see the dispatch sweep's own
+// doc comment below for the concrete race). A row failed with any other
+// error_kind (a real runner failure) is left alone: its Workflow is already
+// terminal, so there is nothing to stop. Best-effort throughout —
+// terminateTranslateInstance swallows a missing instance / terminate failure.
+async function terminateForceFailedTranslateInstances(
+  env: Env,
+  capturedJobIds: string[],
+): Promise<void> {
+  if (capturedJobIds.length === 0) return;
+  const placeholders = capturedJobIds.map((_, i) => `?${i + 1}`).join(", ");
+  const forceFailed = await env.DB.prepare(
+    `SELECT job_id FROM pipeline_jobs
+      WHERE job_id IN (${placeholders})
+        AND state = 'failed'
+        AND error_kind = 'interrupted'`,
+  )
+    .bind(...capturedJobIds)
+    .all<{ job_id: string }>();
+  for (const r of forceFailed.results ?? []) {
+    await terminateTranslateInstance(env, r.job_id);
+  }
+}
+
 // Polls every non-terminal pipeline_job. Designed for the scheduled
 // handler — runs in parallel with per-job error isolation so one stuck
 // upstream call doesn't drag the batch down.
@@ -1243,6 +1274,24 @@ export async function pollAllNonTerminal(env: Env): Promise<void> {
   // proxy branch of pollPipelineJob keeps its own token dependency; a proxy job
   // cannot exist on a token-less deployment (dispatchNext fails it before it
   // ever reaches 'running'), so nothing here spins a bot fetch without a token.
+  //
+  // #456: capture the internal translate jobs the two running-state auto-fail
+  // sweeps below (48h no-progress and MAX_POLL_ATTEMPTS) are about to force-fail,
+  // while they are still non-terminal, so their still-live Workflow instances can
+  // be terminated afterward — the same paid-model-call / cost leak #464 fixed for
+  // the dispatch crash window, but for a job that already reached 'running'. Unlike
+  // that window, a running/paused row has runner='internal' written, so that is the
+  // precise signal (a proxy translate job has no Workflow instance and terminate
+  // no-ops anyway). Union of both sweeps' predicates so one capture covers both;
+  // the verify-after-UPDATE step below terminates only rows actually failed here.
+  const stuckRunningTranslates = await env.DB.prepare(
+    `SELECT job_id FROM pipeline_jobs
+      WHERE state IN ('running', 'paused_for_outage', 'paused_for_usage_limit')
+        AND runner = 'internal'
+        AND (updated_at < unixepoch() - ?1 OR attempt_count > ?2)`,
+  )
+    .bind(STUCK_JOB_THRESHOLD_SECONDS, MAX_POLL_ATTEMPTS)
+    .all<{ job_id: string }>();
   await env.DB.prepare(
     `UPDATE pipeline_jobs
         SET state = 'failed',
@@ -1268,6 +1317,14 @@ export async function pollAllNonTerminal(env: Env): Promise<void> {
   )
     .bind(MAX_POLL_ATTEMPTS)
     .run();
+  // #456: terminate the orphaned Workflow instance of every internal translate
+  // job the two sweeps above just force-failed. Re-reads state, so a row a live
+  // poll rescued to 'done' (fresh updated_at, or a terminal state) between the
+  // capture and the UPDATEs is not terminated.
+  await terminateForceFailedTranslateInstances(
+    env,
+    (stuckRunningTranslates.results ?? []).map((r) => r.job_id),
+  );
   // Recover wedged dispatches so a dead-mid-POST Worker can't hold the slot
   // forever.
   //
@@ -1325,21 +1382,10 @@ export async function pollAllNonTerminal(env: Env): Promise<void> {
   // say-so would kill that live instance and leave a `running` row holding the
   // single global dispatch slot and the chapter write-lock until the 48h
   // no-progress sweep. Re-reading state after the UPDATE closes that window.
-  const capturedIds = (stuckTranslateDispatches.results ?? []).map((r) => r.job_id);
-  if (capturedIds.length > 0) {
-    const placeholders = capturedIds.map((_, i) => `?${i + 1}`).join(", ");
-    const forceFailed = await env.DB.prepare(
-      `SELECT job_id FROM pipeline_jobs
-        WHERE job_id IN (${placeholders})
-          AND state = 'failed'
-          AND error_kind = 'interrupted'`,
-    )
-      .bind(...capturedIds)
-      .all<{ job_id: string }>();
-    for (const r of forceFailed.results ?? []) {
-      await terminateTranslateInstance(env, r.job_id);
-    }
-  }
+  await terminateForceFailedTranslateInstances(
+    env,
+    (stuckTranslateDispatches.results ?? []).map((r) => r.job_id),
+  );
   // Upstream #493 / #511: a dispatch that timed out on OUR side (marked
   // ambiguous by dispatchNext's own catch block, see
   // AMBIGUOUS_DISPATCH_GRACE_SECONDS's doc comment) gets one extra grace
