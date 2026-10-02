@@ -219,6 +219,7 @@ export default function HelpDrawer({ open, openSeq, routeKey, initialArticle, on
         {/* Not keyed on openSeq: an answer survives closing the panel to try
             its steps; "New question" clears it. */}
         <AskAi
+          open={open}
           articles={articles}
           lang={lang}
           routeKey={routeKey}

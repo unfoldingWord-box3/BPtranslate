@@ -2,7 +2,7 @@
 // articles show while the user types, and nothing reaches /api/help/ask until
 // the Ask AI button is pressed. The conversation lives in component state only.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Box, Button, Chip, CircularProgress, Divider, List, ListItemButton, ListItemText, Stack, TextField, Typography } from "@mui/material";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -16,7 +16,13 @@ const MAX_CONTENT = 2000;
 
 type Msg = { role: "user" | "assistant"; content: string };
 
+/** Dollar amounts shown in the help UI: always two decimals. */
+export function formatUsd(n: number): string {
+  return n.toFixed(2);
+}
+
 interface Props {
+  open: boolean;
   articles: HelpArticle[];
   lang: string;
   routeKey: string | null;
@@ -25,7 +31,7 @@ interface Props {
   bodySx: object;
 }
 
-export default function AskAi({ articles, lang, routeKey, onOpenArticle, components, bodySx }: Props) {
+export default function AskAi({ open, articles, lang, routeKey, onOpenArticle, components, bodySx }: Props) {
   const { t } = useTranslation();
   const [status, setStatus] = useState<HelpStatus | null>(null);
   const [question, setQuestion] = useState("");
@@ -34,8 +40,12 @@ export default function AskAi({ articles, lang, routeKey, onOpenArticle, compone
   const [remaining, setRemaining] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const inFlight = useRef(false);
 
+  // Refetch each time the drawer opens so an admin's switch / key change shows
+  // up without a reload; a failed fetch is retried on the next open.
   useEffect(() => {
+    if (!open) return;
     let alive = true;
     api
       .getHelpStatus()
@@ -46,12 +56,12 @@ export default function AskAi({ articles, lang, routeKey, onOpenArticle, compone
         }
       })
       .catch(() => {
-        /* no status, no Ask AI area; search keeps working */
+        /* keep the last known status; search keeps working */
       });
     return () => {
       alive = false;
     };
-  }, []);
+  }, [open]);
 
   const trimmed = question.trim();
   const hits = useMemo(() => (trimmed ? searchHelp(articles, trimmed).slice(0, 3) : []), [articles, trimmed]);
@@ -91,7 +101,8 @@ export default function AskAi({ articles, lang, routeKey, onOpenArticle, compone
   };
 
   const ask = async () => {
-    if (!trimmed || busy || done) return;
+    if (!trimmed || busy || done || inFlight.current) return;
+    inFlight.current = true;
     setBusy(true);
     setError(null);
     const messages: Msg[] = [...history, { role: "user", content: trimmed }];
@@ -104,6 +115,7 @@ export default function AskAi({ articles, lang, routeKey, onOpenArticle, compone
     } catch (e) {
       setError(describe(e));
     } finally {
+      inFlight.current = false;
       setBusy(false);
     }
   };
@@ -135,6 +147,12 @@ export default function AskAi({ articles, lang, routeKey, onOpenArticle, compone
         {t("help.ask.title")}
       </Typography>
 
+      {remaining !== null && (
+        <Typography variant="caption" color="text.secondary" component="p" sx={{ mb: 1 }}>
+          {t("help.ask.remaining", { amount: formatUsd(remaining) })}
+        </Typography>
+      )}
+
       {history.map((m, i) =>
         m.role === "user" ? (
           <Typography key={i} variant="body2" sx={{ fontWeight: 600, mt: 1 }}>
@@ -159,11 +177,6 @@ export default function AskAi({ articles, lang, routeKey, onOpenArticle, compone
                       })}
                     </Stack>
                   </Box>
-                )}
-                {remaining !== null && (
-                  <Typography variant="caption" color="text.secondary" component="p" sx={{ mt: 1 }}>
-                    {t("help.ask.remaining", { amount: remaining.toFixed(2) })}
-                  </Typography>
                 )}
               </>
             )}

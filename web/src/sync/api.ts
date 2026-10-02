@@ -444,7 +444,10 @@ async function request<T>(
   // distinct sentinel callers can detect; the outbox already treats 403 as
   // fatal so it won't loop.
   const method = (init?.method ?? "GET").toUpperCase();
-  if (readOnly && method !== "GET" && method !== "HEAD") {
+  // Exemption: POST /api/help/ask is allowed for viewers, mirroring the server
+  // allowlist in api/src/viewerGuard.ts. Nothing else gets through.
+  const viewerAllowed = method === "POST" && path === "/api/help/ask";
+  if (readOnly && method !== "GET" && method !== "HEAD" && !viewerAllowed) {
     throw new ApiError(403, "read_only");
   }
 

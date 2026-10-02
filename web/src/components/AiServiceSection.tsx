@@ -28,6 +28,7 @@ import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import SaveIcon from "@mui/icons-material/Save";
 import { useTranslation } from "react-i18next";
 import { api, ApiError, type AiProviderSettings, type HelpStatus } from "../sync/api";
+import { formatUsd } from "../help/AskAi";
 
 // Temporary: hide the shared uW subscription ("default") from the picker and
 // steer orgs toward Gemini (bsoj has a key; Gemini/Grok have been strongest for
@@ -66,6 +67,7 @@ export function AiServiceSection() {
   // provider row, so it loads and saves on its own.
   const [help, setHelp] = useState<HelpStatus | null>(null);
   const [helpSaving, setHelpSaving] = useState(false);
+  const [helpLoadError, setHelpLoadError] = useState(false);
 
   // Draft form state, seeded from `settings` once loaded.
   const [draftProvider, setDraftProvider] = useState<string>(UI_DEFAULT_PROVIDER);
@@ -98,9 +100,17 @@ export function AiServiceSection() {
     }
   };
 
+  const loadHelp = () => {
+    setHelpLoadError(false);
+    api
+      .getHelpStatus()
+      .then(setHelp)
+      .catch(() => setHelpLoadError(true));
+  };
+
   useEffect(() => {
     void load();
-    api.getHelpStatus().then(setHelp).catch(() => setHelp(null));
+    loadHelp();
   }, []);
 
   const onHelpToggle = async (enabled: boolean) => {
@@ -325,6 +335,19 @@ export function AiServiceSection() {
           </Button>
         </Box>
 
+        {helpLoadError && !help && (
+          <Alert
+            severity="error"
+            action={
+              <Button size="small" onClick={loadHelp}>
+                {t("common.retry")}
+              </Button>
+            }
+          >
+            {t("preferences.aiService.helpChat.loadFailed")}
+          </Alert>
+        )}
+
         {help && (
           <Box>
             <FormControlLabel
@@ -338,7 +361,7 @@ export function AiServiceSection() {
               label={t("preferences.aiService.helpChat.label")}
             />
             <FormHelperText sx={{ mx: 0 }}>
-              {t("preferences.aiService.helpChat.helper", { cap: help.capUsd })}{" "}
+              {t("preferences.aiService.helpChat.helper", { cap: formatUsd(help.capUsd) })}{" "}
               {t("preferences.aiService.helpChat.needsKey")}
             </FormHelperText>
           </Box>

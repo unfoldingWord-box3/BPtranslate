@@ -314,7 +314,8 @@
       "helpChat": {
         "label": "Let team members ask the AI help assistant",
         "helper": "It uses this organization's AI key and is capped at ${{cap}} per person per day.",
-        "needsKey": "It only answers once an API key is saved."
+        "needsKey": "It only answers once an API key is saved.",
+        "loadFailed": "Couldn't load the help assistant setting."
       }
     },
     "localization": {
