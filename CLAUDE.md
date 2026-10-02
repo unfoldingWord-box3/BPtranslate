@@ -194,6 +194,17 @@ into the other or filing the gap issue the map demands. Classic may retire later
 (#173); when it does, classic pointers get deleted entry-by-entry and the map
 remains the desk's feature inventory.
 
+### In-app guide (`help/`)
+
+The Help panel's guide is Markdown in `help/en/` and `help/ar/`, with committed
+screenshots in `help/screenshots/<lang>/`; `help/README.md` is the format
+contract. **When you change a user-visible flow, update the matching article in
+`help/en` and `help/ar`, rerun `npm run guide:screenshots`, then
+`node scripts/build-help.mjs`.** CI runs `build-help.mjs --check` and fails on a
+stale `web/src/help/helpIndex.generated.json`. A new screen (a new `view` in
+`App.tsx`'s `Location`, or a new admin section) fails
+`web/src/help/guideMap.test.mjs` until an article lists it under `routes:`.
+
 ### Concurrency tests (`tests/concurrency/`)
 
 One Playwright worker, no test-level parallelism — every test shares the seeded ZEC fixture and races multiple `browserContext`s *inside* one test (the parallelism is per-test, not across tests). Running tests in parallel would cross the streams.
