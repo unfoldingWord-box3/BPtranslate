@@ -13,7 +13,7 @@
 //
 // Role gate: this route used to have none (grep found no admin/editor check),
 // which the adminSurfaceMap flagged as a gap. It's now admin-only, matching
-// the other three former-FlowNav "More tools" screens (#186).
+// the other three former pill-bar "More tools" screens (#186).
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {

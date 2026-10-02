@@ -21,7 +21,7 @@ export type ClassicSurface = {
 export type DeskSurface = {
   /**
    * AdminDesk nav identity: an `AdminSection` key — every rail entry (the top
-   * 4 admin sections and the four former-FlowNav "More tools" pages) is one
+   * 4 admin sections and the four former pill-bar "More tools" pages) is one
    * since #186 unified them onto the same union ("progress", "setup", "ai", …).
    */
   page: string;

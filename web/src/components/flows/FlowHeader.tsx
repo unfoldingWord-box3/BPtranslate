@@ -2,7 +2,7 @@
 //
 // App.tsx renders a single global chrome bar above the flow screens: a flexible
 // slot on the inline-start side, the account/status controls on the inline-end
-// side. A screen's own title row (back chevron, h1, count, actions) or FlowNav
+// side. A screen's own title row (back chevron, h1, count, actions)
 // renders through <FlowHeader>, which portals it into that slot — so the screen
 // title and the global controls share one row instead of stacking two bars.
 // The bar sits outside the screen's scroll box, so it stays put without the

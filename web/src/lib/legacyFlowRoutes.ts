@@ -1,0 +1,76 @@
+// Redirects for the hashes of the old flows screens retired in #173.
+//
+// The old flows mode (HomeScreen, ScriptureScreen, AlignScreen, ArticlesScreen,
+// WordsScreen, SetupScreen, TeamScreen and their pill-bar nav) was replaced by
+// the #165 redesign. Its hashes may still sit in bookmarks, history, or old
+// links, so each one is rewritten to the screen that does that job now instead
+// of falling through to the classic catch-all (which would read "home" or
+// "align" as a book code) or to a blank page.
+//
+// Tolerant of the near-misses a hand-typed or old link carries: any case in
+// the route word (#/Home), a trailing slash (#/home/), and any query tail
+// (#/home?x=1). Only the old word-links screen's ?row= is carried over.
+//
+// Pure (string in, string out) so the table is unit-tested in
+// legacyFlowRoutes.test.mjs; App.tsx's parseHash applies the result with
+// history.replaceState. Returns null when the hash is not a retired route,
+// including every form a kept screen still owns (#/scripture/{book}/…,
+// #/verse/…, #/articles/{tw|ta}/…, #/ai, #/style, #/curate, #/observe).
+export function legacyFlowRedirect(hash: string): string | null {
+  const m = hash.match(/^#\/([A-Za-z]+)((?:\/[A-Za-z0-9]+)*)\/?(?:\?(.*))?$/);
+  if (!m) return null;
+  const route = m[1].toLowerCase();
+  const segs = m[2].split("/").filter(Boolean);
+  const query = new URLSearchParams(m[3] ?? "");
+  const isNum = (s: string | undefined) => s === undefined || /^\d+$/.test(s);
+
+  if (segs.length === 0) {
+    switch (route) {
+      case "home":
+        return "#/books";
+      case "setup":
+        return "#/admin/setup";
+      case "team":
+        return "#/admin/team";
+      // The flows tW/tA article browser → the article workspace, which keeps
+      // the populate / add-by-id / search tools that screen had.
+      case "articles":
+        return "#/articles/tw";
+      // A bare #/scripture, #/align or #/words carried no book (the old screens
+      // fell back to OBA, which may not be imported here), so send the user to
+      // the Books screen to pick one.
+      case "scripture":
+      case "align":
+      case "words":
+        return "#/books";
+      default:
+        return null;
+    }
+  }
+
+  const [book, chapter, verse, ...rest] = segs;
+  if (rest.length > 0 || !isNum(chapter) || !isNum(verse)) return null;
+  const BOOK = book.toUpperCase();
+
+  // #/align/{book}[/{ch}[/{vs}]] → the redesign aligner, #/alignment/{book}/{ch}[/{vs}].
+  if (route === "align") {
+    return `#/alignment/${BOOK}/${chapter ?? "1"}${verse ? `/${verse}` : ""}`;
+  }
+
+  if (route === "words") {
+    // #/words/{book} is the kept Words & Articles screen: only normalize a
+    // near-miss (case, trailing slash, query tail) onto its exact hash.
+    if (chapter === undefined) {
+      const kept = `#/words/${BOOK}`;
+      return hash === kept ? null : kept;
+    }
+    // #/words/{book}/{ch}[/{vs}][?row={id}] was the old word-links (twl)
+    // editor. The new UI has none, so open the classic editor at that verse;
+    // ?twl= tells it to open the word-links tab with that row selected.
+    const row = query.get("row");
+    const tail = row ? `?twl=${encodeURIComponent(row)}` : "";
+    return `#/${BOOK}/${chapter}/${verse ?? "1"}${tail}`;
+  }
+
+  return null;
+}

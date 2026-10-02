@@ -492,12 +492,12 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
           // this jump. parseHash accepts the verse and ?row= tail (#335).
           location.hash = `#/questions/${m.book}/${m.chapter}/${m.verse}?row=${encodeURIComponent(m.id)}`;
         } else {
-          // twl row-level landing (#335): the flows WordsScreen (the old
-          // 3-segment #/words/{book}/{ch}/{vs} route — distinct from the
-          // 1-segment #/words/{book} tW/tA article screen) is where twl rows
-          // are actually authored in the new UI. It now accepts the same
-          // verse + ?row= tail as tn/tq and selects the exact drafted link.
-          location.hash = `#/words/${m.book}/${m.chapter}/${m.verse}?row=${encodeURIComponent(m.id)}`;
+          // twl row: the new UI has no word-links editor since the old flows
+          // words screen retired (#173), so open the classic editor at that
+          // verse. ?twl= starts its resource column on the Words tab with this
+          // row active; the row's WordsTable entry restores the draft from the
+          // drafts store (same rowKey).
+          location.hash = `#/${m.book}/${m.chapter}/${m.verse}?twl=${encodeURIComponent(m.id)}`;
         }
       } else {
         onNavigate?.(m.book, m.chapter, m.verse);

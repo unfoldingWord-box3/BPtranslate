@@ -246,6 +246,11 @@ interface Props {
   book: string;
   chapter: number;
   initialVerse?: number;
+  // A word-links (twl) row to select (#/{book}/{ch}/{vs}?twl={id}), set by the
+  // drafts menu in the new UI and by retired #/words bookmarks (#173). On mount
+  // the resource column also starts on its Words tab; a later change while
+  // mounted selects the row through the chapter-reset effect but leaves the tab.
+  initialWordId?: string | null;
   onNavigate?: (book: string, chapter: number, verse?: number) => void;
   bookHook?: UseBookReturn;
   onLogout?: () => void;
@@ -259,6 +264,7 @@ export function Shell({
   book,
   chapter,
   initialVerse = 1,
+  initialWordId = null,
   onNavigate,
   bookHook,
   onLogout,
@@ -459,7 +465,14 @@ export function Shell({
   }, [scheduleLintRefetch]);
   const [activeVerse, setActiveVerse] = useState(initialVerse);
   const [activeNoteId, setActiveNoteId] = useState<string | null>(null);
-  const [activeWordId, setActiveWordId] = useState<string | null>(null);
+  const [activeWordId, setActiveWordId] = useState<string | null>(initialWordId);
+  // One-shot: the resource column first renders once `data` arrives (the
+  // early return below), and reads initialTab only then. Clear the flag after
+  // that commit so a later remount (e.g. a layout switch) opens as usual.
+  const [openOnWords, setOpenOnWords] = useState(initialWordId !== null);
+  useEffect(() => {
+    if (data && openOnWords) setOpenOnWords(false);
+  }, [data, openOnWords]);
   // Transient hover preview: hovering a Words row's "locate" spot lights up where
   // its Hebrew/Greek word sits in the scripture, without clicking (no active
   // switch, no verse jump). Feeds the same activeQuote/activeOccurrence highlight
@@ -2133,16 +2146,22 @@ export function Shell({
   // remount used to: reset the per-chapter transient state. Keyed on
   // [chapter, initialVerse] — internal same-chapter verse selection sets
   // activeVerse directly without an URL push, so initialVerse doesn't change
-  // and this won't clobber it. Skips the initial mount.
-  const chapterResetMounted = useRef(false);
+  // and this won't clobber it. Skips the initial mount by comparing against the
+  // mounted position rather than a "has run" flag: StrictMode's dev-only second
+  // effect pass would otherwise read as a navigation and reset the mount state,
+  // including a row seeded from initialWordId. initialWordId is part of the key
+  // and becomes the active word, so a ?twl= navigation while Shell is already
+  // mounted (back/forward, or a hash that changes only ?twl=) selects that row
+  // instead of clearing it. The resource tab is not switched on such a change:
+  // ResourceColumn reads initialTab only when it mounts.
+  const chapterResetKey = useRef(`${chapter}:${initialVerse}:${initialWordId ?? ""}`);
   useEffect(() => {
-    if (!chapterResetMounted.current) {
-      chapterResetMounted.current = true;
-      return;
-    }
+    const key = `${chapter}:${initialVerse}:${initialWordId ?? ""}`;
+    if (chapterResetKey.current === key) return;
+    chapterResetKey.current = key;
     setActiveVerse(initialVerse);
     setActiveNoteId(null);
-    setActiveWordId(null);
+    setActiveWordId(initialWordId);
     setAlignerTarget(null);
     setDualTarget(null);
     setPanelMode("resources");
@@ -2153,7 +2172,7 @@ export function Shell({
     setDualRightReadingDirty(false);
     setPendingNav(null);
     setPendingDualAction(null);
-  }, [chapter, initialVerse]);
+  }, [chapter, initialVerse, initialWordId]);
 
   // A front-matter / intro chapter (chapter 0) has only the intro tile (verse 0)
   // and no real verses. Navigation defaults activeVerse to 1, which doesn't
@@ -3446,7 +3465,11 @@ export function Shell({
   };
 
   const renderResources = (visibleTabs?: ResourceTab[]) => (
-    <ResourceColumn {...resourceColumnProps} visibleTabs={visibleTabs} initialTab={visibleTabs?.[0]} />
+    <ResourceColumn
+      {...resourceColumnProps}
+      visibleTabs={visibleTabs}
+      initialTab={openOnWords && (!visibleTabs || visibleTabs.includes("words")) ? "words" : visibleTabs?.[0]}
+    />
   );
 
   // ── Arrangeable layouts: tiled docking (drag a panel between regions) ──

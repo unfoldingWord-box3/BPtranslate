@@ -68,7 +68,7 @@
 //   a limit message.
 //
 // ── Deliberate omissions ───────────────────────────────────────────────────
-//   * No FlowNav — the redesigned screens navigate by back-chevron + hash
+//   * No pill bar — the redesigned screens navigate by back-chevron + hash
 //     (TranslateWordsScreen.tsx:12-14 precedent).
 //   * No read-only "reference" panel (AlignScreen.tsx:741-808) — not in the
 //     redesign spec; the verse list's status chips carry that signal now.

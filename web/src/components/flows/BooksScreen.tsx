@@ -1,7 +1,7 @@
 // a2-import: All roles — the default landing screen. Port of docs/flows/ui/a2-import.html.
 //
 // 2026-08-11 (Benjamin): this screen is the redesign's top-level entry, and two
-// decisions landed together: (1) the old FlowNav pill bar (which pointed at the
+// decisions landed together: (1) the old flows pill bar (which pointed at the
 // retired flows routes) is replaced by the redesign's own sticky topbar idiom
 // (see PackageHubScreen) — title, org/language sub, Tune button opening a menu
 // shown to every role; (2) the per-book source-overrides editor was duplicated

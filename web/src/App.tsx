@@ -13,6 +13,7 @@ import { TemplateWorkspace } from "./components/TemplateWorkspace";
 import { ReviewQueue } from "./components/ReviewQueue";
 import { PreferencesWorkspace, ALL_SECTIONS as PREFS_SECTIONS, type Section as PrefsSection } from "./components/PreferencesWorkspace";
 import { LocalizationInspector } from "./components/LocalizationInspector";
+import { legacyFlowRedirect } from "./lib/legacyFlowRoutes";
 import { useBook } from "./hooks/useBook";
 import { useAlerts } from "./hooks/useAlerts";
 import { useLayoutBand } from "./hooks/useLayoutBand";
@@ -39,22 +40,15 @@ import {
 } from "./components/WorkspaceChoiceDialog";
 
 type Location =
-  | { view: "chapter"; book: string; chapter: number; verse: number }
+  | { view: "chapter"; book: string; chapter: number; verse: number; twlRowId?: string | null }
   | { view: "article"; resource: "tw" | "ta"; articleId: string | null }
   | { view: "templates"; templateId: string | null }
   | { view: "preferences"; section: PrefsSection }
   | { view: "review"; book: string; chapter: number }
-  | { view: "home" }
-  | { view: "scripture"; book: string; chapter: number; verse: number }
-  | { view: "align"; book: string; chapter: number; verse: number }
-  | { view: "flowArticles" }
-  | { view: "words"; book: string; chapter: number; verse: number; rowId?: string | null }
   | { view: "ai" }
   | { view: "style" }
   | { view: "curate"; templateId: string | null }
-  | { view: "setup" }
   | { view: "books"; book: string | null }
-  | { view: "team" }
   | { view: "observe" }
   | { view: "verse"; book: string; chapter: number; verse: number }
   | { view: "notes"; book: string; chapter: number; verse: number | null; rowId: string | null }
@@ -71,12 +65,11 @@ type Location =
 // {BOOK} is a book with no chapter/verse: browsing, not working, so it must not
 // overwrite a precise stored position with 1:1) and every non-scripture view.
 //
-// NOTE on view names (#200): the redesign routes the issue targets parse to the
-// `translate*` views, NOT the same-named old-flow views. `#/scripture/{BOOK}
-// [/{CH}[/{VS}]]` → `translateScripture` (the `ts` regex claims the 1–3
-// segment arity ahead of the old 3-segment `scripture`); `#/alignment/{BOOK}/
-// {CH}[/{VS}]` → `translateAlign`. `translateScripture` carries the verse when
-// the URL had one (#389); a chapter-only hash still records verse 1.
+// NOTE on view names (#200): the redesign routes parse to the `translate*`
+// views. `#/scripture/{BOOK}[/{CH}[/{VS}]]` → `translateScripture`;
+// `#/alignment/{BOOK}/{CH}[/{VS}]` → `translateAlign`. `translateScripture`
+// carries the verse when the URL had one (#389); a chapter-only hash still
+// records verse 1.
 function positionFromLoc(loc: Location): { book: string; chapter: number; verse: number } | null {
   switch (loc.view) {
     case "chapter":
@@ -92,19 +85,12 @@ function positionFromLoc(loc: Location): { book: string; chapter: number; verse:
   }
 }
 
-// Flow screens (docs/flows port) are lazy so their weight isn't paid on the
-// classic editor routes. Stubs today; replaced screen-by-screen in this stack.
-const HomeScreen = lazy(() => import("./components/flows/HomeScreen"));
-const ScriptureScreen = lazy(() => import("./components/flows/ScriptureScreen"));
-const AlignScreen = lazy(() => import("./components/flows/AlignScreen"));
-const ArticlesScreen = lazy(() => import("./components/flows/ArticlesScreen"));
-const WordsScreen = lazy(() => import("./components/flows/WordsScreen"));
+// Flow screens are lazy so their weight isn't paid on the classic editor
+// routes.
 const AiScreen = lazy(() => import("./components/flows/AiScreen"));
 const StyleScreen = lazy(() => import("./components/flows/StyleScreen"));
 const CurateScreen = lazy(() => import("./components/flows/CurateScreen"));
-const SetupScreen = lazy(() => import("./components/flows/SetupScreen"));
 const BooksScreen = lazy(() => import("./components/flows/BooksScreen"));
-const TeamScreen = lazy(() => import("./components/flows/TeamScreen"));
 const ObserveScreen = lazy(() => import("./components/flows/ObserveScreen"));
 const VerseScreen = lazy(() => import("./components/flows/VerseScreen"));
 const TranslateNotesScreen = lazy(() => import("./components/flows/TranslateNotesScreen"));
@@ -152,6 +138,13 @@ function safeDecode(s: string): string {
 }
 
 function parseHash(): Location {
+  // Hashes of the old flows screens retired in #173 (bookmarks, history) are
+  // rewritten to the screen that does that job now, then parsed as that hash.
+  // replaceState doesn't fire hashchange, so the parse below is what renders.
+  // Keep the query string: the boot flags (?_choose_ws, ?_auth_denied) are read
+  // from it after this runs.
+  const legacy = legacyFlowRedirect(location.hash);
+  if (legacy) history.replaceState(null, "", location.pathname + location.search + legacy);
   const pm = location.hash.match(/^#\/preferences(?:\/(\w+))?$/);
   if (pm) {
     const s = pm[1] as PrefsSection | undefined;
@@ -221,28 +214,20 @@ function parseHash(): Location {
       rowId: qn[4] ? safeDecode(qn[4]) : null,
     };
   }
-  // Flow screens (docs/flows port). Parameterless routes are single reserved
-  // tokens; none collide with 3-letter USFM book codes in the catch-all below.
-  if (/^#\/home$/.test(location.hash)) return { view: "home" };
-  if (/^#\/articles$/.test(location.hash)) return { view: "flowArticles" };
+  // Flow screens. Parameterless routes are single reserved tokens; none
+  // collide with 3-letter USFM book codes in the catch-all below.
   if (/^#\/ai$/.test(location.hash)) return { view: "ai" };
   if (/^#\/style$/.test(location.hash)) return { view: "style" };
-  if (/^#\/setup$/.test(location.hash)) return { view: "setup" };
   const bk = location.hash.match(/^#\/books(?:\/([A-Za-z0-9]+))?$/);
   if (bk) return { view: "books", book: bk[1] ? bk[1].toUpperCase() : null };
-  if (/^#\/team$/.test(location.hash)) return { view: "team" };
   if (/^#\/observe$/.test(location.hash)) return { view: "observe" };
   const cu = location.hash.match(/^#\/curate(?:\/(.+))?$/);
   if (cu) {
     return { view: "curate", templateId: decodeURIComponent(cu[1] ?? "") || null };
   }
-  // Titus-redesign routes. These deliberately claim the short arities of
-  // #/scripture and #/words ahead of the fv catch-all below: the 1–2 segment
-  // forms open the new translate screens, while the 3-segment (verse-level)
-  // form for #/words still opens the old flows screen until it is retired.
-  // #/scripture now claims its 3-segment verse form too (#389): the new
-  // TranslateScriptureScreen seeks to the deep-linked verse on mount, so it no
-  // longer needs to give way to the old 3-segment ScriptureScreen route below.
+  // Titus-redesign routes. They must sit above the book-code catch-all at the
+  // end, which is unanchored and would read "package" or "words" as a book.
+  // TranslateScriptureScreen seeks to a deep-linked verse on mount (#389).
   const pk = location.hash.match(/^#\/package\/([A-Za-z0-9]+)$/);
   if (pk) {
     return { view: "package", book: pk[1].toUpperCase() };
@@ -250,23 +235,6 @@ function parseHash(): Location {
   const wb = location.hash.match(/^#\/words\/([A-Za-z0-9]+)$/);
   if (wb) {
     return { view: "translateWords", book: wb[1].toUpperCase() };
-  }
-  // #/words/{book}/{ch}[/{vs}][?row={id}]: the old flows twl (word-links)
-  // screen's own route contract, claimed ahead of the fv catch-all below so
-  // the optional ?row= tail (the SyncStatusBar "N unsaved" jump menu) reaches
-  // it — mirrors the #/notes and #/questions forms above (#335).
-  const wl = location.hash.match(/^#\/words\/([A-Za-z0-9]+)\/(\d+)(?:\/(\d+))?(?:\?row=([^&]+))?$/);
-  if (wl) {
-    return {
-      view: "words",
-      book: wl[1].toUpperCase(),
-      chapter: parseInt(wl[2], 10),
-      verse: wl[3] ? parseInt(wl[3], 10) : 1,
-      // Guarded decode (see the #/notes case above): a mangled percent
-      // sequence must not throw out of parseHash and blank the app; a wrong
-      // id just degrades to the verse's first row.
-      rowId: wl[4] ? safeDecode(wl[4]) : null,
-    };
   }
   const ts = location.hash.match(/^#\/scripture\/([A-Za-z0-9]+)(?:\/(\d+))?(?:\/(\d+))?$/);
   if (ts) {
@@ -282,9 +250,8 @@ function parseHash(): Location {
   if (ad) {
     return { view: "admin", section: ad[1] as "team" | "setup" | "workflow" | "progress" | "review" };
   }
-  // #/alignment (redesign) is distinct from the old 3-segment #/align, which
-  // still flows to the fv catch-all below. Must sit above the final book-code
-  // catch-all, which is unanchored and would swallow "alignment" as a book.
+  // #/alignment (redesign). Must sit above the final book-code catch-all,
+  // which is unanchored and would swallow "alignment" as a book.
   const al = location.hash.match(/^#\/alignment\/([A-Za-z0-9]+)\/(\d+)(?:\/(\d+))?(\/dual)?$/);
   if (al) {
     return {
@@ -296,23 +263,28 @@ function parseHash(): Location {
     };
   }
   const fv = location.hash.match(
-    /^#\/(scripture|align|words|verse)(?:\/([A-Za-z0-9]+)(?:\/(\d+))?(?:\/(\d+))?)?$/,
+    /^#\/verse(?:\/([A-Za-z0-9]+)(?:\/(\d+))?(?:\/(\d+))?)?$/,
   );
   if (fv) {
     return {
-      view: fv[1] as "scripture" | "align" | "words" | "verse",
-      book: fv[2] ? fv[2].toUpperCase() : DEFAULT_BOOK,
-      chapter: fv[3] ? parseInt(fv[3], 10) : 1,
-      verse: fv[4] ? parseInt(fv[4], 10) : 1,
+      view: "verse",
+      book: fv[1] ? fv[1].toUpperCase() : DEFAULT_BOOK,
+      chapter: fv[2] ? parseInt(fv[2], 10) : 1,
+      verse: fv[3] ? parseInt(fv[3], 10) : 1,
     };
   }
   const m = location.hash.match(/^#\/?([A-Za-z0-9]+)(?:\/(\d+))?(?:\/(\d+))?/);
   if (!m) return { view: "books", book: null };
+  // Optional ?twl={id} tail: open the word-links tab with that row selected.
+  // The drafts jump menu and the retired #/words/{book}/{ch}/{vs} bookmarks
+  // use it, since the classic editor is where word links are edited (#173).
+  const tw = location.hash.match(/[?&]twl=([^&]+)/);
   return {
     view: "chapter",
     book: m[1].toUpperCase(),
     chapter: m[2] ? parseInt(m[2], 10) : 1,
     verse: m[3] ? parseInt(m[3], 10) : 1,
+    twlRowId: tw ? safeDecode(tw[1]) : null,
   };
 }
 
@@ -832,17 +804,10 @@ export function App() {
           />
         ) : loc.view === "review" ? (
           <ReviewQueue book={loc.book} chapter={loc.chapter} onNavigate={navigate} />
-        ) : loc.view === "home" ||
-          loc.view === "scripture" ||
-          loc.view === "align" ||
-          loc.view === "flowArticles" ||
-          loc.view === "words" ||
-          loc.view === "ai" ||
+        ) : loc.view === "ai" ||
           loc.view === "style" ||
           loc.view === "curate" ||
-          loc.view === "setup" ||
           loc.view === "books" ||
-          loc.view === "team" ||
           loc.view === "observe" ||
           loc.view === "notes" ||
           loc.view === "questions" ||
@@ -870,8 +835,8 @@ export function App() {
           //
           // The "N unsaved drafts" reminder (UnsavedToasts) is intentionally NOT
           // mounted here — it requires a `book` in scope (Shell resolves it via
-          // its own useChapter instance), but most flow views (home, books, team,
-          // setup, style, curate, ai, observe, package, admin) have no
+          // its own useChapter instance), but most flow views (books, style,
+          // curate, ai, observe, package, admin) have no
           // book/chapter in `loc` at all. Hoisting it needs either new data
           // plumbing or a redesign of its in-place Save action — scoped as a
           // separate follow-up rather than risking a silent no-op or a
@@ -1021,24 +986,12 @@ export function App() {
               </Stack>
             }
           >
-            {loc.view === "home" ? (
-              <HomeScreen role={auth.role} me={auth.me} onNavigate={navigate} />
-            ) : loc.view === "scripture" ? (
-              <ScriptureScreen role={auth.role} me={auth.me} onNavigate={navigate} book={loc.book} chapter={loc.chapter} verse={loc.verse} />
-            ) : loc.view === "align" ? (
-              <AlignScreen role={auth.role} me={auth.me} onNavigate={navigate} book={loc.book} chapter={loc.chapter} verse={loc.verse} />
-            ) : loc.view === "flowArticles" ? (
-              <ArticlesScreen role={auth.role} me={auth.me} onNavigate={navigate} />
-            ) : loc.view === "words" ? (
-              <WordsScreen role={auth.role} me={auth.me} onNavigate={navigate} book={loc.book} chapter={loc.chapter} verse={loc.verse} rowId={loc.rowId ?? undefined} />
-            ) : loc.view === "ai" ? (
+            {loc.view === "ai" ? (
               <AiScreen role={auth.role} me={auth.me} onNavigate={navigate} />
             ) : loc.view === "style" ? (
               <StyleScreen role={auth.role} me={auth.me} onNavigate={navigate} />
             ) : loc.view === "curate" ? (
               <CurateScreen role={auth.role} me={auth.me} onNavigate={navigate} templateId={loc.templateId} />
-            ) : loc.view === "setup" ? (
-              <SetupScreen role={auth.role} me={auth.me} onNavigate={navigate} />
             ) : loc.view === "books" ? (
               <BooksScreen
                 role={auth.role}
@@ -1052,8 +1005,6 @@ export function App() {
                     : null)
                 }
               />
-            ) : loc.view === "team" ? (
-              <TeamScreen role={auth.role} me={auth.me} onNavigate={navigate} />
             ) : loc.view === "observe" ? (
               <ObserveScreen role={auth.role} me={auth.me} onNavigate={navigate} />
             ) : loc.view === "notes" ? (
@@ -1104,6 +1055,7 @@ export function App() {
             book={loc.book}
             chapter={loc.chapter}
             initialVerse={loc.verse}
+            initialWordId={loc.twlRowId ?? null}
             onNavigate={navigate}
             bookHook={bookHook}
             onLogout={handleSignOut}
