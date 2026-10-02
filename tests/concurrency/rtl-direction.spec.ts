@@ -196,11 +196,37 @@ async function patchProjectConfig(
   await page.route("**/api/project-config", async (route) => {
     if (route.request().method() !== "GET") return route.continue();
     const res = await route.fetch();
+    // A failed config read would otherwise surface as a confusing JSON error
+    // (or a silently unpatched LTR project); name the status instead.
+    if (!res.ok()) {
+      throw new Error(`GET /api/project-config returned ${res.status()}: ${await res.text()}`);
+    }
     const json = await res.json();
     json.config = { ...json.config, ...patch };
     return route.fulfill({ response: res, json });
   });
 }
+
+/**
+ * Every browser context a test opens, closed in afterEach. A test that throws
+ * (all the `test.fail` cases, on every run) never reaches its own
+ * `context.close()`, and Playwright does not close contexts created from the
+ * shared `browser` fixture — a leaked ZEC 6 page would stay connected to the
+ * chapter room through the s1–s8 save-race specs that run next.
+ */
+const openContexts: BrowserContext[] = [];
+function track(context: BrowserContext): BrowserContext {
+  openContexts.push(context);
+  return context;
+}
+test.afterEach(async () => {
+  for (const c of openContexts.splice(0)) await c.close().catch(() => {});
+});
+
+// Several of these routes are first loaded by this spec on a cold runner
+// (vite transforms on first hit), so the 30 s default is too tight for a 15 s
+// wait plus navigation — same reason as phone-header-title.spec.ts.
+test.describe.configure({ timeout: 120_000 });
 
 /** Door43 is never needed by these cases; refuse it so nothing waits on the network. */
 async function blockDoor43(page: Page): Promise<void> {
@@ -226,6 +252,7 @@ async function open(
   opts: OpenOpts = {},
 ): Promise<{ context: BrowserContext; page: Page }> {
   const { context } = await newUserContext(browser, user);
+  track(context);
   await context.addInitScript(
     ({ uiLang, storage }) => {
       try {
@@ -272,6 +299,7 @@ test.describe("RTL text direction on scripture surfaces (#293)", () => {
   test("flows notes: Arabic lane is rtl, English lane is ltr", async ({ browser }) => {
     const english = await ustSnippet();
     const { context } = await newUserContext(browser, "rtl-notes");
+    track(context);
     const page = await context.newPage();
     await page.goto(
       `/#/notes/${RTL_FIXTURE.book}/${RTL_FIXTURE.chapter}/${RTL_FIXTURE.verse}`,
@@ -295,6 +323,7 @@ test.describe("RTL text direction on scripture surfaces (#293)", () => {
   test("flows questions: Arabic lane is rtl, English lane is ltr", async ({ browser }) => {
     const english = await ustSnippet();
     const { context } = await newUserContext(browser, "rtl-questions");
+    track(context);
     const page = await context.newPage();
     await page.goto(`/#/questions/${RTL_FIXTURE.book}/${RTL_FIXTURE.chapter}`);
 
@@ -315,6 +344,7 @@ test.describe("RTL text direction on scripture surfaces (#293)", () => {
   // ── Surface 3: classic scripture pane (#/BOOK/CHAPTER) ─────────────────────
   test("classic scripture pane: Hebrew source is rtl, English is ltr", async ({ browser }) => {
     const { context } = await newUserContext(browser, "rtl-classic");
+    track(context);
     const page = await context.newPage();
     await page.goto(`/#/${RTL_FIXTURE.book}/1`);
 
@@ -335,6 +365,7 @@ test.describe("RTL text direction on scripture surfaces (#293)", () => {
   // separate rendering code from ScriptureColumn, so it needs its own guard.
   test("book view: Hebrew source is rtl, English is ltr", async ({ browser }) => {
     const { context } = await newUserContext(browser, "rtl-book");
+    track(context);
     await context.addInitScript(() => {
       try {
         localStorage.setItem("be:scriptureMode", JSON.stringify("book"));
@@ -415,7 +446,17 @@ test.describe("RTL paint on Arabic surfaces (#486)", () => {
       project: RTL_PROJECT,
       viewport: { width: 1280, height: 900 },
     });
-    await expectRtlWordOrder(page.locator("body"), "AlignmentPanel word bank");
+    // Scope to the word-bank strip itself: the innermost element holding both
+    // the "ULT words" label and the first Arabic word chip (the groups area
+    // below has neither label nor unaligned chips), so the case fails for
+    // #532's word order and not for a chip matched elsewhere on the page.
+    const bank = page
+      .locator("div")
+      .filter({ has: page.getByText("ULT words", { exact: true }) })
+      .filter({ has: page.getByText(ULT_WORDS[0], { exact: true }) })
+      .last();
+    await expect(bank, "AlignmentPanel word bank not shown").toBeVisible({ timeout: 15_000 });
+    await expectRtlWordOrder(bank, "AlignmentPanel word bank");
     await context.close();
   });
 
@@ -435,6 +476,11 @@ test.describe("RTL paint on Arabic surfaces (#486)", () => {
       storage: { "be:scriptureMode": "columns" },
       viewport: { width: 1280, height: 900 },
     });
+    // `[data-find-cell]` exists in the stacked view too — prove columns mode
+    // actually rendered first: only a DocColumn header reads "ULT · editing".
+    await expect(page.getByText(/^ULT · (editing|read-only)$/).first(), "columns mode not rendered").toBeVisible({
+      timeout: 15_000,
+    });
     const cell = page.locator(`[data-find-cell="${RTL_FIXTURE.chapter}-${RTL_FIXTURE.verse}-ULT"]`).first();
     await expectRtlSentence(sentence(cell, RTL_FIXTURE.arabicUlt), "DocColumn ULT verse");
     await context.close();
@@ -446,6 +492,12 @@ test.describe("RTL paint on Arabic surfaces (#486)", () => {
       storage: { "be:scriptureMode": "book", "be:enabledVersions": ["ULT", "UST"] },
       viewport: { width: 1280, height: 900 },
     });
+    // Prove book mode rendered first: only BookView draws per-chapter headers
+    // ("ZEC chapter 6"); the stacked and columns views have none.
+    await expect(
+      page.getByText(`${RTL_FIXTURE.book} chapter ${RTL_FIXTURE.chapter}`, { exact: true }).first(),
+      "book mode not rendered",
+    ).toBeAttached({ timeout: 15_000 });
     const cell = page.locator(`[data-find-cell="${RTL_FIXTURE.chapter}-${RTL_FIXTURE.verse}-ULT"]`).first();
     await cell.scrollIntoViewIfNeeded({ timeout: 15_000 });
     await expectRtlSentence(sentence(cell, RTL_FIXTURE.arabicUlt), "BookView ULT verse");
@@ -463,17 +515,28 @@ test.describe("RTL paint on Arabic surfaces (#486)", () => {
     browser,
   }) => {
     const { context } = await newUserContext(browser, "rtl-451");
+    track(context);
     const page = await context.newPage();
     await page.setViewportSize({ width: 1280, height: 900 });
     await blockDoor43(page);
     // Never answer: the screen stays in its config-null state.
     await page.route("**/api/project-config", () => {});
     await page.goto(`/#/verse/${V}`);
-    // The original-language words render regardless of config — once they are
-    // up, the lanes have had their chance to draw.
+    // The original-language words render regardless of config, so the screen
+    // is up once they are.
     await expect(page.locator("[data-original-word]").first()).toBeVisible({ timeout: 15_000 });
+    // Then give the lane a fixed, generous window to draw — a single probe
+    // right here would race a lane that commits a frame later, pass, and turn
+    // this test.fail into a flaky "unexpected pass". Today the lane appears
+    // within milliseconds, so the paint check below runs (and fails: #451).
+    // Under a "wait for the config" fix (option A) it never appears and the
+    // case passes after the window.
     const lane = sentence(page.locator("main"), RTL_FIXTURE.arabicUlt);
-    if ((await lane.count()) > 0 && (await lane.isVisible())) {
+    const drawn = await lane
+      .waitFor({ state: "visible", timeout: 10_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (drawn) {
       await expectRtlPaint(lane, "#451 VerseScreen lane, config pending", { latin: RTL_FIXTURE.latin });
     }
     await context.close();

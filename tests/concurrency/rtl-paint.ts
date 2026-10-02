@@ -19,8 +19,11 @@ import { expect, type Locator } from "@playwright/test";
 //     letters read left-to-right, and the Arabic word logically before it sits
 //     to its RIGHT (and the one after it to its LEFT).
 //
-// All geometry is measured on the line the punctuation sits on, so a wrapped
-// lane still checks cleanly.
+// Every comparison is made between glyphs on the SAME line (the punctuation's
+// line, or the Latin token's line), so a sentence that wraps differently on
+// CI's fonts still checks cleanly. Nothing is skipped silently: a missing
+// `within` sentence, a missing Latin token, a missing neighbour word, or a
+// token with no neighbour on its own line all fail with a message.
 
 export interface PaintOpts {
   /** Sentence-final punctuation to look for (default "."); its LAST occurrence. */
@@ -31,23 +34,36 @@ export interface PaintOpts {
   within?: string;
 }
 
+type Box = { left: number; right: number };
+
 export interface PaintReport {
   text: string;
+  /** False when `within` was given but is not in the element's text. */
+  withinFound: boolean;
   /** Punctuation glyph's box on its line. */
-  punct: { left: number; right: number } | null;
+  punct: Box | null;
   /** Leftmost / rightmost painted edge of every other glyph on that line. */
   lineLeft: number;
   lineRight: number;
+  /** False when `latin` was given but is not in the measured text. */
+  latinFound: boolean;
   /** Lefts of each Latin token letter, in logical order (empty if not asked). */
   latinLefts: number[];
-  /** Box of the Latin token, and of the Arabic words logically before/after it. */
-  latinBox: { left: number; right: number } | null;
-  beforeBox: { left: number; right: number } | null;
-  afterBox: { left: number; right: number } | null;
+  /** Box of the Latin token. */
+  latinBox: Box | null;
+  /** Whether a whitespace-delimited word exists logically before / after the token. */
+  hasBefore: boolean;
+  hasAfter: boolean;
+  /**
+   * Box of that neighbour word's glyphs ON THE TOKEN'S LINE — null when the
+   * neighbour wrapped to another line (then it is not comparable).
+   */
+  beforeBox: Box | null;
+  afterBox: Box | null;
 }
 
 /**
- * Measure where `punct` (the LAST occurrence in the element's text) and an
+ * Measure where `punct` (the LAST occurrence in the measured text) and an
  * optional embedded `latin` token were painted inside the element `locator`
  * resolves to.
  */
@@ -70,9 +86,11 @@ export async function measurePaint(
       }
       // Measure only the given sentence when the element holds other text too
       // (e.g. an English hint after the Arabic line).
+      let withinFound = true;
       if (within) {
         const w0 = text.indexOf(within);
-        if (w0 >= 0) {
+        withinFound = w0 >= 0;
+        if (withinFound) {
           map = map.slice(w0, w0 + within.length);
           text = within;
         }
@@ -89,13 +107,16 @@ export async function measurePaint(
       // Base glyphs only: combining marks (Arabic harakat, U+064B–065F, U+0670,
       // Hebrew points) and whitespace have no box of their own.
       const isBase = (ch: string) => /\S/.test(ch) && !/\p{M}/u.test(ch);
-      const span = (from: number, to: number) => {
+      // Horizontal extent of the base glyphs in [from, to) — optionally only
+      // those whose box spans the vertical midline `onY` (i.e. on that line).
+      const span = (from: number, to: number, onY?: number) => {
         let left = Infinity;
         let right = -Infinity;
         for (let i = from; i < to; i++) {
           if (!isBase(text[i])) continue;
           const r = rectAt(i);
           if (!r) continue;
+          if (onY !== undefined && (onY < r.top || onY > r.bottom)) continue;
           left = Math.min(left, r.left);
           right = Math.max(right, r.right);
         }
@@ -117,34 +138,49 @@ export async function measurePaint(
         }
       }
 
+      let latinFound = false;
       let latinLefts: number[] = [];
-      let latinBox = null;
-      let beforeBox = null;
-      let afterBox = null;
+      let latinBox: { left: number; right: number } | null = null;
+      let hasBefore = false;
+      let hasAfter = false;
+      let beforeBox: { left: number; right: number } | null = null;
+      let afterBox: { left: number; right: number } | null = null;
       if (latin) {
         const li = text.indexOf(latin);
-        if (li >= 0) {
+        latinFound = li >= 0;
+        if (latinFound) {
           latinLefts = Array.from(latin).map((_, k) => rectAt(li + k)?.left ?? NaN);
           latinBox = span(li, li + latin.length);
-          // The whitespace-delimited word just before / after the token.
+          const first = rectAt(li);
+          const tokenY = first ? (first.top + first.bottom) / 2 : undefined;
+          // The whitespace-delimited word just before / after the token,
+          // measured only where it shares the token's line.
           const before = text.slice(0, li).trimEnd();
           const bStart = before.search(/\S+$/);
-          if (bStart >= 0) beforeBox = span(bStart, before.length);
+          hasBefore = bStart >= 0;
+          if (hasBefore && tokenY !== undefined) beforeBox = span(bStart, before.length, tokenY);
           const aFrom = li + latin.length;
           const rest = text.slice(aFrom);
           const lead = rest.length - rest.trimStart().length;
           const word = rest.trimStart().match(/^[^\s.]+/)?.[0] ?? "";
-          if (word) afterBox = span(aFrom + lead, aFrom + lead + word.length);
+          hasAfter = word.length > 0;
+          if (hasAfter && tokenY !== undefined) {
+            afterBox = span(aFrom + lead, aFrom + lead + word.length, tokenY);
+          }
         }
       }
 
       return {
         text,
+        withinFound,
         punct: pr ? { left: pr.left, right: pr.right } : null,
         lineLeft,
         lineRight,
+        latinFound,
         latinLefts,
         latinBox,
+        hasBefore,
+        hasAfter,
         beforeBox,
         afterBox,
       };
@@ -166,6 +202,7 @@ export async function expectRtlPaint(
   const tol = 1; // px — sub-pixel glyph overlap at word joins
   const r = await measurePaint(locator, opts);
   const why = `${label}: ${JSON.stringify(r)}`;
+  expect(r.withinFound, `${why} — sentence ${JSON.stringify(opts.within)} not in the element`).toBe(true);
   expect(r.punct, `${why} — punctuation not painted`).not.toBeNull();
   expect(r.lineLeft, `${why} — no other glyph on the punctuation's line`).toBeLessThan(Infinity);
   // Period on the LEFT end of its line (RTL sentence end).
@@ -176,6 +213,7 @@ export async function expectRtlPaint(
     r.lineRight,
   );
   if (opts.latin) {
+    expect(r.latinFound, `${why} — Latin token ${JSON.stringify(opts.latin)} not in the text`).toBe(true);
     expect(r.latinBox, `${why} — Latin token not painted`).not.toBeNull();
     // Inside the token, letters read left-to-right.
     for (let k = 1; k < r.latinLefts.length; k++) {
@@ -183,8 +221,18 @@ export async function expectRtlPaint(
         r.latinLefts[k - 1],
       );
     }
+    // The fixtures always embed the token mid-sentence, so both neighbours
+    // must exist; a missing one means the wrong element or text was measured.
+    expect(r.hasBefore, `${why} — no word before the Latin token`).toBe(true);
+    expect(r.hasAfter, `${why} — no word after the Latin token`).toBe(true);
+    // A neighbour that wrapped to another line is not comparable, but at
+    // least one must share the token's line, or the order check would be empty.
+    expect(
+      r.beforeBox !== null || r.afterBox !== null,
+      `${why} — neither neighbour word shares the Latin token's line`,
+    ).toBe(true);
     // RTL word order around the token: logically-previous word to its right,
-    // logically-next word to its left.
+    // logically-next word to its left (each compared only on the token's line).
     if (r.beforeBox) {
       expect(r.beforeBox.left, `${why} — word before the token is not to its right`).toBeGreaterThanOrEqual(
         r.latinBox!.right - tol,
