@@ -54,7 +54,8 @@ for (const [lang, ws] of Object.entries(WORKSPACES)) {
         const r = await write("POST", "/api/articles/populate", { book: GUIDE_BOOK });
         expect(r.ok(), `populate articles: ${r.status()} ${await r.text()}`).toBeTruthy();
         const b = (await r.json()) as { skipped?: boolean; aborted?: boolean; remaining?: number };
-        done = !!(b.skipped || b.aborted || b.remaining === 0);
+        expect(b.aborted, "article populate aborted").toBeFalsy();
+        done = !!(b.skipped || b.remaining === 0);
       }
       expect(done, "article populate did not finish").toBeTruthy();
 

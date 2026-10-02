@@ -9,7 +9,7 @@ screenshots:
   - scripture-phone #/scripture/OBA/1/1 phone
 ---
 
-The **Scripture** screen is where you write and approve the verses of one chapter, one verse at a time. Each verse has two boxes: **ULT** (the literal text, which follows the original words closely) and **UST** (the simplified text, which says the meaning in plain words). In a translation project, both boxes hold your own language.
+The **Scripture** screen is where you write and approve the verses of one chapter, one verse at a time. Each verse has two boxes, one for each of your project's two texts. They carry your project's own names, for example **GLT** and **GST**, or **AVD** and **NAV**. In unfoldingWord's English source these are the ULT (the literal text, which follows the original words closely) and the UST (the simplified text, which says the meaning in plain words). In a translation project, both boxes hold your own language.
 
 ![The Scripture screen at Obadiah 1:1 with the verse list and the two text boxes](../screenshots/en/scripture-1.png)
 
@@ -25,7 +25,7 @@ On a wide screen, the list of verses is on the left. Each verse can show a chip:
 
 ## Write a verse
 1. Read the reference card. It shows the verse and the original-language text.
-2. Click in the box **Your text · ULT** and write or correct the verse. Do the same in **Your text · UST**.
+2. Click in the first of the two boxes (**Your text** followed by your project's first text name, for example **Your text · GLT**) and write or correct the verse. Do the same in the second box (for example **Your text · GST**).
 3. Select **Save draft** to save both boxes without approving. A message **Draft saved** appears.
 4. When the verse is finished, select **Approve verse**. It saves both boxes and marks the verse done.
 5. Select **Next** to go to the next verse.

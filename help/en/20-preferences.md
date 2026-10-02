@@ -2,7 +2,7 @@
 id: preferences
 title: Preferences (classic settings page)
 routes: [preferences]
-roles: [admin]
+roles: [editor, admin]
 keywords: [preferences, settings, memory, brief, instructions, terminology, examples, setup, localization, users, ai service, change scripture source, replace source, lane]
 screenshots:
   - preferences-1 #/preferences/setup top

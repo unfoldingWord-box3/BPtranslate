@@ -53,6 +53,8 @@ const api = spawn(
     "--port", String(apiPort),
     "--inspector-port", String(apiPort + 1000),
     "--ip", "127.0.0.1",
+    // Throwaway local value (base64 of 32 bytes) so the admin AI screen shows no "bring your own key" warning.
+    "--var", "AI_KEY_WRAPPING_KEY:ZGV2LW9ubHktZ3VpZGUtd3JhcHBpbmcta2V5LTMyYiE=",
     "--persist-to", JSON.stringify(persistTo),
   ],
   spawnOpts,

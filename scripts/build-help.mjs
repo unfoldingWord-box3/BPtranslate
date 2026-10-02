@@ -9,7 +9,7 @@
 
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 const KEYS = new Set(["id", "title", "routes", "roles", "keywords", "screenshots"]);
 const LIST_KEYS = new Set(["routes", "roles", "keywords", "screenshots"]);
@@ -131,6 +131,15 @@ export function validateGuide(guide, repoRoot) {
     }
     byLang[lang] = ids;
   }
+  for (const a of guide.en ?? []) {
+    for (const s of a.screenshots) {
+      for (const lang of langs) {
+        if (!existsSync(path.join(repoRoot, "help", "screenshots", lang, `${s.name}.png`))) {
+          errors.push(`${a.file}: screenshot "${s.name}" has no help/screenshots/${lang}/${s.name}.png (run npm run guide:screenshots)`);
+        }
+      }
+    }
+  }
   for (const lang of langs) {
     for (const a of guide[lang]) {
       for (const m of a.body.matchAll(/#help:([a-z0-9][a-z0-9-]*)/g)) {
@@ -217,7 +226,7 @@ export function main(argv, repoRoot) {
   return 0;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const repoRoot = process.env.HELP_REPO_ROOT
     ? path.resolve(process.env.HELP_REPO_ROOT)
     : path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");

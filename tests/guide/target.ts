@@ -21,5 +21,7 @@ export const WORKSPACES: Record<string, GuideWorkspace> = {
 };
 
 export function workspaceFor(lang: string): GuideWorkspace {
-  return WORKSPACES[lang] ?? WORKSPACES.ar;
+  const ws = WORKSPACES[lang];
+  if (!ws) throw new Error(`No guide workspace for language "${lang}": add one to WORKSPACES in tests/guide/target.ts`);
+  return ws;
 }

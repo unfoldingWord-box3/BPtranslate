@@ -64,12 +64,17 @@ for (const lang of langs) {
           // Users' own machines carry fonts that cover both scripts.
           const face = (f: string, src: string, range: string) =>
             `@font-face{font-family:"${f}";src:${src};unicode-range:${range};}`;
+          // The flows screens use SCRIPTURE_FONT_STACK (web/src/theme.ts).
+          const families = [
+            "Times New Roman", "SBL Hebrew", "Cardo", "Source Serif Pro", "Cambria",
+            "Iowan Old Style", "Charter", "Palatino Linotype", "Georgia", "Frank Ruhl Libre",
+          ];
           await page.addStyleTag({
             content: [
-              ...["Times New Roman", "SBL Hebrew", "Cardo"].map((f) =>
+              ...families.map((f) =>
                 face(f, 'local("Ezra SIL"),local("EzraSIL")', "U+0590-05FF,U+FB1D-FB4F"),
               ),
-              ...["Source Serif Pro", "Cambria", "Times New Roman"].map((f) =>
+              ...families.map((f) =>
                 face(f, 'local("Noto Naskh Arabic")', "U+0600-06FF,U+0750-077F,U+08A0-08FF,U+FB50-FDFF,U+FE70-FEFF"),
               ),
             ].join(""),

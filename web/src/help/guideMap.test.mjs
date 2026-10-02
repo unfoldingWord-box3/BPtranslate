@@ -11,7 +11,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { routeKey, articlesFor, articleForRoute } from "./guideMap.ts";
@@ -66,6 +67,22 @@ test("every route key listed by an article is a real screen", () => {
 test("the guide validates", () => {
   const errors = validateGuide(loadGuide(repoRoot), repoRoot);
   assert.deepEqual(errors, []);
+});
+
+test("validateGuide reports a missing screenshot in every language folder", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "help-guide-"));
+  try {
+    for (const l of ["en", "ar"]) mkdirSync(path.join(root, "help", "screenshots", l), { recursive: true });
+    writeFileSync(path.join(root, "help", "screenshots", "en", "a-1.png"), "");
+    const mk = (shots) => ({ id: "a", title: "a", routes: [], roles: [], keywords: [], headings: [], body: "", file: "help/en/a.md", screenshots: shots });
+    const ar = { id: "a", title: "a", routes: [], roles: [], keywords: [], headings: [], body: "", file: "help/ar/a.md", screenshots: [] };
+    const shot = (name) => ({ name, hash: "#/x", phone: false, top: false });
+    const errors = validateGuide({ en: [mk([shot("a-1"), shot("a-2")])], ar: [ar] }, root);
+    assert.equal(errors.filter((e) => e.includes('"a-1"')).length, 1, errors.join("\n")); // missing only in ar
+    assert.equal(errors.filter((e) => e.includes('"a-2"')).length, 2, errors.join("\n")); // missing in en and ar
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 const art = (id, routes) => ({ id, title: id, routes, roles: [], keywords: [], headings: [], body: "" });

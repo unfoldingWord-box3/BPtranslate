@@ -74,6 +74,9 @@ app's own API (`tests/guide/seed.setup.ts`, `tests/guide/target.ts`): English
 pictures come from the `mltest` workspace (preset `en-bible-editor-ml-test`,
 English pulled from unfoldingWord), Arabic pictures from `bsoj` (preset
 `ar-bsoj`). It fails loudly if onboarding or import fails. The PNGs are committed.
+The run switches into the `mltest` workspace, which needs `SUPER_ADMINS=dev` in
+`api/.dev.vars` (`worktree-init` copies a `.dev.vars` that has it; see
+`api/.dev.vars.example`).
 The run needs the same local setup as the e2e suites (see
 `playwright.guide.config.ts`). On Ubuntu 26.04 set
 `PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64`.

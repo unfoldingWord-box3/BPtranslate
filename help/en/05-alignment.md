@@ -22,10 +22,10 @@ The title is **Alignment**. Under it you see the book and chapter and an arrow f
 ## Single or dual
 Two buttons choose the view:
 
-- **Single** aligns one text at a time. Choose which one with the text picker next to it (ULT or UST).
-- **Dual** puts the ULT and UST side by side in a full-screen window. Both are aligned to the same original words, so you can compare them. Dual is greyed out if the verse has no text to compare.
+- **Single** aligns one text at a time. Choose which one with the text picker next to it (it lists your project's two text names, for example GLT or GST).
+- **Dual** puts your project's two texts (for example GLT and GST) side by side in a full-screen window. Both are aligned to the same original words, so you can compare them. Dual is greyed out if the verse has no text to compare.
 
-![Dual mode with ULT and UST side by side](../screenshots/en/alignment-2.png)
+![Dual mode with the project's two texts side by side](../screenshots/en/alignment-2.png)
 
 In Dual mode you can also correct the verse text. Save the alignment first, then edit. When you close with unsaved work, the window **Unsaved changes** offers **Cancel**, **Discard** or **Save**.
 
@@ -35,7 +35,7 @@ The screen offers two ways to work. On a large screen you can switch between **D
 Drag canvas:
 1. Drag a word chip from the word bank onto a card of original words (**drop English here**).
 2. To split a joined original group, double-click the original word. To unalign a word, double-click it or drag it back to the word bank.
-3. Select **Save ULT** (the button names the text you are aligning). **Reset** returns to the last saved version.
+3. Select **Save** followed by the text name, for example **Save GLT** (the button names the text you are aligning). **Reset** returns to the last saved version.
 
 Tap mode:
 1. Tap a card of original words, then tap the target words that belong to it. (Or tap target words first, then the card.)
