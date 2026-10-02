@@ -84,7 +84,6 @@ const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
 // Known open bugs pinned as `test.fail` (an unexpected pass means the bug was
 // fixed — drop the `.fail`):
 //   - #451 — VerseScreen target lanes render LTR while projectConfig is null.
-//   - #532 — the desktop drag aligner lays Arabic target words out LTR.
 //   - #533 — ReviewContextPanel verse lanes set no `dir`.
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -441,11 +440,10 @@ test.describe("RTL paint on Arabic surfaces (#486)", () => {
     await context.close();
   });
 
-  // KNOWN BUG (#532): AlignmentPanel's word-bank strip sets no `dir` and
-  // its group target stacks hardcode dir="ltr", so under an RTL target project
-  // with an LTR UI the Arabic words lay out left-to-right — the sentence reads
-  // backwards. Remove `.fail` once fixed.
-  test.fail("drag aligner (desktop): Arabic word bank runs right-to-left", async ({ browser }) => {
+  // #532 regression: AlignmentPanel's word-bank strip used to set no `dir` and
+  // its group target stacks hardcoded dir="ltr", so under an RTL target project
+  // with an LTR UI the Arabic words laid out left-to-right (read backwards).
+  test("drag aligner (desktop): Arabic word bank runs right-to-left", async ({ browser }) => {
     const { context, page } = await open(browser, "rtl-dragalign", `/#/alignment/${V}`, {
       project: RTL_PROJECT,
       viewport: { width: 1280, height: 900 },
