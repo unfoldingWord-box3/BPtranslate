@@ -1223,10 +1223,8 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
   const ultText = coveredLaneSlices(ultIndex, sourceIndex, coveredVerses).plainText;
   const ustText = coveredLaneSlices(ustIndex, sourceIndex, coveredVerses).plainText;
   const verseTwl = selectedRow ? data.twl.filter((w) => w.verse === selectedRow.verse) : [];
-  const sourceText =
-    selectedRow && activeKind === "tq"
-      ? t("flowReview.queue.questionPrefix", { question: (selectedRow as TqRow).question ?? "" })
-      : null;
+  const sourceQuestion =
+    selectedRow && activeKind === "tq" ? ((selectedRow as TqRow).question ?? "") : null;
 
   const showGrid = isAuthoringMode && activeKind === "tq" && gridView;
   // Card keystrokes are the selected row's response; show them in its cell.
@@ -1557,9 +1555,16 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
                   />
                 )}
 
-                {sourceText && (
+                {sourceQuestion !== null && (
+                  // "Q:" is UI language and keeps the UI direction; the question
+                  // is project language, so it is its own dir="auto" element
+                  // (content-driven, #256): an Arabic question reads RTL under an
+                  // LTR UI (#533). A block flex item, so a multi-line question
+                  // keeps one direction across its line breaks.
                   <Box
                     sx={{
+                      display: "flex",
+                      gap: 0.75,
                       bgcolor: "action.hover",
                       borderRadius: 1,
                       paddingInline: 1.5,
@@ -1571,7 +1576,12 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
                       fontFamily: SCRIPTURE_FONT_STACK,
                     }}
                   >
-                    {sourceText}
+                    <Box component="span" sx={{ flex: "none" }}>
+                      {t("flowReview.queue.questionPrefix")}
+                    </Box>
+                    <Box component="span" dir="auto" sx={{ flex: 1, minWidth: 0 }}>
+                      {sourceQuestion}
+                    </Box>
                   </Box>
                 )}
 
@@ -1623,7 +1633,10 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
                   value={draftValue}
                   onChange={(e) => setDraftValue(e.target.value)}
                   disabled={saveLocked || isTrashed}
-                  inputProps={{ "data-dirty": hasDiff ? "true" : "false" }}
+                  // Direction follows the *content* (dir="auto"), as in the
+                  // Translate notes/questions editors (#256): an Arabic draft
+                  // reads RTL under an LTR UI, English placeholder stays LTR (#533).
+                  inputProps={{ dir: "auto", "data-dirty": hasDiff ? "true" : "false" }}
                 />
 
                 <Stack direction="row" spacing={1} flexWrap="wrap" sx={{ mt: 1.5 }}>

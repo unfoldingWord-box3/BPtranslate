@@ -72,7 +72,7 @@ const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
 //   - VerseScreen audit mode — its cells show only ALIGNED fragments of each
 //     lane, and the fixture verse is deliberately unaligned, so they are empty.
 //   - NoteHistoryDialog (its note field hardcodes dir="ltr"; needs seeded edit
-//     history), the ReviewQueue draft field and "Q:" line, the classic Words
+//     history), the ReviewQueue "Q:" line, the classic Words
 //     tab (WordsTable), QuestionCard (classic translation mode), and the
 //     NoteCard note in AUTHORING mode (its dir is unset by design for the
 //     English root project) — not yet covered (TODO, #486).
@@ -84,7 +84,6 @@ const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
 // Known open bugs pinned as `test.fail` (an unexpected pass means the bug was
 // fixed — drop the `.fail`):
 //   - #451 — VerseScreen target lanes render LTR while projectConfig is null.
-//   - #533 — ReviewContextPanel verse lanes set no `dir`.
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const AR_UI = JSON.parse(
@@ -544,22 +543,44 @@ test.describe("RTL paint on Arabic surfaces (#486)", () => {
     await context.close();
   });
 
-  // KNOWN BUG (#533): ReviewContextPanel's ULT/UST lanes set no `dir`,
-  // so the Arabic verse inherits the LTR UI (period on the right). Remove
-  // `.fail` once fixed.
-  test.fail("review queue: Arabic ULT context lane paints rtl", async ({ browser }) => {
+  // #533: ReviewContextPanel's ULT/UST lanes and the card's draft field
+  // follow their content (dir="auto", as #256/#292), so the Arabic verse and
+  // note paint RTL under the LTR UI.
+  test("review queue: Arabic ULT context lane paints rtl", async ({ browser }) => {
     const { context, page } = await open(
       browser,
       "rtl-review",
       `/#/review/${RTL_FIXTURE.book}/${RTL_FIXTURE.chapter}`,
       { project: RTL_PROJECT, viewport: { width: 1280, height: 900 } },
     );
-    // The queue opens on the chapter intro; pick the first ZEC 6:1 card so the
-    // "This verse" panel shows the fixture verse.
+    // Draft field first: select the Arabic tn row (f66i, ZEC 6:11). Its rail
+    // card is the only one whose note snippet is the Arabic note (the snippet
+    // keeps 140 chars; the fixture note is shorter). A textarea is asserted on
+    // computed direction (header).
+    const noteRef = `${RTL_FIXTURE.book} ${RTL_FIXTURE.chapter}:${RTL_FIXTURE.noteVerse}`;
+    const noteCard = page
+      .getByRole("button")
+      .filter({ hasText: noteRef })
+      .filter({ hasText: RTL_FIXTURE.arabicNote });
+    await expect(noteCard).toHaveCount(1, { timeout: 15_000 });
+    await noteCard.click();
+    const draft = page
+      .locator('textarea:not([aria-hidden="true"])')
+      .filter({ hasText: RTL_FIXTURE.arabicNote })
+      .first();
+    await expect(draft).toBeVisible({ timeout: 15_000 });
+    expect(await computedDirection(draft), "ReviewQueue draft field").toBe("rtl");
+
+    // Then the lanes: pick the first ZEC 6:1 card so the "This verse" panel
+    // shows the fixture verse.
     const ref = `${RTL_FIXTURE.book} ${RTL_FIXTURE.chapter}:${RTL_FIXTURE.verse}`;
     await page.getByText(ref, { exact: true }).first().click({ timeout: 15_000 });
     const lane = containing(page, RTL_FIXTURE.arabicUlt);
     await expectRtlSentence(lane, "ReviewContextPanel ULT lane", RTL_FIXTURE.arabicUlt);
+    // The English UST lane must not flip just because the project is RTL.
+    const englishLane = containing(page, await ustSnippet());
+    await expect(englishLane).toBeVisible();
+    expect(await computedDirection(englishLane), "ReviewContextPanel UST lane").toBe("ltr");
     await context.close();
   });
 

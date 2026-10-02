@@ -3077,7 +3077,7 @@
       "keptMine": "Kept your version — re-sending it against the server's current version.",
       "keptTheirs": "Kept their version — your edit was discarded.",
       "discardedMine": "Discarded your {{fields}} change — the row now shows the server's values. Anything unsaved in the draft box was left alone.",
-      "questionPrefix": "Q: {{question}}",
+      "questionPrefix": "Q:",
       "tabNotes": "Notes",
       "tabQuestions": "Questions",
       "goToFirstUnsaved": "Go to the first unsaved edit and focus Save",
