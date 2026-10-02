@@ -1146,6 +1146,31 @@ export interface AiProviderCatalog {
   providers: readonly string[];
   models: Record<string, readonly string[]>;
 }
+export interface HelpStatus {
+  enabled: boolean;
+  configured: boolean;
+  provider: string | null;
+  model: string | null;
+  capUsd: number;
+  remainingUsd: number;
+}
+export interface HelpAskBody {
+  lang: string;
+  route: string;
+  messages: { role: "user" | "assistant"; content: string }[];
+}
+export interface HelpAskResponse {
+  answer: string;
+  articleIds: string[];
+  remainingUsd: number;
+}
+/** Error body of /api/help/ask (read it from ApiError.body). */
+export interface HelpAskErrorBody {
+  code?: string;
+  resetsAt?: string;
+  remainingUsd?: number;
+}
+
 export interface AiProviderSettings {
   provider: string;
   model: string | null;
@@ -2129,6 +2154,20 @@ export const api = {
     request<AiProviderSettings>(`/api/ai-provider`, {
       method: "DELETE",
       headers: { "If-Match": String(expectedVersion) },
+    }),
+  // ── In-app help assistant (api/src/help/helpRoutes.ts) ──
+  getHelpStatus: () => request<HelpStatus>(`/api/help/status`),
+  // The model call can take up to 45 s server-side.
+  askHelp: (body: HelpAskBody) =>
+    request<HelpAskResponse>(`/api/help/ask`, {
+      method: "POST",
+      body: JSON.stringify(body),
+      timeoutMs: 60_000,
+    }),
+  setHelpChatEnabled: (enabled: boolean) =>
+    request<{ enabled: boolean }>(`/api/help/settings`, {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
     }),
   getContextExportStatus: () =>
     request<ContextExportStatus>(`/api/translation-memory/export-status`),

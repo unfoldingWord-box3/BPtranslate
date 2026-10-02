@@ -30,6 +30,7 @@ import { UiLangContext } from "../i18n/UiLangContext";
 import helpIndexJson from "./helpIndex.generated.json";
 import { articleForRoute, articlesFor, type HelpIndex } from "./guideMap";
 import { searchHelp } from "./search";
+import AskAi from "./AskAi";
 
 const helpIndex = helpIndexJson as unknown as HelpIndex;
 
@@ -135,6 +136,7 @@ export default function HelpDrawer({ open, openSeq, routeKey, initialArticle, on
       anchor="right"
       open={open}
       onClose={onClose}
+      keepMounted
       slotProps={{ paper: { sx: { width: isPhone ? "100%" : 420, maxWidth: "100%" }, "aria-label": t("help.title") } as object }}
     >
       <Box sx={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
@@ -214,6 +216,16 @@ export default function HelpDrawer({ open, openSeq, routeKey, initialArticle, on
             </List>
           )}
         </Box>
+        {/* Not keyed on openSeq: an answer survives closing the panel to try
+            its steps; "New question" clears it. */}
+        <AskAi
+          articles={articles}
+          lang={lang}
+          routeKey={routeKey}
+          onOpenArticle={select}
+          components={components}
+          bodySx={bodySx}
+        />
       </Box>
     </Drawer>
   );

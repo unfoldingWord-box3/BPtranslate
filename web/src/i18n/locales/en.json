@@ -310,7 +310,12 @@
       "encryptionUnavailable": "Bringing your own AI key isn't enabled on this deployment yet — an admin needs to set the AI_KEY_WRAPPING_KEY secret.",
       "notMigrated": "This organization's database is behind on migrations — an admin needs to apply the AI provider migration before a key can be saved.",
       "loadFailed": "Could not load the AI service settings.",
-      "conflictReloaded": "Someone else changed this configuration — reloaded; review before saving again."
+      "conflictReloaded": "Someone else changed this configuration — reloaded; review before saving again.",
+      "helpChat": {
+        "label": "Let team members ask the AI help assistant",
+        "helper": "It uses this organization's AI key and is capped at ${{cap}} per person per day.",
+        "needsKey": "It only answers once an API key is saved."
+      }
     },
     "localization": {
       "intro": "Edit the {{language}} interface strings. English is shown on the left for reference; edit the {{language}} text on the right. Changes take effect immediately and are shared with everyone using {{language}} on their next load. Switch languages using the language menu in the top bar.",
@@ -3665,6 +3670,25 @@
     "noResults": "Nothing found for \"{{query}}\".",
     "results": "Search results",
     "allTopics": "All topics",
-    "forAdmins": "For admins"
+    "forAdmins": "For admins",
+    "ask": {
+      "title": "Ask AI",
+      "label": "Ask a question about the app",
+      "followUpLabel": "Ask a follow-up question",
+      "placeholder": "For example: how do I align a verse?",
+      "didOneAnswer": "Did one of these answer it?",
+      "button": "Ask AI",
+      "asking": "Asking…",
+      "newQuestion": "New question",
+      "sources": "From the guide:",
+      "remaining": "${{amount}} left today",
+      "notConfigured": "Ask AI isn't set up for this organization.",
+      "budgetExhausted": "Today's AI help allowance is used up. It resets {{when}}. Searching the guide still works.",
+      "budgetExhaustedNoTime": "Today's AI help allowance is used up. It resets tomorrow (UTC). Searching the guide still works.",
+      "disabled": "Ask AI has been turned off for this organization.",
+      "unavailable": "Ask AI isn't available right now. Searching the guide still works.",
+      "failed": "Ask AI could not answer. Try again, or search the guide.",
+      "limitReached": "This conversation has reached its length limit. Start a new question to continue."
+    }
   }
 }
