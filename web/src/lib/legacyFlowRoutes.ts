@@ -17,12 +17,33 @@
 // #/ai, #/style, #/curate[/{templateId}] and #/observe now redirect to
 // #/admin/ai, #/admin/style, #/admin/curate[/{templateId}] and #/admin/observe.
 //
+// parseHash matches the #/admin/{section} hashes themselves exactly, so their
+// near-misses (#/admin/AI, #/admin/ai/, #/admin/observe?x=1,
+// #/admin/curate/{id}/) are canonicalized here too (#544) instead of falling
+// to the book-code catch-all as book "ADMIN".
+//
 // Pure (string in, string out) so the table is unit-tested in
 // legacyFlowRoutes.test.mjs; App.tsx's parseHash applies the result with
 // history.replaceState. Returns null when the hash is not a retired route,
 // including every form a kept screen still owns (#/scripture/{book}/…,
-// #/verse/…, #/articles/{tw|ta}/…, #/admin/…).
+// #/verse/…, #/articles/{tw|ta}/…), an #/admin/… hash that is already exact,
+// and an unknown #/admin/{section}.
+const ADMIN_SECTIONS = new Set([
+  "team", "setup", "workflow", "progress", "review", "ai", "style", "observe", "curate",
+]);
+
 export function legacyFlowRedirect(hash: string): string | null {
+  // #/admin/{section}[/{templateId}]: lowercase the section, drop a trailing
+  // slash and any query tail. Only curate takes a tail, and its template id is
+  // kept exactly as encoded, the same as the #/curate/{id} branch below.
+  const ad = hash.match(/^#\/admin\/([A-Za-z]+)(?:\/([^?/][^?]*?))?\/?(?:\?.*)?$/i);
+  if (ad) {
+    const section = ad[1].toLowerCase();
+    if (!ADMIN_SECTIONS.has(section) || (ad[2] !== undefined && section !== "curate")) return null;
+    const canonical = `#/admin/${section}${ad[2] ? `/${ad[2]}` : ""}`;
+    return hash === canonical ? null : canonical;
+  }
+
   // #/curate/{templateId}: a template id is free text (percent-encoded in the
   // hash), so it can't go through the [A-Za-z0-9] segment matcher below. Carry
   // it over exactly as encoded; drop a trailing slash and any raw query tail

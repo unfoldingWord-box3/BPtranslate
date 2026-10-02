@@ -51,6 +51,8 @@
 | a4 observe | `#/observe` | `ObserveScreen.tsx` |
 | verse overview | `#/verse/{book}/{chapter}/{verse}` | `VerseScreen.tsx` |
 
+Since #537, the l1 AI, l2 style, l3 templates and a4 observe screens live at `#/admin/ai`, `#/admin/style`, `#/admin/curate/{id?}` and `#/admin/observe`; the old hashes above redirect there (`web/src/lib/legacyFlowRoutes.ts`).
+
 Route names are single reserved tokens; none collide with USFM book codes
 (3-char). Each wave registers its own routes; components are `React.lazy` so
 a screen's weight isn't paid on unrelated routes.
