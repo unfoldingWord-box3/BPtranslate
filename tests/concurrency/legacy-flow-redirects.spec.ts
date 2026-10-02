@@ -56,6 +56,11 @@ const redirects: [from: string, to: string, landmark: Landmark][] = [
   ["#/curate/", "#/admin/curate", TEMPLATES],
   ["#/curate/figs-metaphor-1", "#/admin/curate/figs-metaphor-1", TEMPLATES],
   ["#/Curate/a%20b/?x=1", "#/admin/curate/a%20b", TEMPLATES],
+  // Near-misses of the #/admin/* hashes themselves (#544).
+  ["#/admin/AI", "#/admin/ai", AI_STUDIO],
+  ["#/admin/observe/?x=1", "#/admin/observe", OBSERVE],
+  ["#/admin/Team", "#/admin/team", h1("Team & roles")],
+  ["#/admin/curate/figs-metaphor-1/", "#/admin/curate/figs-metaphor-1", TEMPLATES],
 ];
 
 // Every surviving destination reachable from the package hub, the admin desk
