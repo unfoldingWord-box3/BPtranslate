@@ -72,7 +72,7 @@ const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
 //   - VerseScreen audit mode — its cells show only ALIGNED fragments of each
 //     lane, and the fixture verse is deliberately unaligned, so they are empty.
 //   - NoteHistoryDialog (its note field hardcodes dir="ltr"; needs seeded edit
-//     history), the ReviewQueue draft field and "Q:" line, the classic Words
+//     history), the ReviewQueue "Q:" line, the classic Words
 //     tab (WordsTable), QuestionCard (classic translation mode), and the
 //     NoteCard note in AUTHORING mode (its dir is unset by design for the
 //     English root project) — not yet covered (TODO, #486).
@@ -84,7 +84,6 @@ const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
 // Known open bugs pinned as `test.fail` (an unexpected pass means the bug was
 // fixed — drop the `.fail`):
 //   - #451 — VerseScreen target lanes render LTR while projectConfig is null.
-//   - #533 — ReviewContextPanel verse lanes set no `dir`.
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const AR_UI = JSON.parse(
