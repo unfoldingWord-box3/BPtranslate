@@ -108,6 +108,23 @@ const ERROR_COPY_KEY: Record<PipelineErrorKind, string> = {
   checks_failed: "aiStudio.errors.checks_failed",
   internal_error_after_call: "aiStudio.errors.internal_error_after_call",
   internal_error: "aiStudio.errors.internal_error",
+  // Remaining internal translate-runner step kinds (#471 follow-up to #475).
+  workspace_missing: "aiStudio.errors.workspace_missing",
+  workspace_unknown: "aiStudio.errors.workspace_unknown",
+  job_missing: "aiStudio.errors.job_missing",
+  job_not_running: "aiStudio.errors.job_not_running",
+  cancelled: "aiStudio.errors.cancelled",
+  artifact_missing: "aiStudio.errors.artifact_missing",
+  source_not_found: "aiStudio.errors.source_not_found",
+  no_source_rows: "aiStudio.errors.no_source_rows",
+  scripture_fetch_failed: "aiStudio.errors.scripture_fetch_failed",
+  output_persist_failed: "aiStudio.errors.output_persist_failed",
+  ai_provider_unavailable: "aiStudio.errors.ai_provider_unavailable",
+  ai_provider_changed: "aiStudio.errors.ai_provider_changed",
+  ai_provider_key_decrypt_failed: "aiStudio.errors.ai_provider_key_decrypt_failed",
+  target_book_absent: "aiStudio.errors.target_book_absent",
+  merge_failed: "aiStudio.errors.merge_failed",
+  merge_shrink_refused: "aiStudio.errors.merge_shrink_refused",
 };
 
 function errorCopy(kind: PipelineErrorKind | null, t: TFunction): string {
