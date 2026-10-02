@@ -13,3 +13,8 @@
 *.tsv text eol=lf
 *.sql text eol=lf
 *.ps1 text eol=crlf
+
+# Built by scripts/build-help.mjs from help/**/*.md (CI fails when they are
+# stale), so diffs and reviews read the Markdown, not its generated copy.
+*.generated.json -diff linguist-generated
+*.generated.ts -diff linguist-generated
