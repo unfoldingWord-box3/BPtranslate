@@ -68,6 +68,24 @@ const nearMisses = [
   ["#/Curate?x=1", "#/admin/curate"],
   ["#/curate/figs-metaphor-1/", "#/admin/curate/figs-metaphor-1"],
   ["#/Curate/figs-metaphor-1?x=1", "#/admin/curate/figs-metaphor-1"],
+  // The #/admin/* hashes themselves (#544): parseHash matches them exactly, so
+  // a near-miss is canonicalized here rather than read as book "ADMIN".
+  ["#/admin/AI", "#/admin/ai"],
+  ["#/admin/ai/", "#/admin/ai"],
+  ["#/admin/observe?x=1", "#/admin/observe"],
+  ["#/admin/Team", "#/admin/team"],
+  ["#/admin/Setup/", "#/admin/setup"],
+  ["#/admin/workflow?tab=x", "#/admin/workflow"],
+  ["#/admin/PROGRESS", "#/admin/progress"],
+  ["#/admin/review/", "#/admin/review"],
+  ["#/admin/Style?x=1", "#/admin/style"],
+  ["#/Admin/ai", "#/admin/ai"],
+  ["#/admin/curate/", "#/admin/curate"],
+  ["#/admin/Curate?x=1", "#/admin/curate"],
+  // The template id keeps its case and percent-encoding exactly.
+  ["#/admin/curate/some-id/", "#/admin/curate/some-id"],
+  ["#/admin/curate/Some-ID?x=1", "#/admin/curate/Some-ID"],
+  ["#/admin/Curate/a%20b%2Fc/", "#/admin/curate/a%20b%2Fc"],
 ];
 
 for (const [from, to] of [...redirects, ...nearMisses]) {
@@ -96,6 +114,16 @@ const kept = [
   "#/admin/curate",
   "#/admin/curate/figs-metaphor-1",
   "#/admin/observe",
+  "#/admin/team",
+  "#/admin/workflow",
+  "#/admin/progress",
+  "#/admin/review",
+  "#/admin/curate/Some-ID",
+  "#/admin/curate/a%20b%2Fc",
+  // Unknown admin sections are left as they behave today (#544).
+  "#/admin/bogus",
+  "#/admin/Bogus/",
+  "#/admin/ai/extra",
   "#/review/ZEC/1",
   "#/ZEC/6/3",
   "#/ZEC/6/3?twl=rqe5",
