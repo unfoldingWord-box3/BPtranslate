@@ -419,10 +419,18 @@ export function ResourceColumn({
     setResourceTab(tab);
   };
   const seenTabRequest = useRef(requestTab?.nonce);
+  // Bumped when a requested tab switch lands, so the scroll effect below re-runs
+  // in the commit where the new tab's rows exist. Shell sets the active row in
+  // the same commit as the request, while the old tab is still mounted, so the
+  // scroll effect's own run finds no row to scroll to.
+  const [tabRequestScroll, setTabRequestScroll] = useState(0);
   useEffect(() => {
     if (!requestTab || requestTab.nonce === seenTabRequest.current) return;
     seenTabRequest.current = requestTab.nonce;
-    if (tabs.includes(requestTab.tab)) setResourceTab(requestTab.tab);
+    if (tabs.includes(requestTab.tab)) {
+      setResourceTab(requestTab.tab);
+      setTabRequestScroll((n) => n + 1);
+    }
   }, [requestTab?.nonce]);
 
   // Lazily mount the Search iframe on first visit, then keep it alive (the body
@@ -644,6 +652,7 @@ export function ResourceColumn({
   //     pinned and the user wants to jump into that verse's group)
   //   - pinned.* (pin toggles, so the user lands on the same conceptual
   //     spot they were viewing before the layout reshuffled)
+  //   - tabRequestScroll (a requestTab switch landed; see above)
   // Priority: active note > active word > active-verse group in any pinned
   // section. Without any of those, no scroll.
   const prevNonceRef = useRef(scrollNonce);
@@ -723,6 +732,7 @@ export function ResourceColumn({
     pinned.notes,
     pinned.words,
     pinned.questions,
+    tabRequestScroll,
   ]);
 
   return (
