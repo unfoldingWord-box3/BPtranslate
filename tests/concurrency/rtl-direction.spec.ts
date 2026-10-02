@@ -89,7 +89,7 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const AR_UI = JSON.parse(
   readFileSync(resolve(repoRoot, "web/src/i18n/locales/ar.json"), "utf8"),
 ) as Record<string, Record<string, unknown>>;
-/** Arabic UI string at a dotted key, e.g. "flowHome.descScripture". */
+/** Arabic UI string at a dotted key, e.g. "flowBooks.list.sub". */
 function arUi(key: string): string {
   const v = key.split(".").reduce<unknown>((o, k) => (o as Record<string, unknown>)?.[k], AR_UI);
   if (typeof v !== "string") throw new Error(`ar.json has no string at ${key}`);
