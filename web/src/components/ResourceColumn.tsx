@@ -219,6 +219,11 @@ interface Props {
   // (panelMode) and unaffected.
   visibleTabs?: ResourceTab[];
   initialTab?: ResourceTab;
+  // Switch to `tab` after mount, once per new `nonce` (#535): a ?twl= link
+  // reached while the column is already open must show Words. The value
+  // present at mount is ignored (initialTab covers mount), and so is a tab
+  // this layout doesn't show.
+  requestTab?: { tab: ResourceTab; nonce: number } | null;
 }
 
 type Pinned = Record<PinKey, boolean>;
@@ -327,6 +332,7 @@ export function ResourceColumn({
   checkoff,
   visibleTabs,
   initialTab,
+  requestTab,
 }: Props) {
   const { t } = useTranslation();
   // Translation mode: only gateway-language projects (translationSource != null)
@@ -412,6 +418,12 @@ export function ResourceColumn({
     if (panelMode !== "resources") onSetPanelMode?.("resources");
     setResourceTab(tab);
   };
+  const seenTabRequest = useRef(requestTab?.nonce);
+  useEffect(() => {
+    if (!requestTab || requestTab.nonce === seenTabRequest.current) return;
+    seenTabRequest.current = requestTab.nonce;
+    if (tabs.includes(requestTab.tab)) setResourceTab(requestTab.tab);
+  }, [requestTab?.nonce]);
 
   // Lazily mount the Search iframe on first visit, then keep it alive (the body
   // toggles its visibility rather than unmounting). Avoids loading the external
