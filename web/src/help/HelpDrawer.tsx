@@ -9,6 +9,7 @@ import {
   Drawer,
   IconButton,
   InputAdornment,
+  Link,
   List,
   ListItemButton,
   ListItemText,
@@ -63,6 +64,9 @@ export default function HelpDrawer({ open, openSeq, routeKey, initialArticle, on
   const theme = useTheme();
   const isPhone = useMediaQuery(theme.breakpoints.down("sm"));
   const articles = useMemo(() => articlesFor(helpIndex, lang), [lang]);
+  // No guide in this UI language: the articles are the English fallback, so
+  // keep them LTR even when the surrounding UI is RTL.
+  const englishFallback = !helpIndex.langs[lang];
   const [query, setQuery] = useState("");
   const [articleId, setArticleId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -98,15 +102,9 @@ export default function HelpDrawer({ open, openSeq, routeKey, initialArticle, on
       if (href?.startsWith("#help:")) {
         const id = href.slice("#help:".length);
         return (
-          <a
-            href={href}
-            onClick={(e) => {
-              e.preventDefault();
-              select(id);
-            }}
-          >
+          <Link component="button" type="button" onClick={() => select(id)} sx={{ font: "inherit", verticalAlign: "baseline" }}>
             {children}
-          </a>
+          </Link>
         );
       }
       if (href && /^https?:\/\//i.test(href)) {
@@ -116,7 +114,7 @@ export default function HelpDrawer({ open, openSeq, routeKey, initialArticle, on
           </a>
         );
       }
-      return <a href={href}>{children}</a>;
+      return <>{children}</>;
     },
     img({ src, alt }) {
       return <img src={src} alt={alt ?? ""} loading="lazy" style={{ maxWidth: "100%", height: "auto" }} />;
@@ -168,7 +166,7 @@ export default function HelpDrawer({ open, openSeq, routeKey, initialArticle, on
           />
         </Box>
 
-        <Box ref={scrollRef} sx={{ flex: 1, minHeight: 0, overflowY: "auto", px: 2, py: 1 }}>
+        <Box ref={scrollRef} dir={englishFallback ? "ltr" : undefined} sx={{ flex: 1, minHeight: 0, overflowY: "auto", px: 2, py: 1 }}>
           {trimmed ? (
             hits.length === 0 ? (
               <Typography variant="body2" color="text.secondary" sx={{ py: 2 }}>

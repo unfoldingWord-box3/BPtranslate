@@ -50,3 +50,27 @@ test("no match returns nothing; limit applies", () => {
   assert.deepEqual(searchHelp(fixture, "zzzz"), []);
   assert.equal(searchHelp(fixture, "the", 1).length <= 1, true);
 });
+
+test("link targets and image paths are not searchable", () => {
+  const f = [
+    art("a", "Alpha", [], [], "Talk about notes here."),
+    art("b", "Beta", [], [], "See [this](#help:notes) and #help:notes.\n\n![shot](/help/en/x.png)"),
+  ];
+  assert.equal(searchHelp(f, "notes")[0].article.id, "a");
+  assert.deepEqual(searchHelp(f, "notes").map((h) => h.article.id), ["a"]);
+  assert.deepEqual(searchHelp(f, "png"), []);
+  assert.deepEqual(searchHelp(f, "help"), []);
+});
+
+test("Arabic proclitics: all forms match الحفظ", () => {
+  const f = [art("x", "عنوان", [], [], "اضغط على الحفظ عند الانتهاء.")];
+  for (const q of ["حفظ", "الحفظ", "وحفظ", "بالحفظ", "للحفظ"]) {
+    assert.equal(searchHelp(f, q).length, 1, q);
+  }
+});
+
+test("English query unaffected by Arabic proclitic stripping", () => {
+  const f = [art("e", "Bible", [], [], "Letters like lab and fall.")];
+  assert.equal(searchHelp(f, "lab").length, 1);
+  assert.equal(searchHelp(f, "bible").length, 1);
+});

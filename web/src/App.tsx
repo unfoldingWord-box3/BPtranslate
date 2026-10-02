@@ -89,7 +89,21 @@ function positionFromLoc(loc: Location): { book: string; chapter: number; verse:
 }
 
 // The Help panel (and the guide JSON it bundles) loads on first open.
-const HelpDrawer = lazy(() => import("./help/HelpDrawer"));
+// A failed chunk load (stale tab after a deploy) must not reach the top-level
+// error boundary, which reloads the page and can lose unsaved edits.
+function HelpUnavailable({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const { t } = useTranslation();
+  return (
+    <Snackbar open={open} onClose={onClose} anchorOrigin={{ vertical: "bottom", horizontal: "center" }}>
+      <Alert severity="warning" onClose={onClose}>
+        {t("help.loadFailed")}
+      </Alert>
+    </Snackbar>
+  );
+}
+const HelpDrawer = lazy(() =>
+  import("./help/HelpDrawer").catch(() => ({ default: HelpUnavailable as unknown as typeof import("./help/HelpDrawer").default })),
+);
 
 // Flow screens are lazy so their weight isn't paid on the classic editor
 // routes.

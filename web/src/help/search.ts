@@ -23,8 +23,37 @@ export function normalizeText(s: string): string {
     .replace(/ة/g, "ه");
 }
 
+const ARABIC_LETTER = /[\u0600-\u06FF]/;
+const MULTI_PROCLITICS = ["وال", "بال", "كال", "فال", "لل", "ال"];
+const SINGLE_PROCLITICS = ["و", "ب", "ل", "ف", "ك"];
+
+/**
+ * Strip an Arabic definite article / attached one-letter particle so "حفظ"
+ * matches "الحفظ", "وحفظ", "بالحفظ", "للحفظ". Conservative: the remainder must
+ * stay at least 2 letters (3 for a single-letter proclitic, which is often a
+ * real root letter).
+ */
+function stripProclitic(token: string): string {
+  if (!ARABIC_LETTER.test(token)) return token;
+  for (const p of MULTI_PROCLITICS) {
+    if (token.startsWith(p) && token.length - p.length >= 2) return token.slice(p.length);
+  }
+  for (const p of SINGLE_PROCLITICS) {
+    if (token.startsWith(p) && token.length - p.length >= 3) return token.slice(p.length);
+  }
+  return token;
+}
+
 export function tokenize(s: string): string[] {
-  return (normalizeText(s).match(/[\p{L}\p{N}]+/gu) ?? []).filter((t) => t.length > 1);
+  return (normalizeText(s).match(/[\p{L}\p{N}]+/gu) ?? []).filter((t) => t.length > 1).map(stripProclitic);
+}
+
+/** Article body as prose: link/image targets and #help: references removed. */
+function proseOf(body: string): string {
+  return body
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/#help:[\w-]+/g, "");
 }
 
 const TITLE_WEIGHT = 10;
@@ -72,7 +101,7 @@ export function searchHelp(articles: HelpArticle[], query: string, limit = 8): H
     const titleWords = tokenize(article.title);
     const keywordWords = article.keywords.flatMap(tokenize);
     const headingWords = article.headings.flatMap(tokenize);
-    const bodyWords = tokenize(article.body);
+    const bodyWords = tokenize(proseOf(article.body));
     let score = 0;
     for (const t of tokens) {
       if (hasPrefixMatch(titleWords, t)) score += TITLE_WEIGHT;
