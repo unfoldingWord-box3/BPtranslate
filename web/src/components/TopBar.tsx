@@ -44,6 +44,7 @@ import CloudDownloadIcon from "@mui/icons-material/CloudDownload";
 import CloudDownloadOutlinedIcon from "@mui/icons-material/CloudDownloadOutlined";
 import FileDownloadIcon from "@mui/icons-material/FileDownload";
 import LanguageIcon from "@mui/icons-material/Language";
+import HelpOutlineIcon from "@mui/icons-material/HelpOutline";
 import CheckIcon from "@mui/icons-material/Check";
 import ArticleOutlinedIcon from "@mui/icons-material/ArticleOutlined";
 import NoteAltOutlinedIcon from "@mui/icons-material/NoteAltOutlined";
@@ -59,6 +60,8 @@ import AppsIcon from "@mui/icons-material/Apps";
 import OpenInNewIcon from "@mui/icons-material/OpenInNew";
 import LogoutIcon from "@mui/icons-material/Logout";
 import { useTranslation } from "react-i18next";
+import { HelpContext } from "../help/HelpContext";
+import { HelpButton } from "../help/HelpButton";
 import { useProjectConfig, isTranslationProject, setProjectMode } from "../hooks/useProjectConfig";
 import { UI_LANGUAGES } from "../i18n";
 import { UiLangContext } from "../i18n/UiLangContext";
@@ -495,6 +498,7 @@ export function TopBar({
   };
 
   // ── "More" menu ────────────────────────────────────────────────────────
+  const { openHelp } = useContext(HelpContext);
   const [moreAnchor, setMoreAnchor] = useState<null | HTMLElement>(null);
   const moreButtonRef = useRef<HTMLButtonElement>(null);
   const [langSubmenuAnchor, setLangSubmenuAnchor] = useState<null | HTMLElement>(null);
@@ -832,6 +836,9 @@ export function TopBar({
         />
       )}
 
+      {/* Narrow bars (phone) carry Help inside the More menu instead. */}
+      {!isNarrow && <HelpButton />}
+
       <Button
         ref={moreButtonRef}
         variant="outlined"
@@ -929,6 +936,20 @@ export function TopBar({
               <NoteAltOutlinedIcon fontSize="small" sx={{ color: "text.secondary" }} />
             </ListItemIcon>
             <ListItemText primary={t("templates.title")} />
+          </MenuItem>
+        )}
+
+        {isNarrow && (
+          <MenuItem
+            onClick={() => {
+              closeMore();
+              openHelp();
+            }}
+          >
+            <ListItemIcon>
+              <HelpOutlineIcon fontSize="small" sx={{ color: "text.secondary" }} />
+            </ListItemIcon>
+            <ListItemText primary={t("help.open")} />
           </MenuItem>
         )}
 

@@ -4054,5 +4054,16 @@
       "diminutive": "تصغير",
       "indeclinable": "مبني"
     }
+  },
+  "help": {
+    "open": "المساعدة",
+    "title": "المساعدة",
+    "close": "إغلاق المساعدة",
+    "searchLabel": "البحث في المساعدة",
+    "searchPlaceholder": "ابحث في الدليل",
+    "noResults": "لا توجد نتائج لـ «{{query}}».",
+    "results": "نتائج البحث",
+    "allTopics": "كل المواضيع",
+    "forAdmins": "للمسؤولين"
   }
 }

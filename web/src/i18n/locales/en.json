@@ -3654,5 +3654,16 @@
       "diminutive": "diminutive",
       "indeclinable": "indeclinable"
     }
+  },
+  "help": {
+    "open": "Help",
+    "title": "Help",
+    "close": "Close Help",
+    "searchLabel": "Search help",
+    "searchPlaceholder": "Search the guide",
+    "noResults": "Nothing found for \"{{query}}\".",
+    "results": "Search results",
+    "allTopics": "All topics",
+    "forAdmins": "For admins"
   }
 }

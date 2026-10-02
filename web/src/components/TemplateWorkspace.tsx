@@ -32,6 +32,7 @@ import { useTemplateAiDraft } from "../hooks/useTemplateAiDraft";
 import { useTemplateBulkDraft } from "../hooks/useTemplateBulkDraft";
 import { MarkdownView } from "./MarkdownView";
 import { TemplateHistoryDialog } from "./TemplateHistoryDialog";
+import { HelpButton } from "../help/HelpButton";
 
 type TemplateState = "ai_draft" | "edited" | "validated" | null;
 
@@ -205,9 +206,10 @@ export function TemplateWorkspace({ templateId, onNavigate, onBack }: Props) {
                 <ArrowBackIcon fontSize="small" />
               </IconButton>
             </Tooltip>
-            <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
+            <Typography variant="subtitle2" sx={{ fontWeight: 700, flex: 1 }}>
               {t("templates.title")}
             </Typography>
+            <HelpButton />
           </Stack>
           <Typography variant="caption" color="text.secondary">
             {t("templates.approved", { n: validatedCount, total })}
