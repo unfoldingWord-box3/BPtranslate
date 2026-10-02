@@ -1223,16 +1223,8 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
   const ultText = coveredLaneSlices(ultIndex, sourceIndex, coveredVerses).plainText;
   const ustText = coveredLaneSlices(ustIndex, sourceIndex, coveredVerses).plainText;
   const verseTwl = selectedRow ? data.twl.filter((w) => w.verse === selectedRow.verse) : [];
-  const sourceText =
-    selectedRow && activeKind === "tq"
-      ? t("flowReview.queue.questionPrefix", {
-          // The "Q:" prefix is UI language; the question is target language.
-          // Wrap the question in a first-strong isolate (U+2068…U+2069, the
-          // text form of <bdi dir="auto">) so an Arabic question lays out RTL
-          // inside an LTR line and English keeps its order (#533, #256).
-          question: `\u2068${(selectedRow as TqRow).question ?? ""}\u2069`,
-        })
-      : null;
+  const sourceQuestion =
+    selectedRow && activeKind === "tq" ? ((selectedRow as TqRow).question ?? "") : null;
 
   const showGrid = isAuthoringMode && activeKind === "tq" && gridView;
   // Card keystrokes are the selected row's response; show them in its cell.
@@ -1563,9 +1555,16 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
                   />
                 )}
 
-                {sourceText && (
+                {sourceQuestion !== null && (
+                  // "Q:" is UI language and keeps the UI direction; the question
+                  // is project language, so it is its own dir="auto" element
+                  // (content-driven, #256): an Arabic question reads RTL under an
+                  // LTR UI (#533). A block flex item, so a multi-line question
+                  // keeps one direction across its line breaks.
                   <Box
                     sx={{
+                      display: "flex",
+                      gap: 0.75,
                       bgcolor: "action.hover",
                       borderRadius: 1,
                       paddingInline: 1.5,
@@ -1577,7 +1576,12 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
                       fontFamily: SCRIPTURE_FONT_STACK,
                     }}
                   >
-                    {sourceText}
+                    <Box component="span" sx={{ flex: "none" }}>
+                      {t("flowReview.queue.questionPrefix")}
+                    </Box>
+                    <Box component="span" dir="auto" sx={{ flex: 1, minWidth: 0 }}>
+                      {sourceQuestion}
+                    </Box>
                   </Box>
                 )}
 

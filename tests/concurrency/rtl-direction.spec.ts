@@ -553,21 +553,22 @@ test.describe("RTL paint on Arabic surfaces (#486)", () => {
       `/#/review/${RTL_FIXTURE.book}/${RTL_FIXTURE.chapter}`,
       { project: RTL_PROJECT, viewport: { width: 1280, height: 900 } },
     );
-    // Draft field first: select the Arabic tn row (f66i, ZEC 6:11) by trying
-    // each 6:11 card. A textarea is asserted on computed direction (header).
+    // Draft field first: select the Arabic tn row (f66i, ZEC 6:11). Its rail
+    // card is the only one whose note snippet is the Arabic note (the snippet
+    // keeps 140 chars; the fixture note is shorter). A textarea is asserted on
+    // computed direction (header).
     const noteRef = `${RTL_FIXTURE.book} ${RTL_FIXTURE.chapter}:${RTL_FIXTURE.noteVerse}`;
-    const noteCards = page.getByRole("button").filter({ hasText: noteRef });
-    await expect(noteCards.first()).toBeVisible({ timeout: 15_000 });
+    const noteCard = page
+      .getByRole("button")
+      .filter({ hasText: noteRef })
+      .filter({ hasText: RTL_FIXTURE.arabicNote });
+    await expect(noteCard).toHaveCount(1, { timeout: 15_000 });
+    await noteCard.click();
     const draft = page
       .locator('textarea:not([aria-hidden="true"])')
       .filter({ hasText: RTL_FIXTURE.arabicNote })
       .first();
-    const cardCount = await noteCards.count();
-    for (let i = 0; i < cardCount && !(await draft.isVisible()); i++) {
-      await noteCards.nth(i).click();
-      await page.waitForTimeout(300);
-    }
-    await expect(draft).toBeVisible({ timeout: 5_000 });
+    await expect(draft).toBeVisible({ timeout: 15_000 });
     expect(await computedDirection(draft), "ReviewQueue draft field").toBe("rtl");
 
     // Then the lanes: pick the first ZEC 6:1 card so the "This verse" panel
