@@ -6,7 +6,17 @@
 // tokens * price micro-dollars. Prices are held x100 as integers so cache-read
 // 0.10 and cache-write 1.25 never touch float math.
 
-export const HELP_MAX_OUTPUT_TOKENS = 1024;
+/**
+ * Per-provider max output tokens. Gemini, OpenAI and xAI count thinking /
+ * reasoning tokens inside this limit, so they get more room than Claude (which
+ * runs without thinking here).
+ */
+const MAX_OUTPUT: Record<string, number> = { claude: 1024, gemini: 2048, openai: 2048, xai: 2048 };
+
+export function maxOutputFor(provider: string): number {
+  if (!Object.prototype.hasOwnProperty.call(MAX_OUTPUT, provider)) throw new Error(`no help output budget for provider ${provider}`);
+  return MAX_OUTPUT[provider];
+}
 
 export type HelpUsage = {
   inputTokens: number;

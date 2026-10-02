@@ -4,17 +4,22 @@
 // ONE statement, before any provider call; settle() then swaps the reservation
 // for the real cost.
 
-import { HELP_MAX_OUTPUT_TOKENS, priceFor } from "./helpPrices.ts";
+import { priceFor } from "./helpPrices.ts";
 
 type Db = D1Database;
 
 export const DEFAULT_CAP_USD = 2;
 
-/** Parse HELP_CHAT_DAILY_CAP_USD; missing or invalid falls back to $2. */
+/** Parse HELP_CHAT_DAILY_CAP_USD; 0 means no AI spend; missing, non-numeric or negative falls back to $2. */
 export function capMicrosFromEnv(raw: string | undefined): number {
   const n = Number(raw);
-  const usd = raw !== undefined && raw.trim() !== "" && Number.isFinite(n) && n > 0 ? n : DEFAULT_CAP_USD;
+  const usd = raw !== undefined && raw.trim() !== "" && Number.isFinite(n) && n >= 0 ? n : DEFAULT_CAP_USD;
   return Math.round(usd * 1_000_000);
+}
+
+/** True for the error D1 raises when migration 0074 has not been applied. */
+export function isMissingSchemaError(e: unknown): boolean {
+  return /no such (table|column)/i.test(e instanceof Error ? e.message : String(e));
 }
 
 export function utcDay(now: Date = new Date()): string {
@@ -48,7 +53,7 @@ export function inputTokenBound(texts: string[]): number {
 export function worstCaseMicros(
   provider: string,
   inputTokens: number,
-  maxOutput: number = HELP_MAX_OUTPUT_TOKENS,
+  maxOutput: number,
 ): number {
   const p = priceFor(provider);
   const inRate = Math.max(p.input, p.cacheWrite ?? 0);
@@ -71,17 +76,27 @@ export async function reserve(db: Db, userId: number, day: string, micros: numbe
   return r.meta.changes === 1;
 }
 
-/** Release the reservation and record what was actually spent. */
-export async function settle(db: Db, userId: number, day: string, reservedMicros: number, actualMicros: number): Promise<void> {
+/**
+ * Release the reservation and record what was spent. `answered` is true only
+ * when the call returned an answer; it alone increments `calls`.
+ */
+export async function settle(
+  db: Db,
+  userId: number,
+  day: string,
+  reservedMicros: number,
+  actualMicros: number,
+  answered: boolean,
+): Promise<void> {
   await db
     .prepare(
       `UPDATE help_chat_usage
           SET reserved_micros = MAX(reserved_micros - ?1, 0),
               spent_micros = spent_micros + ?2,
-              calls = calls + 1
+              calls = calls + ?5
         WHERE user_id = ?3 AND day = ?4`,
     )
-    .bind(reservedMicros, actualMicros, userId, day)
+    .bind(reservedMicros, actualMicros, userId, day, answered ? 1 : 0)
     .run();
 }
 

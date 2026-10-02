@@ -1,6 +1,12 @@
 // Provider adapters, system prompt and answer parsing for the in-app help
 // assistant. Prices for the daily cap live in helpPrices.ts (re-exported here).
 //
+// The cap is hard: each call reserves its worst case (this provider's own
+// max output tokens plus a byte-bound on input) before the call, and settles at
+// the real cost, or at the worst case when the real cost is unknown (timeout,
+// network error, 5xx, missing usage). After settle, spend can exceed the cap
+// only if a provider billed past its own token limit.
+//
 // The adapters make their own calls rather than reuse translate/llm.ts
 // transports: those return no cache-token usage and are shaped for one-shot
 // batch output. Error classification and secret scrubbing ARE reused.
@@ -12,10 +18,10 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import { classifyProviderError, scrubSecrets, GEMINI_API_BASE } from "../translate/llm.ts";
-import { HELP_MAX_OUTPUT_TOKENS, type HelpUsage } from "./helpPrices.ts";
+import { maxOutputFor, type HelpUsage } from "./helpPrices.ts";
 import { HELP_KB } from "./helpKb.generated.ts";
 
-export { costMicros, priceFor, HELP_MAX_OUTPUT_TOKENS } from "./helpPrices.ts";
+export { costMicros, priceFor, maxOutputFor } from "./helpPrices.ts";
 export type { HelpUsage } from "./helpPrices.ts";
 
 export type HelpMessage = { role: "user" | "assistant"; content: string };
@@ -47,7 +53,7 @@ export function makeClaudeHelpAdapter(clientFactory: HelpClaudeClientFactory = d
     // No thinking parameter: Haiku 4.5 rejects the adaptive shape.
     const res = await client.messages.create({
       model,
-      max_tokens: HELP_MAX_OUTPUT_TOKENS,
+      max_tokens: maxOutputFor("claude"),
       system: [{ type: "text", text: system, cache_control: { type: "ephemeral" } }],
       messages,
     });
@@ -110,7 +116,7 @@ export function buildHelpGeminiRequest(model: string, system: string, messages: 
     systemInstruction: { parts: [{ text: system }] },
     contents: messages.map((m) => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] })),
     generationConfig: {
-      maxOutputTokens: HELP_MAX_OUTPUT_TOKENS,
+      maxOutputTokens: maxOutputFor("gemini"),
       // Lowest thinking setting, same nesting llm.ts uses (inside generationConfig).
       thinkingConfig: model.startsWith("gemini-3") ? { thinkingLevel: "low" } : { thinkingBudget: 0 },
     },
@@ -128,20 +134,19 @@ export function makeGeminiHelpAdapter(fetchImpl: FetchLike = fetch): HelpAdapter
     );
     const cand = body.candidates?.[0];
     const text = (cand?.content?.parts || []).map((p: { text?: string }) => p.text).filter(Boolean).join("");
-    if (!text && (body.promptFeedback?.blockReason || cand?.finishReason === "SAFETY")) {
-      throw new Error("blocked by Gemini content filters");
-    }
     const um = body.usageMetadata ?? {};
-    return {
-      text,
-      usage: {
-        inputTokens: um.promptTokenCount || 0,
-        // Thinking tokens are billed as output.
-        outputTokens: (um.candidatesTokenCount || 0) + (um.thoughtsTokenCount || 0),
-        cacheWriteTokens: 0,
-        cacheReadTokens: 0,
-      },
+    const usage: HelpUsage = {
+      inputTokens: um.promptTokenCount || 0,
+      // Thinking tokens are billed as output.
+      outputTokens: (um.candidatesTokenCount || 0) + (um.thoughtsTokenCount || 0),
+      cacheWriteTokens: 0,
+      cacheReadTokens: 0,
     };
+    if (!text && (body.promptFeedback?.blockReason || cand?.finishReason === "SAFETY")) {
+      // The 200 was billed: carry the usage so the route settles the real cost.
+      throw Object.assign(new Error("blocked by Gemini content filters"), { usage });
+    }
+    return { text, usage };
   };
 }
 
@@ -157,16 +162,20 @@ export function makeChatCompletionsHelpAdapter(
   return async ({ model, system, messages, apiKey, timeoutMs }) => {
     const body: Record<string, unknown> = {
       model,
-      max_completion_tokens: HELP_MAX_OUTPUT_TOKENS,
+      max_completion_tokens: maxOutputFor(provider),
       messages: [{ role: "system", content: system }, ...messages],
     };
     if (provider === "openai") body.reasoning_effort = "low";
     const res = await postJson(fetchImpl, `${baseUrl}/chat/completions`, { authorization: `Bearer ${apiKey}` }, body, timeoutMs);
+    const prompt = res.usage?.prompt_tokens || 0;
+    const completion = res.usage?.completion_tokens || 0;
+    // Reasoning tokens reported outside completion_tokens still bill as output.
+    const total = typeof res.usage?.total_tokens === "number" ? res.usage.total_tokens : 0;
     return {
       text: res.choices?.[0]?.message?.content ?? "",
       usage: {
-        inputTokens: res.usage?.prompt_tokens || 0,
-        outputTokens: res.usage?.completion_tokens || 0,
+        inputTokens: prompt,
+        outputTokens: Math.max(completion, total - prompt),
         cacheWriteTokens: 0,
         cacheReadTokens: 0,
       },

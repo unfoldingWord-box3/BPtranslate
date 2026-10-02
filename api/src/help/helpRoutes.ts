@@ -9,21 +9,23 @@ import type { Env } from "../index";
 import { requireAuth, requireAdmin, currentUserId } from "../auth.ts";
 import { getAiProviderConfig, resolveDispatchAi } from "../aiProvider.ts";
 import { decryptApiKey } from "../aiKeyCrypto.ts";
+import { scrubSecrets } from "../translate/llm.ts";
 import { getProviderConfig } from "../translate/providerCatalog.ts";
 import {
   buildSystemPrompt,
   costMicros,
   describeProviderError,
   helpAdapterFor,
-  HELP_MAX_OUTPUT_TOKENS,
+  maxOutputFor,
   HELP_TIMEOUT_MS,
   parseAnswer,
   withRouteContext,
   type HelpAdapter,
   type HelpAdapterDeps,
   type HelpMessage,
+  type HelpUsage,
 } from "./helpChat.ts";
-import { capMicrosFromEnv, inputTokenBound, nextResetIso, remainingMicros, reserve, settle, utcDay, worstCaseMicros } from "./helpBudget.ts";
+import { capMicrosFromEnv, inputTokenBound, isMissingSchemaError, nextResetIso, remainingMicros, reserve, settle, utcDay, worstCaseMicros } from "./helpBudget.ts";
 
 type HelpEnv = { Bindings: Env; Variables: { userId?: number; username?: string } };
 
@@ -35,7 +37,9 @@ export type HelpRouteDeps = {
 };
 
 const MAX_MESSAGES = 10;
-const MAX_CONTENT = 2000;
+// Users type short questions; assistant turns are echoed answers, which run longer.
+const MAX_USER_CONTENT = 2000;
+const MAX_ASSISTANT_CONTENT = 8000;
 
 type Parsed = { lang: string; route: string; messages: HelpMessage[] };
 
@@ -52,8 +56,9 @@ function parseBody(body: unknown): Parsed | string {
     const m = b.messages[i] as Record<string, unknown> | null;
     const want = i % 2 === 0 ? "user" : "assistant";
     if (!m || typeof m !== "object" || m.role !== want) return `message ${i + 1} must have role "${want}" (roles alternate, starting with "user")`;
-    if (typeof m.content !== "string" || m.content.trim() === "" || m.content.length > MAX_CONTENT) {
-      return `message ${i + 1} content must be a non-empty string of at most ${MAX_CONTENT} characters`;
+    const max = want === "user" ? MAX_USER_CONTENT : MAX_ASSISTANT_CONTENT;
+    if (typeof m.content !== "string" || m.content.trim() === "" || m.content.length > max) {
+      return `message ${i + 1} content must be a non-empty string of at most ${max} characters`;
     }
     messages.push({ role: want, content: m.content });
   }
@@ -63,13 +68,27 @@ function parseBody(body: unknown): Parsed | string {
 
 async function helpEnabled(db: D1Database): Promise<boolean> {
   try {
-    const r = await db.prepare("SELECT help_chat_enabled FROM ai_provider_config WHERE id = 1").first<{ help_chat_enabled: number }>();
-    return r?.help_chat_enabled === 1;
+    const r = await db.prepare("SELECT enabled FROM help_chat_settings WHERE id = 1").first<{ enabled: number }>();
+    return r?.enabled === 1;
   } catch (e) {
     // Workspace not migrated yet: the assistant is simply off.
-    if (/no such (table|column)/i.test(e instanceof Error ? e.message : String(e))) return false;
+    if (isMissingSchemaError(e)) return false;
     throw e;
   }
+}
+
+/**
+ * Charge for a failed provider call. Usage attached to the error (a billed 200
+ * we could not use) settles the real cost. A 4xx other than 408 is a rejection
+ * that did not bill. Anything else (timeout, network, 5xx, unparseable 200) may
+ * have billed, so it is charged the full reservation.
+ */
+function failureCost(provider: string, err: unknown, worst: number): number {
+  const u = (err as { usage?: HelpUsage } | null)?.usage;
+  if (u && typeof u.inputTokens === "number" && typeof u.outputTokens === "number") return costMicros(provider, u);
+  const status = (err as { status?: unknown } | null)?.status;
+  if (typeof status === "number" && status >= 400 && status <= 499 && status !== 408) return 0;
+  return worst;
 }
 
 const usdOf = (micros: number) => micros / 1_000_000;
@@ -93,7 +112,12 @@ export function makeHelpRoutes(deps: HelpRouteDeps = {}) {
         model = null;
       }
     }
-    const left = await remainingMicros(c.env.DB, userId, utcDay(now()), cap);
+    let left = cap;
+    try {
+      left = await remainingMicros(c.env.DB, userId, utcDay(now()), cap);
+    } catch (e) {
+      if (!isMissingSchemaError(e)) throw e;
+    }
     return c.json({
       enabled,
       configured: ai.kind === "configured",
@@ -146,38 +170,74 @@ export function makeHelpRoutes(deps: HelpRouteDeps = {}) {
     const cap = capMicrosFromEnv(c.env.HELP_CHAT_DAILY_CAP_USD);
     const when = now();
     const day = utcDay(when);
-    const worst = worstCaseMicros(ai.provider, inputTokens, HELP_MAX_OUTPUT_TOKENS);
+    const worst = worstCaseMicros(ai.provider, inputTokens, maxOutputFor(ai.provider));
 
     if (!(await reserve(db, userId, day, worst, cap))) {
       const left = await remainingMicros(db, userId, day, cap);
       return c.json({ code: "help_budget_exhausted", resetsAt: nextResetIso(when), remainingUsd: usdOf(left) }, 429);
     }
 
-    let actual = 0;
-    let settled = false;
-    // Idempotent: runs once on whichever path is taken.
-    const settleOnce = async () => {
-      if (settled) return;
-      settled = true;
+    // Provider call + settle run inside one promise handed to waitUntil, so a
+    // client disconnect cannot cancel the settle. It never rejects.
+    const work = (async (): Promise<{ status: 200 | 502; body: Record<string, unknown> }> => {
+      let actual = worst;
+      let answered = false;
+      let outcome: { status: 200 | 502; body: Record<string, unknown> };
+      let failure: { kind: string; message: string } | null = null;
       try {
-        await settle(db, userId, day, worst, actual);
-      } catch (e) {
-        console.error(`help budget settle failed: ${e instanceof Error ? e.message : String(e)}`);
+        const result = await adapter({ model: catalog.lightModel!, system, messages, apiKey, timeoutMs: HELP_TIMEOUT_MS });
+        const u = result.usage;
+        if (u.inputTokens + u.outputTokens + u.cacheWriteTokens + u.cacheReadTokens === 0) {
+          console.warn(`help ask (${ai.provider}): provider reported no usage; charging the worst case`);
+          actual = worst;
+        } else {
+          actual = costMicros(ai.provider, u);
+        }
+        const { answer, articleIds: used } = parseAnswer(result.text, articleIds);
+        console.log(`help ask ok (${ai.provider}): in=${u.inputTokens} out=${u.outputTokens} cacheW=${u.cacheWriteTokens} cacheR=${u.cacheReadTokens} micros=${actual}`);
+        if (answer === "") {
+          failure = { kind: "empty_answer", message: "provider returned an empty answer" };
+          outcome = { status: 502, body: { code: "help_ai_failed", kind: "empty_answer" } };
+        } else {
+          answered = true;
+          outcome = { status: 200, body: { answer, articleIds: used } };
+        }
+      } catch (err) {
+        actual = failureCost(ai.provider, err, worst);
+        failure = describeProviderError(err, apiKey);
+        outcome = { status: 502, body: { code: "help_ai_failed", kind: failure.kind } };
       }
-    };
+      let settled = false;
+      let settleErr: unknown;
+      for (let attempt = 0; attempt < 3 && !settled; attempt++) {
+        try {
+          await settle(db, userId, day, worst, actual, answered);
+          settled = true;
+        } catch (e) {
+          settleErr = e;
+        }
+      }
+      if (!settled) {
+        const m = scrubSecrets(settleErr instanceof Error ? settleErr.message : String(settleErr), [apiKey]).slice(0, 300);
+        console.error(`help budget settle failed after 3 attempts (user ${userId}, ${day}, reserved ${worst}, actual ${actual}): ${m}`);
+      }
+      if (failure) console.error(`help ask failed (${ai.provider}, ${failure.kind}): ${failure.message}`);
+      if (outcome.status === 200) {
+        try {
+          outcome.body.remainingUsd = usdOf(await remainingMicros(db, userId, day, cap));
+        } catch {
+          outcome.body.remainingUsd = 0;
+        }
+      }
+      return outcome;
+    })();
     try {
-      const result = await adapter({ model: catalog.lightModel, system, messages, apiKey, timeoutMs: HELP_TIMEOUT_MS });
-      actual = costMicros(ai.provider, result.usage);
-      const { answer, articleIds: used } = parseAnswer(result.text, articleIds);
-      await settleOnce();
-      const left = await remainingMicros(db, userId, day, cap);
-      return c.json({ answer, articleIds: used, remainingUsd: usdOf(left), usage: result.usage });
-    } catch (err) {
-      await settleOnce();
-      const d = describeProviderError(err, apiKey);
-      console.error(`help ask failed (${ai.provider}, ${d.kind}): ${d.message}`);
-      return c.json({ code: "help_ai_failed", kind: d.kind }, 502);
+      c.executionCtx.waitUntil(work);
+    } catch {
+      // No ExecutionContext (unit tests): awaiting below is all there is.
     }
+    const out = await work;
+    return c.json(out.body, out.status);
   });
 
   app.put("/settings", requireAdmin, async (c) => {
@@ -189,14 +249,19 @@ export function makeHelpRoutes(deps: HelpRouteDeps = {}) {
     }
     const enabled = (body as { enabled?: unknown } | null)?.enabled;
     if (typeof enabled !== "boolean") return c.json({ code: "bad_request", detail: "enabled must be a boolean" }, 400);
-    // Does not touch `version`: that is the provider config's If-Match counter.
-    await c.env.DB
-      .prepare(
-        `INSERT INTO ai_provider_config (id, provider, help_chat_enabled) VALUES (1, 'default', ?1)
-         ON CONFLICT(id) DO UPDATE SET help_chat_enabled = ?1`,
-      )
-      .bind(enabled ? 1 : 0)
-      .run();
+    // Own table: nothing here touches ai_provider_config's version counter.
+    try {
+      await c.env.DB
+        .prepare(
+          `INSERT INTO help_chat_settings (id, enabled, updated_at, updated_by) VALUES (1, ?1, unixepoch(), ?2)
+           ON CONFLICT(id) DO UPDATE SET enabled = ?1, updated_at = unixepoch(), updated_by = ?2`,
+        )
+        .bind(enabled ? 1 : 0, currentUserId(c) ?? null)
+        .run();
+    } catch (e) {
+      if (isMissingSchemaError(e)) return c.json({ code: "help_ai_unavailable", reason: "not_migrated" }, 409);
+      throw e;
+    }
     return c.json({ enabled });
   });
 

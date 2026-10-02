@@ -14,8 +14,9 @@ import { attachAuth, requireCsrf } from "../auth.ts";
 import { encryptApiKey } from "../aiKeyCrypto.ts";
 import { blockViewerWrites } from "../viewerGuard.ts";
 import { makeHelpRoutes } from "./helpRoutes.ts";
+import { aiProvider } from "../aiProvider.ts";
 import { reserve, settle, remainingMicros, worstCaseMicros, inputTokenBound, capMicrosFromEnv, utcDay, nextResetIso } from "./helpBudget.ts";
-import { costMicros, buildSystemPrompt, parseAnswer, makeClaudeHelpAdapter, makeChatCompletionsHelpAdapter, makeGeminiHelpAdapter, articleIdsOf } from "./helpChat.ts";
+import { costMicros, maxOutputFor, withRouteContext, buildSystemPrompt, parseAnswer, makeClaudeHelpAdapter, makeChatCompletionsHelpAdapter, makeGeminiHelpAdapter, articleIdsOf } from "./helpChat.ts";
 import { HELP_KB } from "./helpKb.generated.ts";
 import { buildKb, serializeKb, loadGuide } from "../../../scripts/build-help.mjs";
 
@@ -57,11 +58,10 @@ async function setup({ provider = "claude", enabled = true, wrappingKey = WRAPPI
   const db = freshDb();
   if (provider) {
     const enc = await encryptApiKey(WRAPPING_KEY, key);
-    db.prepare("INSERT INTO ai_provider_config (id, provider, model, key_ciphertext, key_iv, help_chat_enabled) VALUES (1, ?, ?, ?, ?, ?)")
-      .run(provider, provider === "default" ? null : "claude-sonnet-5", provider === "default" ? null : enc.ciphertextB64, provider === "default" ? null : enc.ivB64, enabled ? 1 : 0);
-  } else if (enabled) {
-    db.prepare("INSERT INTO ai_provider_config (id, provider, help_chat_enabled) VALUES (1, 'default', 1)").run();
+    db.prepare("INSERT INTO ai_provider_config (id, provider, model, key_ciphertext, key_iv) VALUES (1, ?, ?, ?, ?)")
+      .run(provider, provider === "default" ? null : "claude-sonnet-5", provider === "default" ? null : enc.ciphertextB64, provider === "default" ? null : enc.ivB64);
   }
+  if (enabled) db.prepare("INSERT INTO help_chat_settings (id, enabled) VALUES (1, 1)").run();
   const calls = [];
   const stub = adapter ?? (async (req) => {
     calls.push(req);
@@ -72,22 +72,32 @@ async function setup({ provider = "claude", enabled = true, wrappingKey = WRAPPI
   app.use("/api/*", blockViewerWrites);
   app.use("*", requireCsrf);
   app.route("/api/help", makeHelpRoutes({ adapterFor: () => stub }));
+  app.route("/api/ai-provider", aiProvider);
   const env = {
     JWT_SIGNING_KEY: SIGNING, JWT_ISSUER: "bible-editor", DCS_BASE_URL: "https://git.door43.org",
     AI_KEY_WRAPPING_KEY: wrappingKey, DB: makeD1(db), ...(cap ? { HELP_CHAT_DAILY_CAP_USD: cap } : {}),
   };
-  const send = async (method, path, { role = "editor", sub = "1", body } = {}) => {
+  const waited = [];
+  const send = async (method, path, { role = "editor", sub = "1", body, headers: extra } = {}) => {
     const tok = await token(role, sub);
-    const headers = { cookie: `be_access=${tok}; be_csrf=c1`, "x-csrf-token": "c1" };
+    const headers = { cookie: `be_access=${tok}; be_csrf=c1`, "x-csrf-token": "c1", ...extra };
     const init = { method, headers };
     if (body !== undefined) { headers["content-type"] = "application/json"; init.body = JSON.stringify(body); }
-    return app.request(path, init, env);
+    return app.request(path, init, env, { waitUntil: (p) => waited.push(p), passThroughOnException() {} });
   };
-  return { db, send, calls, env };
+  return { db, send, calls, env, waited };
 }
 
 const ask = (over = {}) => ({ lang: "en", route: "notes", messages: [{ role: "user", content: "How do I save a note?" }], ...over });
 const NOW = new Date("2026-10-02T12:00:00Z");
+
+// The reservation the route makes for the default ask() on a provider.
+function worstFor(provider, over = {}) {
+  const body = ask(over);
+  const { system } = buildSystemPrompt(body.lang);
+  const msgs = withRouteContext(body.messages, body.route);
+  return worstCaseMicros(provider, inputTokenBound([system, ...msgs.map((m) => m.content)]), maxOutputFor(provider));
+}
 
 test("(a) concurrent reservations never exceed the cap", async () => {
   const d1 = makeD1(freshDb());
@@ -106,11 +116,11 @@ test("(b) settle releases the reservation and records the actual cost", async ()
   const db = freshDb();
   const d1 = makeD1(db);
   assert.equal(await reserve(d1, 1, "2026-10-02", 40_000, 100_000), true);
-  await settle(d1, 1, "2026-10-02", 40_000, 1_234);
+  await settle(d1, 1, "2026-10-02", 40_000, 1_234, true);
   const row = db.prepare("SELECT * FROM help_chat_usage").get();
   assert.deepEqual({ ...row }, { user_id: 1, day: "2026-10-02", spent_micros: 1_234, reserved_micros: 0, calls: 1 });
   await reserve(d1, 1, "2026-10-02", 10_000, 100_000);
-  await settle(d1, 1, "2026-10-02", 10_000, 0); // provider threw
+  await settle(d1, 1, "2026-10-02", 10_000, 0, false); // provider rejected
   assert.equal(await remainingMicros(d1, 1, "2026-10-02", 100_000), 100_000 - 1_234);
 });
 
@@ -140,14 +150,15 @@ test("route: budget exhausted -> 429 and no provider call", async () => {
   assert.equal(calls.length, 0);
 });
 
-test("route: provider failure releases the reservation", async () => {
+test("route: provider 5xx releases the reservation and charges the worst case", async () => {
   const { send, db } = await setup({ adapter: async () => { throw Object.assign(new Error("boom"), { status: 503 }); } });
   const res = await send("POST", "/api/help/ask", { body: ask() });
   assert.equal(res.status, 502);
   assert.deepEqual(await res.json(), { code: "help_ai_failed", kind: "provider_overloaded" });
   const row = db.prepare("SELECT * FROM help_chat_usage").get();
   assert.equal(row.reserved_micros, 0);
-  assert.equal(row.spent_micros, 0);
+  assert.equal(row.spent_micros, worstFor("claude"));
+  assert.equal(row.calls, 0);
 });
 
 test("(c) claude cost math prices cache write and read tokens", () => {
@@ -162,7 +173,7 @@ test("(c) claude cost math prices cache write and read tokens", () => {
 
 test("worst case uses cache-write rate for claude and covers max output", () => {
   assert.equal(worstCaseMicros("claude", 1000, 1024), Math.ceil((1000 * 125 + 1024 * 500) / 100));
-  assert.equal(worstCaseMicros("gemini", 1000, 1024), Math.ceil((1000 * 75 + 1024 * 375) / 100));
+  assert.equal(worstCaseMicros("gemini", 1000, 2048), Math.ceil((1000 * 75 + 2048 * 375) / 100));
   // One token per UTF-8 byte: Arabic letters are 2 bytes each, so the bound
   // never falls under a real token count.
   assert.equal(inputTokenBound(["abc"]), 3 + 20);
@@ -174,6 +185,8 @@ test("cap env parsing falls back to $2", () => {
   assert.equal(capMicrosFromEnv("abc"), 2_000_000);
   assert.equal(capMicrosFromEnv("-1"), 2_000_000);
   assert.equal(capMicrosFromEnv("0.5"), 500_000);
+  assert.equal(capMicrosFromEnv("0"), 0); // 0 = no AI spend
+  assert.equal(capMicrosFromEnv(""), 2_000_000);
 });
 
 test("(d) config states: not configured, unavailable, disabled", async () => {
@@ -230,6 +243,10 @@ test("(e) request limits -> 400", async () => {
     assert.equal(res.status, 400, JSON.stringify(body).slice(0, 80));
     assert.equal((await res.json()).code, "bad_request");
   }
+  const long = (n) => "x".repeat(n);
+  const turns = (aLen) => [m("user", "q"), m("assistant", long(aLen)), m("user", "more")];
+  assert.equal((await send("POST", "/api/help/ask", { body: ask({ messages: turns(8001) }) })).status, 400);
+  assert.equal((await send("POST", "/api/help/ask", { body: ask({ messages: turns(8000) }) })).status, 200);
   const ok = await send("POST", "/api/help/ask", { body: ask({ messages: Array.from({ length: 9 }, (_, i) => m(i % 2 ? "assistant" : "user")), route: "r".repeat(64) }) });
   assert.equal(ok.status, 200);
 });
@@ -268,9 +285,22 @@ test("settings: admin toggles, editor refused, row created when absent", async (
   assert.equal((await send("PUT", "/api/help/settings", { role: "admin", body: { enabled: "yes" } })).status, 400);
   const res = await send("PUT", "/api/help/settings", { role: "admin", body: { enabled: true } });
   assert.deepEqual(await res.json(), { enabled: true });
-  assert.equal(db.prepare("SELECT provider, help_chat_enabled FROM ai_provider_config").get().help_chat_enabled, 1);
+  assert.equal(db.prepare("SELECT enabled FROM help_chat_settings").get().enabled, 1);
   assert.equal((await send("PUT", "/api/help/settings", { role: "admin", body: { enabled: false } })).status, 200);
-  assert.equal(db.prepare("SELECT help_chat_enabled FROM ai_provider_config").get().help_chat_enabled, 0);
+  assert.equal(db.prepare("SELECT enabled FROM help_chat_settings").get().enabled, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM ai_provider_config").get().n, 0); // switch never touches the provider row
+});
+
+test("(1) PUT /settings on an empty DB does not break the AI key form's If-Match: 0 save", async () => {
+  const { send, db } = await setup({ provider: null, enabled: false });
+  assert.equal((await send("PUT", "/api/help/settings", { role: "admin", body: { enabled: true } })).status, 200);
+  const res = await send("PUT", "/api/ai-provider", {
+    role: "admin", headers: { "If-Match": "0" },
+    body: { provider: "claude", model: "claude-haiku-4-5", apiKey: API_KEY },
+  });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).version, 1);
+  assert.equal(db.prepare("SELECT version FROM ai_provider_config").get().version, 1);
 });
 
 test("status reports enabled/configured/model/cap", async () => {
@@ -317,20 +347,180 @@ test("gemini and chat-completions adapter request shapes", async () => {
   const msgs = [{ role: "user", content: "a" }, { role: "assistant", content: "b" }, { role: "user", content: "c" }];
   const g = await makeGeminiHelpAdapter(fakeFetch({ candidates: [{ content: { parts: [{ text: "ok" }] } }], usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 4, thoughtsTokenCount: 3 } }))({ model: "gemini-3.8-flash", system: "S", messages: msgs, apiKey: "k", timeoutMs: 1000 });
   assert.deepEqual(seen.body.contents.map((c) => c.role), ["user", "model", "user"]);
-  assert.deepEqual(seen.body.generationConfig, { maxOutputTokens: 1024, thinkingConfig: { thinkingLevel: "low" } });
+  assert.deepEqual(seen.body.generationConfig, { maxOutputTokens: 2048, thinkingConfig: { thinkingLevel: "low" } });
   assert.equal(seen.init.headers["x-goog-api-key"], "k");
   assert.equal(g.usage.outputTokens, 7);
 
   const o = await makeChatCompletionsHelpAdapter("openai", "https://api.openai.com/v1", fakeFetch({ choices: [{ message: { content: "ok" } }], usage: { prompt_tokens: 9, completion_tokens: 2 } }))({ model: "gpt-5.6-luna", system: "S", messages: msgs, apiKey: "k", timeoutMs: 1000 });
   assert.equal(seen.url, "https://api.openai.com/v1/chat/completions");
   assert.equal(seen.body.messages[0].role, "system");
-  assert.equal(seen.body.max_completion_tokens, 1024);
+  assert.equal(seen.body.max_completion_tokens, 2048);
   assert.equal(seen.body.reasoning_effort, "low");
   assert.deepEqual(o.usage, { inputTokens: 9, outputTokens: 2, cacheWriteTokens: 0, cacheReadTokens: 0 });
 
   await makeChatCompletionsHelpAdapter("xai", "https://api.x.ai/v1", fakeFetch({ choices: [{ message: { content: "ok" } }], usage: {} }))({ model: "grok-4.3", system: "S", messages: msgs, apiKey: "k", timeoutMs: 1000 });
   assert.equal("reasoning_effort" in seen.body, false);
   assert.equal(seen.url, "https://api.x.ai/v1/chat/completions");
+  assert.equal(seen.body.max_completion_tokens, 2048);
+});
+
+test("(6) openai/xai bill reasoning tokens reported only in total_tokens", async () => {
+  const fakeFetch = (reply) => async () => new Response(JSON.stringify(reply), { status: 200 });
+  const run = (provider, usage) => makeChatCompletionsHelpAdapter(provider, "https://x/v1", fakeFetch({ choices: [{ message: { content: "ok" } }], usage }))({ model: "m", system: "S", messages: [{ role: "user", content: "a" }], apiKey: "k", timeoutMs: 1000 });
+  assert.equal((await run("openai", { prompt_tokens: 100, completion_tokens: 20, total_tokens: 170 })).usage.outputTokens, 70);
+  assert.equal((await run("xai", { prompt_tokens: 100, completion_tokens: 20, total_tokens: 170 })).usage.outputTokens, 70);
+  assert.equal((await run("xai", { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 })).usage.outputTokens, 50);
+  assert.equal((await run("openai", { prompt_tokens: 100, completion_tokens: 20 })).usage.outputTokens, 20); // no total
+});
+
+test("(4) a Gemini safety block after a 200 carries its usage on the error", async () => {
+  const reply = { candidates: [{ finishReason: "SAFETY" }], usageMetadata: { promptTokenCount: 50, candidatesTokenCount: 0, thoughtsTokenCount: 9 } };
+  await assert.rejects(
+    makeGeminiHelpAdapter(async () => new Response(JSON.stringify(reply), { status: 200 }))({ model: "gemini-3.8-flash", system: "S", messages: [{ role: "user", content: "a" }], apiKey: "k", timeoutMs: 1000 }),
+    (e) => e.usage.inputTokens === 50 && e.usage.outputTokens === 9,
+  );
+});
+
+const spentRow = (db) => db.prepare("SELECT * FROM help_chat_usage").get();
+const okReply = { text: "Fine.\nSOURCES: notes", usage: { inputTokens: 1000, outputTokens: 100, cacheWriteTokens: 0, cacheReadTokens: 0 } };
+
+test("(4) failures: unbilled 4xx charges nothing; uncertain failures charge the worst case", async () => {
+  const cases = [
+    [{ status: 400 }, 0], [{ status: 401 }, 0], [{ status: 429 }, 0], [{ status: 499 }, 0],
+    [{ status: 408 }, "worst"], [{ status: 500 }, "worst"], [{ status: 529 }, "worst"], [{}, "worst"],
+    [{ name: "TimeoutError" }, "worst"],
+  ];
+  for (const [props, want] of cases) {
+    const { send, db } = await setup({ adapter: async () => { throw Object.assign(new Error("x"), props); } });
+    const res = await send("POST", "/api/help/ask", { body: ask() });
+    assert.equal(res.status, 502);
+    const row = spentRow(db);
+    assert.equal(row.spent_micros, want === "worst" ? worstFor("claude") : 0, JSON.stringify(props));
+    assert.equal(row.reserved_micros, 0);
+    assert.equal(row.calls, 0);
+  }
+});
+
+test("(4) a failure that carries usage settles the actual cost", async () => {
+  const usage = { inputTokens: 500, outputTokens: 10, cacheWriteTokens: 0, cacheReadTokens: 0 };
+  const { send, db } = await setup({ adapter: async () => { throw Object.assign(new Error("blocked"), { usage }); } });
+  assert.equal((await send("POST", "/api/help/ask", { body: ask() })).status, 502);
+  assert.equal(spentRow(db).spent_micros, 500 + 50);
+});
+
+test("(5) a reply reporting zero usage is charged the worst case", async () => {
+  const warns = [];
+  const orig = console.warn;
+  console.warn = (...a) => warns.push(a.join(" "));
+  try {
+    const { send, db } = await setup({ adapter: async () => ({ ...okReply, usage: { inputTokens: 0, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0 } }) });
+    const res = await send("POST", "/api/help/ask", { body: ask() });
+    assert.equal(res.status, 200);
+    assert.equal(spentRow(db).spent_micros, worstFor("claude"));
+    assert.equal(warns.length, 1);
+  } finally {
+    console.warn = orig;
+  }
+});
+
+test("(7) the reservation uses each provider's own output budget", async () => {
+  assert.deepEqual(["claude", "gemini", "openai", "xai"].map(maxOutputFor), [1024, 2048, 2048, 2048]);
+  for (const provider of ["claude", "gemini", "openai", "xai"]) {
+    let during;
+    let h;
+    h = await setup({ provider, adapter: async () => { during = spentRow(h.db).reserved_micros; return okReply; } });
+    const res = await h.send("POST", "/api/help/ask", { body: ask() });
+    assert.equal(res.status, 200, provider);
+    assert.equal(during, worstFor(provider), provider);
+  }
+});
+
+test("(8) an empty answer settles the actual cost, then 502 empty_answer, and is not counted", async () => {
+  const { send, db } = await setup({ adapter: async () => ({ ...okReply, text: "SOURCES: none" }) });
+  const res = await send("POST", "/api/help/ask", { body: ask() });
+  assert.equal(res.status, 502);
+  assert.deepEqual(await res.json(), { code: "help_ai_failed", kind: "empty_answer" });
+  const row = spentRow(db);
+  assert.deepEqual({ spent: row.spent_micros, reserved: row.reserved_micros, calls: row.calls }, { spent: 1500, reserved: 0, calls: 0 });
+});
+
+test("(10) cap 0 means no AI spend: every ask is 429", async () => {
+  const { send, calls } = await setup({ cap: "0" });
+  const res = await send("POST", "/api/help/ask", { body: ask() });
+  assert.equal(res.status, 429);
+  assert.equal(calls.length, 0);
+  assert.equal((await (await send("GET", "/api/help/status")).json()).capUsd, 0);
+});
+
+test("(12) /ask never returns usage; the log line carries no user text", async () => {
+  const logs = [];
+  const orig = console.log;
+  console.log = (...a) => logs.push(a.join(" "));
+  try {
+    const { send } = await setup();
+    const j = await (await send("POST", "/api/help/ask", { body: ask({ messages: [{ role: "user", content: "secret question text" }] }) })).json();
+    assert.equal("usage" in j, false);
+    assert.deepEqual(Object.keys(j).sort(), ["answer", "articleIds", "remainingUsd"]);
+    assert.ok(logs.some((l) => l.includes("in=1000") && l.includes("out=100")));
+    assert.ok(!logs.join("\n").includes("secret question text"));
+  } finally {
+    console.log = orig;
+  }
+});
+
+// Wraps the D1 so the first `failures` settle UPDATEs throw.
+function failSettle(env, failures) {
+  const real = env.DB;
+  const state = { failed: 0 };
+  env.DB = { prepare: (sql) => {
+    if (/SET reserved_micros = MAX/.test(sql) && state.failed < failures) {
+      state.failed++;
+      throw new Error("D1 unavailable");
+    }
+    return real.prepare(sql);
+  } };
+  return state;
+}
+
+test("(3) the settle write is retried up to 3 times; the provider call is registered with waitUntil", async () => {
+  const { send, db, env, waited } = await setup();
+  const st = failSettle(env, 2);
+  const res = await send("POST", "/api/help/ask", { body: ask() });
+  assert.equal(res.status, 200);
+  assert.equal(st.failed, 2);
+  const row = spentRow(db);
+  assert.deepEqual({ spent: row.spent_micros, reserved: row.reserved_micros, calls: row.calls }, { spent: 1500, reserved: 0, calls: 1 });
+  assert.equal(waited.length, 1);
+});
+
+test("(3) if every settle attempt fails it is logged scrubbed and the reservation stays", async () => {
+  const errs = [];
+  const orig = console.error;
+  console.error = (...a) => errs.push(a.join(" "));
+  try {
+    const { send, db, env } = await setup();
+    const st = failSettle(env, 99);
+    const res = await send("POST", "/api/help/ask", { body: ask() });
+    assert.equal(res.status, 200);
+    assert.equal(st.failed, 3);
+    assert.ok(errs.some((e) => e.includes("settle failed after 3 attempts")));
+    assert.ok(spentRow(db).reserved_micros > 0); // never released below what was reserved
+  } finally {
+    console.error = orig;
+  }
+});
+
+test("(2) unmigrated workspace: /status reports off at the full cap; /settings returns 409", async () => {
+  const { send, db } = await setup({ enabled: false });
+  db.exec("DROP TABLE help_chat_settings; DROP TABLE help_chat_usage;");
+  const st = await send("GET", "/api/help/status");
+  assert.equal(st.status, 200);
+  const j = await st.json();
+  assert.equal(j.enabled, false);
+  assert.equal(j.remainingUsd, j.capUsd);
+  const put = await send("PUT", "/api/help/settings", { role: "admin", body: { enabled: true } });
+  assert.equal(put.status, 409);
+  assert.deepEqual(await put.json(), { code: "help_ai_unavailable", reason: "not_migrated" });
 });
 
 test("(h) committed HELP_KB matches the guide (buildKb)", () => {
