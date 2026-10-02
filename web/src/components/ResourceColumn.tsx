@@ -219,6 +219,11 @@ interface Props {
   // (panelMode) and unaffected.
   visibleTabs?: ResourceTab[];
   initialTab?: ResourceTab;
+  // Switch to `tab` after mount, once per new `nonce` (#535): a ?twl= link
+  // reached while the column is already open must show Words. The value
+  // present at mount is ignored (initialTab covers mount), and so is a tab
+  // this layout doesn't show.
+  requestTab?: { tab: ResourceTab; nonce: number } | null;
 }
 
 type Pinned = Record<PinKey, boolean>;
@@ -327,6 +332,7 @@ export function ResourceColumn({
   checkoff,
   visibleTabs,
   initialTab,
+  requestTab,
 }: Props) {
   const { t } = useTranslation();
   // Translation mode: only gateway-language projects (translationSource != null)
@@ -412,6 +418,20 @@ export function ResourceColumn({
     if (panelMode !== "resources") onSetPanelMode?.("resources");
     setResourceTab(tab);
   };
+  const seenTabRequest = useRef(requestTab?.nonce);
+  // Bumped when a requested tab switch lands, so the scroll effect below re-runs
+  // in the commit where the new tab's rows exist. Shell sets the active row in
+  // the same commit as the request, while the old tab is still mounted, so the
+  // scroll effect's own run finds no row to scroll to.
+  const [tabRequestScroll, setTabRequestScroll] = useState(0);
+  useEffect(() => {
+    if (!requestTab || requestTab.nonce === seenTabRequest.current) return;
+    seenTabRequest.current = requestTab.nonce;
+    if (tabs.includes(requestTab.tab)) {
+      setResourceTab(requestTab.tab);
+      setTabRequestScroll((n) => n + 1);
+    }
+  }, [requestTab?.nonce]);
 
   // Lazily mount the Search iframe on first visit, then keep it alive (the body
   // toggles its visibility rather than unmounting). Avoids loading the external
@@ -632,6 +652,7 @@ export function ResourceColumn({
   //     pinned and the user wants to jump into that verse's group)
   //   - pinned.* (pin toggles, so the user lands on the same conceptual
   //     spot they were viewing before the layout reshuffled)
+  //   - tabRequestScroll (a requestTab switch landed; see above)
   // Priority: active note > active word > active-verse group in any pinned
   // section. Without any of those, no scroll.
   const prevNonceRef = useRef(scrollNonce);
@@ -711,6 +732,7 @@ export function ResourceColumn({
     pinned.notes,
     pinned.words,
     pinned.questions,
+    tabRequestScroll,
   ]);
 
   return (
