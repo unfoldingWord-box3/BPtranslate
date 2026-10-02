@@ -1,37 +1,100 @@
-import { expect, test, request as apiRequest, type Locator } from "@playwright/test";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  expect,
+  test,
+  request as apiRequest,
+  type Browser,
+  type BrowserContext,
+  type Locator,
+  type Page,
+} from "@playwright/test";
 import { fetchChapter, mintToken, newUserContext } from "./helpers";
 import { RTL_FIXTURE } from "./global-setup";
+import { expectRtlPaint } from "./rtl-paint";
 
 // Honor BE_BASE_URL so the suite runs on a relocated port (mirrors s1/s8).
 const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
 
-// RTL direction guard (issue #293).
+// RTL direction guard (issues #293, #486).
 //
 // An RTL regression — Arabic scripture rendered LTR in the flows notes view's
-// lanes — reached the deployed dev worker and was caught by a human the night
-// before a partner demo (fixed in PR #292, which wrapped the lane text in
-// `dir="auto"`). Nothing automated guarded text direction, and the flows
-// screens share no rendering code with the classic editor, so a fix in one
-// place says nothing about the others. typecheck/build/lib tests can't see
-// layout — only a real browser resolves `dir="auto"` and computed `direction`.
+// lanes, the period on the wrong side — reached the deployed dev worker and was
+// caught by a human the night before a partner demo (fixed in PR #292, which
+// wrapped the lane text in `dir="auto"`). The flows screens share no rendering
+// code with the classic editor, so a fix in one place says nothing about the
+// others; typecheck/build/lib tests can't see layout. Only a real browser
+// resolves `dir` and lays out bidi text.
 //
-// This spec walks the four RTL-sensitive scripture surfaces and asserts the
-// COMPUTED text direction, using each surface's real RTL path:
+// Two kinds of assertion:
 //
-//   1. #/notes    — flows lane text, `dir="auto"` (the exact PR #292 surface)
-//   2. #/questions— flows lane text, `dir="auto"` (the exact PR #292 surface)
-//   3. classic    — ScriptureColumn, `dir` from versionIsRtl()
-//   4. book view  — BookView, `dir` from versionIsRtl()
+//   - COMPUTED direction (`getComputedStyle(el).direction`) — the original #293
+//     guard. Necessary but not sufficient: the value can be right while the
+//     line still paints wrong (a child overriding `dir`, a bidi-isolation break
+//     around punctuation or an embedded Latin token).
+//   - PAINT (#486) — rtl-paint.ts reads where the browser actually laid out each
+//     glyph (Range.getClientRects) and asserts the sentence-final period is the
+//     LEFTMOST glyph on its line and the embedded Latin token "AVD" sits in RTL
+//     word order with its own letters left-to-right. Geometry, not pixel
+//     baselines: a `toHaveScreenshot()` baseline generated on one Chromium build
+//     and font set fails on CI's ubuntu runner, while glyph boxes do not depend
+//     on either. Textareas are the one exception — a Range cannot measure a
+//     form control's value — so the textarea surfaces assert computed direction
+//     only.
 //
-// The flows lanes are the tight guard: reverting PR #292 removes the
-// `dir="auto"` wrapper, so the seeded Arabic lane resolves LTR and the `rtl`
-// assertions on surfaces 1–2 fail. Surfaces 3–4 render RTL by SCRIPT — the
-// Hebrew UHB original is unconditionally RTL via versionIsRtl() regardless of
-// the (LTR) project direction — so they guard the classic/book direction path
-// without needing an RTL workspace. The synthetic Arabic verse (global-setup's
-// RTL_FIXTURE, ULT ZEC 6:1) drives the `dir="auto"` flows lanes; the classic
-// and book surfaces assert on the Hebrew original, which the fixture leaves
-// untouched. An English lane on each mixed flows screen anchors the `ltr` half.
+// Fixture (global-setup.ts RTL_FIXTURE): ULT ZEC 6:1 is an Arabic sentence (in
+// both plain_text and content_json) and tn row f66i on ZEC 6:11 is an Arabic
+// note; UST stays English. The seeded workspace is the LTR `en-unfoldingword`
+// project, so surfaces whose direction comes from the PROJECT language
+// (versionIsRtl / projectConfig.direction) are opened with the client's view of
+// /api/project-config switched to `direction: "rtl"` — an Arabic target project
+// — without touching the shared DB row other specs rely on. Surfaces using
+// `dir="auto"` follow the content and need no switch. UI chrome surfaces (books
+// screen, admin desk) are opened with the Arabic UI language (be:uiLang = "ar").
+//
+// Surfaces NOT covered here, by name, with the reason (#486 asks for this list
+// instead of silent skips):
+//
+//   - The old flows screens deleted in #534 (HomeScreen, ScriptureScreen +
+//     ScriptureLane, AlignScreen, ArticlesScreen, WordsScreen, SetupScreen,
+//     TeamScreen) — gone; their hashes redirect (legacy-flow-redirects.spec.ts).
+//   - WordsLexiconStrip, UhbStrip, QuoteBuilderPopper, ReviewSourceStrip,
+//     OriginalLanguagePanel — show only the Hebrew original + English glosses,
+//     never target-language text; the Hebrew `versionIsRtl("UHB")` path is
+//     already guarded by the classic + book-view cases below.
+//   - flows/UltAlignmentStrip — shows the published English en_ult source, not
+//     project content (direction of its lane is `dir="auto"`).
+//   - TranslateWordsScreen, ArticleWorkspace, MarkdownView,
+//     TerminologySection — need Arabic tW/tA article drafts or target terms; the
+//     fixture seeds none yet (TODO, #486). The VerseScreen tA article panel's
+//     direction is covered by verse-view-article-inplace.spec.ts (#523).
+//   - VerseScreen audit mode — its cells show only ALIGNED fragments of each
+//     lane, and the fixture verse is deliberately unaligned, so they are empty.
+//   - NoteHistoryDialog (its note field hardcodes dir="ltr"; needs seeded edit
+//     history), the ReviewQueue "Q:" line, the classic Words
+//     tab (WordsTable), QuestionCard (classic translation mode), and the
+//     NoteCard note in AUTHORING mode (its dir is unset by design for the
+//     English root project) — not yet covered (TODO, #486).
+//   - TemplateWorkspace / TemplateHistoryDialog — note templates are English
+//     authoring scaffolds, never target-language content.
+//   - TopBar — UI chrome only; it sets no `dir` of its own and inherits <html dir>,
+//     which the books/admin cases below already exercise.
+//
+// Known open bugs pinned as `test.fail` (an unexpected pass means the bug was
+// fixed — drop the `.fail`):
+//   - #451 — VerseScreen target lanes render LTR while projectConfig is null.
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+const AR_UI = JSON.parse(
+  readFileSync(resolve(repoRoot, "web/src/i18n/locales/ar.json"), "utf8"),
+) as Record<string, Record<string, unknown>>;
+/** Arabic UI string at a dotted key, e.g. "flowBooks.list.sub". */
+function arUi(key: string): string {
+  const v = key.split(".").reduce<unknown>((o, k) => (o as Record<string, unknown>)?.[k], AR_UI);
+  if (typeof v !== "string") throw new Error(`ar.json has no string at ${key}`);
+  return v;
+}
 
 /** getComputedStyle(...).direction of the element a locator resolves to. */
 function computedDirection(locator: Locator): Promise<string> {
@@ -46,7 +109,7 @@ function computedDirection(locator: Locator): Promise<string> {
  * `direction` inherits down and would read LTR on an ancestor above the `dir`.
  */
 async function cellDirection(
-  page: import("@playwright/test").Page,
+  page: Page,
   chapter: number,
   verse: number,
   version: string,
@@ -58,6 +121,158 @@ async function cellDirection(
     return getComputedStyle(dirEl as HTMLElement).direction;
   });
 }
+
+/**
+ * The element whose whole text is the Arabic sentence `text`, inside `scope`.
+ * getByText(exact) resolves to the innermost element whose combined text
+ * matches, so a lane built from one <button> per word still resolves to the
+ * lane box, not one word.
+ */
+function sentence(scope: Page | Locator, text: string): Locator {
+  return scope.getByText(text, { exact: true }).first();
+}
+
+/** Computed `rtl` AND painted RTL (period left, Latin token in RTL order). */
+async function expectRtlSentence(loc: Locator, label: string, within?: string): Promise<void> {
+  await expect(loc, `${label}: Arabic sentence not shown`).toBeVisible({ timeout: 15_000 });
+  expect(await computedDirection(loc), `${label}: computed direction`).toBe("rtl");
+  await expectRtlPaint(loc, label, { latin: RTL_FIXTURE.latin, within });
+}
+
+/**
+ * Innermost element whose text CONTAINS `text` — for surfaces that render the
+ * Arabic sentence next to other text (an English hint) in the same element.
+ * Pair with `expectRtlSentence(..., text)` so only the sentence is measured.
+ */
+function containing(scope: Page | Locator, text: string): Locator {
+  return scope.getByText(text).first();
+}
+
+/**
+ * The words of the Arabic ULT sentence, in logical order, sentence period
+ * dropped — the chips/buttons an aligner renders one per word.
+ */
+const ULT_WORDS = RTL_FIXTURE.arabicUlt.replace(/\.$/, "").split(" ");
+
+/**
+ * Word-per-element surfaces (aligner chips): consecutive words that share a row
+ * must step RIGHT-to-left. Rows are compared by vertical overlap so a wrapped
+ * strip still checks cleanly.
+ */
+async function expectRtlWordOrder(scope: Locator, label: string): Promise<void> {
+  const boxes: { word: string; x: number; y: number; h: number }[] = [];
+  for (const w of ULT_WORDS) {
+    const el = scope.getByText(w, { exact: true }).first();
+    await expect(el, `${label}: word "${w}" not shown`).toBeVisible({ timeout: 15_000 });
+    const b = await el.boundingBox();
+    expect(b, `${label}: word "${w}" has no box`).not.toBeNull();
+    boxes.push({ word: w, x: b!.x, y: b!.y, h: b!.height });
+  }
+  let compared = 0;
+  for (let i = 0; i + 1 < boxes.length; i++) {
+    const a = boxes[i];
+    const b = boxes[i + 1];
+    if (Math.abs(a.y - b.y) > Math.min(a.h, b.h) / 2) continue; // wrapped to next row
+    compared++;
+    expect(
+      a.x,
+      `${label}: "${a.word}" should sit RIGHT of the next word "${b.word}" — ${JSON.stringify(boxes)}`,
+    ).toBeGreaterThan(b.x);
+  }
+  expect(compared, `${label}: no two words shared a row — ${JSON.stringify(boxes)}`).toBeGreaterThan(0);
+}
+
+/**
+ * Serve this page's GET /api/project-config with the real response patched —
+ * by default to an Arabic (RTL) target project. The shared DB row stays
+ * `en-unfoldingword`, so no other spec sees the switch.
+ */
+async function patchProjectConfig(
+  page: Page,
+  patch: Record<string, unknown> = { direction: "rtl" },
+): Promise<void> {
+  await page.route("**/api/project-config", async (route) => {
+    if (route.request().method() !== "GET") return route.continue();
+    const res = await route.fetch();
+    // A failed config read would otherwise surface as a confusing JSON error
+    // (or a silently unpatched LTR project); name the status instead.
+    if (!res.ok()) {
+      throw new Error(`GET /api/project-config returned ${res.status()}: ${await res.text()}`);
+    }
+    const json = await res.json();
+    json.config = { ...json.config, ...patch };
+    return route.fulfill({ response: res, json });
+  });
+}
+
+/**
+ * Every browser context a test opens, closed in afterEach. A test that throws
+ * (all the `test.fail` cases, on every run) never reaches its own
+ * `context.close()`, and Playwright does not close contexts created from the
+ * shared `browser` fixture — a leaked ZEC 6 page would stay connected to the
+ * chapter room through the s1–s8 save-race specs that run next.
+ */
+const openContexts: BrowserContext[] = [];
+function track(context: BrowserContext): BrowserContext {
+  openContexts.push(context);
+  return context;
+}
+test.afterEach(async () => {
+  for (const c of openContexts.splice(0)) await c.close().catch(() => {});
+});
+
+// Several of these routes are first loaded by this spec on a cold runner
+// (vite transforms on first hit), so the 30 s default is too tight for a 15 s
+// wait plus navigation — same reason as phone-header-title.spec.ts.
+test.describe.configure({ timeout: 120_000 });
+
+/** Door43 is never needed by these cases; refuse it so nothing waits on the network. */
+async function blockDoor43(page: Page): Promise<void> {
+  await page.route("https://git.door43.org/**", (route) =>
+    route.fulfill({ status: 404, body: "not mocked" }),
+  );
+}
+
+interface OpenOpts {
+  /** Patch the client's project config (default: none). */
+  project?: Record<string, unknown>;
+  /** UI language (be:uiLang). */
+  uiLang?: string;
+  /** localStorage entries, stored as JSON. */
+  storage?: Record<string, unknown>;
+  viewport?: { width: number; height: number };
+}
+
+async function open(
+  browser: Browser,
+  user: string,
+  hash: string,
+  opts: OpenOpts = {},
+): Promise<{ context: BrowserContext; page: Page }> {
+  const { context } = await newUserContext(browser, user);
+  track(context);
+  await context.addInitScript(
+    ({ uiLang, storage }) => {
+      try {
+        if (uiLang) localStorage.setItem("be:uiLang", uiLang);
+        for (const [k, v] of Object.entries(storage)) localStorage.setItem(k, JSON.stringify(v));
+      } catch {
+        /* private mode etc. */
+      }
+    },
+    { uiLang: opts.uiLang ?? null, storage: opts.storage ?? {} },
+  );
+  const page = await context.newPage();
+  if (opts.viewport) await page.setViewportSize(opts.viewport);
+  await blockDoor43(page);
+  if (opts.project) await patchProjectConfig(page, opts.project);
+  await page.goto(hash);
+  return { context, page };
+}
+
+const RTL_PROJECT = { direction: "rtl" } as const;
+const V = `${RTL_FIXTURE.book}/${RTL_FIXTURE.chapter}/${RTL_FIXTURE.verse}`;
+const NOTE_V = `${RTL_FIXTURE.book}/${RTL_FIXTURE.chapter}/${RTL_FIXTURE.noteVerse}`;
 
 // A distinctive English substring from the UST of the fixture verse, captured
 // from the seeded server so the `ltr` locator never hard-codes sample text that
@@ -82,6 +297,7 @@ test.describe("RTL text direction on scripture surfaces (#293)", () => {
   test("flows notes: Arabic lane is rtl, English lane is ltr", async ({ browser }) => {
     const english = await ustSnippet();
     const { context } = await newUserContext(browser, "rtl-notes");
+    track(context);
     const page = await context.newPage();
     await page.goto(
       `/#/notes/${RTL_FIXTURE.book}/${RTL_FIXTURE.chapter}/${RTL_FIXTURE.verse}`,
@@ -92,6 +308,7 @@ test.describe("RTL text direction on scripture surfaces (#293)", () => {
       .filter({ hasText: RTL_FIXTURE.arabicUlt });
     await expect(arabicLane).toBeVisible({ timeout: 15_000 });
     expect(await computedDirection(arabicLane)).toBe("rtl");
+    await expectRtlPaint(arabicLane, "flows notes lane", { latin: RTL_FIXTURE.latin });
 
     const englishLane = page.locator('span[dir="auto"]').filter({ hasText: english });
     await expect(englishLane.first()).toBeVisible();
@@ -104,6 +321,7 @@ test.describe("RTL text direction on scripture surfaces (#293)", () => {
   test("flows questions: Arabic lane is rtl, English lane is ltr", async ({ browser }) => {
     const english = await ustSnippet();
     const { context } = await newUserContext(browser, "rtl-questions");
+    track(context);
     const page = await context.newPage();
     await page.goto(`/#/questions/${RTL_FIXTURE.book}/${RTL_FIXTURE.chapter}`);
 
@@ -112,6 +330,7 @@ test.describe("RTL text direction on scripture surfaces (#293)", () => {
       .filter({ hasText: RTL_FIXTURE.arabicUlt });
     await expect(arabicLane).toBeVisible({ timeout: 15_000 });
     expect(await computedDirection(arabicLane)).toBe("rtl");
+    await expectRtlPaint(arabicLane, "flows questions lane", { latin: RTL_FIXTURE.latin });
 
     const englishLane = page.locator('span[dir="auto"]').filter({ hasText: english });
     await expect(englishLane.first()).toBeVisible();
@@ -123,6 +342,7 @@ test.describe("RTL text direction on scripture surfaces (#293)", () => {
   // ── Surface 3: classic scripture pane (#/BOOK/CHAPTER) ─────────────────────
   test("classic scripture pane: Hebrew source is rtl, English is ltr", async ({ browser }) => {
     const { context } = await newUserContext(browser, "rtl-classic");
+    track(context);
     const page = await context.newPage();
     await page.goto(`/#/${RTL_FIXTURE.book}/1`);
 
@@ -143,6 +363,7 @@ test.describe("RTL text direction on scripture surfaces (#293)", () => {
   // separate rendering code from ScriptureColumn, so it needs its own guard.
   test("book view: Hebrew source is rtl, English is ltr", async ({ browser }) => {
     const { context } = await newUserContext(browser, "rtl-book");
+    track(context);
     await context.addInitScript(() => {
       try {
         localStorage.setItem("be:scriptureMode", JSON.stringify("book"));
@@ -159,6 +380,298 @@ test.describe("RTL text direction on scripture surfaces (#293)", () => {
     expect(await cellDirection(page, 1, 1, "UHB")).toBe("rtl");
     expect(await cellDirection(page, 1, 1, "UST")).toBe("ltr");
 
+    await context.close();
+  });
+});
+
+// ── #486: every remaining surface that shows Arabic, asserting paint ─────────
+test.describe("RTL paint on Arabic surfaces (#486)", () => {
+  // ── Scripture content: Arabic ULT ZEC 6:1 ─────────────────────────────────
+
+  test("flows verse screen (Read mode): Arabic literal lane paints rtl", async ({ browser }) => {
+    const { context, page } = await open(browser, "rtl-verse", `/#/verse/${V}`, {
+      project: RTL_PROJECT,
+      viewport: { width: 1280, height: 900 },
+    });
+    await expectRtlSentence(sentence(page.locator("main"), RTL_FIXTURE.arabicUlt), "VerseScreen literal lane");
+    await context.close();
+  });
+
+  test("translate scripture screen: verse list snippet paints rtl, ULT editor is rtl", async ({
+    browser,
+  }) => {
+    const { context, page } = await open(browser, "rtl-tscripture", `/#/scripture/${V}`, {
+      project: RTL_PROJECT,
+      viewport: { width: 1280, height: 900 },
+    });
+    // The verse-list snippet (plain_text, dir="auto").
+    await expectRtlSentence(sentence(page, RTL_FIXTURE.arabicUlt), "TranslateScripture verse snippet");
+    // The ULT lane editor is a textarea (content_json): a Range cannot measure
+    // a form control's value, so this one is computed direction only.
+    // Skip MUI multiline's aria-hidden autosize mirror, which never gets
+    // inputProps.dir (same exclusion as helpers.ts noteTextarea).
+    const editor = page
+      .locator('section[aria-label="ULT lane"] textarea:not([aria-hidden="true"])')
+      .first();
+    await expect(editor).toHaveValue(RTL_FIXTURE.arabicUlt, { timeout: 15_000 });
+    expect(await computedDirection(editor)).toBe("rtl");
+    await context.close();
+  });
+
+  test("translate alignment screen: verse list snippet paints rtl", async ({ browser }) => {
+    // dir="auto" follows the content — no project switch needed.
+    const { context, page } = await open(browser, "rtl-talign", `/#/alignment/${V}`, {
+      viewport: { width: 1280, height: 900 },
+    });
+    await expectRtlSentence(sentence(page, RTL_FIXTURE.arabicUlt), "TranslateAlign verse snippet");
+    await context.close();
+  });
+
+  test("tap aligner (phone): Arabic target words run right-to-left", async ({ browser }) => {
+    const { context, page } = await open(browser, "rtl-tapalign", `/#/alignment/${V}`, {
+      project: RTL_PROJECT,
+      viewport: { width: 390, height: 844 },
+    });
+    const pool = page.locator('[role="list"][aria-label]').filter({ hasText: ULT_WORDS[0] }).last();
+    await expect(pool).toBeVisible({ timeout: 15_000 });
+    expect(await computedDirection(pool)).toBe("rtl");
+    await expectRtlWordOrder(pool, "AlignTapView target pool");
+    await context.close();
+  });
+
+  // #532 regression: AlignmentPanel's word-bank strip used to set no `dir` and
+  // its group target stacks hardcoded dir="ltr", so under an RTL target project
+  // with an LTR UI the Arabic words laid out left-to-right (read backwards).
+  test("drag aligner (desktop): Arabic word bank runs right-to-left", async ({ browser }) => {
+    const { context, page } = await open(browser, "rtl-dragalign", `/#/alignment/${V}`, {
+      project: RTL_PROJECT,
+      viewport: { width: 1280, height: 900 },
+    });
+    // Scope to the word-bank strip itself: the innermost element holding both
+    // the "ULT words" label and the first Arabic word chip (the groups area
+    // below has neither label nor unaligned chips), so the case fails for
+    // #532's word order and not for a chip matched elsewhere on the page.
+    const bank = page
+      .locator("div")
+      .filter({ has: page.getByText("ULT words", { exact: true }) })
+      .filter({ has: page.getByText(ULT_WORDS[0], { exact: true }) })
+      .last();
+    await expect(bank, "AlignmentPanel word bank not shown").toBeVisible({ timeout: 15_000 });
+    await expectRtlWordOrder(bank, "AlignmentPanel word bank");
+    await context.close();
+  });
+
+  test("classic scripture pane: active Arabic ULT verse paints rtl", async ({ browser }) => {
+    const { context, page } = await open(browser, "rtl-classic-ar", `/#/${V}`, {
+      project: RTL_PROJECT,
+      viewport: { width: 1280, height: 900 },
+    });
+    const cell = page.locator(`[data-find-cell="${RTL_FIXTURE.chapter}-${RTL_FIXTURE.verse}-ULT"]`).first();
+    await expectRtlSentence(sentence(cell, RTL_FIXTURE.arabicUlt), "ScriptureColumn active ULT verse");
+    await context.close();
+  });
+
+  test("classic columns view (DocColumn): Arabic ULT verse paints rtl", async ({ browser }) => {
+    const { context, page } = await open(browser, "rtl-doccol", `/#/${V}`, {
+      project: RTL_PROJECT,
+      storage: { "be:scriptureMode": "columns" },
+      viewport: { width: 1280, height: 900 },
+    });
+    // `[data-find-cell]` exists in the stacked view too — prove columns mode
+    // actually rendered first: only a DocColumn header reads "ULT · editing".
+    await expect(page.getByText(/^ULT · (editing|read-only)$/).first(), "columns mode not rendered").toBeVisible({
+      timeout: 15_000,
+    });
+    const cell = page.locator(`[data-find-cell="${RTL_FIXTURE.chapter}-${RTL_FIXTURE.verse}-ULT"]`).first();
+    await expectRtlSentence(sentence(cell, RTL_FIXTURE.arabicUlt), "DocColumn ULT verse");
+    await context.close();
+  });
+
+  test("classic book view: Arabic ULT verse paints rtl", async ({ browser }) => {
+    const { context, page } = await open(browser, "rtl-book-ar", `/#/${V}`, {
+      project: RTL_PROJECT,
+      storage: { "be:scriptureMode": "book", "be:enabledVersions": ["ULT", "UST"] },
+      viewport: { width: 1280, height: 900 },
+    });
+    // Prove book mode rendered first: only BookView draws per-chapter headers
+    // ("ZEC chapter 6"); the stacked and columns views have none.
+    await expect(
+      page.getByText(`${RTL_FIXTURE.book} chapter ${RTL_FIXTURE.chapter}`, { exact: true }).first(),
+      "book mode not rendered",
+    ).toBeAttached({ timeout: 15_000 });
+    const cell = page.locator(`[data-find-cell="${RTL_FIXTURE.chapter}-${RTL_FIXTURE.verse}-ULT"]`).first();
+    await cell.scrollIntoViewIfNeeded({ timeout: 15_000 });
+    await expectRtlSentence(sentence(cell, RTL_FIXTURE.arabicUlt), "BookView ULT verse");
+    await context.close();
+  });
+
+  // #451 (open, needs a product decision): versionIsRtl(null, "ULT") is false,
+  // so while /api/project-config has not answered (first load, or offline with
+  // nothing cached) VerseScreen paints an Arabic target lane LTR. Hold the
+  // config request open and look at the lane in that window. Correct behavior is
+  // EITHER not drawing the lane until the direction is known (#451 option A) OR
+  // drawing it RTL — so the assertion accepts both, and only an LTR-painted
+  // Arabic lane fails. Remove `.fail` once #451 ships.
+  test.fail("#451: Arabic lane is not painted LTR while project config is unresolved", async ({
+    browser,
+  }) => {
+    const { context } = await newUserContext(browser, "rtl-451");
+    track(context);
+    const page = await context.newPage();
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await blockDoor43(page);
+    // Never answer: the screen stays in its config-null state.
+    await page.route("**/api/project-config", () => {});
+    await page.goto(`/#/verse/${V}`);
+    // The original-language words render regardless of config, so the screen
+    // is up once they are.
+    await expect(page.locator("[data-original-word]").first()).toBeVisible({ timeout: 15_000 });
+    // Then give the lane a fixed, generous window to draw — a single probe
+    // right here would race a lane that commits a frame later, pass, and turn
+    // this test.fail into a flaky "unexpected pass". Today the lane appears
+    // within milliseconds, so the paint check below runs (and fails: #451).
+    // Under a "wait for the config" fix (option A) it never appears and the
+    // case passes after the window.
+    const lane = sentence(page.locator("main"), RTL_FIXTURE.arabicUlt);
+    const drawn = await lane
+      .waitFor({ state: "visible", timeout: 10_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (drawn) {
+      await expectRtlPaint(lane, "#451 VerseScreen lane, config pending", { latin: RTL_FIXTURE.latin });
+    }
+    await context.close();
+  });
+
+  // #533: ReviewContextPanel's ULT/UST lanes and the card's draft field
+  // follow their content (dir="auto", as #256/#292), so the Arabic verse and
+  // note paint RTL under the LTR UI.
+  test("review queue: Arabic ULT context lane paints rtl", async ({ browser }) => {
+    const { context, page } = await open(
+      browser,
+      "rtl-review",
+      `/#/review/${RTL_FIXTURE.book}/${RTL_FIXTURE.chapter}`,
+      { project: RTL_PROJECT, viewport: { width: 1280, height: 900 } },
+    );
+    // Draft field first: select the Arabic tn row (f66i, ZEC 6:11). Its rail
+    // card is the only one whose note snippet is the Arabic note (the snippet
+    // keeps 140 chars; the fixture note is shorter). A textarea is asserted on
+    // computed direction (header).
+    const noteRef = `${RTL_FIXTURE.book} ${RTL_FIXTURE.chapter}:${RTL_FIXTURE.noteVerse}`;
+    const noteCard = page
+      .getByRole("button")
+      .filter({ hasText: noteRef })
+      .filter({ hasText: RTL_FIXTURE.arabicNote });
+    await expect(noteCard).toHaveCount(1, { timeout: 15_000 });
+    await noteCard.click();
+    const draft = page
+      .locator('textarea:not([aria-hidden="true"])')
+      .filter({ hasText: RTL_FIXTURE.arabicNote })
+      .first();
+    await expect(draft).toBeVisible({ timeout: 15_000 });
+    expect(await computedDirection(draft), "ReviewQueue draft field").toBe("rtl");
+
+    // Then the lanes: pick the first ZEC 6:1 card so the "This verse" panel
+    // shows the fixture verse.
+    const ref = `${RTL_FIXTURE.book} ${RTL_FIXTURE.chapter}:${RTL_FIXTURE.verse}`;
+    await page.getByText(ref, { exact: true }).first().click({ timeout: 15_000 });
+    const lane = containing(page, RTL_FIXTURE.arabicUlt);
+    await expectRtlSentence(lane, "ReviewContextPanel ULT lane", RTL_FIXTURE.arabicUlt);
+    // The English UST lane must not flip just because the project is RTL.
+    const englishLane = containing(page, await ustSnippet());
+    await expect(englishLane).toBeVisible();
+    expect(await computedDirection(englishLane), "ReviewContextPanel UST lane").toBe("ltr");
+    await context.close();
+  });
+
+  // ── Note content: Arabic tn note on ZEC 6:11 ─────────────────────────────
+
+  test("flows notes screen: Arabic note body and list preview paint rtl", async ({ browser }) => {
+    const { context, page } = await open(
+      browser,
+      "rtl-notes-note",
+      `/#/notes/${NOTE_V}?row=${RTL_FIXTURE.noteId}`,
+      { viewport: { width: 1280, height: 900 } },
+    );
+    const hits = page.getByText(RTL_FIXTURE.arabicNote, { exact: true });
+    await expect(hits.first()).toBeVisible({ timeout: 15_000 });
+    // The list preview and the note body can commit on different renders, so
+    // poll for both rather than reading the count once.
+    await expect
+      .poll(() => hits.count(), { message: "expected the note body AND its list preview", timeout: 15_000 })
+      .toBeGreaterThanOrEqual(2);
+    const n = await hits.count();
+    let checked = 0;
+    for (let i = 0; i < n; i++) {
+      if (!(await hits.nth(i).isVisible())) continue;
+      await expectRtlSentence(hits.nth(i), `TranslateNotes note #${i}`);
+      checked++;
+    }
+    expect(checked, "expected the note body AND its list preview visible").toBeGreaterThanOrEqual(2);
+    await context.close();
+  });
+
+  test("flows verse screen: Arabic note row and detail pane paint rtl", async ({ browser }) => {
+    const { context, page } = await open(browser, "rtl-verse-note", `/#/verse/${NOTE_V}`, {
+      viewport: { width: 1280, height: 900 },
+    });
+    const row = page.locator("[data-resource-row]").filter({ hasText: RTL_FIXTURE.arabicNote }).first();
+    await expectRtlSentence(sentence(row, RTL_FIXTURE.arabicNote), "VerseScreen resource row");
+    await row.click();
+    const detail = page.locator('aside[aria-label="Detail"]');
+    await expectRtlSentence(sentence(detail, RTL_FIXTURE.arabicNote), "VerseDetailPane note body");
+    await context.close();
+  });
+
+  test("classic note card (translation mode): Arabic note editor is rtl", async ({ browser }) => {
+    const { context, page } = await open(browser, "rtl-notecard", `/#/${NOTE_V}`, {
+      project: { direction: "rtl", mode: "translation" },
+      viewport: { width: 1280, height: 900 },
+    });
+    // NoteCard's note is a textarea: computed direction only (see header).
+    const editor = page
+      .locator(`[data-note-id="${RTL_FIXTURE.noteId}"] textarea:not([aria-hidden="true"])`)
+      .filter({ hasText: RTL_FIXTURE.arabicNote })
+      .first();
+    await expect(editor).toBeVisible({ timeout: 15_000 });
+    expect(await computedDirection(editor)).toBe("rtl");
+    await context.close();
+  });
+
+  // ── Arabic UI chrome (be:uiLang = "ar") ─────────────────────────────────
+
+  // The books screen is the app's landing page since #534 retired HomeScreen
+  // (#/home now redirects here).
+  test("books screen (Arabic UI): list subtitle paints rtl", async ({ browser }) => {
+    const { context, page } = await open(browser, "rtl-books", "/#/books", {
+      uiLang: "ar",
+      viewport: { width: 1280, height: 900 },
+    });
+    // "قانون الأسفار الكامل المؤلف من 66 سفرًا، … «غير مستورد»." — two sentences,
+    // embedded digits, final period. No Latin token in this string.
+    const sub = sentence(page, arUi("flowBooks.list.sub"));
+    await expect(sub).toBeVisible({ timeout: 15_000 });
+    expect(await computedDirection(sub)).toBe("rtl");
+    await expectRtlPaint(sub, "BooksScreen list subtitle");
+    await context.close();
+  });
+
+  test("admin desk (Arabic UI): page subtitles paint rtl", async ({ browser }) => {
+    const { context, page } = await open(browser, "dev", "/#/admin/team", {
+      uiLang: "ar",
+      viewport: { width: 1280, height: 900 },
+    });
+    // "مَن له وصول هنا، ومن أين يأتي دوره، وكيف تتقدم فرق Door43 على غيرها."
+    const team = sentence(page, arUi("adminPages.team.subtitle"));
+    await expect(team).toBeVisible({ timeout: 15_000 });
+    expect(await computedDirection(team)).toBe("rtl");
+    await expectRtlPaint(team, "AdminTeamScreen subtitle", { latin: "Door43" });
+
+    await page.goto("/#/admin/setup");
+    const setup = sentence(page, arUi("adminPages.setup.subtitle"));
+    await expect(setup).toBeVisible({ timeout: 15_000 });
+    expect(await computedDirection(setup)).toBe("rtl");
+    await expectRtlPaint(setup, "AdminSetupScreen subtitle");
     await context.close();
   });
 });

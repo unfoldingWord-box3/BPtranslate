@@ -43,8 +43,6 @@
     "ar"
   ],
   "sameAsEnglish": [
-    "appShell.scripture.errorSuffix",
-    "appShell.scripture.wordListSuffix",
     "common.passageRef",
     "dialogs.findReplace.tnScope",
     "flowQuestions.subAuthoring",
@@ -55,7 +53,6 @@
     "import.sources.sourceTypeAquifer",
     "lanes.twShort",
     "moreTools.observe.shaSub",
-    "moreTools.team.errGeneric",
     "noteCard.sh",
     "noteCard.supportRefPlaceholder",
     "noteCard.tcm",

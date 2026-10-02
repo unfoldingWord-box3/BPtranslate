@@ -473,6 +473,9 @@ export function Shell({
   useEffect(() => {
     if (data && openOnWords) setOpenOnWords(false);
   }, [data, openOnWords]);
+  // The same request for a column that is already mounted (#535): bumped by the
+  // chapter-reset effect below when a ?twl= navigation lands without a remount.
+  const [wordsTabRequest, setWordsTabRequest] = useState<{ tab: ResourceTab; nonce: number } | null>(null);
   // Transient hover preview: hovering a Words row's "locate" spot lights up where
   // its Hebrew/Greek word sits in the scripture, without clicking (no active
   // switch, no verse jump). Feeds the same activeQuote/activeOccurrence highlight
@@ -2152,8 +2155,8 @@ export function Shell({
   // including a row seeded from initialWordId. initialWordId is part of the key
   // and becomes the active word, so a ?twl= navigation while Shell is already
   // mounted (back/forward, or a hash that changes only ?twl=) selects that row
-  // instead of clearing it. The resource tab is not switched on such a change:
-  // ResourceColumn reads initialTab only when it mounts.
+  // instead of clearing it. ResourceColumn reads initialTab only when it
+  // mounts, so such a change also sends it a requestTab to show Words (#535).
   const chapterResetKey = useRef(`${chapter}:${initialVerse}:${initialWordId ?? ""}`);
   useEffect(() => {
     const key = `${chapter}:${initialVerse}:${initialWordId ?? ""}`;
@@ -2162,6 +2165,7 @@ export function Shell({
     setActiveVerse(initialVerse);
     setActiveNoteId(null);
     setActiveWordId(initialWordId);
+    if (initialWordId !== null) setWordsTabRequest((r) => ({ tab: "words", nonce: (r?.nonce ?? 0) + 1 }));
     setAlignerTarget(null);
     setDualTarget(null);
     setPanelMode("resources");
@@ -3469,6 +3473,7 @@ export function Shell({
       {...resourceColumnProps}
       visibleTabs={visibleTabs}
       initialTab={openOnWords && (!visibleTabs || visibleTabs.includes("words")) ? "words" : visibleTabs?.[0]}
+      requestTab={wordsTabRequest}
     />
   );
 

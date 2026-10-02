@@ -182,6 +182,44 @@ test.describe("retired flows routes (#173)", () => {
     await context.close();
   });
 
+  // #535: the resource column's tab is its own state, read from initialTab only
+  // at mount. A ?twl= link reached while the editor is already open on another
+  // tab (back/forward, a typed link) must still switch it to Words, and scroll
+  // the row into view. Words is pinned to chapter scope so the whole chapter's
+  // 51 word links are listed and the chosen row (the last in 6:15) starts below
+  // the fold.
+  test("a ?twl= link reached while the editor shows Notes switches to the Words tab", async ({ browser }) => {
+    const { context } = await newUserContext(browser, "dev");
+    await context.addInitScript(() => localStorage.setItem("be:pinned", JSON.stringify({ words: true })));
+    const page = await context.newPage();
+    const errors: string[] = [];
+    page.on("pageerror", (e) => errors.push(e.message));
+    const res = await page.request.get("/api/chapters/ZEC/6");
+    expect(res.ok()).toBe(true);
+    const { twl } = (await res.json()) as { twl: { id: string; verse: number }[] };
+    const id = twl.filter((r) => r.verse === 15).at(-1)?.id;
+    expect(id, "seeded ZEC 6:15 has word links").toBeTruthy();
+    await page.goto("/#/ZEC/6/15");
+    await expectLandmark(page, CLASSIC_NOTES);
+    // Go to Words, then back to Notes, so the tab is a user choice, not the default.
+    await page.getByRole("button", { name: /^TWLinks/ }).click();
+    await expectLandmark(page, h6("TWLinks"));
+    const row = page.locator(`[data-word-id="${id}"]`);
+    await expect(row).toBeAttached();
+    await expect(row, "the row starts below the fold").not.toBeInViewport();
+    await page.getByRole("button", { name: /^Notes/ }).click();
+    await expectLandmark(page, CLASSIC_NOTES);
+    await expect(page.locator("h6").filter({ hasText: "TWLinks" })).toHaveCount(0);
+    // Same book and verse, only ?twl= is added: no remount, no reload.
+    await page.evaluate((rowId) => {
+      location.hash = `#/ZEC/6/15?twl=${encodeURIComponent(rowId)}`;
+    }, id!);
+    await expectWordsTabWithRow(page, id!);
+    await expect(row).toBeInViewport();
+    expect(errors, errors.join("\n")).toEqual([]);
+    await context.close();
+  });
+
   test("a ?twl= id with selector characters does not break the editor", async ({ browser }) => {
     const { context } = await newUserContext(browser, "dev");
     const page = await context.newPage();
