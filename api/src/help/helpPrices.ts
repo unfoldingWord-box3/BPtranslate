@@ -41,13 +41,31 @@ export function priceFor(provider: string): Price {
   return PRICES[provider];
 }
 
+const count = (n: unknown): number => (typeof n === "number" && Number.isFinite(n) && n > 0 ? n : 0);
+
+/** Missing, negative or non-numeric token counts become 0, so costMicros can never return NaN. */
+export function normalizeUsage(u: Partial<HelpUsage> | null | undefined): HelpUsage {
+  return {
+    inputTokens: count(u?.inputTokens),
+    outputTokens: count(u?.outputTokens),
+    cacheWriteTokens: count(u?.cacheWriteTokens),
+    cacheReadTokens: count(u?.cacheReadTokens),
+  };
+}
+
+/** True iff all four counts are finite numbers (a provider that omitted one did not report honestly). */
+export function usageIsComplete(u: Partial<HelpUsage> | null | undefined): boolean {
+  return [u?.inputTokens, u?.outputTokens, u?.cacheWriteTokens, u?.cacheReadTokens].every((n) => typeof n === "number" && Number.isFinite(n));
+}
+
 /**
  * Actual cost in whole micro-dollars (rounded up). Claude prices cache write and
  * read tokens at their own rates; every other provider prices all input tokens
  * at the full input rate (no cache discount: over-counting is the safe side).
  */
-export function costMicros(provider: string, u: HelpUsage): number {
+export function costMicros(provider: string, usage: HelpUsage): number {
   const p = priceFor(provider);
+  const u = normalizeUsage(usage);
   let centi: number;
   if (provider === "claude") {
     centi =

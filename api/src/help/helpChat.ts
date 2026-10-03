@@ -21,7 +21,7 @@ import { classifyProviderError, scrubSecrets, GEMINI_API_BASE } from "../transla
 import { maxOutputFor, type HelpUsage } from "./helpPrices.ts";
 import { HELP_KB } from "./helpKb.generated.ts";
 
-export { costMicros, priceFor, maxOutputFor } from "./helpPrices.ts";
+export { costMicros, priceFor, maxOutputFor, normalizeUsage, usageIsComplete } from "./helpPrices.ts";
 export type { HelpUsage } from "./helpPrices.ts";
 
 export type HelpMessage = { role: "user" | "assistant"; content: string };
@@ -123,6 +123,10 @@ export function buildHelpGeminiRequest(model: string, system: string, messages: 
   };
 }
 
+// Same set as GEMINI_BLOCKED_FINISH_REASONS in translate/llm.ts (not exported
+// there): finish reasons that mean "the model refused", not "the model finished".
+const GEMINI_BLOCKED_FINISH_REASONS = new Set(["SAFETY", "PROHIBITED_CONTENT", "RECITATION", "BLOCKLIST", "SPII", "IMAGE_SAFETY"]);
+
 export function makeGeminiHelpAdapter(fetchImpl: FetchLike = fetch): HelpAdapter {
   return async ({ model, system, messages, apiKey, timeoutMs }) => {
     const body = await postJson(
@@ -142,7 +146,7 @@ export function makeGeminiHelpAdapter(fetchImpl: FetchLike = fetch): HelpAdapter
       cacheWriteTokens: 0,
       cacheReadTokens: 0,
     };
-    if (!text && (body.promptFeedback?.blockReason || cand?.finishReason === "SAFETY")) {
+    if (!text && (body.promptFeedback?.blockReason || (cand?.finishReason && GEMINI_BLOCKED_FINISH_REASONS.has(cand.finishReason)))) {
       // The 200 was billed: carry the usage so the route settles the real cost.
       throw Object.assign(new Error("blocked by Gemini content filters"), { usage });
     }
@@ -153,6 +157,17 @@ export function makeGeminiHelpAdapter(fetchImpl: FetchLike = fetch): HelpAdapter
 // ---------------------------------------------------------------------------
 // OpenAI + xAI (chat completions)
 // ---------------------------------------------------------------------------
+
+/** chat-completions `message.content` is a string, an array of parts, or null. */
+function contentText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((p) => (typeof p === "string" ? p : p && typeof p === "object" && typeof (p as { text?: unknown }).text === "string" ? (p as { text: string }).text : ""))
+      .join("");
+  }
+  return "";
+}
 
 export function makeChatCompletionsHelpAdapter(
   provider: "openai" | "xai",
@@ -172,7 +187,7 @@ export function makeChatCompletionsHelpAdapter(
     // Reasoning tokens reported outside completion_tokens still bill as output.
     const total = typeof res.usage?.total_tokens === "number" ? res.usage.total_tokens : 0;
     return {
-      text: res.choices?.[0]?.message?.content ?? "",
+      text: contentText(res.choices?.[0]?.message?.content),
       usage: {
         inputTokens: prompt,
         outputTokens: Math.max(completion, total - prompt),

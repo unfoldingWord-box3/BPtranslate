@@ -17,6 +17,8 @@ import {
   describeProviderError,
   helpAdapterFor,
   maxOutputFor,
+  normalizeUsage,
+  usageIsComplete,
   HELP_TIMEOUT_MS,
   parseAnswer,
   withRouteContext,
@@ -85,7 +87,11 @@ async function helpEnabled(db: D1Database): Promise<boolean> {
  */
 function failureCost(provider: string, err: unknown, worst: number): number {
   const u = (err as { usage?: HelpUsage } | null)?.usage;
-  if (u && typeof u.inputTokens === "number" && typeof u.outputTokens === "number") return costMicros(provider, u);
+  if (u && typeof u === "object") {
+    // All-zero (or unreadable) usage on a billed reply is not believable.
+    const n = normalizeUsage(u);
+    return n.inputTokens + n.outputTokens + n.cacheWriteTokens + n.cacheReadTokens === 0 ? worst : costMicros(provider, n);
+  }
   const status = (err as { status?: unknown } | null)?.status;
   if (typeof status === "number" && status >= 400 && status <= 499 && status !== 408) return 0;
   return worst;
@@ -172,56 +178,69 @@ export function makeHelpRoutes(deps: HelpRouteDeps = {}) {
     const day = utcDay(when);
     const worst = worstCaseMicros(ai.provider, inputTokens, maxOutputFor(ai.provider));
 
-    if (!(await reserve(db, userId, day, worst, cap))) {
-      const left = await remainingMicros(db, userId, day, cap);
-      return c.json({ code: "help_budget_exhausted", resetsAt: nextResetIso(when), remainingUsd: usdOf(left) }, 429);
+    let reserved: boolean;
+    try {
+      reserved = await reserve(db, userId, day, worst, cap);
+    } catch (e) {
+      // help_chat_settings exists but help_chat_usage does not: partly migrated.
+      if (isMissingSchemaError(e)) return c.json({ code: "help_ai_unavailable", reason: "not_migrated" }, 409);
+      throw e;
+    }
+    if (!reserved) {
+      // What is left is below one more question's worst case, so report it as used up.
+      return c.json({ code: "help_budget_exhausted", resetsAt: nextResetIso(when), remainingUsd: 0 }, 429);
     }
 
-    // Provider call + settle run inside one promise handed to waitUntil, so a
-    // client disconnect cannot cancel the settle. It never rejects.
+    // Provider call + settle run inside one promise handed to waitUntil, which
+    // keeps the settle running after a client disconnect for as long as the
+    // platform allows (~30 s). An unsettled reservation only blocks spend (it
+    // never allows more) until UTC midnight. It never rejects.
     const work = (async (): Promise<{ status: 200 | 502; body: Record<string, unknown> }> => {
       let actual = worst;
       let answered = false;
       let outcome: { status: 200 | 502; body: Record<string, unknown> };
-      let failure: { kind: string; message: string } | null = null;
+      let failure: { kind: string; status?: number } | null = null;
       try {
         const result = await adapter({ model: catalog.lightModel!, system, messages, apiKey, timeoutMs: HELP_TIMEOUT_MS });
-        const u = result.usage;
-        if (u.inputTokens + u.outputTokens + u.cacheWriteTokens + u.cacheReadTokens === 0) {
-          console.warn(`help ask (${ai.provider}): provider reported no usage; charging the worst case`);
+        const u = normalizeUsage(result.usage);
+        // Price from usage first, so nothing after this can re-price the call.
+        // A reply with an answer cannot honestly have zero output tokens.
+        if (!usageIsComplete(result.usage) || u.outputTokens === 0) {
+          console.warn(`help ask (${ai.provider}): provider reported no usable usage; charging the worst case`);
           actual = worst;
         } else {
           actual = costMicros(ai.provider, u);
         }
-        const { answer, articleIds: used } = parseAnswer(result.text, articleIds);
+        let parsed: { answer: string; articleIds: string[] } | null = null;
+        try {
+          parsed = parseAnswer(typeof result.text === "string" ? result.text : "", articleIds);
+        } catch {
+          parsed = null;
+        }
         console.log(`help ask ok (${ai.provider}): in=${u.inputTokens} out=${u.outputTokens} cacheW=${u.cacheWriteTokens} cacheR=${u.cacheReadTokens} micros=${actual}`);
-        if (answer === "") {
-          failure = { kind: "empty_answer", message: "provider returned an empty answer" };
+        if (!parsed || parsed.answer === "") {
+          failure = { kind: "empty_answer" };
           outcome = { status: 502, body: { code: "help_ai_failed", kind: "empty_answer" } };
         } else {
           answered = true;
-          outcome = { status: 200, body: { answer, articleIds: used } };
+          outcome = { status: 200, body: { answer: parsed.answer, articleIds: parsed.articleIds } };
         }
       } catch (err) {
         actual = failureCost(ai.provider, err, worst);
-        failure = describeProviderError(err, apiKey);
+        const status = (err as { status?: unknown } | null)?.status;
+        failure = { kind: describeProviderError(err, apiKey).kind, status: typeof status === "number" ? status : undefined };
         outcome = { status: 502, body: { code: "help_ai_failed", kind: failure.kind } };
       }
-      let settled = false;
-      let settleErr: unknown;
-      for (let attempt = 0; attempt < 3 && !settled; attempt++) {
-        try {
-          await settle(db, userId, day, worst, actual, answered);
-          settled = true;
-        } catch (e) {
-          settleErr = e;
-        }
+      // One attempt: settle is not idempotent, so a retry after a commit-then-error
+      // could apply twice. On failure the reservation stays (it only blocks spend).
+      try {
+        await settle(db, userId, day, worst, actual, answered);
+      } catch (e) {
+        const m = scrubSecrets(e instanceof Error ? e.message : String(e), [apiKey]).slice(0, 300);
+        console.error(`help budget settle failed (user ${userId}, ${day}, reserved ${worst}, actual ${actual}): ${m}`);
       }
-      if (!settled) {
-        const m = scrubSecrets(settleErr instanceof Error ? settleErr.message : String(settleErr), [apiKey]).slice(0, 300);
-        console.error(`help budget settle failed after 3 attempts (user ${userId}, ${day}, reserved ${worst}, actual ${actual}): ${m}`);
-      }
-      if (failure) console.error(`help ask failed (${ai.provider}, ${failure.kind}): ${failure.message}`);
+      // Provider error bodies can echo the question: log only kind and status.
+      if (failure) console.error(`help ask failed (${ai.provider}, ${failure.kind}${failure.status !== undefined ? `, HTTP ${failure.status}` : ""})`);
       if (outcome.status === 200) {
         try {
           outcome.body.remainingUsd = usdOf(await remainingMicros(db, userId, day, cap));

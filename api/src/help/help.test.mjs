@@ -482,18 +482,18 @@ function failSettle(env, failures) {
   return state;
 }
 
-test("(3) the settle write is retried up to 3 times; the provider call is registered with waitUntil", async () => {
+test("(3) settle gets ONE attempt and the provider call is registered with waitUntil", async () => {
   const { send, db, env, waited } = await setup();
-  const st = failSettle(env, 2);
+  const st = failSettle(env, 1);
   const res = await send("POST", "/api/help/ask", { body: ask() });
   assert.equal(res.status, 200);
-  assert.equal(st.failed, 2);
+  assert.equal(st.failed, 1); // no retry: a second attempt would have succeeded and released it
   const row = spentRow(db);
-  assert.deepEqual({ spent: row.spent_micros, reserved: row.reserved_micros, calls: row.calls }, { spent: 1500, reserved: 0, calls: 1 });
+  assert.deepEqual({ spent: row.spent_micros, reserved: row.reserved_micros, calls: row.calls }, { spent: 0, reserved: worstFor("claude"), calls: 0 });
   assert.equal(waited.length, 1);
 });
 
-test("(3) if every settle attempt fails it is logged scrubbed and the reservation stays", async () => {
+test("(3) a failed settle is logged scrubbed and the reservation stays", async () => {
   const errs = [];
   const orig = console.error;
   console.error = (...a) => errs.push(a.join(" "));
@@ -502,9 +502,109 @@ test("(3) if every settle attempt fails it is logged scrubbed and the reservatio
     const st = failSettle(env, 99);
     const res = await send("POST", "/api/help/ask", { body: ask() });
     assert.equal(res.status, 200);
-    assert.equal(st.failed, 3);
-    assert.ok(errs.some((e) => e.includes("settle failed after 3 attempts")));
-    assert.ok(spentRow(db).reserved_micros > 0); // never released below what was reserved
+    assert.equal(st.failed, 1);
+    assert.ok(errs.some((e) => e.includes("settle failed")));
+    assert.ok(spentRow(db).reserved_micros > 0);
+  } finally {
+    console.error = orig;
+  }
+});
+
+test("(2) chat-completions content as an array of parts or null is normalized", async () => {
+  const run = (content) => makeChatCompletionsHelpAdapter("openai", "https://x/v1", async () => new Response(JSON.stringify({ choices: [{ message: { content } }], usage: { prompt_tokens: 10, completion_tokens: 5 } }), { status: 200 }))({ model: "m", system: "S", messages: [{ role: "user", content: "a" }], apiKey: "k", timeoutMs: 1000 });
+  assert.equal((await run([{ type: "text", text: "Hello " }, { type: "refusal" }, { type: "text", text: "there" }])).text, "Hello there");
+  assert.equal((await run(null)).text, "");
+});
+
+test("(2) array content is priced from usage, not the worst case", async () => {
+  const fetchImpl = async () => new Response(JSON.stringify({ choices: [{ message: { content: [{ type: "text", text: "Open Notes.\nSOURCES: notes" }] } }], usage: { prompt_tokens: 1000, completion_tokens: 100 } }), { status: 200 });
+  const adapter = makeChatCompletionsHelpAdapter("openai", "https://x/v1", fetchImpl);
+  const { send, db } = await setup({ provider: "openai", adapter });
+  const res = await send("POST", "/api/help/ask", { body: ask() });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).answer, "Open Notes.");
+  assert.equal(spentRow(db).spent_micros, costMicros("openai", { inputTokens: 1000, outputTokens: 100, cacheWriteTokens: 0, cacheReadTokens: 0 }));
+});
+
+test("(3) a reply with zero output tokens or a missing count is charged the worst case", async () => {
+  const usages = [
+    { inputTokens: 1000, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0 },
+    { inputTokens: 1000, outputTokens: 100, cacheWriteTokens: undefined, cacheReadTokens: 0 },
+    { inputTokens: 1000, outputTokens: "100", cacheWriteTokens: 0, cacheReadTokens: 0 },
+  ];
+  const orig = console.warn;
+  console.warn = () => {};
+  try {
+    for (const usage of usages) {
+      const { send, db } = await setup({ adapter: async () => ({ ...okReply, usage }) });
+      assert.equal((await send("POST", "/api/help/ask", { body: ask() })).status, 200);
+      assert.equal(spentRow(db).spent_micros, worstFor("claude"), JSON.stringify(usage));
+    }
+  } finally {
+    console.warn = orig;
+  }
+});
+
+test("(3) an error carrying all-zero usage is charged the worst case", async () => {
+  const usage = { inputTokens: 0, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0 };
+  const { send, db } = await setup({ adapter: async () => { throw Object.assign(new Error("blocked"), { usage }); } });
+  assert.equal((await send("POST", "/api/help/ask", { body: ask() })).status, 502);
+  assert.equal(spentRow(db).spent_micros, worstFor("claude"));
+});
+
+test("(4) costMicros never returns NaN, and NaN usage cannot reach settle", async () => {
+  const bad = { inputTokens: NaN, outputTokens: undefined, cacheWriteTokens: "x", cacheReadTokens: null };
+  assert.equal(costMicros("claude", bad), 0);
+  assert.equal(costMicros("openai", { ...bad, inputTokens: 1000 }), costMicros("openai", { inputTokens: 1000, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0 }));
+  const orig = console.warn;
+  console.warn = () => {};
+  try {
+    const { send, db } = await setup({ adapter: async () => ({ ...okReply, usage: bad }) });
+    assert.equal((await send("POST", "/api/help/ask", { body: ask() })).status, 200);
+    const row = spentRow(db);
+    assert.ok(Number.isInteger(row.spent_micros));
+    assert.equal(row.spent_micros, worstFor("claude"));
+  } finally {
+    console.warn = orig;
+  }
+});
+
+test("(5) every Gemini blocked finish reason is a filter block", async () => {
+  for (const finishReason of ["SAFETY", "PROHIBITED_CONTENT", "RECITATION", "BLOCKLIST", "SPII", "IMAGE_SAFETY"]) {
+    const reply = { candidates: [{ finishReason }], usageMetadata: { promptTokenCount: 50, candidatesTokenCount: 0 } };
+    await assert.rejects(
+      makeGeminiHelpAdapter(async () => new Response(JSON.stringify(reply), { status: 200 }))({ model: "gemini-3.8-flash", system: "S", messages: [{ role: "user", content: "a" }], apiKey: "k", timeoutMs: 1000 }),
+      (e) => e.usage.inputTokens === 50,
+      finishReason,
+    );
+  }
+});
+
+test("(6) partial migration (usage table missing) -> 409 not_migrated, not 500", async () => {
+  const { send, db } = await setup();
+  db.exec("DROP TABLE help_chat_usage;");
+  const res = await send("POST", "/api/help/ask", { body: ask() });
+  assert.equal(res.status, 409);
+  assert.deepEqual(await res.json(), { code: "help_ai_unavailable", reason: "not_migrated" });
+});
+
+test("(7) the 429 body reports remainingUsd 0", async () => {
+  const { send } = await setup({ cap: "0.01" });
+  const res = await send("POST", "/api/help/ask", { body: ask() });
+  assert.equal(res.status, 429);
+  assert.equal((await res.json()).remainingUsd, 0);
+});
+
+test("(8) the failure log carries provider, kind and status only, never the provider body", async () => {
+  const errs = [];
+  const orig = console.error;
+  console.error = (...a) => errs.push(a.join(" "));
+  try {
+    const { send } = await setup({ adapter: async () => { throw Object.assign(new Error("echo: secret question text"), { status: 500 }); } });
+    await send("POST", "/api/help/ask", { body: ask({ messages: [{ role: "user", content: "secret question text" }] }) });
+    const line = errs.find((e) => e.includes("help ask failed"));
+    assert.ok(line && line.includes("500"));
+    assert.ok(!errs.join("\n").includes("secret question text"));
   } finally {
     console.error = orig;
   }
