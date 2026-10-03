@@ -85,7 +85,7 @@ export default function HelpDrawer({ open, openSeq, routeKey, initialArticle, on
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: 0 });
-  }, [articleId, query]);
+  }, [articleId, query, open, openSeq]);
 
   const article = articleId ? articles.find((a) => a.id === articleId) ?? null : null;
   // A 0-1 character query is treated as empty: keep showing the article / TOC.
@@ -119,6 +119,8 @@ export default function HelpDrawer({ open, openSeq, routeKey, initialArticle, on
       return <>{children}</>;
     },
     img({ src, alt }) {
+      // Only the guide's own screenshots; AI answers must not load arbitrary URLs.
+      if (typeof src !== "string" || !src.startsWith("/help/")) return <>{alt ?? ""}</>;
       return <img src={src} alt={alt ?? ""} loading="lazy" style={{ maxWidth: "100%", height: "auto" }} />;
     },
   };

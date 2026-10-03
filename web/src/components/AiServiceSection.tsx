@@ -28,7 +28,7 @@ import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import SaveIcon from "@mui/icons-material/Save";
 import { useTranslation } from "react-i18next";
 import { api, ApiError, type AiProviderSettings, type HelpStatus } from "../sync/api";
-import { formatUsd } from "../help/AskAi";
+import { formatUsd } from "../help/money";
 
 // Temporary: hide the shared uW subscription ("default") from the picker and
 // steer orgs toward Gemini (bsoj has a key; Gemini/Grok have been strongest for

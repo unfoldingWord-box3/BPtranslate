@@ -10,16 +10,12 @@ import { useTranslation } from "react-i18next";
 import { api, ApiError, type HelpAskErrorBody, type HelpStatus } from "../sync/api";
 import type { HelpArticle } from "./guideMap";
 import { searchHelp } from "./search";
+import { formatUsd } from "./money";
 
 const MAX_MESSAGES = 10;
 const MAX_CONTENT = 2000;
 
 type Msg = { role: "user" | "assistant"; content: string };
-
-/** Dollar amounts shown in the help UI: always two decimals. */
-export function formatUsd(n: number): string {
-  return n.toFixed(2);
-}
 
 interface Props {
   open: boolean;
@@ -88,9 +84,14 @@ export default function AskAi({ open, articles, lang, routeKey, onOpenArticle, c
         if (typeof b.remainingUsd === "number") setRemaining(b.remainingUsd);
         const when = b.resetsAt ? new Date(b.resetsAt) : null;
         if (when && !Number.isNaN(when.getTime())) {
-          return t("help.ask.budgetExhausted", {
-            when: new Intl.DateTimeFormat(lang, { dateStyle: "medium", timeStyle: "short" }).format(when),
-          });
+          const fmt = (loc?: string) => new Intl.DateTimeFormat(loc, { dateStyle: "medium", timeStyle: "short" }).format(when);
+          let formatted: string;
+          try {
+            formatted = fmt(lang);
+          } catch {
+            formatted = fmt(undefined);
+          }
+          return t("help.ask.budgetExhausted", { when: formatted });
         }
         return t("help.ask.budgetExhaustedNoTime");
       }
@@ -98,6 +99,16 @@ export default function AskAi({ open, articles, lang, routeKey, onOpenArticle, c
       if (e.status === 409) return t("help.ask.unavailable");
     }
     return t("help.ask.failed");
+  };
+
+  // A failed ask may still have been charged server-side; refresh the amount.
+  const refreshRemaining = () => {
+    api
+      .getHelpStatus()
+      .then((s) => setRemaining(s.remainingUsd))
+      .catch(() => {
+        /* keep the last known amount */
+      });
   };
 
   const ask = async () => {
@@ -114,6 +125,7 @@ export default function AskAi({ open, articles, lang, routeKey, onOpenArticle, c
       setQuestion("");
     } catch (e) {
       setError(describe(e));
+      refreshRemaining();
     } finally {
       inFlight.current = false;
       setBusy(false);
@@ -153,6 +165,8 @@ export default function AskAi({ open, articles, lang, routeKey, onOpenArticle, c
         </Typography>
       )}
 
+      {/* New answers are announced to screen readers as they arrive. */}
+      <Box aria-live="polite" aria-relevant="additions">
       {history.map((m, i) =>
         m.role === "user" ? (
           <Typography key={i} variant="body2" sx={{ fontWeight: 600, mt: 1 }}>
@@ -184,12 +198,15 @@ export default function AskAi({ open, articles, lang, routeKey, onOpenArticle, c
           </Box>
         ),
       )}
+      </Box>
 
-      {error && (
-        <Alert severity="info" sx={{ mb: 1 }}>
-          {error}
-        </Alert>
-      )}
+      <Box aria-live="polite">
+        {error && (
+          <Alert severity="info" sx={{ mb: 1 }}>
+            {error}
+          </Alert>
+        )}
+      </Box>
 
       {done ? (
         <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
@@ -233,7 +250,7 @@ export default function AskAi({ open, articles, lang, routeKey, onOpenArticle, c
             size="small"
             variant="contained"
             onClick={() => void ask()}
-            disabled={!trimmed || busy}
+            disabled={!trimmed || busy || (remaining !== null && remaining <= 0)}
             startIcon={busy ? <CircularProgress size={14} color="inherit" /> : undefined}
           >
             {busy ? t("help.ask.asking") : t("help.ask.button")}
