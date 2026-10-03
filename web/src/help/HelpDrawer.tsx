@@ -87,7 +87,8 @@ export default function HelpDrawer({ open, openSeq, routeKey, initialArticle, on
   }, [articleId, query]);
 
   const article = articleId ? articles.find((a) => a.id === articleId) ?? null : null;
-  const trimmed = query.trim();
+  // A 0-1 character query is treated as empty: keep showing the article / TOC.
+  const trimmed = query.trim().length < 2 ? "" : query.trim();
   const hits = useMemo(() => (trimmed ? searchHelp(articles, trimmed) : []), [articles, trimmed]);
   const general = articles.filter((a) => !(a.roles.length === 1 && a.roles[0] === "admin"));
   const adminOnly = articles.filter((a) => a.roles.length === 1 && a.roles[0] === "admin");
@@ -121,7 +122,7 @@ export default function HelpDrawer({ open, openSeq, routeKey, initialArticle, on
     },
   };
 
-  const BackIcon = theme.direction === "rtl" ? ArrowForwardIcon : ArrowBackIcon;
+  const BackIcon = theme.direction === "rtl" && !englishFallback ? ArrowForwardIcon : ArrowBackIcon;
 
   const tocItem = (a: { id: string; title: string }) => (
     <ListItemButton key={a.id} onClick={() => select(a.id)}>

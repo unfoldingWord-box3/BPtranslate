@@ -1119,7 +1119,9 @@ export function App() {
       </Snackbar>
       {chooseWs && <WorkspaceChoiceDialog onClose={() => setChooseWs(false)} />}
       {helpEverOpened && (
-        <Suspense fallback={null}>
+        <Suspense
+          fallback={<CircularProgress size={20} aria-hidden sx={{ position: "fixed", top: 12, insetInlineEnd: 12, zIndex: (th) => th.zIndex.modal + 1 }} />}
+        >
           <HelpDrawer
             open={helpOpen}
             openSeq={helpSeq}

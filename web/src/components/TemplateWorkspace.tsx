@@ -177,7 +177,10 @@ export function TemplateWorkspace({ templateId, onNavigate, onBack }: Props) {
   if (!isTranslation) {
     return (
       <Stack alignItems="center" justifyContent="center" sx={{ height: "100%", px: 4 }} spacing={1}>
-        <Typography variant="h6">{t("templates.title")}</Typography>
+        <Stack direction="row" alignItems="center" spacing={1}>
+          <Typography variant="h6">{t("templates.title")}</Typography>
+          <HelpButton />
+        </Stack>
         <Typography variant="body2" color="text.secondary" textAlign="center" sx={{ maxWidth: 420 }}>
           {t("templates.glOnly")}
         </Typography>
