@@ -105,6 +105,8 @@ test("articleForRoute and articlesFor", () => {
   assert.equal(articleForRoute(index, "xx", "admin/team")?.id, "team"); // unknown lang -> en
   assert.equal(articleForRoute(index, "en", "nope"), null);
   assert.equal(articlesFor(index, "fr").length, 2);
+  const emptyLang = { ...index, langs: { ...index.langs, de: { articles: [] } } };
+  assert.equal(articlesFor(emptyLang, "de").length, 2); // language present but empty -> en
 });
 
 test("parseArticle front-matter subset", () => {

@@ -18,6 +18,11 @@ const apiPort = Number(process.env.GUIDE_API_PORT || 8807);
 const webPort = Number(process.env.GUIDE_WEB_PORT || 5185);
 const persistTo = path.join(repoRoot, ".wrangler", "guide-state");
 
+function tryRun(cmd, args, cwd) {
+  const r = spawnSync(cmd, args, { cwd, stdio: "inherit", shell: true });
+  if (r.status !== 0) throw new Error(`exited with status ${r.status}`);
+}
+
 function run(label, cmd, args, cwd) {
   const r = spawnSync(cmd, args, { cwd, stdio: "inherit", shell: true });
   if (r.status !== 0) {
@@ -26,22 +31,35 @@ function run(label, cmd, args, cwd) {
   }
 }
 
+function runWithRetry(label, fn, attempts = 5) {
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      return fn();
+    } catch (e) {
+      if (i === attempts) throw e;
+      console.log(`[dev-guide] ${label} failed (attempt ${i}/${attempts}: ${e}); retrying…`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
+    }
+  }
+}
+
 if (!existsSync(path.join(repoRoot, "web", "dist"))) {
   console.log("[dev-guide] web/dist missing — building once…");
   run("build:web", "npm", ["run", "build:web"], repoRoot);
 }
 
+// A previous run's workerd may still hold the SQLite file, so retry the wipe.
 console.log(`[dev-guide] wiping ${persistTo}…`);
-rmSync(persistTo, { recursive: true, force: true });
+runWithRetry("rmSync", () => rmSync(persistTo, { recursive: true, force: true }));
 mkdirSync(persistTo, { recursive: true });
 
 const d1 = (extra) => ["wrangler", "d1", ...extra, "--local", "--persist-to", JSON.stringify(persistTo)];
 console.log("[dev-guide] applying migrations…");
-run("migrations apply", "npx", d1(["migrations", "apply", "bptranslate_dev"]), apiDir);
+runWithRetry("migrations apply", () => tryRun("npx", d1(["migrations", "apply", "bptranslate_dev"]), apiDir));
 
 // The second dev workspace (DB_MLTEST, "mltest") has its own D1.
 console.log("[dev-guide] applying migrations to the mltest workspace DB…");
-run("mltest migrations apply", "npx", d1(["migrations", "apply", "bptranslate_mltest_dev"]), apiDir);
+runWithRetry("mltest migrations apply", () => tryRun("npx", d1(["migrations", "apply", "bptranslate_mltest_dev"]), apiDir));
 // Onboarding + book import happen in the Playwright "setup" project
 // (tests/guide/seed.setup.ts), through the app's API, once the servers are up.
 

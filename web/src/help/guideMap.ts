@@ -39,7 +39,8 @@ export function routeKey(loc: HelpLocation): string {
 
 /** Articles for `lang`, falling back to English when that language has none. */
 export function articlesFor(index: HelpIndex, lang: string): HelpArticle[] {
-  return (index.langs[lang] ?? index.langs.en)?.articles ?? [];
+  const own = index.langs[lang]?.articles;
+  return own && own.length > 0 ? own : (index.langs.en?.articles ?? []);
 }
 
 /** The article that lists `key` under `routes:`, or null. */
