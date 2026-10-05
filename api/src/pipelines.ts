@@ -1431,6 +1431,23 @@ pipelines.post("/start", requireEditor, async (c) => {
   const username = await resolveUsername(c, userId);
   if (!username) return c.json({ error: "username_missing" }, 400);
 
+  // Org-key gate (#551): a translate job runs on the org's own AI key or not at
+  // all, so with no key configured (no row, or provider='default' after Clear)
+  // refuse it here, before anything is enqueued. It sits before the dedup
+  // check so a keyless org isn't pointed at an already-queued job that is
+  // doomed to fail at dispatch, and before the bot-token gate because "an admin
+  // needs to add a key" is the more actionable error. A BYO row that is
+  // configured but broken (no key or model, wrapping key unavailable) is not
+  // refused here; dispatchNext fails it with its reason.
+  let translateAi: DispatchAi | null = null;
+  if (parsed.data.pipelineType === "translate") {
+    const aiRow = await getAiProviderConfig(c.env.DB);
+    translateAi = resolveDispatchAi(aiRow, c.env.AI_KEY_WRAPPING_KEY);
+    if (translateAi.kind === "error" && translateAi.reason === "ai_provider_not_configured") {
+      return c.json({ error: "ai_provider_not_configured" }, 409);
+    }
+  }
+
   // Article translate (tw|ta) is scoped by article, not book/chapter. It reuses
   // the pipeline_jobs scope columns via a per-article sentinel so all the
   // dispatch/poll/apply plumbing works unchanged; the real selector rides in
@@ -1691,21 +1708,6 @@ pipelines.post("/start", requireEditor, async (c) => {
     }));
     if (hints.length > 0) {
       mergedOptions = { ...(parsed.data.options ?? {}), hints };
-    }
-  }
-
-  // Org-key gate (#551): a translate job runs on the org's own AI key or not at
-  // all, so with no key configured (no row, or provider='default' after Clear)
-  // refuse it here, before anything is enqueued. It sits before the bot-token
-  // gate because "an admin needs to add a key" is the more actionable error.
-  // A BYO row that is configured but broken (no key or model, wrapping key
-  // unavailable) is not refused here; dispatchNext fails it with its reason.
-  let translateAi: DispatchAi | null = null;
-  if (parsed.data.pipelineType === "translate") {
-    const aiRow = await getAiProviderConfig(c.env.DB);
-    translateAi = resolveDispatchAi(aiRow, c.env.AI_KEY_WRAPPING_KEY);
-    if (translateAi.kind === "error" && translateAi.reason === "ai_provider_not_configured") {
-      return c.json({ error: "ai_provider_not_configured" }, 409);
     }
   }
 

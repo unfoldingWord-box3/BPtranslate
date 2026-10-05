@@ -274,6 +274,18 @@ test.describe.serial("onboarding + AI translate smoke", () => {
       await expect(page.locator("[data-note-id]").first()).toBeVisible();
     });
 
+    await test.step("save a dummy org AI key (translate runs only on the org's own key, #551)", async () => {
+      // Same call the AI service screen makes. The key is a throwaway: the stub
+      // bot never calls a provider, it only echoes `provider` back. Needs a
+      // non-empty AI_KEY_WRAPPING_KEY on the dev server (scripts/dev-smoke.mjs).
+      const res = await context.request.put("/api/ai-provider", {
+        headers: { "x-csrf-token": auth.csrf, "Content-Type": "application/json", "If-Match": "0" },
+        data: { provider: "claude", model: "claude-sonnet-5", apiKey: "sk-smoke-dummy-not-a-real-key" },
+      });
+      expect(res.ok(), `PUT /api/ai-provider: ${res.status()} ${await res.text()}`).toBeTruthy();
+      expect((await res.json()).configured).toBe(true);
+    });
+
     let jobId = "";
     await test.step("start AI translate via the stub bot", async () => {
       const res = await context.request.post("/api/pipelines/start", {

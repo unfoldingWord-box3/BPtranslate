@@ -490,6 +490,28 @@ test("POST /start (#551): translate with no org key is refused with 409 ai_provi
   }
 });
 
+test("POST /start (#551): a keyless org with a same-scope translate job already queued gets the key error, not already_running", async () => {
+  // A job queued before the deploy is doomed (dispatchNext fails it). Dedup
+  // must not answer already_running/conflict pointing at it; the key error wins.
+  const sqlite = freshSqlite();
+  seedQueuedTranslateJob(sqlite, { jobId: "pre-deploy" });
+  sqlite.prepare(`UPDATE pipeline_jobs SET book = 'OBA', start_chapter = 1, end_chapter = 1 WHERE job_id = 'pre-deploy'`).run();
+  const env = freshEnv(sqlite, { JWT_SIGNING_KEY: ROUTE_SIGNING, JWT_ISSUER: ROUTE_ISSUER });
+  const app = routeApp();
+  const tok = await editorToken("1");
+
+  const { res, fetchCount } = await withNoFetch(async (count) => {
+    const res = await app.request("/api/pipelines/start", postReq(tok, START_TRANSLATE), env);
+    return { res, fetchCount: count() };
+  });
+
+  assert.equal(res.status, 409);
+  assert.deepEqual(await res.json(), { error: "ai_provider_not_configured" });
+  assert.equal(fetchCount, 0);
+  const jobs = sqlite.prepare(`SELECT job_id, state FROM pipeline_jobs`).all();
+  assert.deepEqual(jobs.map((j) => j.job_id), ["pre-deploy"], "nothing new was enqueued");
+});
+
 test("POST /start (#551): translate with an org key gets past the key check and carries the key to the bot", async () => {
   const sqlite = freshSqlite();
   await seedByoKey(sqlite, { provider: "openai", model: "gpt-5.5" });
