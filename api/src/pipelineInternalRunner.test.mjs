@@ -249,21 +249,8 @@ test("dispatchNext: every gate-off case still dispatches to the bot, byte-for-by
     assert.equal(row.upstream_job_id, "bot-1", "the BOT's job id, as before");
     assert.equal(row.runner, null, "proxy rows are left unstamped (NULL reads as proxy)");
   }
-  // Mode on, but no BYO key (the shared uW subscription).
-  {
-    const sqlite = freshSqlite();
-    seedQueuedTranslateJob(sqlite);
-    const env = freshEnv(sqlite, { PIPELINE_MODE: "internal" });
-    await withFetch(
-      async () => new Response(JSON.stringify({ jobId: "bot-2" }), { status: 200 }),
-      async (calls) => {
-        await dispatchNext(env);
-        assert.equal(calls.length, 1, "a shared-subscription job stays on the bot");
-      },
-    );
-    assert.equal(env.created.length, 0);
-    assert.equal(jobRow(sqlite).runner, null);
-  }
+  // (Mode on but no org key used to ride the shared uW subscription on the bot.
+  // It now fails at dispatch instead: see the #551 tests below.)
   // Mode on, BYO key, but a provider with no in-Worker adapter.
   {
     const sqlite = freshSqlite();
@@ -364,10 +351,12 @@ test("dispatchNext (internal, no BT_API_TOKEN): still creates the instance — t
 test("dispatchNext (proxy, no BT_API_TOKEN): fails the job cleanly instead of POSTing `Bearer undefined` (#467)", async () => {
   const sqlite = freshSqlite();
   seedQueuedTranslateJob(sqlite);
-  // No BYO key → this translate job routes to the Fly proxy. With no bot token
-  // there is nothing to POST to, so it must fail closed rather than send a bogus
-  // bearer. (Removing the top-of-function early return means the row now gets
-  // claimed and then failed here, freeing the single slot.)
+  // An org key for a provider with no in-Worker adapter → this translate job
+  // routes to the Fly proxy. With no bot token there is nothing to POST to, so
+  // it must fail closed rather than send a bogus bearer. (Removing the
+  // top-of-function early return means the row now gets claimed and then failed
+  // here, freeing the single slot.)
+  await seedByoKey(sqlite, { provider: "openai", model: "gpt-5.5" });
   const env = freshEnv(sqlite, { PIPELINE_MODE: "internal", BT_API_TOKEN: undefined });
 
   const fetchCount = await withNoFetch(async (count) => {
@@ -380,6 +369,147 @@ test("dispatchNext (proxy, no BT_API_TOKEN): fails the job cleanly instead of PO
   const row = jobRow(sqlite);
   assert.equal(row.state, "failed", "the slot is freed, not held on a job that can never run");
   assert.equal(row.error_kind, "pipeline_api_disabled");
+});
+
+// ---------------------------------------------------------------------------
+// #551 part A: translate jobs run on the org's own key or not at all. There is
+// no shared unfoldingWord account to fall back to.
+// ---------------------------------------------------------------------------
+
+function seedDefaultProviderRow(sqlite) {
+  // What DELETE /api/ai-provider leaves behind: provider='default', no key.
+  sqlite
+    .prepare(
+      `INSERT INTO ai_provider_config (id, provider, model, key_ciphertext, key_iv, key_hint, version, updated_at)
+       VALUES (1, 'default', NULL, NULL, NULL, NULL, 2, 0)`,
+    )
+    .run();
+}
+
+test("dispatchNext (#551): a queued translate job whose org has no key fails, and nothing is posted to the bot", async () => {
+  for (const [label, seed] of [
+    ["no ai_provider_config row", () => {}],
+    ["provider='default' (key cleared)", seedDefaultProviderRow],
+  ]) {
+    for (const mode of [undefined, "internal"]) {
+      const sqlite = freshSqlite();
+      seedQueuedTranslateJob(sqlite);
+      seed(sqlite);
+      const env = freshEnv(sqlite, mode ? { PIPELINE_MODE: mode } : {});
+
+      const fetchCount = await withNoFetch(async (count) => {
+        await dispatchNext(env);
+        return count();
+      });
+
+      const tag = `${label}, PIPELINE_MODE=${mode ?? "unset"}`;
+      assert.equal(fetchCount, 0, `${tag}: no upstream POST on the shared account`);
+      assert.equal(env.created.length, 0, `${tag}: no Workflow instance`);
+      const row = jobRow(sqlite);
+      assert.equal(row.state, "failed", `${tag}: the job fails loudly instead of waiting forever`);
+      assert.equal(row.error_kind, "sdk_error", tag);
+      assert.equal(row.error_message, "ai_provider_unavailable: ai_provider_not_configured", tag);
+    }
+  }
+});
+
+test("dispatchNext (#551): a legacy notes job with no org key still dispatches to the bot, unchanged (part B is separate)", async () => {
+  const sqlite = freshSqlite();
+  sqlite
+    .prepare(
+      `INSERT INTO pipeline_jobs
+         (job_id, user_id, pipeline_type, book, start_chapter, end_chapter,
+          session_key, state, options_json, created_at, updated_at)
+       VALUES ('job-notes', 1, 'notes', 'OBA', 1, 1, 'sess-notes', 'queued', NULL, 100, 100)`,
+    )
+    .run();
+  const env = freshEnv(sqlite, { PIPELINE_MODE: "internal" });
+  await withFetch(
+    async () => new Response(JSON.stringify({ jobId: "bot-notes" }), { status: 200 }),
+    async (calls) => {
+      await dispatchNext(env);
+      assert.equal(calls.length, 1, "the notes job still POSTs to the bot");
+      const body = JSON.parse(calls[0].init.body);
+      assert.equal(body.pipelineType, "notes");
+      assert.equal("apiKey" in body, false, "no key fields on a legacy job");
+      assert.equal("provider" in body, false);
+    },
+  );
+  const row = jobRow(sqlite, "job-notes");
+  assert.equal(row.state, "running");
+  assert.equal(row.upstream_job_id, "bot-notes");
+});
+
+function postReq(token, body) {
+  return {
+    method: "POST",
+    headers: { cookie: `be_access=${token}`, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  };
+}
+
+const START_TRANSLATE = {
+  pipelineType: "translate",
+  book: "OBA",
+  startChapter: 1,
+  endChapter: 1,
+  sessionKey: "sess-start-551",
+};
+
+test("POST /start (#551): translate with no org key is refused with 409 ai_provider_not_configured; nothing is enqueued", async () => {
+  for (const [label, seed] of [
+    ["no ai_provider_config row", () => {}],
+    ["provider='default' (key cleared)", seedDefaultProviderRow],
+  ]) {
+    // With and without the bot token: "add a key" is the more actionable error,
+    // so it must win over pipeline_api_disabled.
+    for (const token of ["tok", undefined]) {
+      const sqlite = freshSqlite();
+      seed(sqlite);
+      const env = freshEnv(sqlite, {
+        BT_API_TOKEN: token,
+        JWT_SIGNING_KEY: ROUTE_SIGNING,
+        JWT_ISSUER: ROUTE_ISSUER,
+      });
+      const app = routeApp();
+      const tok = await editorToken("1");
+      const tag = `${label}, BT_API_TOKEN=${token ? "set" : "unset"}`;
+
+      const { res, fetchCount } = await withNoFetch(async (count) => {
+        const res = await app.request("/api/pipelines/start", postReq(tok, START_TRANSLATE), env);
+        return { res, fetchCount: count() };
+      });
+
+      assert.equal(res.status, 409, tag);
+      assert.deepEqual(await res.json(), { error: "ai_provider_not_configured" }, tag);
+      assert.equal(fetchCount, 0, `${tag}: no fetch`);
+      assert.equal(env.created.length, 0, `${tag}: no Workflow instance`);
+      const jobs = sqlite.prepare(`SELECT COUNT(*) AS n FROM pipeline_jobs`).all()[0].n;
+      assert.equal(jobs, 0, `${tag}: no pipeline_jobs row was enqueued`);
+    }
+  }
+});
+
+test("POST /start (#551): translate with an org key gets past the key check and carries the key to the bot", async () => {
+  const sqlite = freshSqlite();
+  await seedByoKey(sqlite, { provider: "openai", model: "gpt-5.5" });
+  const env = freshEnv(sqlite, { JWT_SIGNING_KEY: ROUTE_SIGNING, JWT_ISSUER: ROUTE_ISSUER });
+  const app = routeApp();
+  const tok = await editorToken("1");
+
+  await withFetch(
+    async () => new Response(JSON.stringify({ jobId: "bot-start", provider: "openai" }), { status: 200 }),
+    async (calls) => {
+      const res = await app.request("/api/pipelines/start", postReq(tok, START_TRANSLATE), env);
+      assert.equal(res.status, 200, await res.clone().text());
+      assert.equal((await res.json()).status, "running");
+      assert.equal(calls.length, 1, "dispatched to the bot");
+      const body = JSON.parse(calls[0].init.body);
+      assert.equal(body.provider, "openai");
+      assert.equal(body.model, "gpt-5.5");
+      assert.equal(body.apiKey, API_KEY, "the org's own key is what the bot runs on");
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------

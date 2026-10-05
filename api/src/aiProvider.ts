@@ -1,6 +1,7 @@
 // Per-organization AI provider config (migration 0066): which model drafts this
-// org's AI output, and this org's own API key when they bring one instead of
-// riding the shared unfoldingWord subscription.
+// org's AI output, and this org's own API key. Translate jobs run on this key
+// or not at all (#551): there is no shared unfoldingWord account to fall back
+// to, so usage bills to the org.
 //
 // The key is write-only across the API boundary. It arrives once in a PUT body,
 // is encrypted immediately (aiKeyCrypto.ts), and only ever leaves as a 4-char
@@ -20,9 +21,10 @@ import { requireAdmin, currentUserId } from "./auth.ts";
 import { parseIfMatch } from "./translationMemoryLib.ts";
 import { wrappingKeyAvailable, encryptApiKey } from "./aiKeyCrypto.ts";
 
-// 'default' = the shared uW subscription (no BYO key). The rest are bring-your-
-// own-key providers. Served to the client so the picker can't drift from the
-// server's validation.
+// 'default' = no org key configured (what Clear leaves behind); translate jobs
+// refuse to run in that state (#551). The rest are bring-your-own-key
+// providers. Served to the client so the picker can't drift from the server's
+// validation.
 export const AI_PROVIDERS = ["default", "claude", "openai", "gemini", "xai"] as const;
 export type AiProvider = (typeof AI_PROVIDERS)[number];
 
@@ -54,32 +56,37 @@ const SELECT_ROW = `SELECT id, provider, model, key_ciphertext, key_iv, key_hint
 // Read the singleton. An unmigrated workspace DB degrades to "no provider
 // configured" (same as provider='default') instead of 500ing every AI dispatch —
 // same narrow table-missing tolerance as getBookSourceRanges. Any other read
-// error rethrows so a real failure isn't silently read as "use the shared key".
+// error rethrows so a real failure isn't silently read as "no key configured".
 export async function getAiProviderConfig(db: D1Database): Promise<AiProviderRow | null> {
   try {
     return (await db.prepare(SELECT_ROW).first<AiProviderRow>()) ?? null;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (/no such table/i.test(msg)) {
-      console.warn("ai_provider_config missing (workspace not migrated); using the shared provider");
+      console.warn("ai_provider_config missing (workspace not migrated); treating as no AI key configured");
       return null;
     }
     throw e;
   }
 }
 
-// What dispatch should do with the stored config.
-//   none       — ride the shared uW subscription (row absent or provider=default)
-//   error      — a BYO provider is configured but unusable; the caller must fail
-//                loudly rather than silently billing the shared subscription
+// What dispatch should do with the stored config. There is no third "use the
+// shared account" outcome: that fallback was removed in #551, so every AI run
+// for an org bills to the org's own key.
+//   error      — the job must not run. Either no key is configured at all
+//                (`ai_provider_not_configured`: row absent or provider=default),
+//                or a BYO provider is configured but unusable. The caller fails
+//                loudly; it never falls back to another account.
 //   configured — decrypt `ciphertext`/`iv` and call `provider` with `model`
 export type DispatchAi =
-  | { kind: "none" }
-  | { kind: "error"; reason: "ai_key_encryption_unavailable" | "api_key_missing" | "model_missing" }
+  | {
+      kind: "error";
+      reason: "ai_provider_not_configured" | "ai_key_encryption_unavailable" | "api_key_missing" | "model_missing";
+    }
   | { kind: "configured"; provider: string; model: string | null; ciphertext: string; iv: string };
 
 export function resolveDispatchAi(row: AiProviderRow | null, wrappingKeySecret: string | undefined): DispatchAi {
-  if (!row || row.provider === "default") return { kind: "none" };
+  if (!row || row.provider === "default") return { kind: "error", reason: "ai_provider_not_configured" };
   if (!row.key_ciphertext || !row.key_iv) return { kind: "error", reason: "api_key_missing" };
   if (!row.model) return { kind: "error", reason: "model_missing" };
   if (!wrappingKeyAvailable(wrappingKeySecret)) return { kind: "error", reason: "ai_key_encryption_unavailable" };
@@ -236,9 +243,9 @@ aiProvider.put("/", requireAdmin, async (c) => {
   if (!parsed.success) return c.json({ error: "validation_failed", issues: parsed.error.issues }, 400);
   const { provider, model, apiKey } = parsed.data;
 
-  // provider='default' IS the Clear action: back to the shared subscription, no
-  // model, no key. A model or key alongside it is a confused client, not a
-  // partial intent to honor.
+  // provider='default' IS the Clear action: no model, no key, so translate jobs
+  // stop until a new key is entered (#551). A model or key alongside it is a
+  // confused client, not a partial intent to honor.
   if (provider === "default") {
     if (model !== undefined || apiKey !== undefined) return c.json({ error: "unexpected_fields" }, 400);
     const existing = await getAiProviderConfig(c.env.DB);

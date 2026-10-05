@@ -730,7 +730,7 @@ export async function batchTranslateStep(deps: StepDeps, params: TranslateWorkfl
   const row = await getAiProviderConfig(deps.db as unknown as D1Database);
   const ai = resolveDispatchAi(row, deps.wrappingKey);
   if (ai.kind !== "configured") {
-    throw new TranslateStepError("ai_provider_unavailable", ai.kind === "error" ? ai.reason : "no BYO provider configured for this workspace");
+    throw new TranslateStepError("ai_provider_unavailable", ai.reason);
   }
   if (ai.provider !== params.provider) {
     throw new TranslateStepError("ai_provider_changed", `ai_provider_config now names '${ai.provider}' but this job was dispatched for '${params.provider}'`);

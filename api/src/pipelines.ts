@@ -673,13 +673,15 @@ export async function dispatchNext(env: Env): Promise<void> {
 
   // Per-org AI provider config (migration 0066): translate jobs only. Read
   // fresh at every dispatch — never cached — so an admin's config change
-  // applies to jobs that were already queued. A BYO provider that can't be
-  // decrypted must fail the job, never silently fall back to the shared
-  // subscription (billing correctness).
+  // applies to jobs that were already queued. A translate job runs on the
+  // org's own key or not at all (#551): no key configured, or a BYO provider
+  // that can't be used or decrypted, fails the job. It never falls back to a
+  // shared account (billing correctness). This also fails keyless jobs that
+  // were queued before /start began refusing them.
   let aiApiKey: string | undefined; // plaintext lives ONLY in this function scope
   let aiProvider: string | undefined;
   let aiModel: string | undefined;
-  let dispatchAi: DispatchAi = { kind: "none" };
+  let dispatchAi: DispatchAi | null = null; // null = not a translate job
   if (job.pipeline_type === "translate") {
     const row = await getAiProviderConfig(env.DB);
     const ai = resolveDispatchAi(row, env.AI_KEY_WRAPPING_KEY);
@@ -688,19 +690,17 @@ export async function dispatchNext(env: Env): Promise<void> {
       return;
     }
     dispatchAi = ai;
-    if (ai.kind === "configured") {
-      try {
-        aiApiKey = await decryptApiKey(env.AI_KEY_WRAPPING_KEY!, ai.ciphertext, ai.iv);
-      } catch {
-        await fail("sdk_error", "ai_provider_key_decrypt_failed");
-        return;
-      }
-      aiProvider = ai.provider;
-      // Non-null in practice: resolveDispatchAi returns kind:'error'
-      // ("model_missing") before 'configured' when the row has no model.
-      aiModel = ai.model ?? undefined;
-      Object.assign(upstreamBody, { provider: ai.provider, model: ai.model, apiKey: aiApiKey });
+    try {
+      aiApiKey = await decryptApiKey(env.AI_KEY_WRAPPING_KEY!, ai.ciphertext, ai.iv);
+    } catch {
+      await fail("sdk_error", "ai_provider_key_decrypt_failed");
+      return;
     }
+    aiProvider = ai.provider;
+    // Non-null in practice: resolveDispatchAi returns kind:'error'
+    // ("model_missing") before 'configured' when the row has no model.
+    aiModel = ai.model ?? undefined;
+    Object.assign(upstreamBody, { provider: ai.provider, model: ai.model, apiKey: aiApiKey });
   }
 
   // Internal runner fork (docs/translate-internal-runner.md §D.1). Everything
@@ -709,7 +709,7 @@ export async function dispatchNext(env: Env): Promise<void> {
   // half differs. The internal branch never touches `upstreamBody` (it was built
   // for the bot's POST and carries the plaintext key, which must not travel) and
   // never reaches the fetch block below.
-  if (translateRunner(env, job, dispatchAi, options) === "internal") {
+  if (dispatchAi && translateRunner(env, job, dispatchAi, options) === "internal") {
     // params.workspace is REQUIRED by the Workflow: it re-points its own env on
     // the first line of run(), because a Workflow does NOT inherit the
     // per-request env clone. "default" is the implicit single-workspace slug
@@ -1694,20 +1694,32 @@ pipelines.post("/start", requireEditor, async (c) => {
     }
   }
 
+  // Org-key gate (#551): a translate job runs on the org's own AI key or not at
+  // all, so with no key configured (no row, or provider='default' after Clear)
+  // refuse it here, before anything is enqueued. It sits before the bot-token
+  // gate because "an admin needs to add a key" is the more actionable error.
+  // A BYO row that is configured but broken (no key or model, wrapping key
+  // unavailable) is not refused here; dispatchNext fails it with its reason.
+  let translateAi: DispatchAi | null = null;
+  if (parsed.data.pipelineType === "translate") {
+    const aiRow = await getAiProviderConfig(c.env.DB);
+    translateAi = resolveDispatchAi(aiRow, c.env.AI_KEY_WRAPPING_KEY);
+    if (translateAi.kind === "error" && translateAi.reason === "ai_provider_not_configured") {
+      return c.json({ error: "ai_provider_not_configured" }, 409);
+    }
+  }
+
   // Bot-token gate (#467), now scoped to jobs that need the bot. A translate
   // job that resolves to the internal runner (BYO key, PIPELINE_MODE=internal,
   // a TSV resource on a ported provider) never touches Fly, so it may start with
-  // no BT_API_TOKEN. Everything else — generate/notes/tqs, a shared-subscription
-  // translate, an un-ported provider, an article resource — still routes to the
-  // proxy and fails closed here, before the job is ever enqueued. mergedOptions
-  // carries the server-resolved resourceType translateRunner reads.
+  // no BT_API_TOKEN. Everything else — generate/notes/tqs, an un-ported
+  // provider, an article resource — still routes to the proxy and fails closed
+  // here, before the job is ever enqueued. mergedOptions carries the
+  // server-resolved resourceType translateRunner reads.
   if (!c.env.BT_API_TOKEN) {
-    let runner: "proxy" | "internal" = "proxy";
-    if (parsed.data.pipelineType === "translate") {
-      const aiRow = await getAiProviderConfig(c.env.DB);
-      const ai = resolveDispatchAi(aiRow, c.env.AI_KEY_WRAPPING_KEY);
-      runner = translateRunner(c.env, { pipeline_type: "translate" }, ai, mergedOptions);
-    }
+    const runner = translateAi
+      ? translateRunner(c.env, { pipeline_type: "translate" }, translateAi, mergedOptions)
+      : "proxy";
     if (runner !== "internal") {
       return c.json({ error: "pipeline_api_disabled" }, 503);
     }
