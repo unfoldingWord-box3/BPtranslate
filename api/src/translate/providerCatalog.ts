@@ -14,9 +14,12 @@
 // `estimateCost` (translate-llm.js:530-541) lives here because it is a pure
 // catalog lookup; the LLM adapters (step 2) import it.
 //
-// Prices are USD per 1M tokens as listed in the bot catalog on 2026-09-15.
-// Verify against the vendor price page before relying on a report's
-// estimatedCostUsd for billing.
+// Prices are USD per 1M tokens as listed in the bot catalog on 2026-09-15,
+// except the Claude entries: those were checked against Anthropic's pricing
+// page (platform.claude.com/docs/en/about-claude/pricing) on 2026-10-05 and
+// deliberately differ from the bot catalog, which still had Haiku 4.5 at
+// $0.80/$4 and Sonnet 5 at $3/$15 (issue #548). Verify against the vendor
+// price page before relying on a report's estimatedCostUsd for billing.
 
 export type ModelPrice = { label: string; inputPer1M: number; outputPer1M: number };
 
@@ -39,8 +42,8 @@ export const PROVIDER_CATALOG: Record<CatalogProvider, ProviderConfig> = {
     },
     models: {
       "claude-opus-5": { label: "Claude Opus 5", inputPer1M: 5.0, outputPer1M: 25.0 },
-      "claude-sonnet-5": { label: "Claude Sonnet 5", inputPer1M: 3.0, outputPer1M: 15.0 },
-      "claude-haiku-4-5-20251001": { label: "Claude Haiku 4.5", inputPer1M: 0.8, outputPer1M: 4.0 },
+      "claude-sonnet-5": { label: "Claude Sonnet 5", inputPer1M: 2.0, outputPer1M: 10.0 },
+      "claude-haiku-4-5-20251001": { label: "Claude Haiku 4.5", inputPer1M: 1.0, outputPer1M: 5.0 },
     },
   },
   openai: {

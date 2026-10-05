@@ -62,11 +62,13 @@ test("assertProviderModel names the valid aliases and models on failure", () => 
 });
 
 test("estimateCost prices a call off the catalog", () => {
-  // Claude Sonnet 5: $3 / $15 per 1M → 1M in + 100k out = 3 + 1.5
-  assert.equal(estimateCost("claude", "claude-sonnet-5", { inputTokens: 1_000_000, outputTokens: 100_000 }), 4.5);
+  // Claude Sonnet 5: $2 / $10 per 1M → 1M in + 100k out = 2 + 1.0
+  assert.equal(estimateCost("claude", "claude-sonnet-5", { inputTokens: 1_000_000, outputTokens: 100_000 }), 3.0);
+  // Claude Haiku 4.5: $1 / $5 per 1M → 1M in + 1M out = 1 + 5 (issue #548)
+  assert.equal(estimateCost("claude", "claude-haiku-4-5-20251001", { inputTokens: 1_000_000, outputTokens: 1_000_000 }), 6.0);
   // Alias-resolved model is priced under its concrete id.
   const haiku = estimateCost("claude", "claude-haiku-4-5", { inputTokens: 500_000, outputTokens: 250_000 });
-  assert.ok(Math.abs(haiku - (0.4 + 1.0)) < 1e-9, String(haiku));
+  assert.ok(Math.abs(haiku - (0.5 + 1.25)) < 1e-9, String(haiku));
   assert.equal(estimateCost("xai", "grok-4.3", { inputTokens: 0, outputTokens: 0 }), 0);
   assert.equal(estimateCost("openai", "gpt-5.6-luna", null), 0);
 });
