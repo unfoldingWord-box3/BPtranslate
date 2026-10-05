@@ -41,6 +41,7 @@ import type {
 import { getSessionKey, pipelineStore, type PipelineJob } from "../sync/pipelineStore";
 import { currentPipelineUserId } from "../sync/pipelineSession";
 import { parseChapterRange } from "../lib/refParser";
+import { isAiProviderNotConfigured } from "../lib/aiProviderErrors";
 import { useTranslation } from "react-i18next";
 import { useProjectConfig, isTranslationProject } from "../hooks/useProjectConfig";
 
@@ -356,6 +357,9 @@ export function PipelineMenu({ book, chapter, onMessage, onImported }: Props) {
             onMessage?.(t("pipeline.anotherTranslatorStarted", { jobId: body.jobId ?? t("pipeline.unknown") }));
             setConfirm(null);
           }
+        } else if (isAiProviderNotConfigured(e)) {
+          onMessage?.(t("pipeline.aiKeyNotConfigured"));
+          setConfirm(null);
         } else if (e.status === 401) {
           onMessage?.(t("pipeline.signInToStart"));
         } else {

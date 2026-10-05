@@ -34,6 +34,7 @@ import { pipelineStore, getSessionKey } from "../sync/pipelineStore";
 import { useProjectConfig, isTranslationProject } from "../hooks/useProjectConfig";
 import { useArticles } from "../hooks/useArticles";
 import { useArticleRailCollapsed } from "../lib/editorPrefs";
+import { isAiProviderNotConfigured } from "../lib/aiProviderErrors";
 import { MarkdownView } from "./MarkdownView";
 
 type ArticleState = "ai_draft" | "edited" | "validated" | null;
@@ -713,9 +714,13 @@ function ArticleEditor({
     } catch (e) {
       setTranslating(false);
       const body = (e as { body?: { error?: string } } | null)?.body;
-      setErrorMsg(body?.error ?? (e instanceof Error ? e.message : String(e)));
+      setErrorMsg(
+        isAiProviderNotConfigured(e)
+          ? t("pipeline.aiKeyNotConfigured")
+          : (body?.error ?? (e instanceof Error ? e.message : String(e))),
+      );
     }
-  }, [resource, articleId]);
+  }, [resource, articleId, t]);
 
   const partLabel = useCallback(
     (part: ArticleUnit): string => {

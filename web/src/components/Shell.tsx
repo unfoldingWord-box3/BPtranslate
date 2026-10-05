@@ -58,6 +58,7 @@ import {
 } from "../lib/alignmentDelta";
 import { buildVerseIndex, concatSourceRange, formatVerseLabel, noteCoveredVerses } from "../lib/verseRange";
 import { buildTnQuickRequest } from "../lib/tnQuickRequest";
+import { isAiProviderNotConfigured } from "../lib/aiProviderErrors";
 import { isApprovableRow } from "../lib/reviewApproval";
 import { reviewStatePatches, reviewStateSnapshot } from "../lib/reviewStateSweep";
 import { versionLabel } from "../lib/versionLabels";
@@ -1018,7 +1019,9 @@ export function Shell({
           return next;
         });
         const body = (e as { body?: { error?: string } } | null)?.body;
-        const msg = body?.error ?? (e instanceof Error ? e.message : t("appShell.common.unknownError"));
+        const msg = isAiProviderNotConfigured(e)
+          ? t("pipeline.aiKeyNotConfigured")
+          : (body?.error ?? (e instanceof Error ? e.message : t("appShell.common.unknownError")));
         pushPipelineToast(t("shell.couldntTranslateNote", { message: msg }), "error");
       }
     },
@@ -1143,7 +1146,9 @@ export function Shell({
           return next;
         });
         const body = (e as { body?: { error?: string } } | null)?.body;
-        const msg = body?.error ?? (e instanceof Error ? e.message : t("appShell.common.unknownError"));
+        const msg = isAiProviderNotConfigured(e)
+          ? t("pipeline.aiKeyNotConfigured")
+          : (body?.error ?? (e instanceof Error ? e.message : t("appShell.common.unknownError")));
         pushPipelineToast(t("shell.couldntTranslateNote", { message: msg }), "error");
       }
     },

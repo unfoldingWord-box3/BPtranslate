@@ -132,6 +132,7 @@ import {
   tnRedoBlockedReason,
   tnRedoUsesPipeline,
 } from "../../lib/tnRedo";
+import { isAiProviderNotConfigured } from "../../lib/aiProviderErrors";
 import { resolveFlowChipStatus, flowChipKind, type FlowChipStatus } from "../../lib/flowStatusChip";
 import { flowLaneSegmentsAcross, type FlowSegment } from "../../lib/flowHighlight";
 import { isHebrewBook } from "../../lib/sourceSearch";
@@ -1286,7 +1287,12 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
         err instanceof ApiError && err.body && typeof err.body === "object" && "error" in err.body
           ? String((err.body as { error?: unknown }).error)
           : "";
-      if (redoErrorIsAiUnconfigured(code)) {
+      if (isAiProviderNotConfigured(err)) {
+        // Intro Redo runs the translate pipeline, which needs this org's own AI
+        // key (#551). Not latched like the case below: a verse note's Redo goes
+        // through tn-quick, which this does not affect.
+        say(t("pipeline.aiKeyNotConfigured"));
+      } else if (redoErrorIsAiUnconfigured(code)) {
         // Calm and specific: this workspace simply has no AI drafting yet. This
         // is the ONE case that greys Redo permanently — it's genuinely not set
         // up and won't be mid-session. Nothing else on the screen is affected.

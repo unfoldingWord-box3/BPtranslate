@@ -170,6 +170,7 @@ import { pipelineStore, getSessionKey } from "../../sync/pipelineStore";
 import { MarkdownView } from "../MarkdownView";
 import { realChapterNumbers } from "../../lib/bookSummary";
 import { resolveFlowChipStatus, flowChipKind, type FlowChipStatus } from "../../lib/flowStatusChip";
+import { isAiProviderNotConfigured } from "../../lib/aiProviderErrors";
 
 export interface TranslateWordsScreenProps extends FlowScreenContext {
   book: string;
@@ -1382,8 +1383,11 @@ function ArticleDetail({
       setRedoing(false);
       const body = (e as { body?: { error?: string } } | null)?.body;
       const code = body?.error ?? "";
+      // 409 ai_provider_not_configured = this org has no AI key of its own (#551).
       // 503 pipeline_api_disabled = BT_API_TOKEN unset (api/src/pipelines.ts:995).
-      if ((e instanceof ApiError && e.status === 503) || code === "pipeline_api_disabled") {
+      if (isAiProviderNotConfigured(e)) {
+        setAiUnavailable(t("pipeline.aiKeyNotConfigured"));
+      } else if ((e instanceof ApiError && e.status === 503) || code === "pipeline_api_disabled") {
         setAiUnavailable(t("flowWords.aiUnavailable"));
       } else {
         setNotice({

@@ -620,7 +620,6 @@
       "replace": "Ganti",
       "clear": "Hapus",
       "clearConfirmTitle": "Hapus kunci API?",
-      "clearConfirmBody": "Ini akan menghapus kunci yang tersimpan dan mengalihkan organisasi ini kembali ke penyedia default (langganan uW).",
       "clearConfirmConfirm": "Hapus kunci",
       "encryptionUnavailable": "Membawa kunci AI sendiri belum diaktifkan pada deployment ini — admin perlu mengatur secret AI_KEY_WRAPPING_KEY.",
       "notMigrated": "Basis data organisasi ini belum menjalankan migrasi terbaru — admin perlu menerapkan migrasi penyedia AI sebelum kunci dapat disimpan.",
