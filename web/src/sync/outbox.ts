@@ -736,6 +736,7 @@ async function dispatch(op: OutboxOp): Promise<Result> {
           op.target.id,
           op.expectedVersion,
           op.target.book,
+          op.queuedAt,
         );
       } else {
         updated = await api.patchRow(
@@ -746,6 +747,7 @@ async function dispatch(op: OutboxOp): Promise<Result> {
           {
             ...(op.restoredFromVersion !== undefined ? { restoredFromVersion: op.restoredFromVersion } : {}),
             book: op.target.book,
+            queuedAt: op.queuedAt,
           },
         );
       }

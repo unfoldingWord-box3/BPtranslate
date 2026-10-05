@@ -434,6 +434,29 @@ function composeSignals(signals: AbortSignal[]): AbortSignal {
   return controller.signal;
 }
 
+// Diagnostics for row writes, recorded server-side only when the write 409s
+// (api/migrations/0074_row_conflict_log.sql). A rejected save leaves no
+// edit_log trace, so without these a "someone else changed this note" report
+// can't tell a leftover op from an earlier session (old queuedAt) from a second
+// open tab (two tab ids) from a live race.
+const TAB_ID =
+  typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID().slice(0, 8)
+    : Math.random().toString(36).slice(2, 10);
+
+function rowWriteDiagnosticHeaders(queuedAt: number | undefined): Record<string, string> {
+  const headers: Record<string, string> = { "X-Tab-Id": TAB_ID };
+  if (typeof queuedAt === "number" && Number.isFinite(queuedAt)) {
+    headers["X-Op-Queued-At"] = String(Math.floor(queuedAt));
+  }
+  if (typeof location !== "undefined" && location.hash) {
+    // Header values must be ISO-8859-1; the hash route is ASCII in practice
+    // (#/notes/LUK/7), but strip anything else rather than throw.
+    headers["X-Client-Route"] = location.hash.split("?")[0].replace(/[^\x20-\x7e]/g, "").slice(0, 120);
+  }
+  return headers;
+}
+
 async function request<T>(
   path: string,
   init?: RequestInitWithTimeout,
@@ -1932,11 +1955,11 @@ export const api = {
     id: string,
     expectedVersion: number,
     patch: Record<string, unknown>,
-    opts: { restoredFromVersion?: number | null; book: string },
+    opts: { restoredFromVersion?: number | null; book: string; queuedAt?: number },
   ) =>
     request<T>(`/api/rows/${kind}/${encodeURIComponent(id)}?book=${encodeURIComponent(opts.book)}`, {
       method: "PATCH",
-      headers: { "If-Match": String(expectedVersion) },
+      headers: { "If-Match": String(expectedVersion), ...rowWriteDiagnosticHeaders(opts.queuedAt) },
       body: JSON.stringify(
         typeof opts.restoredFromVersion === "number"
           ? { ...patch, restored_from_version: opts.restoredFromVersion }
@@ -1944,10 +1967,10 @@ export const api = {
       ),
     }),
 
-  deleteRow: (kind: RowKind, id: string, expectedVersion: number, book: string) =>
+  deleteRow: (kind: RowKind, id: string, expectedVersion: number, book: string, queuedAt?: number) =>
     request<{ ok: true }>(`/api/rows/${kind}/${encodeURIComponent(id)}?book=${encodeURIComponent(book)}`, {
       method: "DELETE",
-      headers: { "If-Match": String(expectedVersion) },
+      headers: { "If-Match": String(expectedVersion), ...rowWriteDiagnosticHeaders(queuedAt) },
     }),
 
   // Legacy: alias for setPreserveNote(id, true). Server still accepts it for

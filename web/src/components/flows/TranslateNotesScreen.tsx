@@ -104,7 +104,7 @@ import ViewColumnIcon from "@mui/icons-material/ViewColumn";
 
 import { LockBanner } from "./FlowBanners";
 import { FlowStatusChip, type FlowStatusKind } from "./FlowStatusChip";
-import { isAquiferDraftRow, unescapeNewlines, waitForOp } from "./translateShared";
+import { escapeNewlines, isAquiferDraftRow, unescapeNewlines, waitForOp } from "./translateShared";
 import { useSwipeNav } from "./useSwipeNav";
 import { UltAlignmentStrip } from "./UltAlignmentStrip";
 import { buildAlignmentStrip } from "./alignmentStripModel";
@@ -563,7 +563,13 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   const introRedoTimerRef = useRef<number | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ text: string; severity: "info" | "warning" } | null>(null);
-  const [conflictNotice, setConflictNotice] = useState<string | null>(null);
+  // The row a settled 409 belongs to — not a bare flag. The outbox listener
+  // hears every conflict in this book, including leftover ops from earlier
+  // sessions or another tab; a flag painted "another editor changed THIS
+  // note" on whatever card happened to be open (2026-10-03 report). Keyed by
+  // id, the banner shows only on its own card; conflicts on other rows stay
+  // in SyncStatusBar's conflict panel, which lists every conflicted op.
+  const [conflictRowId, setConflictRowId] = useState<string | null>(null);
   const [chapterLock, setChapterLock] = useState<ChapterLockedBody | null>(null);
   // Sticky once the server tells us the AI proxy isn't configured — there is no
   // capability flag to read up front, so the first 503 is how we learn.
@@ -678,7 +684,10 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
     if (draftValue !== baselineRef.current) {
       void drafts.set(
         key,
-        { patch: { note: draftValue }, baseline: { note: baselineRef.current } },
+        {
+          patch: { note: escapeNewlines(draftValue) },
+          baseline: { note: escapeNewlines(baselineRef.current) },
+        },
         row.version,
         { kind: "row", rowKind: "tn", id: row.id, book, chapter: row.chapter, verse: row.verse },
       );
@@ -745,7 +754,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
         // Only a settled conflict is a question for the user: the outbox
         // auto-heals the healable ones and still notifies listeners.
         if (result.kind === "conflict" && op.status === "conflict") {
-          setConflictNotice(t("flowTranslate.conflictNotice"));
+          setConflictRowId(op.target.id);
         }
       }),
     [book, t],
@@ -986,8 +995,8 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   // to 'edited' server-side. The outbox stays the only thing that talks to
   // /api/rows — we just wait for its result before approving.
   async function saveDraft(target: TnRow): Promise<boolean> {
-    const patch = { note: draftValue };
-    const baseline = { note: baselineRef.current };
+    const patch = { note: escapeNewlines(draftValue) };
+    const baseline = { note: escapeNewlines(baselineRef.current) };
     applyLocalRowPatch("tn", target.id, patch as Partial<TnRow & TqRow>);
     const op = await outbox.enqueueRow("tn", target.id, target.version, patch, { book, baseline });
     const result = await waitForOp(op.id);
@@ -997,7 +1006,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
     }
     if (result.kind !== "ok") {
       if (result.kind === "conflict") {
-        setConflictNotice(t("flowTranslate.conflictNotice"));
+        setConflictRowId(target.id);
       } else if (result.kind === "locked") {
         setChapterLock(result.lockBody);
         say(t("flowTranslate.lockedEditDropped"));
@@ -1313,7 +1322,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   }
 
   function reloadRow() {
-    setConflictNotice(null);
+    setConflictRowId(null);
     void refetch().then(() => setReloadNonce((n) => n + 1));
   }
 
@@ -1525,7 +1534,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
           />
         )}
 
-        {conflictNotice && (
+        {row && conflictRowId === row.id && (
           <Alert
             severity="warning"
             action={
@@ -1534,7 +1543,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
               </Button>
             }
           >
-            {conflictNotice}
+            {t("flowTranslate.conflictNotice")}
           </Alert>
         )}
 
