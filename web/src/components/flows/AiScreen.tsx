@@ -46,6 +46,7 @@ import { PipelineMenu } from "../PipelineMenu";
 import { AiServiceSection } from "../AiServiceSection";
 import { pipelineStore, type PipelineJob } from "../../sync/pipelineStore";
 import { useProjectConfig } from "../../hooks/useProjectConfig";
+import { isAiProviderNotConfigured } from "../../lib/aiProviderErrors";
 import {
   api,
   ApiError,
@@ -312,7 +313,10 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
       });
       setNotice(t("aiStudio.retryQueuedFor", { scope: scopeOf(job, t) }));
     } catch (e) {
-      if (e instanceof ApiError && e.status === 503) {
+      // Checked before the bare 409 below, which would misread it as "already running".
+      if (isAiProviderNotConfigured(e)) {
+        setNotice(t("pipeline.aiKeyNotConfigured"));
+      } else if (e instanceof ApiError && e.status === 503) {
         setAiDisabled(true);
         setNotice(t("aiStudio.retryUnavailable"));
       } else if (e instanceof ApiError && e.status === 409) {

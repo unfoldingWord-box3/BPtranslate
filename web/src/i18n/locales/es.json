@@ -648,7 +648,6 @@
       "replace": "Reemplazar",
       "clear": "Borrar",
       "clearConfirmTitle": "¿Borrar la clave de API?",
-      "clearConfirmBody": "Esto elimina la clave guardada y cambia esta organización de vuelta al proveedor predeterminado (suscripción de uW).",
       "clearConfirmConfirm": "Borrar clave",
       "encryptionUnavailable": "Traer tu propia clave de IA aún no está habilitado en este despliegue — un administrador debe configurar el secreto AI_KEY_WRAPPING_KEY.",
       "notMigrated": "La base de datos de esta organización está atrasada en migraciones — un administrador debe aplicar la migración del proveedor de IA antes de guardar una clave.",

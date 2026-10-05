@@ -481,14 +481,17 @@ const row = (over) => ({
   ...over,
 });
 
-await t("resolveDispatchAi: absent row and provider 'default' both mean 'use the shared subscription'", () => {
-  assert.deepEqual(resolveDispatchAi(null, WRAPPING_KEY), { kind: "none" });
+await t("resolveDispatchAi: absent row and provider 'default' are 'not configured', never a shared-subscription fallback (#551)", () => {
+  const NOT_CONFIGURED = { kind: "error", reason: "ai_provider_not_configured" };
+  assert.deepEqual(resolveDispatchAi(null, WRAPPING_KEY), NOT_CONFIGURED);
   assert.deepEqual(
     resolveDispatchAi(row({ provider: "default", model: null, key_ciphertext: null, key_iv: null }), WRAPPING_KEY),
-    { kind: "none" },
+    NOT_CONFIGURED,
   );
   // A stray key on a default row must not resurrect BYO dispatch.
-  assert.deepEqual(resolveDispatchAi(row({ provider: "default" }), WRAPPING_KEY), { kind: "none" });
+  assert.deepEqual(resolveDispatchAi(row({ provider: "default" }), WRAPPING_KEY), NOT_CONFIGURED);
+  // "Not configured" wins over a missing wrapping key: the actionable fix is "add a key".
+  assert.deepEqual(resolveDispatchAi(null, undefined), NOT_CONFIGURED);
 });
 
 await t("resolveDispatchAi: a configured row yields the ciphertext for the caller to unwrap", () => {

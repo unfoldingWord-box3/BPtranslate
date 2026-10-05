@@ -170,6 +170,7 @@ import { pipelineStore, getSessionKey } from "../../sync/pipelineStore";
 import { MarkdownView } from "../MarkdownView";
 import { realChapterNumbers } from "../../lib/bookSummary";
 import { resolveFlowChipStatus, flowChipKind, type FlowChipStatus } from "../../lib/flowStatusChip";
+import { isAiProviderNotConfigured } from "../../lib/aiProviderErrors";
 
 export interface TranslateWordsScreenProps extends FlowScreenContext {
   book: string;
@@ -1382,8 +1383,13 @@ function ArticleDetail({
       setRedoing(false);
       const body = (e as { body?: { error?: string } } | null)?.body;
       const code = body?.error ?? "";
+      // 409 ai_provider_not_configured = this org has no AI key of its own (#551).
+      // A notice, not the session lock below: an admin can add a key mid-session,
+      // and Redo must work again without a reload.
       // 503 pipeline_api_disabled = BT_API_TOKEN unset (api/src/pipelines.ts:995).
-      if ((e instanceof ApiError && e.status === 503) || code === "pipeline_api_disabled") {
+      if (isAiProviderNotConfigured(e)) {
+        setNotice({ text: t("pipeline.aiKeyNotConfigured"), severity: "warning" });
+      } else if ((e instanceof ApiError && e.status === 503) || code === "pipeline_api_disabled") {
         setAiUnavailable(t("flowWords.aiUnavailable"));
       } else {
         setNotice({

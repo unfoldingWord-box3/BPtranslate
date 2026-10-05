@@ -634,7 +634,6 @@
       "replace": "Badilisha",
       "clear": "Futa",
       "clearConfirmTitle": "Futa ufunguo wa API?",
-      "clearConfirmBody": "Hii itaondoa ufunguo uliohifadhiwa na kurejesha shirika hili kwenye mtoa huduma wa chaguo-msingi (usajili wa uW).",
       "clearConfirmConfirm": "Futa ufunguo",
       "encryptionUnavailable": "Kuleta ufunguo wako wa AI bado hakujawezeshwa kwenye mfumo huu — msimamizi anahitaji kuweka siri ya AI_KEY_WRAPPING_KEY.",
       "notMigrated": "Hifadhidata ya shirika hili haijasasishwa — msimamizi anahitaji kutekeleza uhamishaji wa mtoa AI kabla ufunguo uhifadhiwe.",
