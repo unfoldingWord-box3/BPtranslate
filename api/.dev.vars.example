@@ -21,6 +21,8 @@ BT_API_TOKEN=
 # Base64-encoded 32 random bytes; generate with: openssl rand -base64 32
 # In production set with:
 #   wrangler secret put AI_KEY_WRAPPING_KEY
+# Empty disables the BYO AI key field locally; scripts/worktree-init.sh fills it
+# in for worktrees.
 AI_KEY_WRAPPING_KEY=
 
 # Local-only super-admin list. "dev" is the username /api/auth/dev mints;
