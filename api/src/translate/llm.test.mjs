@@ -353,7 +353,7 @@ test("output_too_long with reasoning enabled retries once at LOW effort, not wit
   assert.equal(call.model, "claude-sonnet-5");
   assert.equal(discardedCalls.length, 1);
   assert.deepEqual(discardedCalls[0].usage, { inputTokens: 1000, outputTokens: 32000 });
-  assert.equal(discardedCalls[0].costUsd, 1000 / 1e6 * 3 + 32000 / 1e6 * 15);
+  assert.equal(discardedCalls[0].costUsd, 1000 / 1e6 * 2 + 32000 / 1e6 * 10);
 });
 
 test("output_too_long: no low-effort retry when the draft already ran at low or without thinking (F1)", async () => {
@@ -404,11 +404,11 @@ test("runOne prices the call off the catalog and reports the resolved model", as
   const { transport } = stubTransport(() => ({ text: wrapped("OUT"), usage: { inputTokens: 1_000_000, outputTokens: 100_000 }, stopReason: "end_turn" }));
   const { call } = await llm.runOne(deps({ transport }), { skill: "translate-tn", taskJson: "{}", packMarkdown: "", sourceText: "" });
   assert.deepEqual(call.usage, { inputTokens: 1_000_000, outputTokens: 100_000 });
-  assert.equal(call.costUsd, 4.5); // Sonnet 5: $3 + $1.5
+  assert.equal(call.costUsd, 3.0); // Sonnet 5: $2 + $1
   const acc = llm.newLlmUsage("claude", null);
   llm.addLlmCall(acc, call);
   llm.addLlmCall(acc, { usage: { inputTokens: 1, outputTokens: 1 }, costUsd: null, model: "claude-sonnet-5" });
-  assert.deepEqual(acc, { provider: "claude", model: "claude-sonnet-5", inputTokens: 1_000_001, outputTokens: 100_001, estimatedCostUsd: 4.5, calls: 2 });
+  assert.deepEqual(acc, { provider: "claude", model: "claude-sonnet-5", inputTokens: 1_000_001, outputTokens: 100_001, estimatedCostUsd: 3.0, calls: 2 });
   assert.equal(llm.newLlmUsage("claude", "x").estimatedCostUsd, null, "missing price stays visible as null, not $0");
 });
 
@@ -715,7 +715,7 @@ test("runBatch counts the discarded truncated draft in llmCalls and calls, separ
   for (const c of res.llmCalls) llm.addLlmCall(usage, c);
   assert.equal(usage.calls, 2);
   assert.equal(usage.outputTokens, 32300);
-  assert.ok(Math.abs(usage.estimatedCostUsd - ((1400 / 1e6) * 3 + (32300 / 1e6) * 15)) < 1e-9, String(usage.estimatedCostUsd));
+  assert.ok(Math.abs(usage.estimatedCostUsd - ((1400 / 1e6) * 2 + (32300 / 1e6) * 10)) < 1e-9, String(usage.estimatedCostUsd));
 });
 
 test("checks_failed and empty_output carry every billed call on the error (F3)", async () => {
@@ -894,7 +894,7 @@ test("runBatch replays all 11 recorded OBA batches: attempts=1, pass-through byt
 
   assert.equal(usage.calls, 11);
   assert.equal(usage.inputTokens, 55000);
-  assert.ok(Math.abs(usage.estimatedCostUsd - (11 * (5000 / 1e6 * 3 + 3000 / 1e6 * 15))) < 1e-9, String(usage.estimatedCostUsd));
+  assert.ok(Math.abs(usage.estimatedCostUsd - (11 * (5000 / 1e6 * 2 + 3000 / 1e6 * 10))) < 1e-9, String(usage.estimatedCostUsd));
   const book = core.mergeChapterIntoBook(null, merged, { startChapter: 1, endChapter: 1, parse: resource.codec.parse, serialize: resource.codec.serialize });
   assert.equal(book, fixture(`${DRY}tn_OBA.tsv`), "merged book byte-identical to the recorded run");
 });
