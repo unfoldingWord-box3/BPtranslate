@@ -4,9 +4,10 @@
 # skips itself when its output already exists.
 #
 # This is the POSIX-bash companion to scripts/worktree-init.ps1 (the Linux box,
-# Ubuntu 26.04, has no pwsh). It does the same work, minus the Windows-only
-# junction-unlink block: junctions were a Windows footgun and Linux never made
-# them, so `git worktree remove` is safe here with nothing to unlink.
+# Ubuntu 26.04, has no pwsh). It does the same work, plus step 1b (the .ps1
+# twin is #554) and minus the Windows-only junction-unlink block: junctions
+# were a Windows footgun and Linux never made them, so `git worktree remove` is
+# safe here with nothing to unlink.
 #
 # WHY A REAL INSTALL (not links): a per-worktree `npm install` carries no path
 # back into main, so a worktree delete can only ever touch its own files. The
@@ -16,7 +17,7 @@
 # sign-in; this script does 1-4 (5 is best-effort):
 #   1. copy api/.dev.vars from main   (JWT_SIGNING_KEY, SUPER_ADMINS=dev)
 #      1b. fill an empty AI_KEY_WRAPPING_KEY with a local value (BYO AI keys)
-#   2. npm install                   (nothing runs without it)
+#   2. npm install                    (nothing runs without it)
 #   3. build web/dist                 (wrangler dev's [assets] aborts without it)
 #   4. apply local D1 migrations      (else POST /api/auth/dev 500s: no such table: users)
 #   5. graft build                    (graft-wired repo; regenerable index)
@@ -26,8 +27,10 @@ set -euo pipefail
 # points at MAIN's .git (from a worktree it's absolute; from main it's ".git"),
 # so its parent is the main checkout. `--show-toplevel` is this worktree's root.
 git_common=$(git rev-parse --git-common-dir)
-main_root=$(cd "$(dirname "$git_common")" && pwd)
-worktree_root=$(git rev-parse --show-toplevel)
+# `pwd -P` on both sides: a symlinked path to main must still compare equal,
+# or the early exit below is skipped and step 1b would write main's .dev.vars.
+main_root=$(cd "$(dirname "$git_common")" && pwd -P)
+worktree_root=$(cd "$(git rev-parse --show-toplevel)" && pwd -P)
 cd "$worktree_root"
 
 if [ "$main_root" = "$worktree_root" ]; then
@@ -52,9 +55,10 @@ fi
 # AI service screen, so no key can be saved in local dev. The value is a
 # throwaway local one: base64 of 32 random bytes, the format aiKeyCrypto.ts
 # requires. Only this worktree's file is written; the early exit above means
-# this never runs in the main checkout. A non-empty value is left alone, so a
-# re-run keeps any key already stored in the worktree's local D1 decryptable.
-if [ -f "$dev_vars_dst" ] \
+# this never runs in the main checkout, and a symlinked .dev.vars (which could
+# point at main's) is skipped. A non-empty value is left alone, so a re-run
+# keeps any key already stored in the worktree's local D1 decryptable.
+if [ -f "$dev_vars_dst" ] && [ ! -L "$dev_vars_dst" ] \
    && ! grep -Eq '^AI_KEY_WRAPPING_KEY=.*[^[:space:]]' "$dev_vars_dst"; then
   if command -v openssl >/dev/null 2>&1; then
     wrapping_key=$(openssl rand -base64 32)
@@ -81,6 +85,8 @@ if [ -f "$dev_vars_dst" ] \
   fi
   unset wrapping_key
   echo "generated a local AI_KEY_WRAPPING_KEY in api/.dev.vars (worktree only)"
+elif [ -L "$dev_vars_dst" ]; then
+  echo "api/.dev.vars is a symlink - not touching AI_KEY_WRAPPING_KEY."
 elif [ -f "$dev_vars_dst" ]; then
   echo "api/.dev.vars already has AI_KEY_WRAPPING_KEY - leaving it alone."
 fi
