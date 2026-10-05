@@ -305,7 +305,7 @@
       "replace": "Replace",
       "clear": "Clear",
       "clearConfirmTitle": "Clear the API key?",
-      "clearConfirmBody": "This removes the stored key. You'll need to choose a provider and enter a new API key before pipeline jobs can run with a BYO key again.",
+      "clearConfirmBody": "This removes the stored key and switches this organization back to the default provider (the shared unfoldingWord subscription). AI jobs keep running on unfoldingWord's account until you enter a new key.",
       "clearConfirmConfirm": "Clear key",
       "encryptionUnavailable": "Bringing your own AI key isn't enabled on this deployment yet — an admin needs to set the AI_KEY_WRAPPING_KEY secret.",
       "notMigrated": "This organization's database is behind on migrations — an admin needs to apply the AI provider migration before a key can be saved.",
