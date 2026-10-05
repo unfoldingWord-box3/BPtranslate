@@ -13,6 +13,13 @@
 // toggles its key directly; clicking an ULT/UST chip toggles its FULL
 // ancestor chain (outer-to-inner zaln milestones), so a click on "first"
 // inside zaln(בַחֹדֶשׁ) > zaln(הָרִאשׁוֹן) toggles both Hebrew words at once.
+//
+// Below md (900px) the same body renders in a Dialog instead — full-screen
+// under the `tablet` breakpoint — because a 560px popper anchored beside a
+// card has nowhere to go on a phone. That is what lets the mobile notes
+// screen (flows/TranslateNotesScreen) reuse it. On a coarse pointer the chips
+// grow to touch size and the shift-click hint becomes a tap hint (shift-click
+// still works wherever a keyboard exists).
 
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -28,7 +35,10 @@ import {
   Divider,
   ClickAwayListener,
   Tooltip,
+  Dialog,
 } from "@mui/material";
+import { useTheme } from "@mui/material/styles";
+import useMediaQuery from "@mui/material/useMediaQuery";
 import CloseIcon from "@mui/icons-material/Close";
 import { collectTargetTokens, buildQuoteFromSelection, tokenKey, collectSourceWordNodes } from "../lib/quoteBuilder";
 import type { HighlightKey } from "../lib/highlight";
@@ -38,10 +48,21 @@ import type { SourceWord } from "../lib/alignment";
 import { isHebrewBook } from "../lib/sourceSearch";
 import { SourceTooltipBody } from "./SourceTooltipBody";
 import { useProjectConfig } from "../hooks/useProjectConfig";
-import { versionLabel } from "../lib/versionLabels";
+import { versionIsRtl, versionLabel } from "../lib/versionLabels";
 
 // Which row a shift-click range is anchored in. A range never spans rows.
-type Row = "src" | "ult" | "ust";
+// "src", "ult", "ust", or an extra lane's id.
+type Row = string;
+
+// An additional read-only target lane, aligned to the same UHB/UGNT — e.g. the
+// published en_ult a gateway-language workspace's notes were written against,
+// whose project ULT/UST lanes are the target language (issue #430).
+export interface QuoteBuilderExtraLane {
+  id: string;
+  label: string;
+  verseObjects: unknown[] | null;
+  rtl?: boolean;
+}
 
 interface Props {
   open: boolean;
@@ -52,6 +73,9 @@ interface Props {
   uhbVerseObjects: unknown[] | null;
   ultVerseObjects: unknown[] | null;
   ustVerseObjects: unknown[] | null;
+  // Lanes shown between the source row and ULT. Optional; classic callers
+  // pass none.
+  extraLanes?: QuoteBuilderExtraLane[];
   // Pre-loaded Strong's → lexicon entry map. Shell already maintains this
   // for the scripture column's HebrewLine hover tooltips; the picker
   // reuses it so the UHB chips show the same gloss/morphology card.
@@ -74,6 +98,7 @@ export function QuoteBuilderPopper({
   uhbVerseObjects,
   ultVerseObjects,
   ustVerseObjects,
+  extraLanes,
   lexiconMap,
   selectedKeys,
   onToggleKey,
@@ -82,9 +107,18 @@ export function QuoteBuilderPopper({
   onCommit,
 }: Props) {
   const { t } = useTranslation();
+  const theme = useTheme();
+  // md+ keeps the classic anchored popper; narrower screens get a dialog.
+  const wide = useMediaQuery(theme.breakpoints.up("md"));
+  const phone = !useMediaQuery(theme.breakpoints.up("tablet"));
+  const coarse = useMediaQuery("(pointer: coarse)");
   const uhbTokens = useMemo(() => collectUhbWords(uhbVerseObjects), [uhbVerseObjects]);
   const ultTokens = useMemo(() => collectTargetTokens(ultVerseObjects), [ultVerseObjects]);
   const ustTokens = useMemo(() => collectTargetTokens(ustVerseObjects), [ustVerseObjects]);
+  const extraTokens = useMemo(
+    () => (extraLanes ?? []).map((l) => collectTargetTokens(l.verseObjects)),
+    [extraLanes],
+  );
 
   // OT books read their source from UHB (Hebrew, RTL); NT books from UGNT
   // (Greek, LTR). Shell hands us whichever exists, so label and direction
@@ -92,6 +126,8 @@ export function QuoteBuilderPopper({
   const sourceIsHebrew = isHebrewBook(book);
   const projectConfig = useProjectConfig();
   const sourceLabel = versionLabel(projectConfig, sourceIsHebrew ? "UHB" : "UGNT");
+  // ULT/UST are in the project's own language (Arabic AVD/NAV reads RTL).
+  const targetRtl = versionIsRtl(projectConfig, "ULT");
 
   // Preview of the would-be quote string. Re-runs cheaply on every toggle
   // since collectUhbWords / matchGroupsAt scan an in-memory tree.
@@ -128,7 +164,7 @@ export function QuoteBuilderPopper({
   // chain (handleEnglishClick); shift-click adds the union of source chains
   // across the inclusive range from the anchor to the clicked chip.
   const handleTargetClick = (
-    row: "ult" | "ust",
+    row: Row,
     tokens: TargetToken[],
     index: number,
     e: React.MouseEvent,
@@ -161,6 +197,190 @@ export function QuoteBuilderPopper({
     }
   };
 
+  const renderTargetChips = (row: Row, tokens: TargetToken[]) =>
+    tokens.map((tok, i) => (
+      <TargetChip
+        key={`${row}|${tok.position}`}
+        text={tok.text}
+        occurrence={tok.occurrence}
+        selected={chainSelected(tok.sources, selectedKeys)}
+        hasChain={tok.sources.length > 0}
+        touch={coarse}
+        onClick={(e) => handleTargetClick(row, tokens, i, e)}
+        tooltip={
+          tok.sources.length === 0
+            ? t("dialogs.quoteBuilder.noHebrewAlignment")
+            : tok.sources.map((s) => s.content).join(" › ")
+        }
+      />
+    ));
+
+  // The picker body, shared by the popper (md+) and the dialog (narrower).
+  const body = (
+    <>
+      {/* Header */}
+      <Stack
+        direction="row"
+        alignItems="center"
+        sx={{
+          px: 1.5,
+          py: 0.75,
+          borderBottom: "1px solid",
+          borderColor: "divider",
+          bgcolor: "primary.50",
+        }}
+      >
+        <Typography
+          variant="caption"
+          sx={{ fontFamily: "monospace", color: "primary.main", fontWeight: 700 }}
+        >
+          {t("dialogs.quoteBuilder.header", { book, chapter, verse })}
+        </Typography>
+        <Box sx={{ flex: 1 }} />
+        <Typography variant="caption" color="text.secondary" noWrap sx={{ mr: 1, minWidth: 0 }}>
+          {coarse ? t("dialogs.quoteBuilder.tapHint") : t("dialogs.quoteBuilder.shiftHint")}
+        </Typography>
+        <IconButton size="small" onClick={onCancel} aria-label={t("dialogs.common.close")}>
+          <CloseIcon fontSize="small" />
+        </IconButton>
+      </Stack>
+
+      {/* Lanes scroll between a pinned header and footer in the dialog
+          (its Paper is a flex column); in the popper the Paper scrolls. */}
+      <Box sx={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto" }}>
+        {/* Source row — UHB or UGNT */}
+        <Section label={sourceLabel} rtl={sourceIsHebrew}>
+          {uhbTokens.length === 0 ? (
+            <EmptyHint>{t("dialogs.quoteBuilder.noSourceWords")}</EmptyHint>
+          ) : (
+            uhbTokens.map((tok, i) => {
+              // Always use nfc-normalized keys — UHB \w text drifts from
+              // zaln x-content in combining-mark order, so a raw
+              // `${text}|${occ}` comparison would miss cross-row matches.
+              const key = tokenKey(tok.text, tok.occurrence);
+              const selected = selectedKeys.has(key);
+              const src: SourceWord = {
+                id: "",
+                strong: tok.strong,
+                lemma: tok.lemma,
+                morph: tok.morph,
+                occurrence: String(tok.occurrence),
+                occurrences: String(tok.occurrences),
+                content: tok.text,
+              };
+              return (
+                <SourceChip
+                  key={`${key}|${tok.position}`}
+                  text={tok.text}
+                  occurrence={tok.occurrence}
+                  selected={selected}
+                  rtl={sourceIsHebrew}
+                  touch={coarse}
+                  onClick={(e) => handleSourceClick(i, e)}
+                  lexiconBody={
+                    <SourceTooltipBody
+                      source={src}
+                      lex={lexiconMap.get(tok.strong) ?? null}
+                    />
+                  }
+                />
+              );
+            })
+          )}
+        </Section>
+
+        {(extraLanes ?? []).map((lane, li) => (
+          <Section key={lane.id} label={lane.label} rtl={lane.rtl}>
+            {extraTokens[li].length === 0 ? (
+              <EmptyHint>{t("dialogs.quoteBuilder.noLaneAlignment", { label: lane.label })}</EmptyHint>
+            ) : (
+              renderTargetChips(lane.id, extraTokens[li])
+            )}
+          </Section>
+        ))}
+
+        {/* ULT row */}
+        <Section label={versionLabel(projectConfig, "ULT")} rtl={targetRtl}>
+          {ultTokens.length === 0 ? (
+            <EmptyHint>{t("dialogs.quoteBuilder.noUltAlignment")}</EmptyHint>
+          ) : (
+            renderTargetChips("ult", ultTokens)
+          )}
+        </Section>
+
+        {/* UST row */}
+        <Section label={versionLabel(projectConfig, "UST")} rtl={targetRtl}>
+          {ustTokens.length === 0 ? (
+            <EmptyHint>{t("dialogs.quoteBuilder.noUstAlignment")}</EmptyHint>
+          ) : (
+            renderTargetChips("ust", ustTokens)
+          )}
+        </Section>
+      </Box>
+
+      <Divider />
+
+      {/* Footer */}
+      <Stack
+        direction="row"
+        alignItems="center"
+        spacing={1}
+        useFlexGap
+        flexWrap="wrap"
+        sx={{ px: 1.5, py: 1 }}
+      >
+        <Box sx={{ flex: 1, minWidth: 0 }}>
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+            {t("dialogs.quoteBuilder.preview")}
+          </Typography>
+          <Typography
+            dir={sourceIsHebrew ? "rtl" : "ltr"}
+            sx={{
+              fontFamily: '"Times New Roman","SBL Hebrew","Cardo",serif',
+              fontSize: 19,
+              textAlign: "start",
+              minHeight: 24,
+              color: preview ? "text.primary" : "text.disabled",
+            }}
+          >
+            {preview ? preview.quote : "—"}
+          </Typography>
+          {preview && preview.occurrence > 1 && (
+            <Typography variant="caption" color="text.secondary">
+              {t("dialogs.quoteBuilder.occurrence", { n: preview.occurrence })}
+            </Typography>
+          )}
+        </Box>
+        <Button size="small" onClick={onCancel}>
+          {t("common.cancel")}
+        </Button>
+        <Button
+          size="small"
+          variant="contained"
+          disabled={!preview}
+          onClick={onCommit}
+        >
+          {t("dialogs.quoteBuilder.useSelection")}
+        </Button>
+      </Stack>
+    </>
+  );
+
+  if (!wide) {
+    return (
+      <Dialog
+        open={open}
+        onClose={onCancel}
+        fullScreen={phone}
+        fullWidth
+        maxWidth="sm"
+        aria-label={t("dialogs.quoteBuilder.header", { book, chapter, verse })}
+      >
+        {body}
+      </Dialog>
+    );
+  }
+
   return (
     <Popper
       open={open}
@@ -183,162 +403,7 @@ export function QuoteBuilderPopper({
             borderColor: "divider",
           }}
         >
-          {/* Header */}
-          <Stack
-            direction="row"
-            alignItems="center"
-            sx={{
-              px: 1.5,
-              py: 0.75,
-              borderBottom: "1px solid",
-              borderColor: "divider",
-              bgcolor: "primary.50",
-            }}
-          >
-            <Typography
-              variant="caption"
-              sx={{ fontFamily: "monospace", color: "primary.main", fontWeight: 700 }}
-            >
-              {t("dialogs.quoteBuilder.header", { book, chapter, verse })}
-            </Typography>
-            <Box sx={{ flex: 1 }} />
-            <Typography variant="caption" color="text.secondary" sx={{ mr: 1 }}>
-              {t("dialogs.quoteBuilder.shiftHint")}
-            </Typography>
-            <IconButton size="small" onClick={onCancel} aria-label={t("dialogs.common.close")}>
-              <CloseIcon fontSize="small" />
-            </IconButton>
-          </Stack>
-
-          {/* Source row — UHB or UGNT */}
-          <Section label={sourceLabel} rtl={sourceIsHebrew}>
-            {uhbTokens.length === 0 ? (
-              <EmptyHint>{t("dialogs.quoteBuilder.noSourceWords")}</EmptyHint>
-            ) : (
-              uhbTokens.map((tok, i) => {
-                // Always use nfc-normalized keys — UHB \w text drifts from
-                // zaln x-content in combining-mark order, so a raw
-                // `${text}|${occ}` comparison would miss cross-row matches.
-                const key = tokenKey(tok.text, tok.occurrence);
-                const selected = selectedKeys.has(key);
-                const src: SourceWord = {
-                  id: "",
-                  strong: tok.strong,
-                  lemma: tok.lemma,
-                  morph: tok.morph,
-                  occurrence: String(tok.occurrence),
-                  occurrences: String(tok.occurrences),
-                  content: tok.text,
-                };
-                return (
-                  <SourceChip
-                    key={`${key}|${tok.position}`}
-                    text={tok.text}
-                    occurrence={tok.occurrence}
-                    selected={selected}
-                    rtl={sourceIsHebrew}
-                    onClick={(e) => handleSourceClick(i, e)}
-                    lexiconBody={
-                      <SourceTooltipBody
-                        source={src}
-                        lex={lexiconMap.get(tok.strong) ?? null}
-                      />
-                    }
-                  />
-                );
-              })
-            )}
-          </Section>
-
-          {/* ULT row */}
-          <Section label={versionLabel(projectConfig, "ULT")}>
-            {ultTokens.length === 0 ? (
-              <EmptyHint>{t("dialogs.quoteBuilder.noUltAlignment")}</EmptyHint>
-            ) : (
-              ultTokens.map((tok, i) => (
-                <TargetChip
-                  key={`ult|${tok.position}`}
-                  text={tok.text}
-                  occurrence={tok.occurrence}
-                  selected={chainSelected(tok.sources, selectedKeys)}
-                  hasChain={tok.sources.length > 0}
-                  onClick={(e) => handleTargetClick("ult", ultTokens, i, e)}
-                  tooltip={
-                    tok.sources.length === 0
-                      ? t("dialogs.quoteBuilder.noHebrewAlignment")
-                      : tok.sources.map((s) => s.content).join(" › ")
-                  }
-                />
-              ))
-            )}
-          </Section>
-
-          {/* UST row */}
-          <Section label={versionLabel(projectConfig, "UST")}>
-            {ustTokens.length === 0 ? (
-              <EmptyHint>{t("dialogs.quoteBuilder.noUstAlignment")}</EmptyHint>
-            ) : (
-              ustTokens.map((tok, i) => (
-                <TargetChip
-                  key={`ust|${tok.position}`}
-                  text={tok.text}
-                  occurrence={tok.occurrence}
-                  selected={chainSelected(tok.sources, selectedKeys)}
-                  hasChain={tok.sources.length > 0}
-                  onClick={(e) => handleTargetClick("ust", ustTokens, i, e)}
-                  tooltip={
-                    tok.sources.length === 0
-                      ? t("dialogs.quoteBuilder.noHebrewAlignment")
-                      : tok.sources.map((s) => s.content).join(" › ")
-                  }
-                />
-              ))
-            )}
-          </Section>
-
-          <Divider />
-
-          {/* Footer */}
-          <Stack
-            direction="row"
-            alignItems="center"
-            spacing={1}
-            sx={{ px: 1.5, py: 1 }}
-          >
-            <Box sx={{ flex: 1, minWidth: 0 }}>
-              <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
-                {t("dialogs.quoteBuilder.preview")}
-              </Typography>
-              <Typography
-                dir={sourceIsHebrew ? "rtl" : "ltr"}
-                sx={{
-                  fontFamily: '"Times New Roman","SBL Hebrew","Cardo",serif',
-                  fontSize: 19,
-                  textAlign: "start",
-                  minHeight: 24,
-                  color: preview ? "text.primary" : "text.disabled",
-                }}
-              >
-                {preview ? preview.quote : "—"}
-              </Typography>
-              {preview && preview.occurrence > 1 && (
-                <Typography variant="caption" color="text.secondary">
-                  {t("dialogs.quoteBuilder.occurrence", { n: preview.occurrence })}
-                </Typography>
-              )}
-            </Box>
-            <Button size="small" onClick={onCancel}>
-              {t("common.cancel")}
-            </Button>
-            <Button
-              size="small"
-              variant="contained"
-              disabled={!preview}
-              onClick={onCommit}
-            >
-              {t("dialogs.quoteBuilder.useSelection")}
-            </Button>
-          </Stack>
+          {body}
         </Paper>
       </ClickAwayListener>
     </Popper>
@@ -400,6 +465,7 @@ function SourceChip({
   occurrence,
   selected,
   rtl,
+  touch,
   onClick,
   lexiconBody,
 }: {
@@ -407,6 +473,8 @@ function SourceChip({
   occurrence: number;
   selected: boolean;
   rtl?: boolean;
+  // Coarse pointer: grow the chip to a comfortable tap target.
+  touch?: boolean;
   onClick: (e: React.MouseEvent) => void;
   // When provided, wraps the chip in the same SourceTooltipBody hovercard
   // the scripture column's HebrewLine uses — strong/lemma/morph/gloss.
@@ -424,8 +492,8 @@ function SourceChip({
         fontFamily: rtl
           ? '"Times New Roman","SBL Hebrew","Cardo",serif'
           : '"Roboto","Helvetica",sans-serif',
-        fontSize: rtl ? 19 : 13,
-        height: rtl ? 30 : 26,
+        fontSize: rtl ? 19 : touch ? 15 : 13,
+        height: touch ? 36 : rtl ? 30 : 26,
         cursor: "pointer",
         userSelect: "none",
         "& .MuiChip-label": { px: 1 },
@@ -443,6 +511,10 @@ function SourceChip({
       title={lexiconBody}
       enterDelay={0}
       enterNextDelay={0}
+      // On touch a tap fires emulated hover/focus, which opened the hovercard
+      // over the lanes below and left it there. Long-press still shows it.
+      disableHoverListener={touch}
+      disableFocusListener={touch}
       slotProps={{ popper: { sx: { pointerEvents: "none" } } }}
     >
       <Box sx={{ display: "inline-flex" }}>{chip}</Box>
@@ -455,6 +527,7 @@ function TargetChip({
   occurrence,
   selected,
   hasChain,
+  touch,
   onClick,
   tooltip,
 }: {
@@ -462,6 +535,7 @@ function TargetChip({
   occurrence: number;
   selected: boolean;
   hasChain: boolean;
+  touch?: boolean;
   onClick: (e: React.MouseEvent) => void;
   tooltip: string;
 }) {
@@ -475,8 +549,8 @@ function TargetChip({
       onClick={hasChain ? onClick : undefined}
       sx={{
         fontFamily: '"Source Serif Pro","Cambria","Times New Roman",serif',
-        fontSize: 13,
-        height: 26,
+        fontSize: touch ? 15 : 13,
+        height: touch ? 36 : 26,
         cursor: hasChain ? "pointer" : "not-allowed",
         opacity: hasChain ? 1 : 0.5,
         userSelect: "none",
@@ -495,6 +569,8 @@ function TargetChip({
         </Box>
       }
       arrow
+      disableHoverListener={touch}
+      disableFocusListener={touch}
     >
       <Box sx={{ display: "inline-flex" }}>{chip}</Box>
     </Tooltip>
