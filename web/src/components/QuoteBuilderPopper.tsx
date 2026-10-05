@@ -514,6 +514,10 @@ function SourceChip({
       title={lexiconBody}
       enterDelay={0}
       enterNextDelay={0}
+      // On touch a tap fires emulated hover/focus, which opened the hovercard
+      // over the lanes below and left it there. Long-press still shows it.
+      disableHoverListener={touch}
+      disableFocusListener={touch}
       slotProps={{ popper: { sx: { pointerEvents: "none" } } }}
     >
       <Box sx={{ display: "inline-flex" }}>{chip}</Box>
@@ -568,6 +572,8 @@ function TargetChip({
         </Box>
       }
       arrow
+      disableHoverListener={touch}
+      disableFocusListener={touch}
     >
       <Box sx={{ display: "inline-flex" }}>{chip}</Box>
     </Tooltip>
