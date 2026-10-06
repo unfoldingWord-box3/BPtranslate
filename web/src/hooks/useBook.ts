@@ -116,7 +116,10 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
       )
         .then((data) => {
           inFlight.current.delete(ch);
-          chapterCtrls.current.delete(ch);
+          // Only drop our own controller: a reloadChapter that aborted us has
+          // already registered its own, and deleting that one would leave a
+          // later reload unable to abort it (stale response could land last).
+          if (chapterCtrls.current.get(ch) === ctrl) chapterCtrls.current.delete(ch);
           if (ctrl.signal.aborted) return;
           setChapters((prev) => {
             const next = new Map(prev);
@@ -126,7 +129,7 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
         })
         .catch((e) => {
           inFlight.current.delete(ch);
-          chapterCtrls.current.delete(ch);
+          if (chapterCtrls.current.get(ch) === ctrl) chapterCtrls.current.delete(ch);
           if (ctrl.signal.aborted) return;
           if (e instanceof DOMException && e.name === "AbortError") return;
           setChapters((prev) => {
