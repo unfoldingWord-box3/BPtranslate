@@ -228,6 +228,26 @@ function versePayload(book: string, bibleVersion: "ULT" | "UST", v: VerseExtract
   };
 }
 
+// Did this translate job select the book introduction? A whole-range job did
+// (it translated every row of the range); a row-scoped job only if it named the
+// row; a verse-range job never. The output file is the WHOLE target book, so for
+// a job that did not select it, the front row in it is just the DCS copy, which
+// can be older than D1 and must not be written over it.
+async function frontIntroSelected(env: Env, jobId: string, rowId: string): Promise<boolean> {
+  const r = await env.DB.prepare(`SELECT options_json FROM pipeline_jobs WHERE job_id = ?1`)
+    .bind(jobId)
+    .first<{ options_json: string | null }>();
+  let o: { rowIds?: unknown; verseStart?: unknown } = {};
+  try {
+    const parsed: unknown = r?.options_json ? JSON.parse(r.options_json) : null;
+    if (parsed && typeof parsed === "object") o = parsed;
+  } catch {
+    /* unreadable options: treat as whole-range, like dispatch does */
+  }
+  if (Array.isArray(o.rowIds) && o.rowIds.length) return o.rowIds.includes(rowId);
+  return o.verseStart == null;
+}
+
 async function parseOutputEntry(
   env: Env,
   ctx: ImportContext,
@@ -294,7 +314,17 @@ async function parseOutputEntry(
       const refRaw = row["Reference"];
       if (!refRaw) continue;
       const [ch] = refParts(refRaw);
-      if (ch < ctx.startChapter || ch > ctx.endChapter) continue;
+      // Book front matter (front:intro) is chapter 0. A translate job that starts
+      // at chapter 1 can have translated it (translate/tsvCodec.ts
+      // sliceChapterRows gives it to such a range), so it must not be scoped out
+      // here, but only when this job actually selected it.
+      const frontInScope =
+        ch === 0 &&
+        cls.kind === "tn" &&
+        ctx.pipelineType === "translate" &&
+        ctx.startChapter === 1 &&
+        (await frontIntroSelected(env, ctx.jobId, row["ID"] ?? ""));
+      if ((ch < ctx.startChapter && !frontInScope) || ch > ctx.endChapter) continue;
       const built = cls.kind === "tn"
         ? tnPayload(ctx.book, refRaw, row)
         : tqPayload(ctx.book, refRaw, row);
@@ -962,10 +992,12 @@ async function applyTranslateTnRow(
   const proposedId = typeof payload.id === "string" ? payload.id : null;
   if (!proposedId) return "no_match";
 
+  // `chapter = 0 AND ?3 = 1`: the book introduction (front:intro) rides along
+  // with a job that starts at chapter 1, as in parseOutputEntry's staging scope.
   const target = await env.DB.prepare(
     `SELECT id, version, note, tags, translation_state, pre_draft_json FROM tn_rows
       WHERE id = ?1 AND deleted_at IS NULL
-        AND book = ?2 AND chapter BETWEEN ?3 AND ?4`,
+        AND book = ?2 AND (chapter BETWEEN ?3 AND ?4 OR (chapter = 0 AND ?3 = 1))`,
   )
     .bind(proposedId, job.book, job.startChapter, job.endChapter)
     .first<{

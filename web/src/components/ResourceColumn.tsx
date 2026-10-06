@@ -74,6 +74,10 @@ interface Props {
   // notes/words for verses 6,7,8,9 all show when the user navigates to v=7.
   displayVerseRange: readonly [number, number];
   tn: TnRow[];
+  // Book-introduction notes (chapter 0) to list before the chapter's own notes;
+  // see selectBookIntroRows. They are not in `tn`, so cards built for them
+  // (members of this list) omit the verse-bound controls.
+  bookIntroTn?: TnRow[];
   tq: TqRow[];
   twl: TwlRow[];
   activeNoteId: string | null;
@@ -267,6 +271,7 @@ export function ResourceColumn({
   activeVerse,
   displayVerseRange,
   tn,
+  bookIntroTn,
   tq,
   twl,
   activeNoteId,
@@ -598,6 +603,7 @@ export function ResourceColumn({
   }, [dragId, dragOver, computeNeighbors, onReorderPreview]);
 
   const scrollBodyRef = useRef<HTMLDivElement | null>(null);
+  const bookIntroIds = useMemo(() => new Set((bookIntroTn ?? []).map((r) => r.id)), [bookIntroTn]);
 
   // Auto-scroll the list while a reorder drag hovers near its top/bottom edge.
   // Native HTML5 DnD only auto-scrolls the window, never a nested overflow
@@ -872,6 +878,7 @@ export function ResourceColumn({
             onNoteApprove={onNoteApprove}
             onApproveAllNotes={onApproveAllNotes}
             renderNoteCard={renderNoteCard}
+            bookIntroRows={bookIntroTn}
           />
         )}
 
@@ -977,6 +984,10 @@ export function ResourceColumn({
     const idx = samePeers.indexOf(r);
     const prevNote = idx > 0 ? samePeers[idx - 1] : null;
     const nextNote = idx < samePeers.length - 1 ? samePeers[idx + 1] : null;
+    // A book-introduction row (chapter 0, shown on the first chapter): it has
+    // no verse here, so no insert-after / change-verse / AI Suggest / quote
+    // build, and the hover preview would point at this chapter's verse 0.
+    const foreign = bookIntroIds.has(r.id);
     return (
       <Fragment key={r.id}>
         {showBefore && <DropIndicator />}
@@ -996,9 +1007,9 @@ export function ResourceColumn({
           onSave={(p, opts) => onNoteSave(r.id, p, opts)}
           onDelete={() => onNoteDelete(r.id)}
           onRestore={() => onNoteRestore(r.id)}
-          onInsertAfter={() => onNoteInsertAfter(r.id)}
-          verseOptions={verseOptions}
-          onChangeVerse={(v, vEnd) => onNoteChangeVerse(r.id, v, vEnd)}
+          onInsertAfter={foreign ? undefined : () => onNoteInsertAfter(r.id)}
+          verseOptions={foreign ? undefined : verseOptions}
+          onChangeVerse={foreign ? undefined : (v, vEnd) => onNoteChangeVerse(r.id, v, vEnd)}
           onFocus={() => onNoteFocus(r)}
           onGripDragStart={() => setDragId(r.id)}
           onMoveUp={
@@ -1021,7 +1032,7 @@ export function ResourceColumn({
           }
           flashArrow={recentNoteMove?.id === r.id ? recentNoteMove.dir : null}
           onReorderHover={
-            onReorderPreview
+            onReorderPreview && !foreign
               ? (entering) =>
                   onReorderPreview(
                     entering
@@ -1055,7 +1066,7 @@ export function ResourceColumn({
             setDragId(null);
             setDragOver(null);
           }}
-          onStartAi={onNoteStartAi ? (live) => onNoteStartAi(r, live) : undefined}
+          onStartAi={onNoteStartAi && !foreign ? (live) => onNoteStartAi(r, live) : undefined}
           isAiPending={isNoteAiPending?.(r.id) ?? false}
           aiRecentlyCompletedAt={noteAiRecentlyCompletedAt?.(r.id) ?? null}
           onVisibilityChange={onNoteVisibilityChange}
@@ -1065,7 +1076,7 @@ export function ResourceColumn({
           }
           onSetHint={onSetNoteHint ? (value) => onSetNoteHint(r.id, value) : undefined}
           onTranslateQuote={
-            onNoteTranslateQuote ? (english) => onNoteTranslateQuote(r, english) : undefined
+            onNoteTranslateQuote && !foreign ? (english) => onNoteTranslateQuote(r, english) : undefined
           }
           quoteBuildMode={quoteBuildActiveNoteId === r.id}
           quoteBuildSelectionCount={
@@ -1074,7 +1085,7 @@ export function ResourceColumn({
           quoteBuildAppliedAt={
             quoteBuildAppliedTo?.noteId === r.id ? quoteBuildAppliedTo.nonce : null
           }
-          onStartQuoteBuild={onStartQuoteBuild ? () => onStartQuoteBuild(r.id) : undefined}
+          onStartQuoteBuild={onStartQuoteBuild && !foreign ? () => onStartQuoteBuild(r.id) : undefined}
           translationMode={translationMode}
           sourceNote={translationMode ? (sourceNotes.get(r.id) ?? null) : null}
           onApprove={onNoteApprove ? () => onNoteApprove(r.id, true) : undefined}

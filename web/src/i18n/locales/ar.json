@@ -760,6 +760,7 @@
     "book": "سفر",
     "find": "بحث",
     "intro": "مقدمة",
+    "bookIntro": "مقدمة السفر",
     "trashedCount": "{{count}} في المهملات",
     "board": "اللوحة",
     "resources": "الموارد",

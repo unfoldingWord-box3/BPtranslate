@@ -704,6 +704,7 @@
     "book": "book",
     "find": "find",
     "intro": "intro",
+    "bookIntro": "Book introduction",
     "trashedCount": "{{count}} trashed",
     "board": "Board",
     "resources": "Resources",

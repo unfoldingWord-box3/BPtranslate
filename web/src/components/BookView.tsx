@@ -215,6 +215,9 @@ export function BookView({
 
   const cols = enabledVersions.length;
   const gridTemplateColumns = `repeat(${cols}, minmax(0, 1fr))`;
+  // Where the front-matter header sends you: the first real chapter's intro tile,
+  // which is where the notes column lists the book introduction.
+  const introChapter = chapterList.find((c) => c >= 1);
 
   return (
     <Box sx={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
@@ -292,6 +295,7 @@ export function BookView({
               lexiconMap={lexiconMap}
               onLoadChapter={onLoadChapter}
               onSelectVerse={onSelectVerse}
+              introChapter={introChapter}
               onEditVerse={onEditVerse}
               onSaveVerse={handleSaveVerse}
               onOpenAligner={onOpenAligner}
@@ -330,6 +334,7 @@ const ChapterBlock = memo(function ChapterBlock({
   lexiconMap,
   onLoadChapter,
   onSelectVerse,
+  introChapter,
   onEditVerse,
   onSaveVerse,
   onOpenAligner,
@@ -355,6 +360,8 @@ const ChapterBlock = memo(function ChapterBlock({
   lexiconMap: Map<string, LexiconEntry | null>;
   onLoadChapter: (ch: number) => void;
   onSelectVerse: (chapter: number, verse: number) => void;
+  // Chapter-0 block only: the chapter whose intro tile shows the book introduction.
+  introChapter?: number;
   onEditVerse: (chapter: number, verse: number, bibleVersion: string, plain: string, base: VerseDto) => void;
   onSaveVerse: (bv: string, chapter: number, verse: number, plain: string, base: VerseDto) => void;
   onOpenAligner: (chapter: number, verse: number, bibleVersion: string) => void;
@@ -457,6 +464,8 @@ const ChapterBlock = memo(function ChapterBlock({
   }
 
   const data = state.data;
+  const goToIntro =
+    chapter === 0 && introChapter !== undefined ? () => onSelectVerse(introChapter, 0) : undefined;
 
   return (
     <Fragment>
@@ -473,7 +482,19 @@ const ChapterBlock = memo(function ChapterBlock({
           borderColor: "primary.main",
           display: "flex",
           alignItems: "center",
+          ...(goToIntro && { cursor: "pointer", "&:hover": { bgcolor: "action.hover" } }),
         }}
+        {...(goToIntro && {
+          role: "button",
+          tabIndex: 0,
+          onClick: goToIntro,
+          onKeyDown: (e: React.KeyboardEvent) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              goToIntro();
+            }
+          },
+        })}
       >
         <Typography
           variant="subtitle2"

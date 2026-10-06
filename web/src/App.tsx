@@ -454,8 +454,10 @@ export function App() {
   useEffect(() => onAuthRefreshed(() => setSessionExpired(false)), []);
 
   const navigate = (book: string, chapter: number, verse?: number) => {
+    // Verse 1 is the default (omitted); verse 0 is the chapter-intro tile and
+    // must survive the round trip or the jump lands on verse 1 instead.
     location.hash =
-      verse !== undefined && verse > 1
+      verse !== undefined && verse !== 1
         ? `#/${book}/${chapter}/${verse}`
         : `#/${book}/${chapter}`;
   };
@@ -948,7 +950,7 @@ export function App() {
                     candidates.push({
                       book: loc.book,
                       chapter: ("chapter" in loc && loc.chapter) || 1,
-                      verse: ("verse" in loc && loc.verse) || 1,
+                      verse: ("verse" in loc ? loc.verse : null) ?? 1,
                     });
                   }
                   const last =

@@ -48,6 +48,7 @@ export function StackedResourcePanel({
   activeVerse,
   displayVerseRange,
   tn,
+  bookIntroTn,
   tq,
   twl,
   activeNoteId,
@@ -209,6 +210,8 @@ export function StackedResourcePanel({
   const totalTwl = pinned ? twl.length : twlForVerse.length;
   const totalTq = tqCount.live;
 
+  // Book-introduction rows (chapter 0) have no verse here; see ResourceColumn.
+  const isForeign = (r: TnRow) => bookIntroTn?.some((b) => b.id === r.id) ?? false;
   const renderNoteCard = (r: TnRow) => (
     <NoteCard
       key={r.id}
@@ -224,23 +227,23 @@ export function StackedResourcePanel({
       onSave={(p, opts) => onNoteSave(r.id, p, opts)}
       onDelete={() => onNoteDelete(r.id)}
       onRestore={() => onNoteRestore(r.id)}
-      onInsertAfter={() => onNoteInsertAfter(r.id)}
-      verseOptions={verseOptions}
-      onChangeVerse={(v, vEnd) => onNoteChangeVerse(r.id, v, vEnd)}
+      onInsertAfter={isForeign(r) ? undefined : () => onNoteInsertAfter(r.id)}
+      verseOptions={isForeign(r) ? undefined : verseOptions}
+      onChangeVerse={isForeign(r) ? undefined : (v, vEnd) => onNoteChangeVerse(r.id, v, vEnd)}
       onFocus={() => onNoteFocus(r)}
       onGripDragStart={() => {}}
       onDragEnd={() => {}}
       onCardDragOver={() => {}}
       onCardDragLeave={() => {}}
       onCardDrop={() => {}}
-      onStartAi={onNoteStartAi ? (live) => onNoteStartAi(r, live) : undefined}
+      onStartAi={onNoteStartAi && !isForeign(r) ? (live) => onNoteStartAi(r, live) : undefined}
       isAiPending={isNoteAiPending?.(r.id) ?? false}
       aiRecentlyCompletedAt={noteAiRecentlyCompletedAt?.(r.id) ?? null}
       onVisibilityChange={onNoteVisibilityChange}
       locked={locked}
       onSetPreserve={onSetNotePreserve ? (value) => onSetNotePreserve(r.id, value) : undefined}
       onSetHint={onSetNoteHint ? (value) => onSetNoteHint(r.id, value) : undefined}
-      onTranslateQuote={onNoteTranslateQuote ? (english) => onNoteTranslateQuote(r, english) : undefined}
+      onTranslateQuote={onNoteTranslateQuote && !isForeign(r) ? (english) => onNoteTranslateQuote(r, english) : undefined}
       translationMode={translationMode}
       sourceNote={translationMode ? (sourceNotes.get(r.id) ?? null) : null}
       onApprove={onNoteApprove ? () => onNoteApprove(r.id, true) : undefined}
@@ -270,6 +273,7 @@ export function StackedResourcePanel({
           onNoteApprove={onNoteApprove}
           onApproveAllNotes={onApproveAllNotes}
           renderNoteCard={(r) => renderNoteCard(r)}
+          bookIntroRows={bookIntroTn}
         />
       )}
       {panelType === "words" && (

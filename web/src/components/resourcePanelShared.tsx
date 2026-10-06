@@ -66,10 +66,13 @@ export function VerseGroupHead({
   verse,
   active,
   section,
+  label,
 }: {
   verse: number;
   active: boolean;
   section: PinKey;
+  // Overrides the default "intro" / "v{n}" text (the book introduction group).
+  label?: string;
 }) {
   const { t } = useTranslation();
   return (
@@ -101,7 +104,7 @@ export function VerseGroupHead({
           letterSpacing: 0.5,
         }}
       >
-        {verse === 0 ? t("shell.intro") : `v${verse}`}
+        {label ?? (verse === 0 ? t("shell.intro") : `v${verse}`)}
       </Typography>
     </Stack>
   );

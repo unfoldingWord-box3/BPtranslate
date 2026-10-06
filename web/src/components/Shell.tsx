@@ -60,6 +60,7 @@ import { buildVerseIndex, concatSourceRange, formatVerseLabel, noteCoveredVerses
 import { buildTnQuickRequest } from "../lib/tnQuickRequest";
 import { isAiProviderNotConfigured } from "../lib/aiProviderErrors";
 import { isApprovableRow } from "../lib/reviewApproval";
+import { selectBookIntroRows } from "../lib/bookIntro";
 import { reviewStatePatches, reviewStateSnapshot } from "../lib/reviewStateSweep";
 import { versionLabel } from "../lib/versionLabels";
 import { findSourceForTargetText, extractTargetSelectionText, type HighlightKey, type ReorderHighlight } from "../lib/highlight";
@@ -280,8 +281,8 @@ export function Shell({
     error,
     retryAttempts,
     refetch,
-    applyLocalRowPatch,
-    applyLocalRowReplacement,
+    applyLocalRowPatch: applyChapterRowPatch,
+    applyLocalRowReplacement: applyChapterRowReplacement,
     applyLocalRowDelete,
     applyLocalRowInsert,
     applyLocalVerse,
@@ -290,6 +291,27 @@ export function Shell({
     applyLaneCheckers,
     replaceLaneChecksForLane,
   } = useChapter(book, chapter);
+
+  // Book-introduction notes (chapter 0) are shown on the first chapter in book
+  // mode but live in useBook's chapter-0 cache, not in useChapter's data. Every
+  // tn patch / replacement below goes through these two, which also update that
+  // cache (a no-op when the row isn't one of its rows). Outbox results already
+  // reach the cache through useBook's own listener.
+  const bookPatchRow = bookHook?.applyLocalRowPatch;
+  const applyLocalRowPatch = useCallback<typeof applyChapterRowPatch>(
+    (kind, id, patch) => {
+      applyChapterRowPatch(kind, id, patch);
+      if (kind === "tn") bookPatchRow?.("tn", 0, id, patch);
+    },
+    [applyChapterRowPatch, bookPatchRow],
+  );
+  const applyLocalRowReplacement = useCallback<typeof applyChapterRowReplacement>(
+    (kind, row) => {
+      applyChapterRowReplacement(kind, row);
+      if (kind === "tn" && row.chapter === 0) bookPatchRow?.("tn", 0, row.id, row);
+    },
+    [applyChapterRowReplacement, bookPatchRow],
+  );
 
   // Live cross-tab updates. The server broadcasts row writes via the
   // ChapterRoom DO; we dedupe by version so the originating user's tab
@@ -489,6 +511,29 @@ export function Shell({
   const [enabledVersions, setEnabledVersions] = useState<string[]>(() =>
     loadFromStorage<string[]>(ENABLED_VERSIONS_KEY, ["ULT", "UST"]),
   );
+  // Book-introduction notes to list before the first chapter's own notes (book
+  // mode only). BookView loads chapter 0 only when it scrolls near, so ask for
+  // it whenever the book has one and book mode is on.
+  const bookIntroRows = useMemo(
+    () =>
+      selectBookIntroRows({
+        mode,
+        chapter,
+        summary: bookHook?.summary,
+        chapters: bookHook?.chapters,
+      }),
+    [mode, chapter, bookHook?.summary, bookHook?.chapters],
+  );
+  const bookIntroRowsRef = useRef(bookIntroRows);
+  useEffect(() => {
+    bookIntroRowsRef.current = bookIntroRows;
+  }, [bookIntroRows]);
+  const loadBookChapter = bookHook?.loadChapter;
+  const reloadBookChapter = bookHook?.reloadChapter;
+  const hasBookFront = bookHook?.summary?.chapters.some((c) => c.chapter === 0) ?? false;
+  useEffect(() => {
+    if (mode === "book" && hasBookFront) loadBookChapter?.(0);
+  }, [mode, hasBookFront, loadBookChapter, book]);
   const [railCollapsed, setRailCollapsed] = useState<boolean>(() =>
     loadFromStorage<boolean>(RAIL_COLLAPSED_KEY, false),
   );
@@ -753,10 +798,17 @@ export function Shell({
       pushPipelineToast(
         t("shell.aiReady", { pipelineType }),
         "info",
-        { label: t("shell.refresh"), onClick: () => void refetch() },
+        {
+          label: t("shell.refresh"),
+          onClick: () => {
+            void refetch();
+            // A translate run can rewrite the book introduction too.
+            if (bookIntroRowsRef.current.length) reloadBookChapter?.(0);
+          },
+        },
       );
     },
-    [pushPipelineToast, refetch, t],
+    [pushPipelineToast, refetch, reloadBookChapter, t],
   );
   useEffect(() => {
     promptRefreshRef.current = promptChapterRefresh;
@@ -896,11 +948,18 @@ export function Shell({
           const inView = job.book === book && chapter >= job.start_chapter && chapter <= job.end_chapter;
           if (inView) promptChapterRefresh(job.pipeline_type);
           else pushPipelineToast(t("shell.aiApplied", { pipelineType: job.pipeline_type, where }), "success");
+          // A translate job reaching chapter 1 can rewrite the book introduction;
+          // keep the cached chapter 0 current wherever the user is now, so
+          // chapter 1 never shows pre-translation text. (A card mid-edit keeps
+          // its text: NoteCard's session guard.)
+          if (job.pipeline_type === "translate" && job.book === book && job.start_chapter <= 1 && mode === "book" && hasBookFront) {
+            reloadBookChapter?.(0);
+          }
         } else if (job.state === "failed" && prev !== "failed") {
           pushPipelineToast(t("shell.aiFailed", { pipelineType: job.pipeline_type, where, error: job.error_kind ?? t("shell.error") }), "error");
         }
       }),
-    [pushPipelineToast, promptChapterRefresh, book, chapter, t],
+    [pushPipelineToast, promptChapterRefresh, reloadBookChapter, book, chapter, mode, hasBookFront, t],
   );
 
   // Surface a toast when the outbox drops an op because the chapter was
@@ -1003,12 +1062,19 @@ export function Shell({
   const handleTranslateNote = useCallback(
     async (id: string) => {
       setTranslatingRowIds((prev) => new Set(prev).add(id));
+      // The server sends front:intro (chapter 0) only to a job that starts at
+      // chapter 1 (sliceChapterRows), and rejects startChapter 0.
+      // Decided by the ROW's chapter, so it also holds on the TopBar "Intro" view
+      // (active chapter 0), where the row sits in useChapter's own data.
+      const introRow =
+        bookIntroRowsRef.current.find((r) => r.id === id) ?? dataRef.current?.tn.find((r) => r.id === id);
+      const isBookIntro = introRow?.chapter === 0;
       try {
         await pipelineStore.start({
           pipelineType: "translate",
           book,
-          startChapter: chapter,
-          endChapter: chapter,
+          startChapter: isBookIntro ? 1 : chapter,
+          endChapter: isBookIntro ? 1 : chapter,
           sessionKey: getSessionKey(),
           translate: { rowIds: [id] },
         });
@@ -1224,13 +1290,15 @@ export function Shell({
   // Whether ANY resource row sits on verse 0 (the intro tile). The cheap
   // `.some` re-runs on every edit, but it yields a *stable boolean* so the
   // expensive tileSet below doesn't re-run when a row's text changes.
+  const hasBookIntroRows = bookIntroRows.length > 0;
   const introHasResource = useMemo(
     () =>
-      !!data &&
-      (data.tn.some((r) => r.verse === 0) ||
-        data.tq.some((r) => r.verse === 0) ||
-        data.twl.some((r) => r.verse === 0)),
-    [data],
+      hasBookIntroRows ||
+      (!!data &&
+        (data.tn.some((r) => r.verse === 0) ||
+          data.tq.some((r) => r.verse === 0) ||
+          data.twl.some((r) => r.verse === 0))),
+    [data, hasBookIntroRows],
   );
   // Does the intro tile actually have Words (TWL) rows? The tw lane is otherwise
   // "always applicable", but verse 0 outside the Psalms usually has none, so the
@@ -3172,6 +3240,7 @@ export function Shell({
     checkoff: resourceCheckoff,
     displayVerseRange,
     tn: data.tn,
+    bookIntroTn: bookIntroRows,
     tq: data.tq,
     twl: data.twl,
     ultVerseObjectsFor,
@@ -3185,7 +3254,7 @@ export function Shell({
       applyLocalRowPatch("tn", id, patch);
     },
     onNoteSave: (id, patch, opts) => {
-      const row = data.tn.find((r) => r.id === id);
+      const row = data.tn.find((r) => r.id === id) ?? bookIntroRows.find((r) => r.id === id);
       if (row) enqueueRow("tn", row, patch, opts);
     },
     onNoteFocus: (row) => {
@@ -3345,9 +3414,13 @@ export function Shell({
       // before React re-renders, and a stale closure would renumber from
       // an outdated order and enqueue ops carrying a stale version.
       const tn = dataRef.current?.tn ?? [];
-      const dragged = tn.find((r) => r.id === draggedId);
-      if (!dragged) return;
-      const sorted = sortedForVerse(tn, dragged.verse);
+      // Book-introduction rows reorder among themselves only; a drop across the
+      // two lists is ignored.
+      const introRows = bookIntroRowsRef.current;
+      const pool = introRows.some((r) => r.id === draggedId) ? introRows : tn;
+      const dragged = pool.find((r) => r.id === draggedId);
+      if (!dragged || !pool.some((r) => r.id === refId)) return;
+      const sorted = sortedForVerse(pool, dragged.verse);
       const changes = reorderSequential(sorted, draggedId, refId, position);
       for (const { row, sort_order } of changes) {
         enqueueRow("tn", row, { sort_order });
