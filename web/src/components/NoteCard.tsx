@@ -95,7 +95,8 @@ interface Props {
   // user's unsaved text alone (see the comment there).
   onDelete: () => void | Promise<boolean | void>;
   onRestore: () => void;
-  onInsertAfter: () => void;
+  // Absent => no "add note after" button (rows with no verse of their own).
+  onInsertAfter?: () => void;
   onFocus?: () => void;
   onGripDragStart: () => void;
   onDragEnd: () => void;
@@ -1396,11 +1397,13 @@ function NoteCardInner({
         )}
         {!readOnly && (
           <>
-            <Tooltip title={t("noteCard.addNoteAfter")}>
-              <IconButton size="small" aria-label={t("noteCard.addNoteAfter")} onClick={onInsertAfter} color="success" sx={{ p: 0.25 }}>
-                <AddIcon fontSize="inherit" />
-              </IconButton>
-            </Tooltip>
+            {onInsertAfter && (
+              <Tooltip title={t("noteCard.addNoteAfter")}>
+                <IconButton size="small" aria-label={t("noteCard.addNoteAfter")} onClick={onInsertAfter} color="success" sx={{ p: 0.25 }}>
+                  <AddIcon fontSize="inherit" />
+                </IconButton>
+              </Tooltip>
+            )}
             <Tooltip title={t("noteCard.deleteNote")}>
               <IconButton size="small" aria-label={t("noteCard.deleteNote")} onClick={() => void handleDelete()} color="error" sx={{ p: 0.25 }}>
                 <DeleteOutlineIcon fontSize="inherit" />

@@ -294,7 +294,11 @@ async function parseOutputEntry(
       const refRaw = row["Reference"];
       if (!refRaw) continue;
       const [ch] = refParts(refRaw);
-      if (ch < ctx.startChapter || ch > ctx.endChapter) continue;
+      // Book front matter (front:intro) is chapter 0. A translate job that starts
+      // at chapter 1 translated it too (translate/tsvCodec.ts sliceChapterRows
+      // gives it to such a range), so it must not be scoped out here.
+      const frontInScope = ch === 0 && ctx.pipelineType === "translate" && ctx.startChapter === 1;
+      if ((ch < ctx.startChapter && !frontInScope) || ch > ctx.endChapter) continue;
       const built = cls.kind === "tn"
         ? tnPayload(ctx.book, refRaw, row)
         : tqPayload(ctx.book, refRaw, row);
@@ -962,10 +966,12 @@ async function applyTranslateTnRow(
   const proposedId = typeof payload.id === "string" ? payload.id : null;
   if (!proposedId) return "no_match";
 
+  // `chapter = 0 AND ?3 = 1`: the book introduction (front:intro) rides along
+  // with a job that starts at chapter 1, as in parseOutputEntry's staging scope.
   const target = await env.DB.prepare(
     `SELECT id, version, note, tags, translation_state, pre_draft_json FROM tn_rows
       WHERE id = ?1 AND deleted_at IS NULL
-        AND book = ?2 AND chapter BETWEEN ?3 AND ?4`,
+        AND book = ?2 AND (chapter BETWEEN ?3 AND ?4 OR (chapter = 0 AND ?3 = 1))`,
   )
     .bind(proposedId, job.book, job.startChapter, job.endChapter)
     .first<{

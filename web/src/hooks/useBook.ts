@@ -33,6 +33,8 @@ export interface UseBookReturn {
   summaryStatus: "idle" | "loading" | "ready" | "error";
   chapters: Map<number, ChapterState>;
   loadChapter: (ch: number) => void;
+  /** Re-fetch an already-cached chapter in place (keeps showing the old data until the new lands). */
+  reloadChapter: (ch: number) => void;
   applyLocalVerse: (verse: VerseDto) => void;
   applyLocalRowPatch: (
     kind: "tn" | "tq" | "twl",
@@ -140,6 +142,25 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
     [book, enabled],
   );
 
+  const reloadChapter = useCallback(
+    (ch: number) => {
+      if (!enabled) return;
+      chapterCtrls.current.get(ch)?.abort();
+      const ctrl = new AbortController();
+      chapterCtrls.current.set(ch, ctrl);
+      fetchWithRetry((signal) => api.getChapter(book, ch, signal), { signal: ctrl.signal })
+        .then((data) => {
+          if (ctrl.signal.aborted) return;
+          chapterCtrls.current.delete(ch);
+          setChapters((prev) => new Map(prev).set(ch, { kind: "ready", data }));
+        })
+        .catch(() => {
+          // Best effort: the cache keeps showing the previous payload.
+        });
+    },
+    [book, enabled],
+  );
+
   const applyLocalVerse = useCallback<UseBookReturn["applyLocalVerse"]>((verse) => {
     setChapters((prev) => {
       const cur = prev.get(verse.chapter);
@@ -166,6 +187,9 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
         if (!cur || cur.kind !== "ready") return prev;
         const data = cur.data;
         const list = data[kind] as Array<TnRow | TqRow | TwlRow>;
+        // Shell patches the chapter-0 cache on every tn edit; skip the state
+        // churn when the row isn't one of this chapter's.
+        if (!list.some((r) => r.id === id)) return prev;
         const nextList = list.map((r) => (r.id === id ? { ...r, ...patch } : r));
         const next = new Map(prev);
         next.set(chapter, { kind: "ready", data: { ...data, [kind]: nextList } as ChapterPayload });
@@ -208,5 +232,5 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
     });
   }, [book, enabled, applyLocalVerse]);
 
-  return { summary, summaryStatus, chapters, loadChapter, applyLocalVerse, applyLocalRowPatch };
+  return { summary, summaryStatus, chapters, loadChapter, reloadChapter, applyLocalVerse, applyLocalRowPatch };
 }

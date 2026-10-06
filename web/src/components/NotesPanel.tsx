@@ -61,6 +61,10 @@ export interface NotesPanelBodyProps {
   // The caller builds each note card (it owns the drag/reorder/flash state the
   // card closes over). `peers` is the row's sibling list for arrow-move bounds.
   renderNoteCard: (r: TnRow, peers: TnRow[]) => ReactNode;
+  // Book-introduction notes (chapter 0), supplied by Shell only in book mode on
+  // the first real chapter. Listed first: always in the pinned whole-chapter
+  // view, and on the intro ("i") tile otherwise.
+  bookIntroRows?: TnRow[];
 }
 
 export function NotesPanelBody({
@@ -80,8 +84,10 @@ export function NotesPanelBody({
   onNoteApprove,
   onApproveAllNotes,
   renderNoteCard,
+  bookIntroRows = [],
 }: NotesPanelBodyProps) {
   const { t } = useTranslation();
+  const showBookIntro = bookIntroRows.length > 0 && (tnGroups !== null || activeVerse === 0);
   // Guards against a double-click firing a second overlapping batch while
   // the first is still sequentially awaiting each row (#412).
   const [approvingAll, setApprovingAll] = useState(false);
@@ -218,6 +224,16 @@ export function NotesPanelBody({
         </Stack>
       )}
       <NotePairAxisContext.Provider value={effectivePairAxis}>
+        {showBookIntro && (
+          <>
+            <VerseGroupHead verse={0} active={activeVerse === 0} section="notes" label={t("shell.bookIntro")} />
+            {bookIntroRows.map((r) => renderNoteCard(r, bookIntroRows))}
+            {/* Unpinned has no per-verse heads, so label the chapter's own intro too. */}
+            {!tnGroups && tnForVerse.length > 0 && (
+              <VerseGroupHead verse={0} active section="notes" />
+            )}
+          </>
+        )}
         {tnGroups ? (
           tnGroups.length === 0 ? (
             <Typography variant="body2" color="text.disabled" sx={{ py: 1, pl: 1 }}>

@@ -454,8 +454,10 @@ export function App() {
   useEffect(() => onAuthRefreshed(() => setSessionExpired(false)), []);
 
   const navigate = (book: string, chapter: number, verse?: number) => {
+    // Verse 1 is the default (omitted); verse 0 is the chapter-intro tile and
+    // must survive the round trip or the jump lands on verse 1 instead.
     location.hash =
-      verse !== undefined && verse > 1
+      verse !== undefined && verse !== 1
         ? `#/${book}/${chapter}/${verse}`
         : `#/${book}/${chapter}`;
   };
