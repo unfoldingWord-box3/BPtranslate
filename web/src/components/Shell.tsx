@@ -947,12 +947,19 @@ export function Shell({
           // "applied" toast, since its new rows aren't in the open list yet.
           const inView = job.book === book && chapter >= job.start_chapter && chapter <= job.end_chapter;
           if (inView) promptChapterRefresh(job.pipeline_type);
-          else pushPipelineToast(t("shell.aiApplied", { pipelineType: job.pipeline_type, where }), "success");
+          else {
+            pushPipelineToast(t("shell.aiApplied", { pipelineType: job.pipeline_type, where }), "success");
+            // A chapter-1 translate also rewrites the book introduction; keep the
+            // cached chapter 0 current even though the user has moved on.
+            if (job.pipeline_type === "translate" && job.book === book && job.start_chapter === 1) {
+              reloadBookChapter?.(0);
+            }
+          }
         } else if (job.state === "failed" && prev !== "failed") {
           pushPipelineToast(t("shell.aiFailed", { pipelineType: job.pipeline_type, where, error: job.error_kind ?? t("shell.error") }), "error");
         }
       }),
-    [pushPipelineToast, promptChapterRefresh, book, chapter, t],
+    [pushPipelineToast, promptChapterRefresh, reloadBookChapter, book, chapter, t],
   );
 
   // Surface a toast when the outbox drops an op because the chapter was
@@ -1279,13 +1286,15 @@ export function Shell({
   // Whether ANY resource row sits on verse 0 (the intro tile). The cheap
   // `.some` re-runs on every edit, but it yields a *stable boolean* so the
   // expensive tileSet below doesn't re-run when a row's text changes.
+  const hasBookIntroRows = bookIntroRows.length > 0;
   const introHasResource = useMemo(
     () =>
-      !!data &&
-      (data.tn.some((r) => r.verse === 0) ||
-        data.tq.some((r) => r.verse === 0) ||
-        data.twl.some((r) => r.verse === 0)),
-    [data],
+      hasBookIntroRows ||
+      (!!data &&
+        (data.tn.some((r) => r.verse === 0) ||
+          data.tq.some((r) => r.verse === 0) ||
+          data.twl.some((r) => r.verse === 0))),
+    [data, hasBookIntroRows],
   );
   // Does the intro tile actually have Words (TWL) rows? The tw lane is otherwise
   // "always applicable", but verse 0 outside the Psalms usually has none, so the

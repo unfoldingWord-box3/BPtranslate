@@ -538,15 +538,15 @@ test("POST /start (#551): translate with an org key gets past the key check and 
 // pollPipelineJob (driven through pollAllNonTerminal, the cron's entry point)
 // ---------------------------------------------------------------------------
 
-function seedRunningInternalJob(sqlite, wfStatus, { jobId = "job-1", startChapter = 1, endChapter = 1 } = {}) {
+function seedRunningInternalJob(sqlite, wfStatus, { jobId = "job-1", startChapter = 1, endChapter = 1, options = null } = {}) {
   sqlite
     .prepare(
       `INSERT INTO pipeline_jobs
          (job_id, user_id, pipeline_type, book, start_chapter, end_chapter, session_key,
-          state, upstream_job_id, runner, wf_status_json, created_at, updated_at)
-       VALUES (?, 1, 'translate', 'OBA', ?, ?, ?, 'running', ?, 'internal', ?, unixepoch(), unixepoch())`,
+          state, upstream_job_id, runner, wf_status_json, options_json, created_at, updated_at)
+       VALUES (?, 1, 'translate', 'OBA', ?, ?, ?, 'running', ?, 'internal', ?, ?, unixepoch(), unixepoch())`,
     )
-    .run(jobId, startChapter, endChapter, `sess-${jobId}`, `translate-ws-${jobId}`, wfStatus == null ? null : JSON.stringify(wfStatus));
+    .run(jobId, startChapter, endChapter, `sess-${jobId}`, `translate-ws-${jobId}`, wfStatus == null ? null : JSON.stringify(wfStatus), options == null ? null : JSON.stringify(options));
 }
 
 function wf(state, current, output) {
@@ -828,6 +828,24 @@ test("import (internal): a job starting at chapter 1 lands the translated book i
   assert.equal(row.note, "مقدمة سفر عوبديا", "the translated intro landed on its chapter-0 row");
   assert.equal(row.translation_state, "ai_draft");
   assert.equal(row.version, 2);
+});
+
+test("import (internal): a row-scoped chapter 1 job leaves the book introduction alone unless it named it", async () => {
+  // The output is the whole target book, so the intro row in it is the DCS copy.
+  for (const [rowIds, lands] of [[["ab12"], false], [["fr01"], true]]) {
+    const sqlite = freshSqlite();
+    seedBookIntroRow(sqlite);
+    seedRunningInternalJob(sqlite, wf("done", { status: "done" }, MANIFEST), { options: { rowIds } });
+    const env = freshEnv(sqlite);
+    env.blobs.map.set(outKey(env.WORKSPACE_SLUG, "job-1", "tn_OBA.tsv"), INTRO_TSV);
+    env.blobs.map.set(outKey(env.WORKSPACE_SLUG, "job-1", "translate-report-1-1.json"), "{}");
+
+    await withNoFetch(async () => pollAllNonTerminal(env));
+
+    const row = sqlite.prepare(`SELECT note, version FROM tn_rows WHERE id = 'fr01'`).all()[0];
+    assert.equal(row.version, lands ? 2 : 1, `rowIds ${JSON.stringify(rowIds)}: intro ${lands ? "lands" : "untouched"}`);
+    assert.equal(row.note === "مقدمة سفر عوبديا", lands);
+  }
 });
 
 test("import (internal): a job that does not start at chapter 1 leaves the book introduction alone", async () => {

@@ -236,7 +236,7 @@ export function NotesPanelBody({
         )}
         {tnGroups ? (
           tnGroups.length === 0 ? (
-            <Typography variant="body2" color="text.disabled" sx={{ py: 1, pl: 1 }}>
+            showBookIntro ? null : <Typography variant="body2" color="text.disabled" sx={{ py: 1, pl: 1 }}>
               {t("shell.noNotesInChapter")}
             </Typography>
           ) : (
@@ -248,7 +248,7 @@ export function NotesPanelBody({
             ))
           )
         ) : tnForVerse.length === 0 ? (
-          <Typography variant="body2" color="text.disabled" sx={{ py: 1, pl: 1 }}>
+          showBookIntro ? null : <Typography variant="body2" color="text.disabled" sx={{ py: 1, pl: 1 }}>
             {t("shell.noNotesForVerse")}
           </Typography>
         ) : (

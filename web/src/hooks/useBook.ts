@@ -155,7 +155,12 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
           setChapters((prev) => new Map(prev).set(ch, { kind: "ready", data }));
         })
         .catch(() => {
-          // Best effort: the cache keeps showing the previous payload.
+          if (ctrl.signal.aborted) return;
+          // Best effort: a ready cache keeps its previous payload. Aborting a
+          // loadChapter in flight left it "loading" for good, so let it retry.
+          setChapters((prev) =>
+            prev.get(ch)?.kind === "loading" ? new Map(prev).set(ch, { kind: "unloaded" }) : prev,
+          );
         });
     },
     [book, enabled],
