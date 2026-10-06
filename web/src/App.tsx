@@ -950,7 +950,7 @@ export function App() {
                     candidates.push({
                       book: loc.book,
                       chapter: ("chapter" in loc && loc.chapter) || 1,
-                      verse: ("verse" in loc && loc.verse) || 1,
+                      verse: ("verse" in loc ? loc.verse : null) ?? 1,
                     });
                   }
                   const last =

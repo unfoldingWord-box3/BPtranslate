@@ -848,6 +848,21 @@ test("import (internal): a row-scoped chapter 1 job leaves the book introduction
   }
 });
 
+test("import (internal): options_json that is the literal null does not throw and counts as whole-range", async () => {
+  const sqlite = freshSqlite();
+  seedBookIntroRow(sqlite);
+  seedRunningInternalJob(sqlite, wf("done", { status: "done" }, MANIFEST));
+  sqlite.prepare(`UPDATE pipeline_jobs SET options_json = 'null' WHERE job_id = 'job-1'`).run();
+  const env = freshEnv(sqlite);
+  env.blobs.map.set(outKey(env.WORKSPACE_SLUG, "job-1", "tn_OBA.tsv"), INTRO_TSV);
+  env.blobs.map.set(outKey(env.WORKSPACE_SLUG, "job-1", "translate-report-1-1.json"), "{}");
+
+  await withNoFetch(async () => pollAllNonTerminal(env));
+
+  const row = sqlite.prepare(`SELECT version FROM tn_rows WHERE id = 'fr01'`).all()[0];
+  assert.equal(row.version, 2, "the intro landed; the null options did not break the import");
+});
+
 test("import (internal): a job that does not start at chapter 1 leaves the book introduction alone", async () => {
   const sqlite = freshSqlite();
   seedBookIntroRow(sqlite);

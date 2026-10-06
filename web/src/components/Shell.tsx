@@ -947,19 +947,19 @@ export function Shell({
           // "applied" toast, since its new rows aren't in the open list yet.
           const inView = job.book === book && chapter >= job.start_chapter && chapter <= job.end_chapter;
           if (inView) promptChapterRefresh(job.pipeline_type);
-          else {
-            pushPipelineToast(t("shell.aiApplied", { pipelineType: job.pipeline_type, where }), "success");
-            // A chapter-1 translate also rewrites the book introduction; keep the
-            // cached chapter 0 current even though the user has moved on.
-            if (job.pipeline_type === "translate" && job.book === book && job.start_chapter === 1) {
-              reloadBookChapter?.(0);
-            }
+          else pushPipelineToast(t("shell.aiApplied", { pipelineType: job.pipeline_type, where }), "success");
+          // A translate job reaching chapter 1 can rewrite the book introduction;
+          // keep the cached chapter 0 current wherever the user is now, so
+          // chapter 1 never shows pre-translation text. (A card mid-edit keeps
+          // its text: NoteCard's session guard.)
+          if (job.pipeline_type === "translate" && job.book === book && job.start_chapter <= 1 && mode === "book" && hasBookFront) {
+            reloadBookChapter?.(0);
           }
         } else if (job.state === "failed" && prev !== "failed") {
           pushPipelineToast(t("shell.aiFailed", { pipelineType: job.pipeline_type, where, error: job.error_kind ?? t("shell.error") }), "error");
         }
       }),
-    [pushPipelineToast, promptChapterRefresh, reloadBookChapter, book, chapter, t],
+    [pushPipelineToast, promptChapterRefresh, reloadBookChapter, book, chapter, mode, hasBookFront, t],
   );
 
   // Surface a toast when the outbox drops an op because the chapter was
@@ -1064,7 +1064,11 @@ export function Shell({
       setTranslatingRowIds((prev) => new Set(prev).add(id));
       // The server sends front:intro (chapter 0) only to a job that starts at
       // chapter 1 (sliceChapterRows), and rejects startChapter 0.
-      const isBookIntro = bookIntroRowsRef.current.some((r) => r.id === id);
+      // Decided by the ROW's chapter, so it also holds on the TopBar "Intro" view
+      // (active chapter 0), where the row sits in useChapter's own data.
+      const introRow =
+        bookIntroRowsRef.current.find((r) => r.id === id) ?? dataRef.current?.tn.find((r) => r.id === id);
+      const isBookIntro = introRow?.chapter === 0;
       try {
         await pipelineStore.start({
           pipelineType: "translate",

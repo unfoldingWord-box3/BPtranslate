@@ -239,7 +239,8 @@ async function frontIntroSelected(env: Env, jobId: string, rowId: string): Promi
     .first<{ options_json: string | null }>();
   let o: { rowIds?: unknown; verseStart?: unknown } = {};
   try {
-    o = r?.options_json ? JSON.parse(r.options_json) : {};
+    const parsed: unknown = r?.options_json ? JSON.parse(r.options_json) : null;
+    if (parsed && typeof parsed === "object") o = parsed;
   } catch {
     /* unreadable options: treat as whole-range, like dispatch does */
   }

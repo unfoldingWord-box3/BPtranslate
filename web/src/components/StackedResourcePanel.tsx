@@ -211,7 +211,7 @@ export function StackedResourcePanel({
   const totalTq = tqCount.live;
 
   // Book-introduction rows (chapter 0) have no verse here; see ResourceColumn.
-  const isForeign = (r: TnRow) => r.chapter !== chapter;
+  const isForeign = (r: TnRow) => bookIntroTn?.some((b) => b.id === r.id) ?? false;
   const renderNoteCard = (r: TnRow) => (
     <NoteCard
       key={r.id}

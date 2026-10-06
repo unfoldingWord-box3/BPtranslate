@@ -76,7 +76,7 @@ interface Props {
   tn: TnRow[];
   // Book-introduction notes (chapter 0) to list before the chapter's own notes;
   // see selectBookIntroRows. They are not in `tn`, so cards built for them
-  // (chapter !== this chapter) omit the verse-bound controls.
+  // (members of this list) omit the verse-bound controls.
   bookIntroTn?: TnRow[];
   tq: TqRow[];
   twl: TwlRow[];
@@ -603,6 +603,7 @@ export function ResourceColumn({
   }, [dragId, dragOver, computeNeighbors, onReorderPreview]);
 
   const scrollBodyRef = useRef<HTMLDivElement | null>(null);
+  const bookIntroIds = useMemo(() => new Set((bookIntroTn ?? []).map((r) => r.id)), [bookIntroTn]);
 
   // Auto-scroll the list while a reorder drag hovers near its top/bottom edge.
   // Native HTML5 DnD only auto-scrolls the window, never a nested overflow
@@ -986,7 +987,7 @@ export function ResourceColumn({
     // A book-introduction row (chapter 0, shown on the first chapter): it has
     // no verse here, so no insert-after / change-verse / AI Suggest / quote
     // build, and the hover preview would point at this chapter's verse 0.
-    const foreign = r.chapter !== chapter;
+    const foreign = bookIntroIds.has(r.id);
     return (
       <Fragment key={r.id}>
         {showBefore && <DropIndicator />}

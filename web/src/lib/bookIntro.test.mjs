@@ -19,6 +19,12 @@ test("rows keep stored order: sort_order, then id", () => {
   assert.deepEqual(selectBookIntroRows({ ...base, chapters }).map((r) => r.id), ["a", "b", "c"]);
 });
 
+test("trashed rows sink last, keeping their relative order", () => {
+  const t = (id, sort_order) => ({ ...row(id, sort_order), trashed_at: 5 });
+  const chapters = cache(ready(t("a", 100), row("b", 200), row("c", 300), t("d", 50)));
+  assert.deepEqual(selectBookIntroRows({ ...base, chapters }).map((r) => r.id), ["b", "c", "d", "a"]);
+});
+
 test("rows and columns modes show nothing", () => {
   assert.deepEqual(selectBookIntroRows({ ...base, mode: "rows" }), []);
   assert.deepEqual(selectBookIntroRows({ ...base, mode: "columns" }), []);

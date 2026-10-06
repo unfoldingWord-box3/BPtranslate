@@ -21,8 +21,10 @@ export function selectBookIntroRows(args: {
   if (args.chapter !== realChapterNumbers(args.summary)[0]) return [];
   const front = args.chapters?.get(0);
   if (!front || front.kind !== "ready" || !front.data) return [];
+  // Trashed rows sink last, like sortBySortOrder (resourcePanelShared.tsx).
   return [...front.data.tn].sort(
     (a, b) =>
+      (a.trashed_at != null ? 1 : 0) - (b.trashed_at != null ? 1 : 0) ||
       (a.sort_order ?? Number.MAX_SAFE_INTEGER) - (b.sort_order ?? Number.MAX_SAFE_INTEGER) ||
       a.id.localeCompare(b.id),
   );
