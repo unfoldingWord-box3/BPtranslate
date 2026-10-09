@@ -14,7 +14,7 @@ import type { Env } from "./index";
 import type { ProjectConfig, TranslationSourceRef } from "./projectConfig";
 import { isIdent, type RepoRef } from "./repoUrl.ts";
 import { parseJson } from "./httpJson.ts";
-import { DcsCommitsResponse, DcsContentsMeta } from "./dcsSchemas.ts";
+import { DcsCommitsResponse, DcsContentsMeta, warnOnSchemaError } from "./dcsSchemas.ts";
 
 // Standard unfoldingWord book number prefixes for USFM filenames. Mirror of
 // the BOOK_NUMBERS map in scripts/import-book.mjs and api/src/export.ts.
@@ -534,7 +534,8 @@ export async function fileCommitSha(env: Env, owner: string, repo: string, path:
     if (!r.ok) return null;
     const commits = await parseJson(r, DcsCommitsResponse, "DCS commits");
     return commits[0]?.sha ?? null;
-  } catch {
+  } catch (e) {
+    warnOnSchemaError(e, "fileCommitSha");
     return null;
   }
 }
@@ -588,7 +589,8 @@ async function dcsFileMeta(
       size: typeof data.size === "number" && Number.isFinite(data.size) ? data.size : null,
       sha: typeof data.sha === "string" ? data.sha : null,
     };
-  } catch {
+  } catch (e) {
+    warnOnSchemaError(e, "dcsFileMeta");
     return null;
   }
 }

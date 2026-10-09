@@ -3,9 +3,10 @@
 // These are the guard the issue asks for: a wrong-shaped or truncated DCS
 // response must be REJECTED at the boundary (so isViewerOrgMember denies, and
 // fileCommitSha / dcsFileMeta fall back to null) rather than flowing inward as
-// garbage. No network — parseJson is fed constructed Response objects. Pure
-// zod + httpJson, so it runs under `node --experimental-strip-types` without
-// loading the Worker runtime that auth.ts / dcsSources.ts pull in.
+// garbage. No network — parseJson is fed constructed Response objects, and
+// the dcsSources.ts call sites get a stubbed globalThis.fetch. dcsSources.ts
+// loads under `node --experimental-strip-types`; auth.ts (Hono, D1) is only
+// covered at the schema level.
 //
 // Run from api/:
 //   node --experimental-strip-types --no-warnings --test src/dcsSchemas.test.mjs
