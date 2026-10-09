@@ -56,6 +56,17 @@ test("a book whose chapter 0 has no notes shows nothing", () => {
   assert.deepEqual(selectBookIntroRows({ ...base, chapters: cache(ready()) }), []);
 });
 
+// #562 review B1: Refresh after an AI apply must reload chapter 0 even when it
+// has no intro notes yet (the run may have just written the first ones).
+test("refreshReloadsIntro: whenever the intro room is open or chapter 0 is cached", async () => {
+  const { refreshReloadsIntro } = await import("./bookIntro.ts");
+  assert.equal(refreshReloadsIntro({ introRoom: 0, front: ready() }), true, "ready with zero rows");
+  assert.equal(refreshReloadsIntro({ introRoom: 0, front: undefined }), true);
+  assert.equal(refreshReloadsIntro({ introRoom: null, front: ready(row("a", 1)) }), true);
+  assert.equal(refreshReloadsIntro({ introRoom: null, front: { kind: "loading" } }), false);
+  assert.equal(refreshReloadsIntro({ introRoom: null, front: undefined }), false);
+});
+
 // #562 item 1: book mode on the first real chapter also listens to the
 // chapter-0 room, so intro edits and intro-only AI hints reach this tab.
 test("introRoomChapter: book mode on the first real chapter of a book with a front", async () => {
