@@ -147,15 +147,14 @@ test("D3': an attempt aborted before its write never touches the opened store", 
   assert.equal(sibling.map.get("X").patch.v, "newer", "the newer payload stays for the next attempt");
 });
 
-test("D3': an attempt aborted after its copy commits leaves the sibling copy and reports failed", async () => {
+test("D3': an attempt aborted after its copy commits still clears the unchanged sibling copy", async () => {
   const opened = fakeStore([]);
   const sibling = fakeStore([{ id: "a", queuedAt: 1 }]);
   let calls = 0;
   const res = await adoptRecords({ sibling, opened, keyOf, isAborted: () => calls++ > 0 });
-  assert.equal(res.failed, true);
   assert.equal(res.adopted, 1);
   assert.ok(opened.map.has("a"));
-  assert.ok(sibling.map.has("a"), "the next attempt drops it");
+  assert.ok(!sibling.map.has("a"), "no stale sibling copy is left to be re-adopted after ours is sent");
 });
 
 test("A5: an equal-timestamp, different-content draft is left in both places", async () => {

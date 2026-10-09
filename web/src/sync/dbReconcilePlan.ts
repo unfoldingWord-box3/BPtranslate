@@ -123,8 +123,9 @@ export async function adoptRecords(opts: {
   if (processed.length === 0) return { adopted, heldUntil };
 
   const changed: { key: IDBValidKey; snapshot: string }[] = [];
-  // Copies are committed; leave the sibling's copies for the next attempt.
-  if (aborted()) return { adopted, heldUntil, failed: true };
+  // Copies are committed, so finish the sibling delete even if aborted: it only
+  // touches the sibling, guarded by the unchanged-snapshot check, and stopping
+  // here would leave a copy a later attempt re-adopts after ours was sent.
   try {
     const delTx = sibling.tx();
     for (const p of processed) {
