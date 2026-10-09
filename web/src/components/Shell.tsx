@@ -60,7 +60,7 @@ import { buildVerseIndex, concatSourceRange, formatVerseLabel, noteCoveredVerses
 import { buildTnQuickRequest } from "../lib/tnQuickRequest";
 import { isAiProviderNotConfigured } from "../lib/aiProviderErrors";
 import { isApprovableRow } from "../lib/reviewApproval";
-import { introRoomChapter, introRoomJoined, selectBookIntroRows } from "../lib/bookIntro";
+import { introRoomChapter, introRoomJoined, refreshReloadsIntro, selectBookIntroRows } from "../lib/bookIntro";
 import { broadcastUpsertAction } from "../lib/bookCache";
 import { reviewStatePatches, reviewStateSnapshot } from "../lib/reviewStateSweep";
 import { versionLabel } from "../lib/versionLabels";
@@ -565,6 +565,12 @@ export function Shell({
     // introCacheReady deliberately not a dep: only the join itself triggers.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [introRoom, reloadBookChapter]);
+  // Read by the chapter-refresh toast's action (promptChapterRefresh, below).
+  const refreshReloadsIntroRef = useRef(false);
+  const introFront = bookHook?.chapters.get(0);
+  useEffect(() => {
+    refreshReloadsIntroRef.current = refreshReloadsIntro({ introRoom, front: introFront });
+  }, [introRoom, introFront]);
   useChapterRoom(book, introRoom, {
     onUpsert: (kind, row) => {
       if (kind !== "tn" || row.chapter !== 0) return;
@@ -586,6 +592,9 @@ export function Shell({
       promptRefreshRef.current(pipelineType);
       void pipelineStore.reload();
     },
+    // An admin review-state sweep covered chapter 0: refetch it (local edits
+    // are replayed onto the response).
+    onReviewStateSwept: () => reloadBookChapter?.(0),
     onVerseUpdate: noop,
     onVerseStatusUpdate: noop,
     onLaneCheckUpdate: noop,
@@ -859,8 +868,8 @@ export function Shell({
           label: t("shell.refresh"),
           onClick: () => {
             void refetch();
-            // A translate run can rewrite the book introduction too.
-            if (bookIntroRowsRef.current.length) reloadBookChapter?.(0);
+            // A translate run can rewrite (or first write) the book introduction.
+            if (refreshReloadsIntroRef.current) reloadBookChapter?.(0);
           },
         },
       );

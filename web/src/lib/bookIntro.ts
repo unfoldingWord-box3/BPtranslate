@@ -36,6 +36,18 @@ export function introRoomJoined(prev: number | null, next: number | null): boole
   return prev === null && next !== null;
 }
 
+/**
+ * Whether the chapter-refresh action should also reload useBook's chapter 0:
+ * when the tab listens to the intro room or holds chapter 0 at all — even with
+ * no intro notes yet, since the AI run may have just written the first ones.
+ */
+export function refreshReloadsIntro(args: {
+  introRoom: number | null;
+  front: { kind: string } | undefined;
+}): boolean {
+  return args.introRoom !== null || args.front?.kind === "ready";
+}
+
 export function selectBookIntroRows(args: {
   mode: string;
   chapter: number;
