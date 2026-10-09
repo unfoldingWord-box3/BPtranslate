@@ -18,7 +18,6 @@
 import {
   api,
   ApiError,
-  type PipelineErrorKind,
   type PipelineJobRow,
   type PipelineQueueSummary,
   type PipelineState,
@@ -143,7 +142,7 @@ function rowFromStatus(prev: PipelineJob, status: PipelineStatusResponse): Pipel
     state: status.state,
     current_skill: status.current?.skill ?? null,
     current_status: status.current?.status ?? null,
-    error_kind: (status.current?.errorKind as PipelineErrorKind) ?? null,
+    error_kind: status.current?.errorKind ?? null,
     error_message: status.current?.error ?? null,
     output_json: status.output ? JSON.stringify(status.output) : prev.output_json,
     updated_at: Number.isFinite(updatedTs) ? Math.floor(updatedTs / 1000) : prev.updated_at,
