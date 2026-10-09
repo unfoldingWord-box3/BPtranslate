@@ -1376,7 +1376,20 @@ export async function pollAllNonTerminal(env: Env): Promise<void> {
   // recoverable proxy job to the poll cap and auto-fail it. Internal jobs read
   // their status from D1 with no token, so they still advance.
   if (!env.BT_API_TOKEN) {
+    const skipped = jobs.filter((j) => j.runner !== "internal").map((j) => j.job_id);
     jobs = jobs.filter((j) => j.runner === "internal");
+    // #496: the skipped proxy rows are in ACTIVE_STATES, the single global
+    // dispatch slot, and are neither polled nor counted toward the poll cap. So
+    // they hold the slot (and the chapter write-lock), blocking every other job,
+    // internal ones included, until the token returns or the 48h no-progress
+    // sweep frees it. That trade is deliberate (#469/#474); this line only makes
+    // it visible. One line per tick, ids only (bounded by the LIMIT above).
+    if (skipped.length > 0) {
+      console.warn(
+        `[scheduled.pipelinePoll] workspace=${env.WORKSPACE_SLUG ?? "default"} BT_API_TOKEN unset: skipped ${skipped.length} proxy job(s) [${skipped.join(", ")}]; ` +
+          `they hold the single dispatch slot until the token returns or the 48h no-progress sweep frees it`,
+      );
+    }
   }
   if (jobs.length > 0) {
     // Bump attempt_count for everything we're about to poll, in one batch. We

@@ -687,6 +687,75 @@ test("pollAllNonTerminal (no BT_API_TOKEN): a running proxy job is skipped — n
   assert.equal(row.attempt_count, 0, "a token-less sweep does not consume the proxy job's poll budget");
 });
 
+// #496: the skipped proxy job above still holds the single dispatch slot, so
+// the queue is wedged until the token returns or the 48h sweep frees it. The
+// sweep must say so in the Worker log: one line per tick (not one per job),
+// naming the jobs, and silent when nothing was skipped.
+async function captureSkipWarnings(fn) {
+  const realWarn = console.warn;
+  const lines = [];
+  console.warn = (...args) => {
+    const line = args.map(String).join(" ");
+    if (line.includes("BT_API_TOKEN unset")) lines.push(line);
+    else realWarn(...args);
+  };
+  try {
+    await fn();
+  } finally {
+    console.warn = realWarn;
+  }
+  return lines;
+}
+
+test("pollAllNonTerminal (no BT_API_TOKEN): skipped proxy jobs are logged once per tick, naming them (#496)", async () => {
+  const sqlite = freshSqlite();
+  seedRunningProxyJob(sqlite, { jobId: "proxy-1", upstreamId: "bot-1" });
+  seedRunningProxyJob(sqlite, { jobId: "proxy-2", upstreamId: "bot-2" });
+  seedRunningInternalJob(sqlite, wf("running", { status: "batch 1/2" }), { jobId: "internal-1" });
+  const env = freshEnv(sqlite, { BT_API_TOKEN: undefined });
+
+  const lines = await captureSkipWarnings(async () => {
+    await withNoFetch(async () => pollAllNonTerminal(env));
+    await withNoFetch(async () => pollAllNonTerminal(env));
+  });
+
+  assert.equal(lines.length, 2, `one line per tick, not one per skipped job: ${JSON.stringify(lines)}`);
+  for (const line of lines) {
+    assert.match(line, /skipped 2 /, "the line counts the skipped proxy jobs");
+    assert.ok(line.includes(`workspace=${env.WORKSPACE_SLUG}`), "the line names the workspace whose queue is wedged");
+    assert.ok(line.includes("proxy-1") && line.includes("proxy-2"), "the line names the jobs holding the slot");
+    assert.ok(!line.includes("internal-1"), "internal jobs are polled, not skipped, so they are not listed");
+  }
+  assert.equal(jobRow(sqlite, "proxy-1").state, "running", "logging does not change what the sweep does to the job");
+  assert.equal(jobRow(sqlite, "proxy-1").attempt_count, 0);
+});
+
+test("pollAllNonTerminal: no skip line when nothing was skipped (#496)", async () => {
+  // Token-less deployment with only internal jobs: nothing is skipped.
+  const sqlite = freshSqlite();
+  seedRunningInternalJob(sqlite, wf("running", { status: "batch 1/2" }));
+  const env = freshEnv(sqlite, { BT_API_TOKEN: undefined });
+  const lines = await captureSkipWarnings(() => withNoFetch(async () => pollAllNonTerminal(env)));
+  assert.deepEqual(lines, []);
+
+  // Token present: the proxy job is polled against the bot, not skipped.
+  const sqlite2 = freshSqlite();
+  seedRunningProxyJob(sqlite2);
+  const env2 = freshEnv(sqlite2);
+  let botCalls = 0;
+  const lines2 = await captureSkipWarnings(() =>
+    withFetch(
+      async () => {
+        botCalls++;
+        return new Response(JSON.stringify({ state: "running" }), { status: 200 });
+      },
+      async () => pollAllNonTerminal(env2),
+    ),
+  );
+  assert.ok(botCalls > 0, "with a token the proxy job is polled");
+  assert.deepEqual(lines2, []);
+});
+
 // ---------------------------------------------------------------------------
 // GET /api/pipelines/:jobId capability gate (#469 fix 2)
 // ---------------------------------------------------------------------------
