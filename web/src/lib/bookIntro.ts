@@ -11,6 +11,43 @@ import { realChapterNumbers } from "./bookSummary.ts";
  * is "book", the active chapter is the first real chapter, and chapter 0 has
  * finished loading. Rows keep the stored order (sort_order, then id).
  */
+/**
+ * The chapter-0 room a book-mode tab also listens to (#562): on the first real
+ * chapter it shows the book introduction, whose row edits and AI-apply hints
+ * are broadcast to room (book, 0) only. Null when no extra room is needed.
+ */
+export function introRoomChapter(args: {
+  mode: string;
+  chapter: number;
+  summary: BookSummary | null | undefined;
+}): 0 | null {
+  if (args.mode !== "book") return null;
+  if (!args.summary?.chapters.some((c) => c.chapter === 0)) return null;
+  if (args.chapter !== realChapterNumbers(args.summary)[0]) return null;
+  return 0;
+}
+
+/**
+ * True when the tab has just started listening to the intro room. Events sent
+ * there while it wasn't listening were missed, so the cached chapter 0 must be
+ * refetched (useBook replays local edits onto the response).
+ */
+export function introRoomJoined(prev: number | null, next: number | null): boolean {
+  return prev === null && next !== null;
+}
+
+/**
+ * Whether the chapter-refresh action should also reload useBook's chapter 0:
+ * when the tab listens to the intro room or holds chapter 0 at all — even with
+ * no intro notes yet, since the AI run may have just written the first ones.
+ */
+export function refreshReloadsIntro(args: {
+  introRoom: number | null;
+  front: { kind: string } | undefined;
+}): boolean {
+  return args.introRoom !== null || args.front?.kind === "ready";
+}
+
 export function selectBookIntroRows(args: {
   mode: string;
   chapter: number;
