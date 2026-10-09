@@ -31,8 +31,35 @@ import { ERROR_COPY_KEY, errorCopy } from "./aiErrorCopy.ts";
 const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const apiSrc = path.resolve(webRoot, "..", "api", "src");
 const readWeb = (rel) => readFileSync(path.join(webRoot, rel), "utf8");
-// Strip comments so a note that mentions a kind can't be parsed as one.
-const strip = (src) => src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+// Strip comments so a note that mentions a kind can't be parsed as one. Walks
+// the source and leaves string and template literals alone, so a "/*" or "//"
+// inside a string (an Accept header, a URL) can't swallow real code. Limit: it
+// does not recognise regex literals; a quote inside one can flip the string
+// state, which only makes it strip less (a stray kind then fails loudly).
+function strip(src) {
+  let out = "";
+  let quote = null;
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (quote) {
+      out += c;
+      if (c === "\\") out += src[++i] ?? "";
+      else if (c === quote) quote = null;
+    } else if (c === '"' || c === "'" || c === "`") {
+      quote = c;
+      out += c;
+    } else if (c === "/" && src[i + 1] === "/") {
+      while (i < src.length && src[i] !== "\n") i++;
+      out += "\n";
+    } else if (c === "/" && src[i + 1] === "*") {
+      const end = src.indexOf("*/", i + 2);
+      i = end === -1 ? src.length : end + 1;
+    } else {
+      out += c;
+    }
+  }
+  return out;
+}
 
 const FIX_HINT =
   "Add the kind to the PipelineErrorKind union (web/src/sync/api.ts) and to ERROR_COPY_KEY " +
@@ -61,12 +88,22 @@ const KIND_PATTERNS = [
 
 function parseServerEmittedKinds() {
   const kinds = new Map(); // kind -> first file that writes it
+  const hits = KIND_PATTERNS.map(() => 0);
   for (const file of apiSourceFiles()) {
     const src = strip(readFileSync(file, "utf8"));
-    for (const re of KIND_PATTERNS) {
-      for (const m of src.matchAll(re)) if (!kinds.has(m[1])) kinds.set(m[1], path.relative(apiSrc, file));
-    }
+    KIND_PATTERNS.forEach((re, i) => {
+      for (const m of src.matchAll(re)) {
+        hits[i]++;
+        if (!kinds.has(m[1])) kinds.set(m[1], path.relative(apiSrc, file));
+      }
+    });
   }
+  // Every pattern family must still match something, so a regex that stops
+  // matching (the server code changed shape) fails here instead of silently
+  // dropping that family's kinds.
+  KIND_PATTERNS.forEach((re, i) => {
+    assert.ok(hits[i] > 0, `Parser rot: pattern ${re} matched nothing in api/src`);
+  });
   // llm.ts provider codes reach the row as `errorKind: err.code`.
   const llm = strip(readFileSync(path.join(apiSrc, "translate", "llm.ts"), "utf8"));
   for (const setName of ["RETRYABLE_CODES", "NON_RETRYABLE_CODES"]) {
