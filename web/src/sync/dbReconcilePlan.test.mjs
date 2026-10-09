@@ -76,6 +76,7 @@ test("A1: a sibling op rewritten by a live tab after the snapshot is not duplica
   assert.equal(res.adopted, 0);
   assert.equal(opened.map.has("a"), false, "our stale copy is undone");
   assert.deepEqual(sibling.map.get("a"), { id: "a", value: "new" });
+  assert.equal(res.recheck, true, "the newer sibling copy must trigger a follow-up re-check");
 });
 
 test("A1: a sibling op sent or discarded by a live tab after the snapshot is not re-sent", async () => {

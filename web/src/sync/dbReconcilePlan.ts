@@ -69,6 +69,9 @@ export interface AdoptResult {
   // The attempt did not finish (an IndexedDB error, a timeout). Whatever it
   // copied is reported in `adopted`; the caller should try again later.
   failed?: boolean;
+  // A live writer changed or removed a sibling record mid-attempt (step 4), so
+  // the sibling may still hold newer work: the caller should re-check soon.
+  recheck?: boolean;
 }
 
 // Move the sibling's records into the opened store. Steps:
@@ -159,6 +162,7 @@ export async function adoptRecords(opts: {
     } catch {
       /* worst case both copies stay: a duplicate send, never a lost edit */
     }
+    return { adopted, heldUntil, recheck: true };
   }
   return { adopted, heldUntil };
 }

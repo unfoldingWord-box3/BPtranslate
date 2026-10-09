@@ -300,7 +300,7 @@ async function adoptStrandedOps(): Promise<void> {
     if (res.heldUntil !== undefined) {
       nextAdoptAt = Math.min(nextAdoptAt, res.heldUntil);
       scheduleDrain(Math.max(0, res.heldUntil - Date.now()) + 250);
-    } else if (res.adopted > 0) {
+    } else if (res.adopted > 0 || res.recheck) {
       scheduleDrain(ADOPT_RECHECK_MS + 250); // one follow-up re-check (see above)
     }
   }
