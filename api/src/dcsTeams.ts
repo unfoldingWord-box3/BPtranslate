@@ -140,7 +140,7 @@ export async function fetchMemberOrgs(
   accessToken: string,
   deps?: { fetch?: typeof fetch },
 ): Promise<Set<string> | null> {
-  const list = await fetchPagedList<{ username?: string }>(
+  const list = await fetchPagedList<{ name?: string | null; username?: string | null }>(
     env,
     "/api/v1/user/orgs",
     "/user/orgs",
@@ -149,9 +149,12 @@ export async function fetchMemberOrgs(
   );
   if (list === null) return null;
   const orgs = new Set<string>();
+  // `name` and the deprecated `username` are both the org login (#572).
   for (const o of list) {
-    const name = (o?.username ?? "").toLowerCase();
-    if (name) orgs.add(name);
+    for (const v of [o?.name, o?.username]) {
+      const login = (typeof v === "string" ? v : "").toLowerCase();
+      if (login) orgs.add(login);
+    }
   }
   return orgs;
 }
