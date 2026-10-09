@@ -1236,18 +1236,18 @@ export async function drain() {
 }
 
 // Move ops an older build queued for the confirmed fallback workspace into
-// this build's outbox (#502; see legacyAdoption.ts). Waits for the drain lock,
-// which every build drains under, so no tab sends an op while it moves.
+// this build's outbox (#502; see legacyAdoption.ts). Holds the drain lock,
+// which every build drains under, so no tab sends an op while it moves; it is
+// only requested when a legacy database actually holds ops.
 export async function adoptLegacyOutbox(fallbackSlug: string): Promise<void> {
-  const move = async () =>
-    adoptFromLegacyDbs({
-      legacyNames: legacyDbNames(OUTBOX_BASE, fallbackSlug),
-      store: STORE,
-      target: await db(),
-      keyPath: "id",
-    });
-  if (typeof navigator === "undefined" || !navigator.locks) return;
-  const moved = await navigator.locks.request("be-outbox-drain", move);
+  const moved = await adoptFromLegacyDbs({
+    legacyNames: legacyDbNames(OUTBOX_BASE, fallbackSlug),
+    store: STORE,
+    target: await db(),
+    keyPath: "id",
+    rule: "outbox",
+    locks: ["be-legacy-adopt", "be-outbox-drain"],
+  });
   if (moved > 0) {
     void notify();
     void drain();

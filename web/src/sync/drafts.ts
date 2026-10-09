@@ -305,15 +305,16 @@ export const drafts = {
 };
 
 // Move drafts an older build stashed for the confirmed fallback workspace into
-// this build's store (#502; see legacyAdoption.ts). The newer `updatedAt`
-// wins a key both stores hold. Caller holds the legacy-adopt lock.
+// this build's store (#502; see legacyAdoption.ts's decide for which copy
+// wins a key both stores hold).
 export async function adoptLegacyDrafts(fallbackSlug: string): Promise<void> {
   const moved = await adoptFromLegacyDbs({
     legacyNames: legacyDbNames(DB_NAME, fallbackSlug),
     store: STORE,
     target: await db(),
     keyPath: "key",
-    newerField: "updatedAt",
+    rule: "draft",
+    locks: ["be-legacy-adopt"],
   });
   if (moved > 0) void notify();
 }

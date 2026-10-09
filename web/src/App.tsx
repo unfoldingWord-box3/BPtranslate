@@ -33,7 +33,6 @@ import {
 import { setPipelineUser } from "./sync/pipelineStore";
 import { api } from "./sync/api";
 import { getWorkspaceSlug, setWorkspaceSlug } from "./sync/workspace";
-import { withLegacyAdoptLock } from "./sync/legacyAdoption";
 import { adoptLegacyOutbox } from "./sync/outbox";
 import { adoptLegacyDrafts } from "./sync/drafts";
 import { adoptLegacyAlignmentDrafts } from "./sync/alignmentDrafts";
@@ -532,13 +531,16 @@ export function App() {
       // name (#502, sync/legacyAdoption.ts). Gated on this live answer, never
       // a persisted flag, so another org's legacy records are never adopted.
       if (serverIsFallback === true) {
-        void withLegacyAdoptLock(async () => {
-          for (const adopt of [adoptLegacyOutbox, adoptLegacyDrafts, adoptLegacyAlignmentDrafts]) {
+        void (async () => {
+          // Drafts first: they never wait on the outbox drain lock, and
+          // editors read them when they open. Then the outbox, so an adopted
+          // op that lands and clears its draft finds the draft already moved.
+          for (const adopt of [adoptLegacyDrafts, adoptLegacyAlignmentDrafts, adoptLegacyOutbox]) {
             // Best effort: whatever is not moved stays durable in its legacy
             // database and the next confirmed boot retries.
             await adopt(serverWs).catch(() => {});
           }
-        }).catch(() => {});
+        })();
       }
       try { sessionStorage.removeItem(WS_RECONCILED_KEY); } catch { /* private mode */ }
       return;

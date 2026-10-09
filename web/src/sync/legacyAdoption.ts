@@ -7,17 +7,21 @@
 // moved without racing a live writer of this build. Adoption:
 //   - runs only after this session's /api/auth/me confirms the current slug is
 //     the fallback workspace (App.tsx), never from a persisted flag;
+//   - first checks, with no lock, whether any legacy database holds records,
+//     and stops there when none does (the normal case once adopted);
+//   - moves the drafts stores first, so editors that read drafts when they
+//     open find them as early as possible, then the outbox;
 //   - runs in one tab at a time, under the "be-legacy-adopt" Web Lock, and the
 //     outbox part also under the outbox's own "be-outbox-drain" lock, which
 //     older builds drain under too, so no tab of any build sends an op while
-//     it moves;
+//     it moves; the drafts part never waits on the drain lock;
 //   - copies a record, then deletes the legacy copy only if it is unchanged.
 //     A tab still running an older build can change it in between; then our
 //     copy is undone and the record stays for the next confirmed boot.
 //   - reruns on every confirmed boot (no "done" marker), because a tab of an
-//     older build left open can keep writing the legacy name. With nothing
-//     left it costs one open of an empty database. The emptied database is
-//     never deleted: deleteDatabase would block on those tabs' connections.
+//     older build left open can keep writing the legacy name. The emptied
+//     database is never deleted: deleteDatabase would block on those tabs'
+//     connections.
 // The legacy data stays durable where it is until a run moves it, so an
 // offline boot (no /api/auth/me answer) delays adoption but loses nothing.
 
@@ -33,17 +37,49 @@ export interface StoreSide {
 }
 export type Change = { put: unknown } | { delete: true } | null;
 
-// Whether a legacy record should replace the target's copy under the same key.
-// With `newerField` (the drafts stores' `updatedAt`), the strictly newer copy
-// wins and a tie keeps the target. Without it (outbox ops, keyed by a random
-// uuid), a shared key means an earlier interrupted run already copied the op,
-// so the target's copy is kept.
-export function shouldReplace(legacy: unknown, current: unknown, newerField?: string): boolean {
-  if (current === undefined) return true;
-  if (!newerField) return false;
-  const l = (legacy as Record<string, unknown> | null)?.[newerField];
-  const c = (current as Record<string, unknown> | null)?.[newerField];
-  return typeof l === "number" && typeof c === "number" && l > c;
+// What to do with one legacy record, given the live store's copy under the
+// same key (undefined when absent):
+//   "copy": put it into the live store, then delete the legacy copy.
+//   "drop": the live copy supersedes it; delete only the legacy copy.
+//   "keep": touch neither, so nothing is lost; the next run decides again.
+export type Decision = "copy" | "drop" | "keep";
+export type Rule = "outbox" | "draft";
+
+// Outbox ops (uuid key; a shared key means an interrupted earlier run already
+// copied the op): the newer `queuedAt` wins, since every coalesce re-stamps
+// it, and a tie keeps the live copy (they differ only in drain bookkeeping).
+// A live op that is in_flight is never overwritten: a newer legacy payload
+// waits for the next run, an older one is dropped.
+//
+// Drafts (`updatedAt`): a strictly newer legacy draft wins. Otherwise the
+// legacy copy is deleted only when its content matches the live one (ignoring
+// updatedAt). A legacy draft with different text is kept, because an editor
+// that opened before adoption may have written the live copy without ever
+// seeing it; a leftover legacy draft costs nothing, deleting it could lose
+// unsaved text.
+export function decide(legacy: unknown, current: unknown, rule: Rule): Decision {
+  if (current === undefined) return "copy";
+  const field = rule === "outbox" ? "queuedAt" : "updatedAt";
+  const l = num(legacy, field);
+  const c = num(current, field);
+  const legacyNewer = l !== undefined && c !== undefined && l > c;
+  if (rule === "outbox") {
+    if (!legacyNewer) return "drop";
+    return (current as Record<string, unknown>).status === "in_flight" ? "keep" : "copy";
+  }
+  if (legacyNewer) return "copy";
+  return same(without(legacy, field), without(current, field)) ? "drop" : "keep";
+}
+
+function num(record: unknown, field: string): number | undefined {
+  const v = (record as Record<string, unknown> | null)?.[field];
+  return typeof v === "number" ? v : undefined;
+}
+
+function without(record: unknown, field: string): unknown {
+  if (!record || typeof record !== "object") return record;
+  const { [field]: _omit, ...rest } = record as Record<string, unknown>;
+  return rest;
 }
 
 function same(a: unknown, b: unknown): boolean {
@@ -58,17 +94,21 @@ export async function moveRecords(
   legacy: StoreSide,
   target: StoreSide,
   keyOf: (record: unknown) => IDBValidKey,
-  newerField?: string,
+  rule: Rule,
 ): Promise<number> {
   let moved = 0;
   for (const rec of await legacy.getAll()) {
     const key = keyOf(rec);
     let copied = false;
+    let keep = false;
     await target.update(key, (cur) => {
-      if (!shouldReplace(rec, cur, newerField)) return null;
+      const d = decide(rec, cur, rule);
+      if (d === "keep") keep = true;
+      if (d !== "copy") return null;
       copied = true;
       return { put: rec };
     });
+    if (keep) continue;
     let removed = false;
     await legacy.update(key, (cur) => {
       if (!same(cur, rec)) return null;
@@ -117,39 +157,68 @@ function openExisting(name: string): Promise<IDBPDatabase | null> {
   });
 }
 
-// Move one store's records from each legacy database into `target` (the
-// store module's own handle, so its schema is already in place). Returns the
-// number of records moved.
+// Legacy databases that exist and hold at least one record in `store`.
+// Takes no lock and creates nothing, so the common case (nothing left to
+// adopt) costs a few opens and never touches the drain lock.
+async function nonEmptyLegacyDbs(names: string[], store: string): Promise<string[]> {
+  const found: string[] = [];
+  for (const name of names) {
+    const db = await openExisting(name);
+    if (!db) continue;
+    try {
+      if (db.objectStoreNames.contains(store) && (await db.count(store)) > 0) found.push(name);
+    } catch {
+      /* unreadable: leave it for a later run */
+    } finally {
+      db.close();
+    }
+  }
+  return found;
+}
+
+// Run `fn` holding every lock in `names`, taken in order.
+async function withLocks<T>(names: string[], fn: () => Promise<T>): Promise<T> {
+  if (names.length === 0) return fn();
+  const [first, ...rest] = names;
+  return navigator.locks.request(first, async (): Promise<T> => withLocks(rest, fn));
+}
+
+// Move one store's records from each non-empty legacy database into `target`
+// (the store module's own handle, so its schema is already in place), holding
+// `locks` ("be-legacy-adopt" first, so only one tab adopts a store at a time).
+// Returns the number of records moved. Without Web Locks (very old browsers)
+// adoption is skipped and the legacy data stays where it is.
 export async function adoptFromLegacyDbs(opts: {
   legacyNames: string[];
   store: string;
   target: IDBPDatabase;
   keyPath: string;
-  newerField?: string;
+  rule: Rule;
+  locks: string[];
 }): Promise<number> {
-  let moved = 0;
-  for (const name of opts.legacyNames) {
-    if (name === opts.target.name) continue;
-    const legacy = await openExisting(name);
-    if (!legacy) continue;
-    try {
-      if (!legacy.objectStoreNames.contains(opts.store)) continue;
-      moved += await moveRecords(
-        idbSide(legacy, opts.store),
-        idbSide(opts.target, opts.store),
-        (r) => (r as Record<string, IDBValidKey>)[opts.keyPath],
-        opts.newerField,
-      );
-    } finally {
-      legacy.close();
+  if (typeof navigator === "undefined" || !navigator.locks) return 0;
+  const names = await nonEmptyLegacyDbs(
+    opts.legacyNames.filter((n) => n !== opts.target.name),
+    opts.store,
+  );
+  if (names.length === 0) return 0;
+  return withLocks(opts.locks, async () => {
+    let moved = 0;
+    for (const name of names) {
+      const legacy = await openExisting(name);
+      if (!legacy) continue;
+      try {
+        if (!legacy.objectStoreNames.contains(opts.store)) continue;
+        moved += await moveRecords(
+          idbSide(legacy, opts.store),
+          idbSide(opts.target, opts.store),
+          (r) => (r as Record<string, IDBValidKey>)[opts.keyPath],
+          opts.rule,
+        );
+      } finally {
+        legacy.close();
+      }
     }
-  }
-  return moved;
-}
-
-// Single-tab gate for a whole adoption run. Without Web Locks (very old
-// browsers) adoption is skipped: the legacy data stays where it is.
-export async function withLegacyAdoptLock(fn: () => Promise<void>): Promise<void> {
-  if (typeof navigator === "undefined" || !navigator.locks) return;
-  await navigator.locks.request("be-legacy-adopt", fn);
+    return moved;
+  });
 }

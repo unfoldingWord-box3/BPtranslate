@@ -115,18 +115,18 @@ export const alignmentDrafts = {
 };
 
 // Move alignment drafts an older build kept for the confirmed fallback
-// workspace into this build's store (#502; see legacyAdoption.ts); the newer
-// `updatedAt` wins. Caller holds the legacy-adopt lock. There is no
-// subscriber: an aligner already open keeps what it read and sees an adopted
-// draft the next time it mounts. If it saves first, its draft is newer and
-// wins, which is the same newest-wins rule.
+// workspace into this build's store (#502; see legacyAdoption.ts's decide).
+// There is no subscriber: an aligner already open keeps what it read and sees
+// an adopted draft the next time it mounts. If it saved a different draft
+// first, the legacy one is left in place rather than deleted.
 export async function adoptLegacyAlignmentDrafts(fallbackSlug: string): Promise<void> {
   await adoptFromLegacyDbs({
     legacyNames: legacyDbNames(DB_NAME, fallbackSlug),
     store: STORE,
     target: await db(),
     keyPath: "key",
-    newerField: "updatedAt",
+    rule: "draft",
+    locks: ["be-legacy-adopt"],
   });
 }
 
