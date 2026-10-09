@@ -168,6 +168,30 @@ assert(
   "another org's suffixed DB is not part of this slug's pair -> left untouched",
 );
 
+// A fallback flag confirmed for ANOTHER slug is stale: api.ts's
+// workspace_mismatch reload changes the slug without touching the flag. Adopting
+// under it would pull org2's ops into the fallback's unsuffixed DB.
+setWorkspaceSlug("bsoj");
+setWorkspaceIsFallback(true);
+setWorkspaceSlug("org2");
+assert(
+  reconcilableSiblingDbName(BASE, "bible-editor-outbox") === null,
+  "stale fallback flag (confirmed for bsoj, slug now org2) -> no adoption",
+);
+// A flag written before the confirmed-for key existed is treated the same way.
+setWorkspaceSlug("bsoj");
+setWorkspaceIsFallback(true);
+data.delete("bible-editor.workspace-fallback-for");
+assert(
+  reconcilableSiblingDbName(BASE, "bible-editor-outbox") === null,
+  "fallback flag with no confirmed-for slug -> no adoption until boot re-confirms it",
+);
+setWorkspaceIsFallback(true);
+assert(
+  reconcilableSiblingDbName(BASE, "bible-editor-outbox") === "bible-editor-outbox-bsoj",
+  "boot re-confirms the flag for bsoj -> adoption allowed again",
+);
+
 // The implicit "default" workspace never suffixes, so there is only one
 // candidate name and thus no pair to reconcile.
 data.delete("bible-editor.workspace");

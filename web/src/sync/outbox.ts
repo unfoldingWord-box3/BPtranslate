@@ -213,6 +213,9 @@ function db() {
       // sibling into the one we opened, then drain so they finally ship. Kicked
       // off (not awaited) so the first open — and any enqueue racing it — never
       // blocks; the adopted ops are ordered by queuedAt/seq like any other.
+      // An adopted young in_flight op is NOT re-sent at once: recoverInFlight's
+      // age gate holds it until its original request must have timed out, and
+      // drainPass arms a timer for that moment.
       void adoptSiblingRecords({ base: OUTBOX_BASE, opened: name, openedDb: idb, store: STORE })
         .then((n) => {
           if (n > 0) void drain();

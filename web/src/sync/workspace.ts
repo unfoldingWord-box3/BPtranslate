@@ -5,6 +5,8 @@
 
 const STORAGE_KEY = "bible-editor.workspace";
 const FALLBACK_KEY = "bible-editor.workspace-is-fallback";
+// The slug FALLBACK_KEY was last confirmed for (see setWorkspaceIsFallback).
+const FALLBACK_FOR_KEY = "bible-editor.workspace-fallback-for";
 
 export function getWorkspaceSlug(): string {
   try {
@@ -52,6 +54,12 @@ export function getWorkspaceIsFallback(): boolean {
 export function setWorkspaceIsFallback(isFallback: boolean): void {
   try {
     localStorage.setItem(FALLBACK_KEY, isFallback ? "1" : "0");
+    // Record which slug this flag was confirmed for. Every caller sets the slug
+    // first, so this is the slug the flag describes. api.ts's workspace_mismatch
+    // path changes the slug WITHOUT touching the flag, leaving it stale for the
+    // new slug; reconcilableSiblingDbName refuses to adopt until they match
+    // again (issue #502).
+    localStorage.setItem(FALLBACK_FOR_KEY, getWorkspaceSlug());
   } catch {
     /* private mode — nothing we can do, next boot re-derives from the server */
   }
@@ -100,7 +108,18 @@ export function reconcilableSiblingDbName(base: string, opened: string): string 
   const suffixed = `${base}-${slug}`;
   const sibling = opened === base ? suffixed : opened === suffixed ? base : null;
   if (sibling === null) return null; // `opened` isn't a member of this slug's pair
-  // Only the fallback workspace can safely reconcile the pair (see above).
+  // Only the fallback workspace can safely reconcile the pair (see above), and
+  // only when the server confirmed "fallback" for THIS slug. A flag left over
+  // from another slug (api.ts's workspace_mismatch reload changes the slug but
+  // not the flag) would otherwise move a non-fallback org's ops into the
+  // fallback's unsuffixed DB.
   if (!getWorkspaceIsFallback()) return null;
+  let confirmedFor: string | null = null;
+  try {
+    confirmedFor = localStorage.getItem(FALLBACK_FOR_KEY);
+  } catch {
+    /* private mode */
+  }
+  if (confirmedFor !== slug) return null;
   return sibling;
 }

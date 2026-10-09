@@ -17,28 +17,34 @@
 
 import { openDB, type IDBPDatabase } from "idb";
 import { reconcilableSiblingDbName } from "./workspace";
+import { decideAdoption } from "./dbReconcilePlan";
 
-// Move every record the safe sibling DB holds under a key the opened DB does
-// NOT already have into the opened DB, then delete every processed key from the
-// sibling. Returns the number of records adopted (0 when there was nothing safe
-// or nothing to do).
+// Move every record the safe sibling DB holds into the opened DB (or drop the
+// sibling's copy when the opened DB already holds an equal-or-newer one), then
+// delete every processed key from the sibling. Returns the number of records
+// copied into the opened DB (0 when there was nothing safe or nothing to do).
 //
 // Design choices, all in service of "never lose an edit, never double-apply one
 // destructively":
-//   - Add-if-absent: the opened DB is the one the app is actively reading and
-//     writing this session, so its copy of any shared key is authoritative; we
-//     only rescue keys it is missing. (Outbox ops are uuid-keyed, so every
-//     stranded op is a distinct key and all are rescued; deterministic-keyed
-//     drafts let the current session's typing win over a stale sibling copy.)
+//   - Per-key rule (dbReconcilePlan.ts decideAdoption): copy when the opened DB
+//     lacks the key or holds an older copy (by updatedAt); otherwise only drop
+//     the sibling's redundant copy. The read-compare-put runs inside ONE
+//     readwrite transaction on the opened DB, so a write this session makes to
+//     the same key cannot slip between the compare and the put.
+//   - Keys come from each record itself (the store's in-line keyPath), from a
+//     single getAll. Separate getAllKeys/getAll reads could interleave with
+//     another tab's write to the sibling and misalign, deleting a record that
+//     was never copied.
 //   - Copy THEN delete (at-least-once): a crash between the two leaves the record
 //     in both DBs; the next reconcile finds the key already present in the opened
-//     DB, skips the copy, and still deletes the sibling's now-redundant copy.
-//     Deleting from the sibling is REQUIRED — a later session that opens the
-//     sibling as its canonical DB would otherwise re-drain the op.
-//   - We only ever delete a sibling key we have confirmed is present in the
-//     opened DB (just copied, or already there), so a record is never removed
-//     from the last place it lives. A rare cross-tab duplicate PATCH is a benign
-//     no-op under the outbox's If-Match/version threading — never data loss.
+//     DB and still deletes the sibling's now-redundant copy. Deleting from the
+//     sibling is REQUIRED: a later session that opens the sibling as its
+//     canonical DB would otherwise re-drain the op.
+//   - The sibling delete re-reads each key inside its own readwrite transaction
+//     and deletes only when the record is still exactly what was processed. A
+//     tab still open on the sibling (it opened before the flag landed) may have
+//     rewritten that key meanwhile; its newer copy is left for the next open
+//     instead of being deleted unseen.
 export async function adoptSiblingRecords(opts: {
   base: string;
   opened: string;
@@ -71,31 +77,38 @@ export async function adoptSiblingRecords(opts: {
     sibling = await openDB(siblingName);
     if (!sibling.objectStoreNames.contains(store)) return 0;
 
-    // getAllKeys() and getAll() both iterate primary-key order, so the two
-    // arrays line up index-for-index.
-    const keys = await sibling.getAllKeys(store);
-    const records = (await sibling.getAll(store)) as unknown[];
-    if (keys.length === 0) return 0;
+    const readTx = sibling.transaction(store, "readonly");
+    const keyPath = readTx.store.keyPath;
+    const records = (await readTx.store.getAll()) as unknown[];
+    await readTx.done;
+    if (records.length === 0) return 0;
+    if (typeof keyPath !== "string") return 0; // every store here uses one in-line key
+    const keyOf = (r: unknown) => (r as Record<string, IDBValidKey>)[keyPath];
 
-    const existing = new Set((await openedDb.getAllKeys(store)).map((k) => String(k)));
     let adopted = 0;
-    const processed: IDBValidKey[] = [];
-    for (let i = 0; i < keys.length; i++) {
-      const key = keys[i];
-      if (!existing.has(String(key))) {
-        // In-line keys (keyPath) — put the record without an explicit key.
-        await openedDb.put(store, records[i]);
-        existing.add(String(key));
+    const processed: { key: IDBValidKey; snapshot: string }[] = [];
+    const writeTx = openedDb.transaction(store, "readwrite");
+    for (const record of records) {
+      const key = keyOf(record);
+      const decision = decideAdoption(record, await writeTx.store.get(key));
+      if (decision === "put") {
+        await writeTx.store.put(record);
         adopted++;
       }
-      // Whether just-copied or already-present, this key now lives in openedDb,
-      // so the sibling's copy is redundant and safe to remove.
-      processed.push(key);
+      processed.push({ key, snapshot: JSON.stringify(record) });
     }
+    await writeTx.done; // committed: every processed key now lives in openedDb
 
-    const tx = sibling.transaction(store, "readwrite");
-    for (const key of processed) await tx.store.delete(key);
-    await tx.done;
+    if (processed.length > 0) {
+      const delTx = sibling.transaction(store, "readwrite");
+      for (const { key, snapshot } of processed) {
+        const current = await delTx.store.get(key);
+        if (current !== undefined && JSON.stringify(current) === snapshot) {
+          await delTx.store.delete(key);
+        }
+      }
+      await delTx.done;
+    }
     return adopted;
   } catch {
     // Reconciliation is best-effort: any failure here must never break the
