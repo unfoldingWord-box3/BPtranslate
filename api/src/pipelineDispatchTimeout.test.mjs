@@ -603,6 +603,203 @@ console.log("\n[#456: a dispatch rescued to 'running' between the capture SELECT
   );
 }
 
+// ─── #456: the two OTHER force-fail paths (48h no-progress + poll-cap) ──────
+// Once a translate job reaches 'running', the dispatch sweep above no longer
+// covers it — but the 48h no-progress sweep and the MAX_POLL_ATTEMPTS backstop
+// can still force-fail a runner='internal' row whose TranslateWorkflow instance
+// is alive and still making paid model calls. #464 closed this leak only for
+// the dispatch crash window; these two paths must terminate the instance too.
+// A running/paused row DOES carry runner='internal' (unlike the crash window),
+// so that is the precise capture signal.
+function seedRunningJob(sqlite, { jobId, runner, updatedAt, attemptCount = 0, state = "running" }) {
+  sqlite
+    .prepare(`INSERT INTO users (id, dcs_user_id, dcs_username) VALUES (1, 1, 'translator') ON CONFLICT(id) DO NOTHING`)
+    .run();
+  sqlite
+    .prepare(
+      `INSERT INTO pipeline_jobs
+         (job_id, user_id, pipeline_type, book, start_chapter, end_chapter, session_key, state, runner, attempt_count, updated_at)
+       VALUES (?, 1, 'translate', 'OBA', 1, 1, 'sess', ?, ?, ?, ?)`,
+    )
+    .run(jobId, state, runner, attemptCount, updatedAt);
+}
+
+console.log("\n[#456: the 48h no-progress and poll-cap sweeps terminate a live internal translate instance; a proxy job's is left alone]");
+{
+  const { sqlite, env } = freshEnv();
+  const realNow = sqlite.prepare("SELECT unixepoch() AS n").get().n;
+  // Internal, running, no progress for well over 48h → caught by the 48h sweep.
+  seedRunningJob(sqlite, { jobId: "job-48h", runner: "internal", updatedAt: realNow - 200000 });
+  // Internal, running, FRESH updated_at but polled past the cap (MAX_POLL_ATTEMPTS
+  // = 100) → caught by the independent poll-count backstop, not the time one.
+  seedRunningJob(sqlite, { jobId: "job-pollcap", runner: "internal", updatedAt: realNow, attemptCount: 101 });
+  // Proxy, running, no progress for over 48h → force-failed, but has no Workflow
+  // instance, so it must not be captured/terminated (runner != 'internal').
+  seedRunningJob(sqlite, { jobId: "job-proxy-48h", runner: "proxy", updatedAt: realNow - 200000 });
+  // Internal, healthy (fresh updated_at, well under the cap) → neither sweep
+  // touches it, so it is never terminated.
+  seedRunningJob(sqlite, { jobId: "job-healthy", runner: "internal", updatedAt: realNow, attemptCount: 1 });
+
+  const terminated = [];
+  env.WORKSPACE_SLUG = "bsoj";
+  env.TRANSLATE_WORKFLOW = {
+    async get(id) {
+      return { id, terminate: async () => { terminated.push(id); } };
+    },
+    async create() { throw new Error("the sweep must never create an instance"); },
+  };
+
+  await pollAllNonTerminal(env);
+
+  const j48 = sqlite.prepare("SELECT state FROM pipeline_jobs WHERE job_id = ?").get("job-48h");
+  const jcap = sqlite.prepare("SELECT state FROM pipeline_jobs WHERE job_id = ?").get("job-pollcap");
+  const jproxy = sqlite.prepare("SELECT state FROM pipeline_jobs WHERE job_id = ?").get("job-proxy-48h");
+  assert(j48.state === "failed", `the 48h-stuck internal job is force-failed (got ${j48.state})`);
+  assert(jcap.state === "failed", `the poll-cap-exhausted internal job is force-failed (got ${jcap.state})`);
+  assert(jproxy.state === "failed", `the 48h-stuck proxy job is force-failed too (got ${jproxy.state})`);
+  const set = new Set(terminated);
+  assert(
+    set.has("translate-bsoj-job-48h") && set.has("translate-bsoj-job-pollcap"),
+    `both force-failed internal instances are terminated by deterministic id (got ${JSON.stringify(terminated)})`,
+  );
+  assert(
+    !set.has("translate-bsoj-job-proxy-48h") && !set.has("translate-bsoj-job-healthy"),
+    `neither the proxy job (no instance) nor the still-healthy internal job is terminated (got ${JSON.stringify(terminated)})`,
+  );
+}
+
+console.log("\n[#456: a running internal job rescued to 'done' between the capture and the force-fail UPDATE is NOT terminated]");
+{
+  // Same live-rescue race as the dispatch test, one step later in the job's
+  // life: a poll can land the job terminal ('done') between the capture SELECT
+  // and the 48h force-fail UPDATE. Re-reading state after the UPDATE must leave
+  // the legitimately-finished job's instance alone. Modelled deterministically
+  // by flipping the row to 'done' the instant before the 48h UPDATE runs.
+  const { sqlite, env } = freshEnv();
+  const realNow = sqlite.prepare("SELECT unixepoch() AS n").get().n;
+  seedRunningJob(sqlite, { jobId: "job-running-rescued", runner: "internal", updatedAt: realNow - 200000 });
+
+  const inner = env.DB;
+  env.DB = {
+    prepare(sql) {
+      const stmt = inner.prepare(sql);
+      if (!/error_message = 'auto-failed: no progress for 48h'/.test(sql)) return stmt;
+      const wrap = (st) => ({
+        ...st,
+        bind: (...a) => wrap(st.bind(...a)),
+        run() {
+          sqlite
+            .prepare("UPDATE pipeline_jobs SET state = 'done', updated_at = unixepoch() WHERE job_id = ?")
+            .run("job-running-rescued");
+          return st.run();
+        },
+      });
+      return wrap(stmt);
+    },
+    batch: inner.batch.bind(inner),
+  };
+
+  const terminated = [];
+  env.WORKSPACE_SLUG = "bsoj";
+  env.TRANSLATE_WORKFLOW = {
+    async get(id) {
+      return { id, terminate: async () => { terminated.push(id); } };
+    },
+    async create() { throw new Error("the sweep must never create an instance"); },
+  };
+
+  await pollAllNonTerminal(env);
+
+  const row = sqlite.prepare("SELECT state FROM pipeline_jobs WHERE job_id = ?").get("job-running-rescued");
+  assert(row.state === "done", `the rescued running job is left 'done', not force-failed (got ${row.state})`);
+  assert(
+    terminated.length === 0,
+    `its live Workflow instance is NOT terminated (got ${JSON.stringify(terminated)})`,
+  );
+}
+
+console.log("\n[#456: a terminate that throws (instance already finished / missing) is logged, not fatal, and the sweep carries on]");
+{
+  // Cloudflare's terminate() throws on an instance that already reached a
+  // terminal state, and get() throws on one that does not exist. Neither may
+  // escape the sweep, skip the remaining terminates, skip the per-job polls
+  // that follow, or undo the force-fail. Each failure is logged.
+  const { sqlite, env } = freshEnv();
+  const realNow = sqlite.prepare("SELECT unixepoch() AS n").get().n;
+  seedRunningJob(sqlite, { jobId: "job-finished-a", runner: "internal", updatedAt: realNow - 200000 });
+  seedRunningJob(sqlite, { jobId: "job-finished-b", runner: "internal", updatedAt: realNow - 200000 });
+  seedRunningJob(sqlite, { jobId: "job-missing", runner: "internal", updatedAt: realNow - 200000 });
+  // Healthy internal job: must still be polled after the terminate step.
+  seedRunningJob(sqlite, { jobId: "job-still-polled", runner: "internal", updatedAt: realNow, attemptCount: 1 });
+
+  const attempted = [];
+  env.WORKSPACE_SLUG = "bsoj";
+  env.TRANSLATE_WORKFLOW = {
+    async get(id) {
+      attempted.push(id);
+      if (id === "translate-bsoj-job-missing") throw new Error("instance.not_found");
+      return {
+        id,
+        terminate: async () => {
+          throw new Error("Cannot terminate instance since its on a finite state");
+        },
+      };
+    },
+    async create() { throw new Error("the sweep must never create an instance"); },
+  };
+
+  const warnings = [];
+  const realWarn = console.warn;
+  console.warn = (...a) => { warnings.push(a.map(String).join(" ")); };
+  let threw = null;
+  try {
+    await pollAllNonTerminal(env);
+  } catch (e) {
+    threw = e;
+  } finally {
+    console.warn = realWarn;
+  }
+
+  assert(threw === null, `pollAllNonTerminal does not throw when terminate()/get() throw (got ${threw})`);
+  const ids = ["job-finished-a", "job-finished-b", "job-missing"];
+  assert(
+    ids.every((j) => attempted.includes(`translate-bsoj-${j}`)),
+    `every force-failed instance gets a terminate attempt even after an earlier one threw (got ${JSON.stringify(attempted)})`,
+  );
+  for (const j of ids) {
+    const row = sqlite.prepare("SELECT state, error_kind FROM pipeline_jobs WHERE job_id = ?").get(j);
+    assert(
+      row.state === "failed" && row.error_kind === "interrupted",
+      `${j} is force-failed regardless of the terminate outcome (got ${row.state}/${row.error_kind})`,
+    );
+    assert(
+      warnings.some((w) => w.includes(j) && w.includes("terminate")),
+      `the terminate failure for ${j} is logged (warnings: ${JSON.stringify(warnings)})`,
+    );
+  }
+  const polled = sqlite.prepare("SELECT attempt_count FROM pipeline_jobs WHERE job_id = ?").get("job-still-polled");
+  assert(
+    polled.attempt_count === 2,
+    `the healthy job is still polled after the terminate failures (attempt_count ${polled.attempt_count}, want 2)`,
+  );
+}
+
+console.log("\n[#456: with no TRANSLATE_WORKFLOW binding, the running-state sweeps still force-fail without error]");
+{
+  const { sqlite, env } = freshEnv();
+  const realNow = sqlite.prepare("SELECT unixepoch() AS n").get().n;
+  seedRunningJob(sqlite, { jobId: "job-no-binding", runner: "internal", updatedAt: realNow - 200000 });
+  let threw = null;
+  try {
+    await pollAllNonTerminal(env);
+  } catch (e) {
+    threw = e;
+  }
+  assert(threw === null, `pollAllNonTerminal does not throw without the binding (got ${threw})`);
+  const row = sqlite.prepare("SELECT state FROM pipeline_jobs WHERE job_id = ?").get("job-no-binding");
+  assert(row.state === "failed", `the stuck internal job is force-failed (got ${row.state})`);
+}
+
 if (failed > 0) {
   console.error(`\n${failed} assertion(s) failed`);
   process.exit(1);
