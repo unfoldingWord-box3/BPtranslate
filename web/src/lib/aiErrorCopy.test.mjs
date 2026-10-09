@@ -26,39 +26,20 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 import { ERROR_COPY_KEY, errorCopy } from "./aiErrorCopy.ts";
 
 const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const apiSrc = path.resolve(webRoot, "..", "api", "src");
 const readWeb = (rel) => readFileSync(path.join(webRoot, rel), "utf8");
-// Strip comments so a note that mentions a kind can't be parsed as one. Walks
-// the source and leaves string and template literals alone, so a "/*" or "//"
-// inside a string (an Accept header, a URL) can't swallow real code. Limit: it
-// does not recognise regex literals; a quote inside one can flip the string
-// state, which only makes it strip less (a stray kind then fails loudly).
-function strip(src) {
-  let out = "";
-  let quote = null;
-  for (let i = 0; i < src.length; i++) {
-    const c = src[i];
-    if (quote) {
-      out += c;
-      if (c === "\\") out += src[++i] ?? "";
-      else if (c === quote) quote = null;
-    } else if (c === '"' || c === "'" || c === "`") {
-      quote = c;
-      out += c;
-    } else if (c === "/" && src[i + 1] === "/") {
-      while (i < src.length && src[i] !== "\n") i++;
-      out += "\n";
-    } else if (c === "/" && src[i + 1] === "*") {
-      const end = src.indexOf("*/", i + 2);
-      i = end === -1 ? src.length : end + 1;
-    } else {
-      out += c;
-    }
-  }
-  return out;
+// Strip comments so a note that mentions a kind can't be parsed as one. Uses
+// TypeScript's own parser and printer (removeComments), so strings, template
+// literals and regex literals are all understood and no real code is dropped.
+// The printer keeps string/template text as written and normalizes spacing,
+// which the \s* in the patterns below already allows for.
+const printer = ts.createPrinter({ removeComments: true });
+function strip(src, file = "x.ts") {
+  return printer.printFile(ts.createSourceFile(file, src, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS));
 }
 
 const FIX_HINT =
@@ -123,6 +104,17 @@ function localeErrors(rel) {
   assert.ok(errors && typeof errors === "object", `${rel}: aiStudio.errors object missing`);
   return errors;
 }
+
+test("comment stripping keeps code after regex and string literals", () => {
+  const src = [
+    'const r = /https?:\\/\\//; fail("kind_a", x);',
+    'const q = /[^"]*/; const h = "*/*"; fail("kind_b", x);',
+    '// fail("kind_c", x);',
+    '/* fail("kind_d", x); */',
+  ].join("\n");
+  const kinds = [...strip(src).matchAll(/\bfail\(\s*"([a-z_]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(kinds, ["kind_a", "kind_b"]);
+});
 
 test("every errorKind the server can write has AI-studio copy", () => {
   const serverKinds = parseServerEmittedKinds();
