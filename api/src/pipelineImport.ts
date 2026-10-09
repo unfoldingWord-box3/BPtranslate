@@ -33,6 +33,7 @@ import { IMPORT_CLAIM_STALE_SECONDS } from "./pipelineImportClaim.ts";
 import { nextPreDraftJson } from "./preDraftSnapshot.ts";
 import { fetchBotOutputWith } from "./botOutput.ts";
 import { getText, outKey } from "./translate/storage.ts";
+import { selectRows } from "./translate/core.ts";
 import { rawUrlOriginError } from "./rawUrlPin.ts";
 import { sameDcsName } from "./repoUrl.ts";
 
@@ -228,24 +229,32 @@ function versePayload(book: string, bibleVersion: "ULT" | "UST", v: VerseExtract
   };
 }
 
-// Did this translate job select the book introduction? A whole-range job did
-// (it translated every row of the range); a row-scoped job only if it named the
-// row; a verse-range job never. The output file is the WHOLE target book, so for
-// a job that did not select it, the front row in it is just the DCS copy, which
-// can be older than D1 and must not be written over it.
-async function frontIntroSelected(env: Env, jobId: string, rowId: string): Promise<boolean> {
+// The subset of its chapter range a translate job selected: explicit rowIds
+// and/or a verse range, read from options_json the same way translate/params.ts
+// does. null = the whole range. The output file is the WHOLE target book, so
+// every row the job did not select is just the DCS copy, which can be older than
+// D1 and must not be written over it (#559: a single-note rerun overwrote 173
+// notes of LUK 7). Rows are matched with selectRows, the same filter the run
+// used to pick its source rows, so import and run agree on the subset. That
+// also covers the book introduction: a row-scoped job selects it only if it
+// named it, a verse-range job never.
+type TranslateSelection = { rowIds: string[] | null; verseStart: number | null; verseEnd: number | null };
+async function translateSelection(env: Env, jobId: string): Promise<TranslateSelection | null> {
   const r = await env.DB.prepare(`SELECT options_json FROM pipeline_jobs WHERE job_id = ?1`)
     .bind(jobId)
     .first<{ options_json: string | null }>();
-  let o: { rowIds?: unknown; verseStart?: unknown } = {};
+  let o: { rowIds?: unknown; verseStart?: unknown; verseEnd?: unknown } = {};
   try {
     const parsed: unknown = r?.options_json ? JSON.parse(r.options_json) : null;
     if (parsed && typeof parsed === "object") o = parsed;
   } catch {
     /* unreadable options: treat as whole-range, like dispatch does */
   }
-  if (Array.isArray(o.rowIds) && o.rowIds.length) return o.rowIds.includes(rowId);
-  return o.verseStart == null;
+  const rowIds = Array.isArray(o.rowIds) && o.rowIds.length ? o.rowIds.map(String) : null;
+  const verseStart = typeof o.verseStart === "number" ? o.verseStart : null;
+  const verseEnd = typeof o.verseEnd === "number" ? o.verseEnd : null;
+  if (!rowIds && verseStart == null) return null;
+  return { rowIds, verseStart, verseEnd };
 }
 
 async function parseOutputEntry(
@@ -310,10 +319,13 @@ async function parseOutputEntry(
 
   if (cls.format === "tsv") {
     const { rows } = parseTsv(raw);
+    const selection = ctx.pipelineType === "translate" ? await translateSelection(env, ctx.jobId) : null;
+    let unselected = 0;
     for (const row of rows) {
       const refRaw = row["Reference"];
       if (!refRaw) continue;
       const [ch] = refParts(refRaw);
+      const selected = !selection || selectRows([row], selection).length > 0;
       // Book front matter (front:intro) is chapter 0. A translate job that starts
       // at chapter 1 can have translated it (translate/tsvCodec.ts
       // sliceChapterRows gives it to such a range), so it must not be scoped out
@@ -323,8 +335,12 @@ async function parseOutputEntry(
         cls.kind === "tn" &&
         ctx.pipelineType === "translate" &&
         ctx.startChapter === 1 &&
-        (await frontIntroSelected(env, ctx.jobId, row["ID"] ?? ""));
+        selected;
       if ((ch < ctx.startChapter && !frontInScope) || ch > ctx.endChapter) continue;
+      if (!selected) {
+        unselected += 1;
+        continue;
+      }
       const built = cls.kind === "tn"
         ? tnPayload(ctx.book, refRaw, row)
         : tqPayload(ctx.book, refRaw, row);
@@ -335,6 +351,12 @@ async function parseOutputEntry(
         bibleVersion: null,
         payload: built.payload,
       });
+    }
+    if (unselected > 0) {
+      return {
+        staged,
+        skipReason: `${unselected} ${cls.kind} row(s) outside the job's selected rows or verses (not imported)`,
+      };
     }
     return { staged };
   }
