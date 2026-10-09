@@ -227,7 +227,7 @@ export function StackedResourcePanel({
       onSave={(p, opts) => onNoteSave(r.id, p, opts)}
       onDelete={() => onNoteDelete(r.id)}
       onRestore={() => onNoteRestore(r.id)}
-      onInsertAfter={isForeign(r) ? undefined : () => onNoteInsertAfter(r.id)}
+      onInsertAfter={() => onNoteInsertAfter(r.id)}
       verseOptions={isForeign(r) ? undefined : verseOptions}
       onChangeVerse={isForeign(r) ? undefined : (v, vEnd) => onNoteChangeVerse(r.id, v, vEnd)}
       onFocus={() => onNoteFocus(r)}

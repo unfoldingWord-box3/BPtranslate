@@ -985,8 +985,9 @@ export function ResourceColumn({
     const prevNote = idx > 0 ? samePeers[idx - 1] : null;
     const nextNote = idx < samePeers.length - 1 ? samePeers[idx + 1] : null;
     // A book-introduction row (chapter 0, shown on the first chapter): it has
-    // no verse here, so no insert-after / change-verse / AI Suggest / quote
-    // build, and the hover preview would point at this chapter's verse 0.
+    // no verse here, so no change-verse / AI Suggest / quote build, and the
+    // hover preview would point at this chapter's verse 0. Insert-after adds
+    // another chapter-0 row (Shell.onNoteInsertAfter, #562).
     const foreign = bookIntroIds.has(r.id);
     return (
       <Fragment key={r.id}>
@@ -1007,7 +1008,7 @@ export function ResourceColumn({
           onSave={(p, opts) => onNoteSave(r.id, p, opts)}
           onDelete={() => onNoteDelete(r.id)}
           onRestore={() => onNoteRestore(r.id)}
-          onInsertAfter={foreign ? undefined : () => onNoteInsertAfter(r.id)}
+          onInsertAfter={() => onNoteInsertAfter(r.id)}
           verseOptions={foreign ? undefined : verseOptions}
           onChangeVerse={foreign ? undefined : (v, vEnd) => onNoteChangeVerse(r.id, v, vEnd)}
           onFocus={() => onNoteFocus(r)}

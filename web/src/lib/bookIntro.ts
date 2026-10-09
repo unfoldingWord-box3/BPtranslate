@@ -11,6 +11,22 @@ import { realChapterNumbers } from "./bookSummary.ts";
  * is "book", the active chapter is the first real chapter, and chapter 0 has
  * finished loading. Rows keep the stored order (sort_order, then id).
  */
+/**
+ * The chapter-0 room a book-mode tab also listens to (#562): on the first real
+ * chapter it shows the book introduction, whose row edits and AI-apply hints
+ * are broadcast to room (book, 0) only. Null when no extra room is needed.
+ */
+export function introRoomChapter(args: {
+  mode: string;
+  chapter: number;
+  summary: BookSummary | null | undefined;
+}): 0 | null {
+  if (args.mode !== "book") return null;
+  if (!args.summary?.chapters.some((c) => c.chapter === 0)) return null;
+  if (args.chapter !== realChapterNumbers(args.summary)[0]) return null;
+  return 0;
+}
+
 export function selectBookIntroRows(args: {
   mode: string;
   chapter: number;

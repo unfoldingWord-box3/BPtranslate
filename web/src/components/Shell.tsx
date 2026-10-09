@@ -60,7 +60,8 @@ import { buildVerseIndex, concatSourceRange, formatVerseLabel, noteCoveredVerses
 import { buildTnQuickRequest } from "../lib/tnQuickRequest";
 import { isAiProviderNotConfigured } from "../lib/aiProviderErrors";
 import { isApprovableRow } from "../lib/reviewApproval";
-import { selectBookIntroRows } from "../lib/bookIntro";
+import { introRoomChapter, selectBookIntroRows } from "../lib/bookIntro";
+import { broadcastUpsertAction } from "../lib/bookCache";
 import { reviewStatePatches, reviewStateSnapshot } from "../lib/reviewStateSweep";
 import { versionLabel } from "../lib/versionLabels";
 import { findSourceForTargetText, extractTargetSelectionText, type HighlightKey, type ReorderHighlight } from "../lib/highlight";
@@ -283,8 +284,8 @@ export function Shell({
     refetch,
     applyLocalRowPatch: applyChapterRowPatch,
     applyLocalRowReplacement: applyChapterRowReplacement,
-    applyLocalRowDelete,
-    applyLocalRowInsert,
+    applyLocalRowDelete: applyChapterRowDelete,
+    applyLocalRowInsert: applyChapterRowInsert,
     applyLocalVerse,
     applyLocalVerseStatus,
     applyLocalLaneCheck,
@@ -294,10 +295,14 @@ export function Shell({
 
   // Book-introduction notes (chapter 0) are shown on the first chapter in book
   // mode but live in useBook's chapter-0 cache, not in useChapter's data. Every
-  // tn patch / replacement below goes through these two, which also update that
-  // cache (a no-op when the row isn't one of its rows). Outbox results already
-  // reach the cache through useBook's own listener.
+  // tn patch / replacement / insert / delete below goes through these four,
+  // which also update that cache (a no-op when the row isn't one of its rows),
+  // so a change made in the chapter-0 view or in book mode shows in the other
+  // (#562). Outbox results already reach the cache through useBook's own
+  // listener.
   const bookPatchRow = bookHook?.applyLocalRowPatch;
+  const bookInsertRow = bookHook?.applyLocalRowInsert;
+  const bookDeleteRow = bookHook?.applyLocalRowDelete;
   const applyLocalRowPatch = useCallback<typeof applyChapterRowPatch>(
     (kind, id, patch) => {
       applyChapterRowPatch(kind, id, patch);
@@ -311,6 +316,22 @@ export function Shell({
       if (kind === "tn" && row.chapter === 0) bookPatchRow?.("tn", 0, row.id, row);
     },
     [applyChapterRowReplacement, bookPatchRow],
+  );
+  const applyLocalRowInsert = useCallback<typeof applyChapterRowInsert>(
+    (kind, row, position) => {
+      // A book-intro row added from the first chapter in book mode belongs to
+      // the chapter-0 cache only, not to the open chapter's list.
+      if (row.chapter === chapter) applyChapterRowInsert(kind, row, position);
+      if (kind === "tn" && row.chapter === 0) bookInsertRow?.("tn", row, position);
+    },
+    [applyChapterRowInsert, bookInsertRow, chapter],
+  );
+  const applyLocalRowDelete = useCallback<typeof applyChapterRowDelete>(
+    (kind, id) => {
+      applyChapterRowDelete(kind, id);
+      if (kind === "tn") bookDeleteRow?.("tn", 0, id);
+    },
+    [applyChapterRowDelete, bookDeleteRow],
   );
 
   // Live cross-tab updates. The server broadcasts row writes via the
@@ -335,25 +356,12 @@ export function Shell({
   useChapterRoom(book, chapter, {
     onUpsert: (kind, row) => {
       const list = dataRef.current?.[kind] as Array<TnRow | TqRow | TwlRow> | undefined;
-      const existing = list?.find((r) => r.id === row.id);
-      if (!existing) {
-        applyLocalRowInsert(kind, row);
-      } else if (row.version > existing.version) {
-        applyLocalRowReplacement(kind, row);
-      } else if (
-        // Preserve/hint/trash toggles on TN rows don't bump version (they're
-        // state flips, not content — see api/src/rows.ts setTnBit /
-        // setTnTrashed). The version > existing.version guard above would drop
-        // these broadcasts, leaving other tabs stale until refetch. Same-
-        // version replace when an intent bit or the trash state differs.
-        kind === "tn" &&
-        row.version === existing.version &&
-        ((row as TnRow).preserve !== (existing as TnRow).preserve ||
-          (row as TnRow).hint !== (existing as TnRow).hint ||
-          (row as TnRow).trashed_at !== (existing as TnRow).trashed_at)
-      ) {
-        applyLocalRowReplacement(kind, row);
-      }
+      // Insert when new, replace when newer, or at the same version when a tN
+      // preserve / hint / trash bit flipped (those don't bump version; see
+      // broadcastUpsertAction).
+      const action = broadcastUpsertAction(kind, list?.find((r) => r.id === row.id), row);
+      if (action === "insert") applyLocalRowInsert(kind, row);
+      else if (action === "replace") applyLocalRowReplacement(kind, row);
       // This room is scoped to the open {book, chapter}, so any row.upserted
       // here is for this book. The server may have flipped lint-relevant state
       // without moving row content or version — e.g. a no-op review-flag clear
@@ -534,6 +542,34 @@ export function Shell({
   useEffect(() => {
     if (mode === "book" && hasBookFront) loadBookChapter?.(0);
   }, [mode, hasBookFront, loadBookChapter, book]);
+  // The book introduction's row edits and AI-apply hints are broadcast to room
+  // (book, 0) only, so while book mode shows it on the first chapter, listen
+  // there too and route them into the chapter-0 cache (#562). Rooms are
+  // listen-only (no presence), so the second socket shows nothing to others.
+  const noop = () => {};
+  useChapterRoom(book, introRoomChapter({ mode, chapter, summary: bookHook?.summary }), {
+    onUpsert: (kind, row) => {
+      if (kind !== "tn" || row.chapter !== 0) return;
+      const front = bookHook?.chapters.get(0);
+      const existing = front?.kind === "ready" ? front.data.tn.find((r) => r.id === row.id) : undefined;
+      const action = broadcastUpsertAction("tn", existing, row);
+      if (action === "insert") bookInsertRow?.("tn", row);
+      else if (action === "replace") bookPatchRow?.("tn", 0, row.id, row);
+    },
+    onDelete: (kind, id) => {
+      if (kind === "tn") bookDeleteRow?.("tn", 0, id);
+    },
+    onPipelineApplied: (_book, _chapter, pipelineType) => {
+      // Same as the open chapter's hint: offer a refresh (which also reloads
+      // the chapter-0 cache) and reconcile the job store.
+      promptRefreshRef.current(pipelineType);
+      void pipelineStore.reload();
+    },
+    onVerseUpdate: noop,
+    onVerseStatusUpdate: noop,
+    onLaneCheckUpdate: noop,
+    onLaneCheckBulkUpdate: noop,
+  });
   const [railCollapsed, setRailCollapsed] = useState<boolean>(() =>
     loadFromStorage<boolean>(RAIL_COLLAPSED_KEY, false),
   );
@@ -3390,15 +3426,18 @@ export function Shell({
       setActiveWordId(null);
     },
     onNoteInsertAfter: async (refId) => {
-      const ref = data.tn.find((r) => r.id === refId);
+      // A book-introduction row (book mode, first chapter) lives in chapter 0:
+      // the new note goes there, ordered among the other intro rows (#562).
+      const introRows = bookIntroRowsRef.current;
+      const ref = data.tn.find((r) => r.id === refId) ?? introRows.find((r) => r.id === refId);
       if (!ref) return;
-      const list = sortedForVerse(data.tn, ref.verse);
+      const list = sortedForVerse(ref.chapter === chapter ? data.tn : introRows, ref.verse);
       const sort_order = pickSortOrder(list, refId, "after");
       // No inherited support_reference — fresh notes get an empty
       // chip so the user can typeahead in immediately.
       const created = (await api.createRow<TnRow>("tn", {
         book,
-        chapter,
+        chapter: ref.chapter,
         verse: ref.verse,
         ref_raw: ref.ref_raw,
         note: "",
