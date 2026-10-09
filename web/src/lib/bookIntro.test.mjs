@@ -39,7 +39,7 @@ test("only the first real chapter shows it", () => {
 
 test("first real chapter is the lowest chapter >= 1, not literally 1", () => {
   const s = { book: "X", chapters: [ch(0), ch(3), ch(4)] };
-  assert.equal(selectBookIntroRows({ ...base, summary: s, chapter: 3 }).length, 1);
+  assert.equal(selectBookIntroRows({ ...base, summary: s, chapter: 3, shownChapter: 3 }).length, 1);
   assert.equal(selectBookIntroRows({ ...base, summary: s, chapter: 1 }).length, 0);
 });
 
