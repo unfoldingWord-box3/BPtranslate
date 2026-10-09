@@ -39,30 +39,32 @@ export function setWorkspaceSlug(slug: string): void {
 // on the same slug opens the same database and drains it. Nothing waits on
 // the server.
 //
-// Each workspace gets its own "-{slug}" suffix so one org's queued edits or
-// unsaved drafts can never surface in another org (#228). The implicit
-// single workspace uses "-default" like any other slug.
+// Naming rule: slug "default" (the implicit single workspace, WORKSPACES
+// unset, as on prod) keeps the unsuffixed legacy `base`, so those installs
+// need no migration and a rollback to an older build still finds their
+// queued edits. Every other slug gets "-{slug}" so one org's queued edits or
+// unsaved drafts can never surface in another org (#228).
 //
-// Older builds wrote the fallback workspace's data to the unsuffixed `base`.
-// No current-code tab writes there, so legacyAdoption.ts can move those
-// records into `base-{slug}` once the server confirms which slug is the
-// fallback (see legacyDbNames below).
+// Older builds also wrote a NAMED fallback workspace's data (e.g. "bsoj") to
+// `base`. legacyAdoption.ts moves those records into `base-{slug}` once the
+// server confirms that slug is the fallback (see legacyDbNames below).
 export function workspaceDbName(base: string): string {
-  return `${base}-${getWorkspaceSlug()}`;
+  const slug = getWorkspaceSlug();
+  return slug === "default" ? base : `${base}-${slug}`;
 }
 
 // Databases whose records belong to the confirmed fallback workspace
-// `fallbackSlug` but that current code never writes to:
-//   - `base`: where every build before #502 stored the fallback workspace's
-//     data (pre-workspaces installs, and the fallback org after WORKSPACES was
-//     configured).
-//   - `base-default`: the implicit single workspace (WORKSPACES unset, as on
-//     prod today). The first deploy that configures WORKSPACES renames that
-//     workspace to a real slug, which would otherwise strand these records.
-//     Only for a fallback slug other than "default", since "default" itself
-//     writes there.
-// Only the fallback workspace ever adopts. A non-fallback org gets no sources,
-// so two orgs' edits are never mixed.
+// `fallbackSlug` but that its tabs no longer write to. For a named fallback
+// slug that is `base`, where every build before #502 stored its data. For
+// "default" there is none: it writes `base` itself. Only the fallback
+// workspace ever adopts, so a non-fallback org never takes another org's
+// records.
+//
+// Known gap, unchanged from main: on a named-fallback deployment a tab whose
+// localStorage was cleared (but not its IndexedDB) starts as slug "default"
+// and opens `base` until App.tsx's reconcile reload. Writes it makes there are
+// adopted later by the fallback org; if the server put it in a non-fallback
+// org, those writes reach the fallback org, as they already do on main.
 export function legacyDbNames(base: string, fallbackSlug: string): string[] {
-  return fallbackSlug === "default" ? [base] : [base, `${base}-default`];
+  return fallbackSlug === "default" ? [] : [base];
 }

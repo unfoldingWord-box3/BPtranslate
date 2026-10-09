@@ -42,8 +42,8 @@ const { getWorkspaceSlug, setWorkspaceSlug, workspaceDbName, legacyDbNames } = a
 
 assert(getWorkspaceSlug() === "default", "fresh install: slug defaults to 'default'");
 assert(
-  workspaceDbName("bible-editor-outbox") === "bible-editor-outbox-default",
-  "implicit single workspace: suffixed with '-default' like any other slug",
+  workspaceDbName("bible-editor-outbox") === "bible-editor-outbox",
+  "implicit single workspace ('default') keeps the unsuffixed legacy name: no migration, rollback-safe",
 );
 
 // ── #502: the name ignores the fallback flag, set or not ───────────────────
@@ -76,18 +76,16 @@ assert(
 // ── legacy sources for the confirmed fallback workspace ────────────────────
 
 assert(
-  JSON.stringify(legacyDbNames("bible-editor-outbox", "default")) ===
-    JSON.stringify(["bible-editor-outbox"]),
-  "implicit single workspace adopts only the unsuffixed legacy DB (it writes '-default' itself)",
+  legacyDbNames("bible-editor-outbox", "default").length === 0,
+  "the implicit single workspace never adopts (it writes the unsuffixed name itself)",
 );
 assert(
-  JSON.stringify(legacyDbNames("bible-editor-outbox", "bsoj")) ===
-    JSON.stringify(["bible-editor-outbox", "bible-editor-outbox-default"]),
-  "a named fallback workspace also adopts '-default' (first WORKSPACES deploy renames 'default')",
+  JSON.stringify(legacyDbNames("bible-editor-outbox", "bsoj")) === JSON.stringify(["bible-editor-outbox"]),
+  "a named fallback workspace adopts only the unsuffixed legacy DB",
 );
+setWorkspaceSlug("bsoj");
 assert(
-  !legacyDbNames("bible-editor-outbox", "bsoj").includes(workspaceDbName("bible-editor-outbox")) &&
-    !legacyDbNames("bible-editor-outbox", "bsoj").includes("bible-editor-outbox-bsoj"),
+  !legacyDbNames("bible-editor-outbox", "bsoj").includes(workspaceDbName("bible-editor-outbox")),
   "a workspace never adopts from its own live database",
 );
 

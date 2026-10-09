@@ -46,11 +46,28 @@ test("decide (outbox): an in_flight live op is never overwritten", () => {
   assert.equal(decide({ queuedAt: 1 }, { queuedAt: 9, status: "in_flight" }, "outbox"), "drop");
 });
 
+test("decide (outbox): a missing or non-numeric queuedAt on either side keeps both", () => {
+  assert.equal(decide({ id: "a" }, { id: "a", queuedAt: 1, status: "pending" }, "outbox"), "keep");
+  assert.equal(decide({ id: "a", queuedAt: 9 }, { id: "a", status: "pending" }, "outbox"), "keep");
+  assert.equal(decide({ id: "a", queuedAt: "9" }, { id: "a", queuedAt: 1 }, "outbox"), "keep");
+});
+
 test("decide (draft): strictly newer wins; otherwise drop only identical content", () => {
-  assert.equal(decide({ updatedAt: 5, t: "a" }, { updatedAt: 4, t: "b" }, "draft"), "copy");
-  assert.equal(decide({ updatedAt: 4, t: "a" }, { updatedAt: 5, t: "a" }, "draft"), "drop");
-  assert.equal(decide({ updatedAt: 4, t: "a" }, { updatedAt: 5, t: "b" }, "draft"), "keep");
-  assert.equal(decide({ updatedAt: 5, t: "a" }, { updatedAt: 5, t: "b" }, "draft"), "keep");
+  const d = (updatedAt, text, extra = {}) => ({ key: "k", updatedAt, payload: { text }, ...extra });
+  assert.equal(decide(d(5, "a"), d(4, "b"), "draft"), "copy");
+  assert.equal(decide(d(4, "a"), d(5, "a"), "draft"), "drop");
+  assert.equal(decide(d(4, "a"), d(5, "b"), "draft"), "keep");
+  assert.equal(decide(d(5, "a"), d(5, "b"), "draft"), "keep");
+});
+
+test("decide (draft): identical text drops despite different generation / expectedVersion", () => {
+  const legacy = { key: "k", updatedAt: 1, payload: { text: "x" }, generation: "g1", expectedVersion: 3 };
+  const live = { key: "k", updatedAt: 2, payload: { text: "x" }, generation: "g2", expectedVersion: 4 };
+  assert.equal(decide(legacy, live, "draft"), "drop");
+  const aLegacy = { key: "k", updatedAt: 1, content: { verseObjects: [1] }, expectedVersion: 3, sourceGeneration: 1 };
+  const aLive = { key: "k", updatedAt: 2, content: { verseObjects: [1] }, expectedVersion: 4, sourceGeneration: 2 };
+  assert.equal(decide(aLegacy, aLive, "draft"), "drop", "alignment drafts compare `content`");
+  assert.equal(decide(aLegacy, { ...aLive, content: { verseObjects: [2] } }, "draft"), "keep");
 });
 
 test("moves outbox ops into the live store and empties the legacy one", async () => {
@@ -74,24 +91,24 @@ test("an op an interrupted run already copied is not re-copied; the legacy copy 
 test("drafts: newer legacy draft replaces the live one; a different older or tied one stays in legacy", async () => {
   const legacy = side(
     [
-      { key: "new", updatedAt: 10, text: "legacy" },
-      { key: "old", updatedAt: 1, text: "legacy" },
-      { key: "tie", updatedAt: 5, text: "legacy" },
+      { key: "new", updatedAt: 10, payload: "legacy" },
+      { key: "old", updatedAt: 1, payload: "legacy" },
+      { key: "tie", updatedAt: 5, payload: "legacy" },
     ],
     "key",
   );
   const target = side(
     [
-      { key: "new", updatedAt: 2, text: "live" },
-      { key: "old", updatedAt: 3, text: "live" },
-      { key: "tie", updatedAt: 5, text: "live" },
+      { key: "new", updatedAt: 2, payload: "live" },
+      { key: "old", updatedAt: 3, payload: "live" },
+      { key: "tie", updatedAt: 5, payload: "live" },
     ],
     "key",
   );
   await moveRecords(legacy, target, byKey, "draft");
-  assert.equal(target.m.get("new").text, "legacy");
-  assert.equal(target.m.get("old").text, "live");
-  assert.equal(target.m.get("tie").text, "live");
+  assert.equal(target.m.get("new").payload, "legacy");
+  assert.equal(target.m.get("old").payload, "live");
+  assert.equal(target.m.get("tie").payload, "live");
   assert.deepEqual([...legacy.m.keys()].sort(), ["old", "tie"], "different older/tied drafts are kept, not deleted");
 });
 
@@ -141,8 +158,8 @@ test("the undo never deletes a newer draft a live tab wrote over our copy", asyn
 });
 
 test("drafts: an older legacy draft identical in content is dropped", async () => {
-  const legacy = side([{ key: "k", updatedAt: 1, text: "same" }], "key");
-  const target = side([{ key: "k", updatedAt: 9, text: "same" }], "key");
+  const legacy = side([{ key: "k", updatedAt: 1, payload: "same", generation: "a" }], "key");
+  const target = side([{ key: "k", updatedAt: 9, payload: "same", generation: "b" }], "key");
   await moveRecords(legacy, target, byKey, "draft");
   assert.equal(legacy.m.size, 0);
   assert.equal(target.m.get("k").updatedAt, 9);

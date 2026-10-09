@@ -19,9 +19,9 @@ const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
 // the first session was stranded forever. The name now depends on the slug
 // alone, so both sessions open the same database and the edit drains.
 //
-// The second test covers the migration: ops an older build queued under the
-// legacy names (unsuffixed, or "-default" from before WORKSPACES was set) are
-// adopted once the server confirms `bsoj` is the fallback workspace.
+// The second test covers the migration: ops an older build queued for the
+// named fallback workspace under the legacy unsuffixed name are adopted once
+// the server confirms `bsoj` is the fallback workspace.
 
 const SUFFIXED = "bible-editor-outbox-bsoj";
 
@@ -207,7 +207,7 @@ function moveOpsToLegacy(page: Page, from: string, to: string, needle: string) {
   );
 }
 
-for (const legacy of ["bible-editor-outbox", "bible-editor-outbox-default"]) {
+for (const legacy of ["bible-editor-outbox"]) {
   test(`an edit an older build queued in ${legacy} is adopted and flushes (#502 migration)`, async ({
     browser,
   }) => {

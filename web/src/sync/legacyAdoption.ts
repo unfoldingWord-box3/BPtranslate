@@ -1,10 +1,12 @@
 // One-time adoption of records left in a legacy per-workspace database (#502).
 //
 // Current code writes each store into exactly one database, workspaceDbName()
-// (see workspace.ts for the invariant). Older builds wrote the fallback
-// workspace's outbox and drafts into other names (workspace.ts's
-// legacyDbNames). No current-code tab writes to those, so their records can be
-// moved without racing a live writer of this build. Adoption:
+// (see workspace.ts for the invariant). Older builds wrote a NAMED fallback
+// workspace's outbox and drafts into the unsuffixed name (workspace.ts's
+// legacyDbNames). Tabs of that workspace no longer write there (the one
+// exception, a tab with cleared localStorage before its reconcile reload, is
+// described at legacyDbNames), and every move below is copy-then-delete-if-
+// unchanged, so a concurrent writer never loses a record. Adoption:
 //   - runs only after this session's /api/auth/me confirms the current slug is
 //     the fallback workspace (App.tsx), never from a persisted flag;
 //   - first checks, with no lock, whether any legacy database holds records,
@@ -49,11 +51,14 @@ export type Rule = "outbox" | "draft";
 // copied the op): the newer `queuedAt` wins, since every coalesce re-stamps
 // it, and a tie keeps the live copy (they differ only in drain bookkeeping).
 // A live op that is in_flight is never overwritten: a newer legacy payload
-// waits for the next run, an older one is dropped.
+// waits for the next run, an older one is dropped. If either side lacks a
+// numeric queuedAt, neither copy is touched.
 //
 // Drafts (`updatedAt`): a strictly newer legacy draft wins. Otherwise the
-// legacy copy is deleted only when its content matches the live one (ignoring
-// updatedAt). A legacy draft with different text is kept, because an editor
+// legacy copy is deleted only when its CONTENT (the text: `payload` for text
+// drafts, `content` for alignment drafts) matches the live one; generation,
+// expectedVersion and timestamps are ignored, so identical-text leftovers do
+// not pile up. A legacy draft with different text is kept, because an editor
 // that opened before adoption may have written the live copy without ever
 // seeing it; a leftover legacy draft costs nothing, deleting it could lose
 // unsaved text.
@@ -64,11 +69,12 @@ export function decide(legacy: unknown, current: unknown, rule: Rule): Decision 
   const c = num(current, field);
   const legacyNewer = l !== undefined && c !== undefined && l > c;
   if (rule === "outbox") {
+    if (l === undefined || c === undefined) return "keep";
     if (!legacyNewer) return "drop";
     return (current as Record<string, unknown>).status === "in_flight" ? "keep" : "copy";
   }
   if (legacyNewer) return "copy";
-  return same(without(legacy, field), without(current, field)) ? "drop" : "keep";
+  return same(draftContent(legacy), draftContent(current)) ? "drop" : "keep";
 }
 
 function num(record: unknown, field: string): number | undefined {
@@ -76,10 +82,9 @@ function num(record: unknown, field: string): number | undefined {
   return typeof v === "number" ? v : undefined;
 }
 
-function without(record: unknown, field: string): unknown {
-  if (!record || typeof record !== "object") return record;
-  const { [field]: _omit, ...rest } = record as Record<string, unknown>;
-  return rest;
+function draftContent(record: unknown): unknown {
+  const r = record as Record<string, unknown> | null;
+  return r?.payload ?? r?.content;
 }
 
 function same(a: unknown, b: unknown): boolean {
