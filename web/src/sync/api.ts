@@ -683,9 +683,9 @@ export interface MeResponse {
   // needed" (see App.tsx boot reconciliation).
   workspace?: string;
   // Whether `workspace` is the FALLBACK workspace (first entry in WORKSPACES,
-  // or the sole implicit "default" one) — see workspace.ts's
-  // getWorkspaceIsFallback / outbox.ts's outboxDbName. Absent alongside
-  // `workspace` on an older/cached response.
+  // or the sole implicit "default" one) — gates App.tsx's legacy database
+  // adoption (#502, sync/legacyAdoption.ts). Absent alongside `workspace` on
+  // an older/cached response.
   workspaceIsFallback?: boolean;
   // Whether this deployment registers the nightly export cron (prod does; the
   // public dev worker does not — crons = []). Drives showing the 05:30 schedule
@@ -707,7 +707,7 @@ export interface WorkspaceInfo {
   org: string;
   allowed: boolean;
   // Whether this is the FALLBACK workspace (first entry in WORKSPACES, or the
-  // sole implicit "default" one) — see workspace.ts's getWorkspaceIsFallback.
+  // sole implicit "default" one) — see workspace.ts's legacyDbNames.
   isFallback: boolean;
 }
 

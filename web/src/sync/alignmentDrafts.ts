@@ -17,12 +17,13 @@
 import { openDB, type IDBPDatabase } from "idb";
 import { isReadOnly } from "./api";
 import { onOutboxResult } from "./outbox";
-import { workspaceDbName } from "./workspace";
+import { legacyDbNames, workspaceDbName } from "./workspace";
+import { adoptFromLegacyDbs } from "./legacyAdoption";
 
 // Base name; the actual per-workspace DB name is derived via workspaceDbName()
 // so alignment drafts written in one Door43 org never surface in another
-// (issue #228). The fallback workspace keeps this unsuffixed name — same rule
-// as the outbox and the text-drafts store.
+// (issue #228). Drafts older builds kept under a legacy name are moved in by
+// adoptLegacyAlignmentDrafts below — same rule as the outbox (#502).
 const DB_NAME = "bible-editor-alignment-drafts";
 const DB_VERSION = 2;
 const STORE = "drafts";
@@ -112,6 +113,22 @@ export const alignmentDrafts = {
     return (await (await db()).getAll(STORE)) as AlignmentDraftRecord[];
   },
 };
+
+// Move alignment drafts an older build kept for the confirmed fallback
+// workspace into this build's store (#502; see legacyAdoption.ts); the newer
+// `updatedAt` wins. Caller holds the legacy-adopt lock. There is no
+// subscriber: an aligner already open keeps what it read and sees an adopted
+// draft the next time it mounts. If it saves first, its draft is newer and
+// wins, which is the same newest-wins rule.
+export async function adoptLegacyAlignmentDrafts(fallbackSlug: string): Promise<void> {
+  await adoptFromLegacyDbs({
+    legacyNames: legacyDbNames(DB_NAME, fallbackSlug),
+    store: STORE,
+    target: await db(),
+    keyPath: "key",
+    newerField: "updatedAt",
+  });
+}
 
 // Belt-and-suspenders: when the verse's PATCH lands (200), the alignment the
 // draft was protecting is now durable server-side, so drop it. AlignmentPanel

@@ -28,7 +28,8 @@ import {
   shouldAnnounceResult,
   targetKey,
 } from "./outboxTargeting.ts";
-import { workspaceDbName } from "./workspace";
+import { legacyDbNames, workspaceDbName } from "./workspace";
+import { adoptFromLegacyDbs } from "./legacyAdoption";
 import i18n from "../i18n";
 
 // DISPLAY-ONLY fallback for the freeze reason stamped on a quarantined op —
@@ -47,22 +48,13 @@ function laneQuarantineReason(bibleVersion: string): string {
 // Namespaced per workspace so switching Door43 orgs can never drain one org's
 // queued edits into another org's D1 database — without this, an edit queued
 // offline while in org A would ship to org B after a workspace switch. Do NOT
-// "simplify" this back to a fixed name.
-//
-// Back-compat: pre-workspaces installs have a populated unsuffixed
-// "bible-editor-outbox" database with real unsynced edits. The FALLBACK
-// workspace (first entry in WORKSPACES, or the sole implicit "default" one —
-// see workspace.ts's getWorkspaceIsFallback) keeps using that original name so
-// no queued edit is orphaned by this deploy. This must key off "is this the
-// fallback workspace", NOT off the literal slug "default": the moment
-// WORKSPACES is first configured, the fallback workspace gets a real slug
-// (e.g. "bsoj"), and keying off the literal string would strand any edits
-// queued before that deploy in a database no longer reachable by any slug.
-// Only non-fallback slugs get the "-{slug}" suffix. The fallback rule itself
-// lives in workspace.ts's workspaceDbName(), shared verbatim with the drafts
-// stores (drafts.ts, alignmentDrafts.ts) — see issue #228.
+// "simplify" this back to a fixed name. The name depends on the slug alone
+// (workspace.ts's workspaceDbName, shared with both drafts stores) so it never
+// changes mid-session (#502); edits older builds queued under the legacy
+// unsuffixed name are moved in by adoptLegacyOutbox below.
+const OUTBOX_BASE = "bible-editor-outbox";
 function outboxDbName(): string {
-  return workspaceDbName("bible-editor-outbox");
+  return workspaceDbName(OUTBOX_BASE);
 }
 
 const DB_VERSION = 1;
@@ -1240,6 +1232,25 @@ export async function drain() {
       drainRequested = false;
       void drain();
     }
+  }
+}
+
+// Move ops an older build queued for the confirmed fallback workspace into
+// this build's outbox (#502; see legacyAdoption.ts). Waits for the drain lock,
+// which every build drains under, so no tab sends an op while it moves.
+export async function adoptLegacyOutbox(fallbackSlug: string): Promise<void> {
+  const move = async () =>
+    adoptFromLegacyDbs({
+      legacyNames: legacyDbNames(OUTBOX_BASE, fallbackSlug),
+      store: STORE,
+      target: await db(),
+      keyPath: "id",
+    });
+  if (typeof navigator === "undefined" || !navigator.locks) return;
+  const moved = await navigator.locks.request("be-outbox-drain", move);
+  if (moved > 0) {
+    void notify();
+    void drain();
   }
 }
 
