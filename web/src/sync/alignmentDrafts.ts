@@ -18,7 +18,7 @@ import { openDB, type IDBPDatabase } from "idb";
 import { isReadOnly } from "./api";
 import { onOutboxResult } from "./outbox";
 import { onFallbackConfirmed, workspaceDbName } from "./workspace";
-import { adoptSiblingRecords, boundedWait } from "./dbReconcile";
+import { adoptSiblingRecords, boundedWait, readoptOnFocus } from "./dbReconcile";
 
 // Base name; the actual per-workspace DB name is derived via workspaceDbName()
 // so alignment drafts written in one Door43 org never surface in another
@@ -76,9 +76,12 @@ function db() {
   return dbp;
 }
 
-// Boot confirmed the fallback flag for this slug for the first time: run the
-// adoption again. Drafts adopted now reach the aligner on its next mount.
-onFallbackConfirmed(() => {
+// Run adoption again into the already-open DB: when boot first confirms the
+// fallback flag for this slug, and on focus / becoming visible (an old tab may
+// have written new drafts into the sibling since, or the last attempt failed).
+// This store has no subscribers: drafts adopted now reach the aligner on its
+// next mount.
+function readopt() {
   const p = dbp;
   if (!p) return; // not opened yet — the open itself will adopt
   void p
@@ -86,7 +89,9 @@ onFallbackConfirmed(() => {
       adoptSiblingRecords({ base: DB_NAME, opened: dbOpenedName, openedDb: idb, store: STORE }),
     )
     .catch(() => {});
-});
+}
+onFallbackConfirmed(readopt);
+readoptOnFocus(readopt);
 
 // Same key shape the outbox uses for a verse target, so the onOutboxResult
 // listener below can clear the matching draft off a landed save.

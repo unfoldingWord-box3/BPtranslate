@@ -29,7 +29,7 @@ import {
   targetKey,
 } from "./outboxTargeting.ts";
 import { onFallbackConfirmed, workspaceDbName } from "./workspace";
-import { adoptSiblingRecords } from "./dbReconcile";
+import { adoptSiblingRecords, withTimeout } from "./dbReconcile";
 import i18n from "../i18n";
 
 // DISPLAY-ONLY fallback for the freeze reason stamped on a quarantined op —
@@ -232,36 +232,55 @@ function db() {
 // lock, which another tab can hold for a whole pass, and enqueue must never
 // wait on that. Adopted ops sort by their original queuedAt/seq, ahead of
 // newer edits to the same target.
+//
+// Not one-shot. A tab still open on the sibling (it opened before the flag
+// landed) can keep queuing into it after we adopted, so later drain passes
+// re-check, at most once per ADOPT_RECHECK_MS. When no sibling exists the
+// re-check costs one indexedDB.databases() call. A failed or timed-out attempt
+// is retried on the same schedule, and a drain is scheduled for it.
+//
+// Bounded by ADOPT_TIMEOUT_MS: a blocked open of the sibling must not hold the
+// drain lock (and so every tab's drain) hostage. On timeout this pass gives up
+// and drains; the abandoned attempt finishes in the background, still guarded
+// by adoptRecords' unchanged-snapshot check.
+const ADOPT_RECHECK_MS = 30_000;
+const ADOPT_TIMEOUT_MS = 3_000;
 let dbName: string | null = null;
-let adoptionPending = true;
+let nextAdoptAt = 0; // 0 = due now
 async function adoptStrandedOps(): Promise<void> {
-  if (!adoptionPending) return;
-  adoptionPending = false;
+  const now = Date.now();
+  if (now < nextAdoptAt) return;
+  nextAdoptAt = now + ADOPT_RECHECK_MS;
   const idb = await db();
-  const { adopted, heldUntil } = await adoptSiblingRecords({
-    base: OUTBOX_BASE,
-    opened: dbName!,
-    openedDb: idb,
-    store: STORE,
-    holdUntil: (r) => {
-      const op = r as OutboxOp;
-      if (op.status !== "in_flight" || op.dispatchedAt === undefined) return undefined;
-      const until = op.dispatchedAt + IN_FLIGHT_RECOVERY_AGE_MS;
-      return until > Date.now() ? until : undefined;
-    },
-  });
-  if (heldUntil !== undefined) {
-    adoptionPending = true;
-    scheduleDrain(Math.max(0, heldUntil - Date.now()) + 250);
+  const res = await withTimeout(
+    adoptSiblingRecords({
+      base: OUTBOX_BASE,
+      opened: dbName!,
+      openedDb: idb,
+      store: STORE,
+      holdUntil: (r) => {
+        const op = r as OutboxOp;
+        if (op.status !== "in_flight" || op.dispatchedAt === undefined) return undefined;
+        const until = op.dispatchedAt + IN_FLIGHT_RECOVERY_AGE_MS;
+        return until > Date.now() ? until : undefined;
+      },
+    }),
+    ADOPT_TIMEOUT_MS,
+  );
+  if (res === undefined || res.failed) {
+    scheduleDrain(ADOPT_RECHECK_MS + 250);
+  } else if (res.heldUntil !== undefined) {
+    nextAdoptAt = Math.min(nextAdoptAt, res.heldUntil);
+    scheduleDrain(Math.max(0, res.heldUntil - Date.now()) + 250);
   }
-  if (adopted > 0) void notify();
+  if (res && res.adopted > 0) void notify();
 }
 
 // Boot confirmed the fallback flag for this slug for the first time (e.g. the
 // first session after the flag's confirmed-for key shipped): the open-time pass
-// may have found nothing safe to adopt, so run it again.
+// may have found nothing safe to adopt, so run it again now.
 onFallbackConfirmed(() => {
-  adoptionPending = true;
+  nextAdoptAt = 0;
   void drain();
 });
 

@@ -41,18 +41,50 @@ function side(db: IDBPDatabase, store: string): StoreSide {
 // handle on adoption; a stuck adoption (another tab holding the adopt lock, a
 // blocked open) must not leave the editors without a drafts store. The
 // adoption itself keeps running and finishes in the background.
-export function boundedWait(p: Promise<unknown>, ms = 3000): Promise<void> {
+export async function boundedWait(p: Promise<unknown>, ms = 3000): Promise<void> {
+  await withTimeout(p, ms);
+}
+
+// Resolve with `p`'s value, or with undefined once `ms` passes first (or when
+// `p` rejects). `p` keeps running either way.
+export function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
   return new Promise((resolve) => {
-    const t = setTimeout(resolve, ms);
-    p.finally(() => {
-      clearTimeout(t);
-      resolve();
-    }).catch(() => {});
+    const t = setTimeout(() => resolve(undefined), ms);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      () => {
+        clearTimeout(t);
+        resolve(undefined);
+      },
+    );
   });
 }
 
-// Best-effort: never throws, and a failure only means the records stay where
-// they are until the next attempt. `holdUntil` leaves a record in the sibling
+// Adoption is not one-shot (#502): a tab still open on the sibling (it opened
+// before the fallback flag landed) can keep writing there after we adopted. The
+// drafts stores re-run `adopt` when the window regains focus or becomes
+// visible, at most once per `ms`. With no sibling present each run costs one
+// indexedDB.databases() call. Also retries an attempt that failed.
+export function readoptOnFocus(adopt: () => void, ms = 30_000): void {
+  if (typeof window === "undefined" || typeof document === "undefined") return;
+  let last = Date.now();
+  const maybe = () => {
+    if (Date.now() - last < ms) return;
+    last = Date.now();
+    adopt();
+  };
+  window.addEventListener("focus", maybe);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") maybe();
+  });
+}
+
+// Best-effort: never throws. An attempt that errors returns `failed: true` and
+// leaves the records where they are; the caller retries on its next attempt
+// (the outbox on a later drain pass, the drafts stores on focus). `holdUntil` leaves a record in the sibling
 // until the returned time (the outbox holds a young in-flight op that may still
 // be on the wire).
 //
@@ -67,6 +99,7 @@ export async function adoptSiblingRecords(opts: {
   holdUntil?: (record: unknown) => number | undefined;
 }): Promise<AdoptResult> {
   const none: AdoptResult = { adopted: 0 };
+  const failed: AdoptResult = { adopted: 0, failed: true };
   const { base, opened, openedDb, store, holdUntil } = opts;
   const siblingName = reconcilableSiblingDbName(base, opened);
   if (!siblingName) return none;
@@ -74,18 +107,19 @@ export async function adoptSiblingRecords(opts: {
   // Never CREATE the sibling — only reconcile one that already exists. Without
   // indexedDB.databases() (older browsers) we can't tell, so skip rather than
   // blind-open (which would create a spurious empty DB). Chromium — the app's
-  // target — supports databases().
+  // target — supports databases(). Checked before taking the lock, so the
+  // common case (no sibling) costs this one call.
   if (typeof indexedDB === "undefined" || typeof indexedDB.databases !== "function") {
     return none;
   }
+  try {
+    const dbs = await indexedDB.databases();
+    if (!dbs.some((d) => d.name === siblingName)) return none;
+  } catch {
+    return failed;
+  }
 
   const run = async (): Promise<AdoptResult> => {
-    try {
-      const dbs = await indexedDB.databases();
-      if (!dbs.some((d) => d.name === siblingName)) return none;
-    } catch {
-      return none;
-    }
     let sibling: IDBPDatabase | undefined;
     try {
       // Open at the sibling's CURRENT version (no version arg → no upgrade) so
@@ -101,7 +135,7 @@ export async function adoptSiblingRecords(opts: {
         holdUntil,
       });
     } catch {
-      return none;
+      return failed;
     } finally {
       sibling?.close();
     }
@@ -113,6 +147,6 @@ export async function adoptSiblingRecords(opts: {
     }
     return await run();
   } catch {
-    return none;
+    return failed;
   }
 }

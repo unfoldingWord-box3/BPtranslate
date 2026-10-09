@@ -14,7 +14,7 @@ import { isLaneFrozen } from "./laneFreeze";
 import { onOutboxResult } from "./outbox";
 import { generationForSuccessfulOp } from "./draftSaveState";
 import { onFallbackConfirmed, workspaceDbName } from "./workspace";
-import { adoptSiblingRecords, boundedWait } from "./dbReconcile";
+import { adoptSiblingRecords, boundedWait, readoptOnFocus } from "./dbReconcile";
 
 // Base name; the actual per-workspace DB name is derived via workspaceDbName()
 // so drafts written in one Door43 org never surface in another (issue #228).
@@ -127,13 +127,17 @@ async function adoptInto(idb: IDBPDatabase, name: string) {
   if (adopted > 0) void notify();
 }
 
-// Boot confirmed the fallback flag for this slug for the first time: the
-// open-time pass may have found nothing safe to adopt, so run it again.
-onFallbackConfirmed(() => {
+// Run adoption again into the already-open DB: when boot first confirms the
+// fallback flag for this slug (the open-time pass may have found nothing safe
+// to adopt), and on focus / becoming visible (an old tab may have written new
+// drafts into the sibling since, or the last attempt failed).
+function readopt() {
   const p = dbp;
   if (!p) return; // not opened yet — the open itself will adopt
   void p.then((idb) => adoptInto(idb, dbOpenedName)).catch(() => {});
-});
+}
+onFallbackConfirmed(readopt);
+readoptOnFocus(readopt);
 
 const subscribers = new Set<Subscriber>();
 

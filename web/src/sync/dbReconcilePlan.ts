@@ -20,19 +20,29 @@
 // same op was already adopted, and the opened copy is kept.
 export type AdoptDecision = "put" | "drop" | "keep";
 
+//
+// Outbox ops: same uuid key, compared by `queuedAt`. Every payload change
+// (an enqueue coalescing into a pending op) re-stamps queuedAt, so a sibling
+// copy with a NEWER queuedAt carries newer user content and replaces ours.
+// Equal queuedAt means the same payload generation; any difference is drain
+// bookkeeping (attempts, status, threaded version) and ours is kept.
 export function decideAdoption(sibling: unknown, existing: unknown): AdoptDecision {
   if (existing === undefined) return "put";
-  const s = updatedAtOf(sibling);
-  const e = updatedAtOf(existing);
+  const s = numberField(sibling, "updatedAt");
+  const e = numberField(existing, "updatedAt");
   if (s !== undefined && e !== undefined) {
     if (s > e) return "put";
     if (s === e && JSON.stringify(sibling) !== JSON.stringify(existing)) return "keep";
+    return "drop";
   }
+  const sq = numberField(sibling, "queuedAt");
+  const eq = numberField(existing, "queuedAt");
+  if (sq !== undefined && eq !== undefined && sq > eq) return "put";
   return "drop";
 }
 
-function updatedAtOf(record: unknown): number | undefined {
-  const v = (record as { updatedAt?: unknown } | null)?.updatedAt;
+function numberField(record: unknown, field: string): number | undefined {
+  const v = (record as Record<string, unknown> | null)?.[field];
   return typeof v === "number" ? v : undefined;
 }
 
@@ -56,6 +66,9 @@ export interface AdoptResult {
   // Earliest time at which a held record (see holdUntil) may be adopted;
   // undefined when nothing was held.
   heldUntil?: number;
+  // The attempt did not finish (an IndexedDB error, a timeout). Whatever it
+  // copied is reported in `adopted`; the caller should try again later.
+  failed?: boolean;
 }
 
 // Move the sibling's records into the opened store. Steps:
@@ -112,7 +125,9 @@ export async function adoptRecords(opts: {
     }
     await delTx.done;
   } catch {
-    return { adopted, heldUntil };
+    // Copies committed but the sibling still holds them: report failed so the
+    // caller retries later (the retry drops the redundant sibling copies).
+    return { adopted, heldUntil, failed: true };
   }
 
   if (changed.length > 0) {

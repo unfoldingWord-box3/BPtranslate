@@ -53,6 +53,7 @@ test("A3: a failing sibling delete still reports the copies that committed", asy
   const opened = fakeStore([]);
   const res = await adoptRecords({ sibling, opened, keyOf });
   assert.equal(res.adopted, 1, "caller must still drain/notify");
+  assert.equal(res.failed, true, "and must retry later to drop the sibling copy");
   assert.ok(opened.map.has("a"));
   assert.ok(sibling.map.has("a"), "left for the next open to drop");
 });
@@ -110,6 +111,27 @@ test("A1: a held (young in-flight) op stays in the sibling and reports when to r
   assert.equal(res.heldUntil, 500);
   assert.ok(sibling.map.has("a") && !opened.map.has("a"));
   assert.ok(opened.map.has("b") && !sibling.map.has("b"));
+});
+
+test("B3: a newer coalesced payload in the sibling replaces an older adopted copy", async () => {
+  // 1. An earlier adoption copied op X into the opened DB but its sibling
+  //    delete failed, so X sits in both.
+  // 2. A live tab still on the sibling coalesces a newer payload into X
+  //    (same uuid, new patch, newer queuedAt).
+  // 3. The next adoption must keep the NEWER payload, not drop it.
+  const opened = fakeStore([{ id: "X", queuedAt: 1, patch: { note: "old" }, status: "pending" }]);
+  const sibling = fakeStore([{ id: "X", queuedAt: 2, patch: { note: "new" }, status: "pending" }]);
+  const res = await adoptRecords({ sibling, opened, keyOf });
+  assert.equal(res.adopted, 1);
+  assert.deepEqual(opened.map.get("X").patch, { note: "new" });
+  assert.equal(sibling.map.size, 0);
+});
+
+test("B3: same queuedAt (same payload, drain bookkeeping differs) keeps ours and drops the sibling", () => {
+  const ours = { id: "X", queuedAt: 1, patch: { note: "a" }, status: "pending", attempts: 3 };
+  const theirs = { id: "X", queuedAt: 1, patch: { note: "a" }, status: "pending", attempts: 0 };
+  assert.equal(decideAdoption(theirs, ours), "drop");
+  assert.equal(decideAdoption({ ...theirs, queuedAt: 0 }, ours), "drop");
 });
 
 test("A5: an equal-timestamp, different-content draft is left in both places", async () => {
