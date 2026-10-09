@@ -1346,7 +1346,32 @@ export type PipelineErrorKind =
   | "resource_not_supported_internal"
   | "checks_failed"
   | "internal_error_after_call"
-  | "internal_error";
+  | "internal_error"
+  // TranslateStepError kinds (#471): every `new TranslateStepError(…)` in
+  // api/src/translate/workflowSteps.ts reaches the client via failedStatus.
+  | "workspace_missing"
+  | "workspace_unknown"
+  | "job_missing"
+  | "job_not_running"
+  | "cancelled"
+  | "artifact_missing"
+  | "source_not_found"
+  | "no_source_rows"
+  | "scripture_fetch_failed"
+  | "output_persist_failed"
+  | "ai_provider_unavailable"
+  | "ai_provider_changed"
+  | "ai_provider_key_decrypt_failed"
+  | "target_book_absent"
+  | "merge_failed"
+  | "merge_shrink_refused"
+  // Dispatch-time failures written by api/src/pipelines.ts dispatchNext.
+  | "lane_fenced"
+  | "pipeline_api_disabled";
+// The union is hand-kept; the wire value is any string. Fields that carry an
+// errorKind from the server are typed `string`, and lib/aiErrorCopy.ts falls
+// back for a kind it doesn't know. lib/aiErrorCopy.test.mjs scans api/src and
+// fails when the server can write a kind that has no copy.
 
 // Mirrors the bp-assistant contract (docs/ai-pipeline-integration.md §3).
 // Server validates with .strict(); unknown keys are rejected. Per-pipeline-type
@@ -1440,7 +1465,7 @@ export interface PipelineStatusResponse {
     skill: string;
     status: "running" | "succeeded" | "failed" | "skipped_complete";
     startedAt: string;
-    errorKind?: PipelineErrorKind;
+    errorKind?: string;
     error?: string;
   };
   updatedAt: string;
@@ -1498,7 +1523,7 @@ export interface PipelineJobRow {
   queue_ahead?: number | null;
   current_skill: string | null;
   current_status: string | null;
-  error_kind: PipelineErrorKind | null;
+  error_kind: string | null;
   error_message: string | null;
   output_json: string | null;
   /**

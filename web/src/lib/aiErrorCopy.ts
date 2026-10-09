@@ -36,9 +36,32 @@ export const ERROR_COPY_KEY: Record<PipelineErrorKind, string> = {
   checks_failed: "aiStudio.errors.checks_failed",
   internal_error_after_call: "aiStudio.errors.internal_error_after_call",
   internal_error: "aiStudio.errors.internal_error",
+  // Translate-runner step kinds (workflowSteps.ts TranslateStepError).
+  workspace_missing: "aiStudio.errors.workspace_missing",
+  workspace_unknown: "aiStudio.errors.workspace_unknown",
+  job_missing: "aiStudio.errors.job_missing",
+  job_not_running: "aiStudio.errors.job_not_running",
+  cancelled: "aiStudio.errors.cancelled",
+  artifact_missing: "aiStudio.errors.artifact_missing",
+  source_not_found: "aiStudio.errors.source_not_found",
+  no_source_rows: "aiStudio.errors.no_source_rows",
+  scripture_fetch_failed: "aiStudio.errors.scripture_fetch_failed",
+  output_persist_failed: "aiStudio.errors.output_persist_failed",
+  ai_provider_unavailable: "aiStudio.errors.ai_provider_unavailable",
+  ai_provider_changed: "aiStudio.errors.ai_provider_changed",
+  ai_provider_key_decrypt_failed: "aiStudio.errors.ai_provider_key_decrypt_failed",
+  target_book_absent: "aiStudio.errors.target_book_absent",
+  merge_failed: "aiStudio.errors.merge_failed",
+  merge_shrink_refused: "aiStudio.errors.merge_shrink_refused",
+  // Dispatch-time kinds (pipelines.ts dispatchNext).
+  lane_fenced: "aiStudio.errors.lane_fenced",
+  pipeline_api_disabled: "aiStudio.errors.pipeline_api_disabled",
 };
 
-export function errorCopy(kind: PipelineErrorKind | null, t: TFunction): string {
-  const key = kind ? (ERROR_COPY_KEY[kind] as string | undefined) : undefined;
+// `kind` is whatever string the server wrote, so it may be a kind this build
+// doesn't know. Own-property check: a plain index would return Object.prototype
+// members for "constructor" or "toString" and hand a function to t().
+export function errorCopy(kind: string | null, t: TFunction): string {
+  const key = kind && Object.hasOwn(ERROR_COPY_KEY, kind) ? ERROR_COPY_KEY[kind as PipelineErrorKind] : undefined;
   return key ? t(key) : t("aiStudio.unrecognizedError", { kind });
 }
