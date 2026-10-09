@@ -13,12 +13,31 @@
 import assert from "node:assert/strict";
 import { parseJson, ResponseSchemaError } from "./httpJson.ts";
 import { DcsOrgsResponse, DcsCommitsResponse, DcsContentsMeta } from "./dcsSchemas.ts";
+import { fileCommitSha, dcsFileSize } from "./dcsSources.ts";
+import { readFileSync } from "node:fs";
+
+// Real responses recorded read-only from git.door43.org (public, no auth) on
+// 2026-10-09, trimmed: orgs.json = GET /api/v1/orgs?limit=3 (same
+// Organization element type as /user/orgs and /users/{u}/orgs, which need a
+// token); commits.json = first 2 of GET /repos/unfoldingWord/en_tn/commits
+// ?path=tn_OBA.tsv (emails redacted); contents-file.json = GET
+// /repos/unfoldingWord/en_tn/contents/tn_OBA.tsv (base64 `content` shortened);
+// contents-dir.json = first 2 of the repo-root contents listing.
+const fixture = (name) =>
+  JSON.parse(readFileSync(new URL(`../test-fixtures/dcs/${name}`, import.meta.url), "utf8"));
 
 let passed = 0;
+let failed = 0;
 async function t(name, fn) {
-  await fn();
-  passed++;
-  console.log(`  ok - ${name}`);
+  try {
+    await fn();
+    passed++;
+    console.log(`  ok - ${name}`);
+  } catch (err) {
+    failed++;
+    process.exitCode = 1;
+    console.log(`  FAIL - ${name}\n    ${err?.message ?? err}`);
+  }
 }
 
 const json = (v, init) => new Response(JSON.stringify(v), init);
@@ -117,4 +136,99 @@ await t("contents: a non-JSON body is REJECTED", async () => {
   );
 });
 
-console.log(`\n${passed} passed`);
+// ── Recorded real DCS payloads (nullable/extra fields must not be rejected) ──
+
+await t("real: recorded Organization list parses (nulls in unread fields are fine)", async () => {
+  const orgs = await parseJson(json(fixture("orgs.json")), DcsOrgsResponse, "DCS orgs");
+  assert.equal(orgs.length, 3);
+  assert.equal(typeof orgs[0].username, "string");
+});
+
+await t("real: recorded commit list parses", async () => {
+  const commits = await parseJson(json(fixture("commits.json")), DcsCommitsResponse, "DCS commits");
+  assert.match(commits[0].sha, /^[0-9a-f]{40}$/);
+});
+
+await t("real: recorded file contents metadata parses", async () => {
+  const meta = await parseJson(json(fixture("contents-file.json")), DcsContentsMeta, "DCS contents");
+  assert.equal(meta.size, 55196);
+  assert.match(meta.sha, /^[0-9a-f]{40}$/);
+});
+
+await t("null in a read field parses (treated like absent, never a sign-in/source break)", async () => {
+  const orgs = await parseJson(json([{ username: null }]), DcsOrgsResponse, "DCS orgs");
+  assert.equal(orgs[0].username, null);
+  const commits = await parseJson(json([{ sha: null }]), DcsCommitsResponse, "DCS commits");
+  assert.equal(commits[0].sha, null);
+  const meta = await parseJson(json({ size: null, sha: null }), DcsContentsMeta, "DCS contents");
+  assert.equal(meta.size, null);
+});
+
+// ── The real dcsSources.ts call sites, with fetch stubbed ──
+//
+// These drive fileCommitSha / dcsFileSize themselves, so they prove the
+// failure posture end to end: a valid body yields the value, a malformed one
+// yields the same null as a 404 / network error (never a garbage watermark),
+// and the rejection is logged with the endpoint name.
+
+const env = { DCS_BASE_URL: "https://dcs.test" };
+async function withFetch(body, fn) {
+  const realFetch = globalThis.fetch;
+  const realWarn = console.warn;
+  const warnings = [];
+  globalThis.fetch = async () => (typeof body === "string" ? new Response(body) : json(body));
+  console.warn = (...args) => warnings.push(args.map(String).join(" "));
+  try {
+    return await fn(warnings);
+  } finally {
+    globalThis.fetch = realFetch;
+    console.warn = realWarn;
+  }
+}
+
+await t("fileCommitSha: recorded commit list returns the head sha", async () => {
+  await withFetch(fixture("commits.json"), async (warnings) => {
+    const sha = await fileCommitSha(env, "unfoldingWord", "en_tn", "tn_OBA.tsv");
+    assert.equal(sha, fixture("commits.json")[0].sha);
+    assert.equal(warnings.length, 0);
+  });
+});
+
+await t("fileCommitSha: a numeric sha returns null, not a watermark, and is logged", async () => {
+  await withFetch([{ sha: 123 }], async (warnings) => {
+    const sha = await fileCommitSha(env, "unfoldingWord", "en_tn", "tn_OBA.tsv");
+    assert.equal(sha, null);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /DCS commits/);
+  });
+});
+
+await t("fileCommitSha: an HTML error page returns null and is logged", async () => {
+  await withFetch("<html>502</html>", async (warnings) => {
+    assert.equal(await fileCommitSha(env, "o", "r", "p"), null);
+    assert.match(warnings[0] ?? "", /valid JSON/);
+  });
+});
+
+await t("dcsFileSize: recorded file metadata returns the recorded size", async () => {
+  await withFetch(fixture("contents-file.json"), async (warnings) => {
+    assert.equal(await dcsFileSize(env, "unfoldingWord", "en_tn", "tn_OBA.tsv"), 55196);
+    assert.equal(warnings.length, 0);
+  });
+});
+
+await t("dcsFileSize: a directory listing (array) returns null, as before, and is logged", async () => {
+  await withFetch(fixture("contents-dir.json"), async (warnings) => {
+    assert.equal(await dcsFileSize(env, "unfoldingWord", "en_tn", ""), null);
+    assert.match(warnings[0] ?? "", /DCS contents/);
+  });
+});
+
+await t("dcsFileSize: a string size returns null and is logged", async () => {
+  await withFetch({ size: "55196", sha: "x" }, async (warnings) => {
+    assert.equal(await dcsFileSize(env, "o", "r", "p"), null);
+    assert.equal(warnings.length, 1);
+  });
+});
+
+console.log(`\n${passed} passed, ${failed} failed`);

@@ -1,0 +1,50 @@
+[
+  {
+    "name": ".gitea",
+    "path": ".gitea",
+    "sha": "5b65834672a398cadb6f6f13cd6560d6baeae794",
+    "last_commit_sha": "d6fc28c11c8b353bdbe473e26ee0586977c2907e",
+    "last_committer_date": "2026-09-28T16:57:54Z",
+    "last_author_date": "2026-09-28T16:57:54Z",
+    "type": "dir",
+    "mode": "40000",
+    "size": 0,
+    "encoding": null,
+    "content": null,
+    "target": null,
+    "url": "https://git.door43.org/api/v1/repos/unfoldingWord/en_tn/contents/.gitea?ref=master",
+    "html_url": "https://git.door43.org/unfoldingWord/en_tn/src/branch/master/.gitea",
+    "git_url": "https://git.door43.org/api/v1/repos/unfoldingWord/en_tn/git/blobs/5b65834672a398cadb6f6f13cd6560d6baeae794",
+    "download_url": null,
+    "submodule_git_url": null,
+    "_links": {
+      "self": "https://git.door43.org/api/v1/repos/unfoldingWord/en_tn/contents/.gitea?ref=master",
+      "git": "https://git.door43.org/api/v1/repos/unfoldingWord/en_tn/git/blobs/5b65834672a398cadb6f6f13cd6560d6baeae794",
+      "html": "https://git.door43.org/unfoldingWord/en_tn/src/branch/master/.gitea"
+    }
+  },
+  {
+    "name": ".github",
+    "path": ".github",
+    "sha": "ecc4feb09ad1f5fef405b22b8e9ea1f47e2d5672",
+    "last_commit_sha": "06aeb1b0a5015a4f456fb36e753ce2bc95d7eb32",
+    "last_committer_date": "2020-12-17T01:37:16Z",
+    "last_author_date": "2020-12-17T01:37:16Z",
+    "type": "dir",
+    "mode": "40000",
+    "size": 0,
+    "encoding": null,
+    "content": null,
+    "target": null,
+    "url": "https://git.door43.org/api/v1/repos/unfoldingWord/en_tn/contents/.github?ref=master",
+    "html_url": "https://git.door43.org/unfoldingWord/en_tn/src/branch/master/.github",
+    "git_url": "https://git.door43.org/api/v1/repos/unfoldingWord/en_tn/git/blobs/ecc4feb09ad1f5fef405b22b8e9ea1f47e2d5672",
+    "download_url": null,
+    "submodule_git_url": null,
+    "_links": {
+      "self": "https://git.door43.org/api/v1/repos/unfoldingWord/en_tn/contents/.github?ref=master",
+      "git": "https://git.door43.org/api/v1/repos/unfoldingWord/en_tn/git/blobs/ecc4feb09ad1f5fef405b22b8e9ea1f47e2d5672",
+      "html": "https://git.door43.org/unfoldingWord/en_tn/src/branch/master/.github"
+    }
+  }
+]
