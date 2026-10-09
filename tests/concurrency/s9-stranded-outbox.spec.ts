@@ -22,12 +22,15 @@ const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
 
 const SUFFIXED = "bible-editor-outbox-bsoj";
 
-// Count pending/in-flight ops whose payload contains `needle` in ONE named
+const ANY_STATUS = ["pending", "in_flight", "conflict", "failed"];
+
+// Count ops in one of `statuses` whose payload contains `needle` in ONE named
 // database. Opens only a database that already exists (indexedDB.open would
-// otherwise create it and change what the app sees).
-function countOpsIn(page: Page, dbName: string, needle: string) {
+// otherwise create it and change what the app sees). Returns null when the
+// read itself fails, so neither assertion can pass on an error.
+function countOpsIn(page: Page, dbName: string, needle: string, statuses: string[]) {
   return page.evaluate(
-    async ({ dbName, needle }) => {
+    async ({ dbName, needle, statuses }) => {
       try {
         const meta = (await indexedDB.databases()).find((d) => d.name === dbName);
         if (!meta) return 0;
@@ -45,17 +48,18 @@ function countOpsIn(page: Page, dbName: string, needle: string) {
           });
           return ops.filter(
             (o) =>
-              (o.status === "pending" || o.status === "in_flight") &&
-              JSON.stringify(o).includes(needle),
+              statuses.includes(o.status as string) && JSON.stringify(o).includes(needle),
           ).length;
         } finally {
           db.close();
         }
       } catch {
-        return 0;
+        // null, not 0: a failed read must never pass the "stranded copy is
+        // gone" check below. expect.poll retries it and fails if it persists.
+        return null;
       }
     },
-    { dbName, needle },
+    { dbName, needle, statuses },
   );
 }
 
@@ -100,12 +104,15 @@ test("an edit queued offline before the fallback flag lands still flushes after 
   await noteTextarea(page1, target!.id).fill(offlineText);
   await saveNote(page1, target!.id);
 
-  // Precondition: the op must sit in the SUFFIXED database. If the app opened
-  // the unsuffixed one, this run does not exercise #502 and must not pass.
+  // Precondition: the op must sit PENDING in the SUFFIXED database. If the app
+  // opened the unsuffixed one, this run does not exercise #502 and must not
+  // pass. "pending" (not in_flight) pins the path under test: an in-flight op
+  // is deliberately held in the sibling until its request has provably timed
+  // out (IN_FLIGHT_RECOVERY_AGE_MS), which this spec does not wait for.
   await expect
-    .poll(() => countOpsIn(page1, SUFFIXED, offlineText), {
+    .poll(() => countOpsIn(page1, SUFFIXED, offlineText, ["pending"]), {
       timeout: 10_000,
-      message: `expected the offline op in ${SUFFIXED} (the pre-flag database)`,
+      message: `expected the offline op pending in ${SUFFIXED} (the pre-flag database)`,
     })
     .toBeGreaterThan(0);
 
@@ -132,8 +139,14 @@ test("an edit queued offline before the fallback flag lands still flushes after 
     30_000,
   );
   expect(final.note).toBe(offlineText);
-  // And the stranded copy is gone, so no later session re-sends it.
-  await expect.poll(() => countOpsIn(page2, SUFFIXED, offlineText), { timeout: 10_000 }).toBe(0);
+  // And no copy of the op is left in the suffixed DB (in any status), so no
+  // later session re-sends it.
+  await expect
+    .poll(() => countOpsIn(page2, SUFFIXED, offlineText, ANY_STATUS), {
+      timeout: 10_000,
+      message: `expected no copy of the op left in ${SUFFIXED}`,
+    })
+    .toBe(0);
 
   await side.dispose();
   await context.close();

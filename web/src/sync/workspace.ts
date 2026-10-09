@@ -20,6 +20,17 @@ export function getWorkspaceSlug(): string {
 
 export function setWorkspaceSlug(slug: string): void {
   try {
+    // A fallback flag describes the slug it was confirmed for. When the slug
+    // changes, drop it so the new slug reads as "unknown" (conservatively
+    // suffixed) until the server confirms it. Callers that know the answer set
+    // it right after. Without this, api.ts's workspace_mismatch reload (which
+    // changes only the slug) left a stale "1" that sent a non-fallback org's
+    // edits into the fallback's unsuffixed DB, where no later session of that
+    // org looks (issue #502).
+    if (slug !== getWorkspaceSlug()) {
+      localStorage.removeItem(FALLBACK_KEY);
+      localStorage.removeItem(FALLBACK_FOR_KEY);
+    }
     localStorage.setItem(STORAGE_KEY, slug);
   } catch {
     /* private mode — nothing we can do, next boot re-derives from the server */
@@ -51,17 +62,41 @@ export function getWorkspaceIsFallback(): boolean {
   return getWorkspaceSlug() === "default";
 }
 
+// Listeners for "the fallback flag was just confirmed for the current slug,
+// and that confirmation is new" (issue #502). The per-workspace stores open at
+// module load, often BEFORE boot confirms the flag, so their adopt-on-open pass
+// found nothing safe to adopt. They register here to run it again once the
+// confirmation lands. A Set of callbacks keeps this module import-free.
+const confirmedListeners = new Set<() => void>();
+export function onFallbackConfirmed(fn: () => void): () => void {
+  confirmedListeners.add(fn);
+  return () => confirmedListeners.delete(fn);
+}
+
 export function setWorkspaceIsFallback(isFallback: boolean): void {
+  const slug = getWorkspaceSlug();
+  const value = isFallback ? "1" : "0";
+  let isNew = false;
   try {
-    localStorage.setItem(FALLBACK_KEY, isFallback ? "1" : "0");
+    isNew =
+      localStorage.getItem(FALLBACK_FOR_KEY) !== slug ||
+      localStorage.getItem(FALLBACK_KEY) !== value;
+    localStorage.setItem(FALLBACK_KEY, value);
     // Record which slug this flag was confirmed for. Every caller sets the slug
-    // first, so this is the slug the flag describes. api.ts's workspace_mismatch
-    // path changes the slug WITHOUT touching the flag, leaving it stale for the
-    // new slug; reconcilableSiblingDbName refuses to adopt until they match
-    // again (issue #502).
-    localStorage.setItem(FALLBACK_FOR_KEY, getWorkspaceSlug());
+    // first, so this is the slug the flag describes. reconcilableSiblingDbName
+    // refuses to adopt unless it matches the current slug (issue #502).
+    localStorage.setItem(FALLBACK_FOR_KEY, slug);
   } catch {
     /* private mode — nothing we can do, next boot re-derives from the server */
+    return;
+  }
+  if (!isNew) return;
+  for (const fn of confirmedListeners) {
+    try {
+      fn();
+    } catch {
+      /* a listener's failure must not break boot */
+    }
   }
 }
 

@@ -17,8 +17,8 @@
 import { openDB, type IDBPDatabase } from "idb";
 import { isReadOnly } from "./api";
 import { onOutboxResult } from "./outbox";
-import { workspaceDbName } from "./workspace";
-import { adoptSiblingRecords } from "./dbReconcile";
+import { onFallbackConfirmed, workspaceDbName } from "./workspace";
+import { adoptSiblingRecords, boundedWait } from "./dbReconcile";
 
 // Base name; the actual per-workspace DB name is derived via workspaceDbName()
 // so alignment drafts written in one Door43 org never surface in another
@@ -49,31 +49,44 @@ export interface AlignmentDraftRecord {
 }
 
 let dbp: Promise<IDBPDatabase> | null = null;
+let dbOpenedName = "";
 function db() {
   if (!dbp) {
     const name = workspaceDbName(DB_NAME);
+    dbOpenedName = name;
     dbp = openDB(name, DB_VERSION, {
       upgrade(d) {
         if (!d.objectStoreNames.contains(STORE)) {
           d.createObjectStore(STORE, { keyPath: "key" });
         }
       },
-    }).then((idb) => {
+    }).then(async (idb) => {
       // #502: same boot-timing race as the outbox and text-drafts store — a
       // reload can open the OTHER of this workspace's two candidate DB names and
       // strand in-progress alignment work. Adopt any stranded drafts from the
-      // safe sibling into the one we opened; the aligner reads them back on mount
-      // (no subscriber to notify here). Not awaited so the first open never blocks.
-      void adoptSiblingRecords({ base: DB_NAME, opened: name, openedDb: idb, store: STORE }).catch(
-        () => {
-          /* best-effort — see adoptSiblingRecords */
-        },
+      // safe sibling BEFORE the handle resolves: the aligner reads drafts once on
+      // mount and this store has no subscribers to notify later.
+      // adoptSiblingRecords never throws; a failure just opens the handle.
+      await boundedWait(
+        adoptSiblingRecords({ base: DB_NAME, opened: name, openedDb: idb, store: STORE }),
       );
       return idb;
     });
   }
   return dbp;
 }
+
+// Boot confirmed the fallback flag for this slug for the first time: run the
+// adoption again. Drafts adopted now reach the aligner on its next mount.
+onFallbackConfirmed(() => {
+  const p = dbp;
+  if (!p) return; // not opened yet — the open itself will adopt
+  void p
+    .then((idb) =>
+      adoptSiblingRecords({ base: DB_NAME, opened: dbOpenedName, openedDb: idb, store: STORE }),
+    )
+    .catch(() => {});
+});
 
 // Same key shape the outbox uses for a verse target, so the onOutboxResult
 // listener below can clear the matching draft off a landed save.

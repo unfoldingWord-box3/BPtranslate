@@ -28,7 +28,7 @@ import {
   shouldAnnounceResult,
   targetKey,
 } from "./outboxTargeting.ts";
-import { workspaceDbName } from "./workspace";
+import { onFallbackConfirmed, workspaceDbName } from "./workspace";
 import { adoptSiblingRecords } from "./dbReconcile";
 import i18n from "../i18n";
 
@@ -198,6 +198,7 @@ function db() {
     // Resolved at first-open time (not module load) so it picks up a slug
     // written during boot reconciliation (see App.tsx) before any op is queued.
     const name = outboxDbName();
+    dbName = name;
     dbp = openDB(name, DB_VERSION, {
       upgrade(db) {
         if (!db.objectStoreNames.contains(STORE)) {
@@ -206,28 +207,63 @@ function db() {
           store.createIndex("status", "status");
         }
       },
-    }).then((idb) => {
-      // #502: the fallback flag that decides `name` is written during boot, so
-      // a reload can open the OTHER of this workspace's two candidate names and
-      // strand ops queued under the first. Adopt any stranded ops from the safe
-      // sibling into the one we opened, then drain so they finally ship. Kicked
-      // off (not awaited) so the first open — and any enqueue racing it — never
-      // blocks; the adopted ops are ordered by queuedAt/seq like any other.
-      // An adopted young in_flight op is NOT re-sent at once: recoverInFlight's
-      // age gate holds it until its original request must have timed out, and
-      // drainPass arms a timer for that moment.
-      void adoptSiblingRecords({ base: OUTBOX_BASE, opened: name, openedDb: idb, store: STORE })
-        .then((n) => {
-          if (n > 0) void drain();
-        })
-        .catch(() => {
-          /* best-effort — see adoptSiblingRecords */
-        });
-      return idb;
     });
   }
   return dbp;
 }
+
+// #502: the fallback flag that decides the outbox's DB name is written during
+// boot, so a reload can open the OTHER of this workspace's two candidate names
+// and strand ops queued under the first. adoptStrandedOps moves them from the
+// safe sibling into the DB this session opened.
+//
+// It runs inside drain() while holding the cross-tab "be-outbox-drain" lock, so
+// no tab is mid-drain on either DB while ops move: an op cannot flip to
+// in_flight, settle, or be deleted by a drain between the snapshot and the
+// sibling delete. Writes outside the drain (an enqueue coalescing into a
+// pending op, a discard) are caught by adoptRecords' unchanged-snapshot check,
+// which undoes our copy so the sibling's newer version is the only one.
+//
+// An in_flight op younger than IN_FLIGHT_RECOVERY_AGE_MS is held in the sibling:
+// its request may still be on the wire from a tab that just closed. Adoption
+// stays pending and a drain is scheduled for when it is provably dead.
+//
+// The handle itself (db()) is NOT gated on adoption: adoption needs the drain
+// lock, which another tab can hold for a whole pass, and enqueue must never
+// wait on that. Adopted ops sort by their original queuedAt/seq, ahead of
+// newer edits to the same target.
+let dbName: string | null = null;
+let adoptionPending = true;
+async function adoptStrandedOps(): Promise<void> {
+  if (!adoptionPending) return;
+  adoptionPending = false;
+  const idb = await db();
+  const { adopted, heldUntil } = await adoptSiblingRecords({
+    base: OUTBOX_BASE,
+    opened: dbName!,
+    openedDb: idb,
+    store: STORE,
+    holdUntil: (r) => {
+      const op = r as OutboxOp;
+      if (op.status !== "in_flight" || op.dispatchedAt === undefined) return undefined;
+      const until = op.dispatchedAt + IN_FLIGHT_RECOVERY_AGE_MS;
+      return until > Date.now() ? until : undefined;
+    },
+  });
+  if (heldUntil !== undefined) {
+    adoptionPending = true;
+    scheduleDrain(Math.max(0, heldUntil - Date.now()) + 250);
+  }
+  if (adopted > 0) void notify();
+}
+
+// Boot confirmed the fallback flag for this slug for the first time (e.g. the
+// first session after the flag's confirmed-for key shipped): the open-time pass
+// may have found nothing safe to adopt, so run it again.
+onFallbackConfirmed(() => {
+  adoptionPending = true;
+  void drain();
+});
 
 const subscribers = new Set<Subscriber>();
 
@@ -1232,12 +1268,18 @@ export async function drain() {
         { ifAvailable: true },
         async (lock) => {
           if (!lock) return false;
-          await drainPass();
+          // #502 adoption runs only here, under the drain lock (see
+          // adoptStrandedOps). It is a no-op once done, and never throws.
+          const pass = async () => {
+            await adoptStrandedOps().catch(() => {});
+            await drainPass();
+          };
+          await pass();
           // Consume queued wakeups while the lock is still held, so the
           // re-pass keeps the cross-tab exclusion drainPass relies on.
           while (drainRequested) {
             drainRequested = false;
-            await drainPass();
+            await pass();
           }
           return true;
         },
@@ -1245,6 +1287,8 @@ export async function drain() {
       if (!acquired) scheduleDrain(3000);
     } else {
       // No Web Locks (very old browser) — fall back to single-tab behavior.
+      // No #502 adoption here: without the lock it could race another tab's
+      // drain (and such browsers lack indexedDB.databases() anyway).
       await drainPass();
       while (drainRequested) {
         drainRequested = false;

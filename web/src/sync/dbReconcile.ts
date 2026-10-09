@@ -8,113 +8,111 @@
 // other, and never flushes: silent loss on the save protocol's "durable across
 // tab close" claim.
 //
-// Fix: whenever a per-workspace store opens, adopt any records stranded in its
-// SAFE sibling database into the one we actually opened, then delete them from
-// the sibling so they cannot be double-drained. Which sibling is "safe" is the
-// crux and lives in workspace.ts's reconcilableSiblingDbName — it only ever
-// reconciles the fallback workspace's own { base, base-{slug} } pair, never the
-// unsuffixed `base` into a non-fallback store (that would mix two orgs' edits).
+// Fix: whenever a per-workspace store opens (and again when boot first confirms
+// the fallback flag for this slug), adopt any records stranded in its SAFE
+// sibling database into the one actually opened, then delete them from the
+// sibling so they cannot be double-drained. Which sibling is "safe" lives in
+// workspace.ts's reconcilableSiblingDbName — only the fallback workspace's own
+// { base, base-{slug} } pair, never the unsuffixed `base` into a non-fallback
+// store (that would mix two orgs' edits). The per-record algorithm (copy, then
+// delete only an unchanged sibling copy, undo on a concurrent change) is the
+// pure, unit-tested adoptRecords in dbReconcilePlan.ts.
 
 import { openDB, type IDBPDatabase } from "idb";
 import { reconcilableSiblingDbName } from "./workspace";
-import { decideAdoption } from "./dbReconcilePlan";
+import { adoptRecords, type AdoptResult, type StoreSide } from "./dbReconcilePlan";
 
-// Move every record the safe sibling DB holds into the opened DB (or drop the
-// sibling's copy when the opened DB already holds an equal-or-newer one), then
-// delete every processed key from the sibling. Returns the number of records
-// copied into the opened DB (0 when there was nothing safe or nothing to do).
+function side(db: IDBPDatabase, store: string): StoreSide {
+  return {
+    readAll: () => db.getAll(store),
+    tx: () => {
+      const t = db.transaction(store, "readwrite");
+      return {
+        get: (key) => t.store.get(key),
+        put: (record) => t.store.put(record),
+        delete: (key) => t.store.delete(key),
+        done: t.done,
+      };
+    },
+  };
+}
+
+// Wait for `p`, but never longer than `ms`. The drafts stores gate their DB
+// handle on adoption; a stuck adoption (another tab holding the adopt lock, a
+// blocked open) must not leave the editors without a drafts store. The
+// adoption itself keeps running and finishes in the background.
+export function boundedWait(p: Promise<unknown>, ms = 3000): Promise<void> {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    p.finally(() => {
+      clearTimeout(t);
+      resolve();
+    }).catch(() => {});
+  });
+}
+
+// Best-effort: never throws, and a failure only means the records stay where
+// they are until the next attempt. `holdUntil` leaves a record in the sibling
+// until the returned time (the outbox holds a young in-flight op that may still
+// be on the wire).
 //
-// Design choices, all in service of "never lose an edit, never double-apply one
-// destructively":
-//   - Per-key rule (dbReconcilePlan.ts decideAdoption): copy when the opened DB
-//     lacks the key or holds an older copy (by updatedAt); otherwise only drop
-//     the sibling's redundant copy. The read-compare-put runs inside ONE
-//     readwrite transaction on the opened DB, so a write this session makes to
-//     the same key cannot slip between the compare and the put.
-//   - Keys come from each record itself (the store's in-line keyPath), from a
-//     single getAll. Separate getAllKeys/getAll reads could interleave with
-//     another tab's write to the sibling and misalign, deleting a record that
-//     was never copied.
-//   - Copy THEN delete (at-least-once): a crash between the two leaves the record
-//     in both DBs; the next reconcile finds the key already present in the opened
-//     DB and still deletes the sibling's now-redundant copy. Deleting from the
-//     sibling is REQUIRED: a later session that opens the sibling as its
-//     canonical DB would otherwise re-drain the op.
-//   - The sibling delete re-reads each key inside its own readwrite transaction
-//     and deletes only when the record is still exactly what was processed. A
-//     tab still open on the sibling (it opened before the flag landed) may have
-//     rewritten that key meanwhile; its newer copy is left for the next open
-//     instead of being deleted unseen.
+// Runs under a Web Lock named for the base, so two tabs never adopt the same
+// pair at once. Without it, tab 2 could see a record "vanish" from the sibling
+// (tab 1 just moved it) and undo its copy, which is tab 1's copy in the same DB.
 export async function adoptSiblingRecords(opts: {
   base: string;
   opened: string;
   openedDb: IDBPDatabase;
   store: string;
-}): Promise<number> {
-  const { base, opened, openedDb, store } = opts;
+  holdUntil?: (record: unknown) => number | undefined;
+}): Promise<AdoptResult> {
+  const none: AdoptResult = { adopted: 0 };
+  const { base, opened, openedDb, store, holdUntil } = opts;
   const siblingName = reconcilableSiblingDbName(base, opened);
-  if (!siblingName) return 0;
+  if (!siblingName) return none;
 
   // Never CREATE the sibling — only reconcile one that already exists. Without
   // indexedDB.databases() (older browsers) we can't tell, so skip rather than
   // blind-open (which would create a spurious empty DB). Chromium — the app's
   // target — supports databases().
   if (typeof indexedDB === "undefined" || typeof indexedDB.databases !== "function") {
-    return 0;
-  }
-  try {
-    const dbs = await indexedDB.databases();
-    if (!dbs.some((d) => d.name === siblingName)) return 0;
-  } catch {
-    return 0;
+    return none;
   }
 
-  let sibling: IDBPDatabase | undefined;
+  const run = async (): Promise<AdoptResult> => {
+    try {
+      const dbs = await indexedDB.databases();
+      if (!dbs.some((d) => d.name === siblingName)) return none;
+    } catch {
+      return none;
+    }
+    let sibling: IDBPDatabase | undefined;
+    try {
+      // Open at the sibling's CURRENT version (no version arg → no upgrade) so
+      // we never trigger a version-change that could block behind another tab.
+      sibling = await openDB(siblingName);
+      if (!sibling.objectStoreNames.contains(store)) return none;
+      const keyPath = sibling.transaction(store, "readonly").store.keyPath;
+      if (typeof keyPath !== "string") return none; // every store here has one in-line key
+      return await adoptRecords({
+        sibling: side(sibling, store),
+        opened: side(openedDb, store),
+        keyOf: (r) => (r as Record<string, IDBValidKey>)[keyPath],
+        holdUntil,
+      });
+    } catch {
+      return none;
+    } finally {
+      sibling?.close();
+    }
+  };
+
   try {
-    // Open at the sibling's CURRENT version (no version arg → no upgrade) so we
-    // never trigger a version-change that could block behind another tab. We
-    // only read and delete existing records.
-    sibling = await openDB(siblingName);
-    if (!sibling.objectStoreNames.contains(store)) return 0;
-
-    const readTx = sibling.transaction(store, "readonly");
-    const keyPath = readTx.store.keyPath;
-    const records = (await readTx.store.getAll()) as unknown[];
-    await readTx.done;
-    if (records.length === 0) return 0;
-    if (typeof keyPath !== "string") return 0; // every store here uses one in-line key
-    const keyOf = (r: unknown) => (r as Record<string, IDBValidKey>)[keyPath];
-
-    let adopted = 0;
-    const processed: { key: IDBValidKey; snapshot: string }[] = [];
-    const writeTx = openedDb.transaction(store, "readwrite");
-    for (const record of records) {
-      const key = keyOf(record);
-      const decision = decideAdoption(record, await writeTx.store.get(key));
-      if (decision === "put") {
-        await writeTx.store.put(record);
-        adopted++;
-      }
-      processed.push({ key, snapshot: JSON.stringify(record) });
+    if (typeof navigator !== "undefined" && navigator.locks) {
+      return await navigator.locks.request(`be-adopt-${base}`, run);
     }
-    await writeTx.done; // committed: every processed key now lives in openedDb
-
-    if (processed.length > 0) {
-      const delTx = sibling.transaction(store, "readwrite");
-      for (const { key, snapshot } of processed) {
-        const current = await delTx.store.get(key);
-        if (current !== undefined && JSON.stringify(current) === snapshot) {
-          await delTx.store.delete(key);
-        }
-      }
-      await delTx.done;
-    }
-    return adopted;
+    return await run();
   } catch {
-    // Reconciliation is best-effort: any failure here must never break the
-    // store's normal open path. Stranded records are simply retried next open.
-    return 0;
-  } finally {
-    sibling?.close();
+    return none;
   }
 }

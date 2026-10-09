@@ -192,6 +192,45 @@ assert(
   "boot re-confirms the flag for bsoj -> adoption allowed again",
 );
 
+// Changing the slug drops a flag that described the OLD slug, so the new slug
+// reads as unknown (conservatively suffixed) instead of inheriting "fallback".
+// This is what stops api.ts's workspace_mismatch reload (slug only) from
+// queuing a non-fallback org's edits into the fallback's unsuffixed DB.
+setWorkspaceSlug("bsoj");
+setWorkspaceIsFallback(true);
+setWorkspaceSlug("org2");
+assert(getWorkspaceIsFallback() === false, "slug change clears the stale fallback flag");
+assert(
+  workspaceDbName(BASE) === "bible-editor-outbox-org2",
+  "after a slug-only change the new org's outbox is suffixed, not the fallback's",
+);
+setWorkspaceSlug("org2");
+setWorkspaceIsFallback(false);
+setWorkspaceSlug("org2");
+assert(
+  data.get("bible-editor.workspace-is-fallback") === "0",
+  "re-setting the SAME slug keeps its confirmed flag",
+);
+
+// A4: onFallbackConfirmed fires when the flag is confirmed for the current slug
+// for the first time (or its value changes), so already-open stores re-run
+// adoption; repeat confirmations each boot do not re-fire.
+const { onFallbackConfirmed } = await import("./workspace.ts");
+let fired = 0;
+const off = onFallbackConfirmed(() => fired++);
+setWorkspaceSlug("bsoj");
+data.delete("bible-editor.workspace-fallback-for");
+data.set("bible-editor.workspace-is-fallback", "1"); // an install from before the key existed
+setWorkspaceIsFallback(true);
+assert(fired === 1, "first confirmation for the slug fires the listeners");
+setWorkspaceIsFallback(true);
+assert(fired === 1, "a repeat confirmation does not fire again");
+setWorkspaceIsFallback(false);
+assert(fired === 2, "a changed flag value for the same slug fires again");
+off();
+setWorkspaceIsFallback(true);
+assert(fired === 2, "an unsubscribed listener is not called");
+
 // The implicit "default" workspace never suffixes, so there is only one
 // candidate name and thus no pair to reconcile.
 data.delete("bible-editor.workspace");

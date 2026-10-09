@@ -7,7 +7,119 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { decideAdoption } from "./dbReconcilePlan.ts";
+import { adoptRecords, decideAdoption } from "./dbReconcilePlan.ts";
+
+// In-memory stand-in for one IndexedDB object store keyed by `id`.
+// `onTx(n)` runs as the n-th transaction opens (0-based), to simulate another
+// tab writing between adoptRecords' phases; `failTx(n)` makes that one throw.
+function fakeStore(records, { onTx, failTx } = {}) {
+  const map = new Map(records.map((r) => [r.id, structuredClone(r)]));
+  let n = 0;
+  return {
+    map,
+    readAll: async () => [...map.values()].map((r) => structuredClone(r)),
+    tx: () => {
+      const i = n++;
+      onTx?.(i, map);
+      const fail = failTx?.(i);
+      return {
+        get: async (k) => (map.has(k) ? structuredClone(map.get(k)) : undefined),
+        put: async (r) => {
+          if (fail) throw new Error("tx failed");
+          map.set(r.id, structuredClone(r));
+        },
+        delete: async (k) => {
+          if (fail) throw new Error("tx failed");
+          map.delete(k);
+        },
+        done: Promise.resolve(),
+      };
+    },
+  };
+}
+const keyOf = (r) => r.id;
+
+test("adoptRecords moves stranded ops and empties the sibling", async () => {
+  const sibling = fakeStore([{ id: "a", v: 1 }, { id: "b", v: 1 }]);
+  const opened = fakeStore([]);
+  const res = await adoptRecords({ sibling, opened, keyOf });
+  assert.equal(res.adopted, 2);
+  assert.deepEqual([...opened.map.keys()].sort(), ["a", "b"]);
+  assert.equal(sibling.map.size, 0);
+});
+
+test("A3: a failing sibling delete still reports the copies that committed", async () => {
+  const sibling = fakeStore([{ id: "a", v: 1 }], { failTx: (i) => i === 0 });
+  const opened = fakeStore([]);
+  const res = await adoptRecords({ sibling, opened, keyOf });
+  assert.equal(res.adopted, 1, "caller must still drain/notify");
+  assert.ok(opened.map.has("a"));
+  assert.ok(sibling.map.has("a"), "left for the next open to drop");
+});
+
+test("A1: a sibling op rewritten by a live tab after the snapshot is not duplicated", async () => {
+  // The sibling's owner coalesces a newer value into op "a" after our snapshot
+  // (as our opened-store write starts). Its version must be the only one left.
+  const opened = fakeStore([]);
+  const sibling = fakeStore([{ id: "a", value: "old" }]);
+  const realTx = opened.tx;
+  let first = true;
+  opened.tx = () => {
+    if (first) {
+      first = false;
+      sibling.map.set("a", { id: "a", value: "new" });
+    }
+    return realTx();
+  };
+  const res = await adoptRecords({ sibling, opened, keyOf });
+  assert.equal(res.adopted, 0);
+  assert.equal(opened.map.has("a"), false, "our stale copy is undone");
+  assert.deepEqual(sibling.map.get("a"), { id: "a", value: "new" });
+});
+
+test("A1: a sibling op sent or discarded by a live tab after the snapshot is not re-sent", async () => {
+  const opened = fakeStore([]);
+  const sibling = fakeStore([{ id: "a", value: "x" }]);
+  const realTx = opened.tx;
+  let first = true;
+  opened.tx = () => {
+    if (first) {
+      first = false;
+      sibling.map.delete("a");
+    }
+    return realTx();
+  };
+  const res = await adoptRecords({ sibling, opened, keyOf });
+  assert.equal(res.adopted, 0);
+  assert.equal(opened.map.has("a"), false);
+});
+
+test("A1: a held (young in-flight) op stays in the sibling and reports when to retry", async () => {
+  const sibling = fakeStore([
+    { id: "a", status: "in_flight", until: 500 },
+    { id: "b", status: "pending" },
+  ]);
+  const opened = fakeStore([]);
+  const res = await adoptRecords({
+    sibling,
+    opened,
+    keyOf,
+    holdUntil: (r) => (r.status === "in_flight" ? r.until : undefined),
+  });
+  assert.equal(res.adopted, 1);
+  assert.equal(res.heldUntil, 500);
+  assert.ok(sibling.map.has("a") && !opened.map.has("a"));
+  assert.ok(opened.map.has("b") && !sibling.map.has("b"));
+});
+
+test("A5: an equal-timestamp, different-content draft is left in both places", async () => {
+  const sibling = fakeStore([{ id: "K", updatedAt: 5, text: "B" }]);
+  const opened = fakeStore([{ id: "K", updatedAt: 5, text: "A" }]);
+  const res = await adoptRecords({ sibling, opened, keyOf });
+  assert.equal(res.adopted, 0);
+  assert.equal(opened.map.get("K").text, "A");
+  assert.equal(sibling.map.get("K").text, "B");
+});
 
 test("a stranded record the opened DB lacks is copied", () => {
   assert.equal(decideAdoption({ id: "op-1", status: "pending" }, undefined), "put");
@@ -32,4 +144,10 @@ test("a stranded draft older than or equal to the opened DB's copy is dropped", 
   const newer = { key: "K", updatedAt: 2 };
   assert.equal(decideAdoption(older, newer), "drop");
   assert.equal(decideAdoption(newer, { ...newer }), "drop");
+});
+
+test("same updatedAt but different content keeps both copies (no distinct edit discarded)", () => {
+  const a = { key: "K", updatedAt: 5, payload: "typed in session A" };
+  const b = { key: "K", updatedAt: 5, payload: "typed in session B" };
+  assert.equal(decideAdoption(a, b), "keep");
 });
