@@ -88,13 +88,23 @@ export async function adoptRecords(opts: {
   opened: StoreSide;
   keyOf: (record: unknown) => IDBValidKey;
   holdUntil?: (record: unknown) => number | undefined;
+  // True once the caller has given up on this attempt (the outbox's timeout).
+  // Checked immediately before each write transaction opens: an abandoned
+  // attempt must not write, because it no longer holds the outbox drain lock
+  // and could overwrite a record that drain has since dispatched. It returns
+  // failed instead, and the next attempt redoes the work under the lock. The
+  // check and the transaction open run in the same task, so no timer can fire
+  // between them.
+  isAborted?: () => boolean;
 }): Promise<AdoptResult> {
   const { sibling, opened, keyOf, holdUntil } = opts;
+  const aborted = opts.isAborted ?? (() => false);
   const records = await sibling.readAll();
   if (records.length === 0) return { adopted: 0 };
 
   let heldUntil: number | undefined;
   const processed: { key: IDBValidKey; snapshot: string; put: boolean }[] = [];
+  if (aborted()) return { adopted: 0, failed: true };
   const writeTx = opened.tx();
   for (const record of records) {
     const until = holdUntil?.(record);
@@ -113,6 +123,8 @@ export async function adoptRecords(opts: {
   if (processed.length === 0) return { adopted, heldUntil };
 
   const changed: { key: IDBValidKey; snapshot: string }[] = [];
+  // Copies are committed; leave the sibling's copies for the next attempt.
+  if (aborted()) return { adopted, heldUntil, failed: true };
   try {
     const delTx = sibling.tx();
     for (const p of processed) {
@@ -131,6 +143,8 @@ export async function adoptRecords(opts: {
   }
 
   if (changed.length > 0) {
+    // Aborted here: both copies stay (a possible duplicate send, never a loss).
+    if (aborted()) return { adopted, heldUntil, failed: true };
     try {
       const undoTx = opened.tx();
       for (const c of changed) {

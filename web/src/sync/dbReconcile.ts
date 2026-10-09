@@ -70,7 +70,9 @@ export function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | undefined
 // indexedDB.databases() call. Also retries an attempt that failed.
 export function readoptOnFocus(adopt: () => void, ms = 30_000): void {
   if (typeof window === "undefined" || typeof document === "undefined") return;
-  let last = Date.now();
+  // 0, not load time: the first focus after a skipped or timed-out open-time
+  // adoption must retry, even within the first 30s.
+  let last = 0;
   const maybe = () => {
     if (Date.now() - last < ms) return;
     last = Date.now();
@@ -97,10 +99,15 @@ export async function adoptSiblingRecords(opts: {
   openedDb: IDBPDatabase;
   store: string;
   holdUntil?: (record: unknown) => number | undefined;
+  // Aborted when the caller gives up on this attempt. It cancels a wait for
+  // the adopt lock, and once aborted the attempt writes nothing (see
+  // adoptRecords' isAborted) and returns failed.
+  signal?: AbortSignal;
 }): Promise<AdoptResult> {
   const none: AdoptResult = { adopted: 0 };
   const failed: AdoptResult = { adopted: 0, failed: true };
-  const { base, opened, openedDb, store, holdUntil } = opts;
+  const { base, opened, openedDb, store, holdUntil, signal } = opts;
+  const isAborted = () => signal?.aborted === true;
   const siblingName = reconcilableSiblingDbName(base, opened);
   if (!siblingName) return none;
 
@@ -120,11 +127,13 @@ export async function adoptSiblingRecords(opts: {
   }
 
   const run = async (): Promise<AdoptResult> => {
+    if (isAborted()) return failed;
     let sibling: IDBPDatabase | undefined;
     try {
       // Open at the sibling's CURRENT version (no version arg → no upgrade) so
       // we never trigger a version-change that could block behind another tab.
       sibling = await openDB(siblingName);
+      if (isAborted()) return failed;
       if (!sibling.objectStoreNames.contains(store)) return none;
       const keyPath = sibling.transaction(store, "readonly").store.keyPath;
       if (typeof keyPath !== "string") return none; // every store here has one in-line key
@@ -133,6 +142,7 @@ export async function adoptSiblingRecords(opts: {
         opened: side(openedDb, store),
         keyOf: (r) => (r as Record<string, IDBValidKey>)[keyPath],
         holdUntil,
+        isAborted,
       });
     } catch {
       return failed;
@@ -143,7 +153,9 @@ export async function adoptSiblingRecords(opts: {
 
   try {
     if (typeof navigator !== "undefined" && navigator.locks) {
-      return await navigator.locks.request(`be-adopt-${base}`, run);
+      // `signal` cancels the wait (the request rejects → failed), so abandoned
+      // attempts do not pile up behind the lock.
+      return await navigator.locks.request(`be-adopt-${base}`, signal ? { signal } : {}, run);
     }
     return await run();
   } catch {

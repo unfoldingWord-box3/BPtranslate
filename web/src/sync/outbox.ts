@@ -236,42 +236,73 @@ function db() {
 // Not one-shot. A tab still open on the sibling (it opened before the flag
 // landed) can keep queuing into it after we adopted, so later drain passes
 // re-check, at most once per ADOPT_RECHECK_MS. When no sibling exists the
-// re-check costs one indexedDB.databases() call. A failed or timed-out attempt
-// is retried on the same schedule, and a drain is scheduled for it.
+// re-check costs one indexedDB.databases() call. An attempt that found work
+// (adopted or held something) schedules one follow-up pass at the next allowed
+// time, so an op written into the sibling right after it is picked up without
+// waiting for focus/online/enqueue. An attempt that found the sibling empty
+// schedules nothing: an emptied sibling DB persists, so "it exists" alone
+// would wake the tab every 30s for its whole life. scheduleDrain keeps a single
+// timer, so this is at most one pending retry.
+//
+// A failed or timed-out attempt retries with backoff (30s, 60s, 120s, ... capped
+// at 5 min, reset on success), so a sibling that can never be opened does not
+// wake a tab every 30s forever.
 //
 // Bounded by ADOPT_TIMEOUT_MS: a blocked open of the sibling must not hold the
-// drain lock (and so every tab's drain) hostage. On timeout this pass gives up
-// and drains; the abandoned attempt finishes in the background, still guarded
-// by adoptRecords' unchanged-snapshot check.
+// drain lock (and so every tab's drain) hostage. On timeout the attempt is
+// ABORTED: it stops waiting for the adopt lock and writes nothing more, because
+// it no longer holds the drain lock and could overwrite an op that drainPass
+// has since dispatched. The next attempt redoes the work under the lock.
 const ADOPT_RECHECK_MS = 30_000;
+const ADOPT_MAX_BACKOFF_MS = 5 * 60_000;
 const ADOPT_TIMEOUT_MS = 3_000;
 let dbName: string | null = null;
 let nextAdoptAt = 0; // 0 = due now
+let adoptFailStreak = 0;
 async function adoptStrandedOps(): Promise<void> {
   const now = Date.now();
   if (now < nextAdoptAt) return;
   nextAdoptAt = now + ADOPT_RECHECK_MS;
   const idb = await db();
-  const res = await withTimeout(
-    adoptSiblingRecords({
-      base: OUTBOX_BASE,
-      opened: dbName!,
-      openedDb: idb,
-      store: STORE,
-      holdUntil: (r) => {
-        const op = r as OutboxOp;
-        if (op.status !== "in_flight" || op.dispatchedAt === undefined) return undefined;
-        const until = op.dispatchedAt + IN_FLIGHT_RECOVERY_AGE_MS;
-        return until > Date.now() ? until : undefined;
-      },
-    }),
-    ADOPT_TIMEOUT_MS,
-  );
+  const ac = new AbortController();
+  const attempt = adoptSiblingRecords({
+    base: OUTBOX_BASE,
+    opened: dbName!,
+    openedDb: idb,
+    store: STORE,
+    signal: ac.signal,
+    holdUntil: (r) => {
+      const op = r as OutboxOp;
+      if (op.status !== "in_flight" || op.dispatchedAt === undefined) return undefined;
+      const until = op.dispatchedAt + IN_FLIGHT_RECOVERY_AGE_MS;
+      return until > Date.now() ? until : undefined;
+    },
+  });
+  const res = await withTimeout(attempt, ADOPT_TIMEOUT_MS);
+  if (res === undefined) {
+    ac.abort();
+    // A write that had already started before the abort may still commit;
+    // drain whatever it copied.
+    void attempt.then((late) => {
+      if (late.adopted > 0) {
+        void notify();
+        void drain();
+      }
+    });
+  }
   if (res === undefined || res.failed) {
-    scheduleDrain(ADOPT_RECHECK_MS + 250);
-  } else if (res.heldUntil !== undefined) {
-    nextAdoptAt = Math.min(nextAdoptAt, res.heldUntil);
-    scheduleDrain(Math.max(0, res.heldUntil - Date.now()) + 250);
+    const backoff = Math.min(ADOPT_RECHECK_MS * 2 ** adoptFailStreak, ADOPT_MAX_BACKOFF_MS);
+    adoptFailStreak++;
+    nextAdoptAt = Date.now() + backoff;
+    scheduleDrain(backoff + 250);
+  } else {
+    adoptFailStreak = 0;
+    if (res.heldUntil !== undefined) {
+      nextAdoptAt = Math.min(nextAdoptAt, res.heldUntil);
+      scheduleDrain(Math.max(0, res.heldUntil - Date.now()) + 250);
+    } else if (res.adopted > 0) {
+      scheduleDrain(ADOPT_RECHECK_MS + 250); // one follow-up re-check (see above)
+    }
   }
   if (res && res.adopted > 0) void notify();
 }

@@ -134,6 +134,30 @@ test("B3: same queuedAt (same payload, drain bookkeeping differs) keeps ours and
   assert.equal(decideAdoption({ ...theirs, queuedAt: 0 }, ours), "drop");
 });
 
+test("D3': an attempt aborted before its write never touches the opened store", async () => {
+  // The outbox gave up on this attempt (timeout) and released the drain lock;
+  // drain may already have dispatched X. The abandoned attempt must not
+  // overwrite it with the sibling's copy.
+  const opened = fakeStore([{ id: "X", queuedAt: 1, status: "in_flight", patch: { v: "sent" } }]);
+  const sibling = fakeStore([{ id: "X", queuedAt: 2, status: "pending", patch: { v: "newer" } }]);
+  const res = await adoptRecords({ sibling, opened, keyOf, isAborted: () => true });
+  assert.equal(res.failed, true);
+  assert.equal(res.adopted, 0);
+  assert.equal(opened.map.get("X").status, "in_flight", "our in-flight record is untouched");
+  assert.equal(sibling.map.get("X").patch.v, "newer", "the newer payload stays for the next attempt");
+});
+
+test("D3': an attempt aborted after its copy commits leaves the sibling copy and reports failed", async () => {
+  const opened = fakeStore([]);
+  const sibling = fakeStore([{ id: "a", queuedAt: 1 }]);
+  let calls = 0;
+  const res = await adoptRecords({ sibling, opened, keyOf, isAborted: () => calls++ > 0 });
+  assert.equal(res.failed, true);
+  assert.equal(res.adopted, 1);
+  assert.ok(opened.map.has("a"));
+  assert.ok(sibling.map.has("a"), "the next attempt drops it");
+});
+
 test("A5: an equal-timestamp, different-content draft is left in both places", async () => {
   const sibling = fakeStore([{ id: "K", updatedAt: 5, text: "B" }]);
   const opened = fakeStore([{ id: "K", updatedAt: 5, text: "A" }]);
