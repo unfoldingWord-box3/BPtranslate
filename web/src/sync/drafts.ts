@@ -13,12 +13,13 @@ import { isReadOnly, type RowKind } from "./api";
 import { isLaneFrozen } from "./laneFreeze";
 import { onOutboxResult } from "./outbox";
 import { generationForSuccessfulOp } from "./draftSaveState";
-import { workspaceDbName } from "./workspace";
+import { legacyDbNames, workspaceDbName } from "./workspace";
+import { adoptFromLegacyDbs } from "./legacyAdoption";
 
 // Base name; the actual per-workspace DB name is derived via workspaceDbName()
 // so drafts written in one Door43 org never surface in another (issue #228).
-// The fallback workspace keeps this unsuffixed name so pre-workspaces drafts
-// are not orphaned — same rule as the outbox.
+// Drafts older builds kept under a legacy name are moved in by
+// adoptLegacyDrafts below — same rule as the outbox (#502).
 const DB_NAME = "bible-editor-drafts";
 const DB_VERSION = 1;
 const STORE = "drafts";
@@ -302,6 +303,21 @@ export const drafts = {
     return n;
   },
 };
+
+// Move drafts an older build stashed for the confirmed fallback workspace into
+// this build's store (#502; see legacyAdoption.ts's decide for which copy
+// wins a key both stores hold).
+export async function adoptLegacyDrafts(fallbackSlug: string): Promise<void> {
+  const moved = await adoptFromLegacyDbs({
+    legacyNames: legacyDbNames(DB_NAME, fallbackSlug),
+    store: STORE,
+    target: await db(),
+    keyPath: "key",
+    rule: "draft",
+    locks: ["be-legacy-adopt"],
+  });
+  if (moved > 0) void notify();
+}
 
 // Emotion/sx fragment for the orange "you have unsaved typing here" border.
 // Targets any descendant marked `data-dirty="true"` that isn't currently
