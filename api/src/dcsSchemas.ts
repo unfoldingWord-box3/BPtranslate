@@ -25,9 +25,18 @@ import { z } from "zod";
 import { ResponseSchemaError } from "./httpJson.ts";
 
 // GET /api/v1/user/orgs and /api/v1/users/{user}/orgs — the org-membership
-// lists behind viewer eligibility (auth.ts isViewerOrgMember). Only `username`
-// is read (compared case-insensitively against the viewer org).
-export const DcsOrgsResponse = z.array(z.object({ username: z.string().nullish() }));
+// lists behind viewer eligibility (auth.ts isViewerOrgMember). Door43's
+// swagger marks Organization `username` deprecated; `name` carries the same
+// value, so `name` is read first and `username` is the fallback (#572).
+export const DcsOrgsResponse = z.array(
+  z.object({ name: z.string().nullish(), username: z.string().nullish() }),
+);
+
+// True when the org list contains `orgName`, compared case-insensitively.
+export function orgListIncludes(orgs: z.infer<typeof DcsOrgsResponse>, orgName: string): boolean {
+  const want = orgName.toLowerCase();
+  return orgs.some((o) => (o.name || o.username || "").toLowerCase() === want);
+}
 
 // GET /api/v1/repos/{owner}/{repo}/commits — the incremental-reimport
 // freshness watermark (dcsSources.ts fileCommitSha reads commits[0].sha).
