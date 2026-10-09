@@ -8,8 +8,13 @@ import { realChapterNumbers } from "./bookSummary.ts";
  * just before the first real chapter's own intro note.
  *
  * Returns [] (the notes column is then exactly as before) unless: scripture mode
- * is "book", the active chapter is the first real chapter, and chapter 0 has
- * finished loading. Rows keep the stored order (sort_order, then id).
+ * is "book", the active chapter is the first real chapter, useChapter's data is
+ * that chapter's (`shownChapter`), and chapter 0 has finished loading. Rows keep
+ * the stored order (sort_order, then id).
+ *
+ * The `shownChapter` gate (#567): useChapter keeps the prior chapter's data
+ * until the new one loads, so coming from the chapter-0 view its notes ARE the
+ * intro rows, and listing the cache's copy too showed each intro card twice.
  */
 /**
  * The chapter-0 room a book-mode tab also listens to (#562): on the first real
@@ -51,11 +56,14 @@ export function refreshReloadsIntro(args: {
 export function selectBookIntroRows(args: {
   mode: string;
   chapter: number;
+  /** The chapter useChapter's data currently holds (undefined before any load). */
+  shownChapter: number | undefined;
   summary: BookSummary | null | undefined;
   chapters: ReadonlyMap<number, { kind: string; data?: ChapterPayload }> | undefined;
 }): TnRow[] {
   if (args.mode !== "book") return [];
   if (args.chapter !== realChapterNumbers(args.summary)[0]) return [];
+  if (args.shownChapter !== args.chapter) return [];
   const front = args.chapters?.get(0);
   if (!front || front.kind !== "ready" || !front.data) return [];
   // Trashed rows sink last, like sortBySortOrder (resourcePanelShared.tsx).

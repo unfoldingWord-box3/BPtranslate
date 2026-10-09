@@ -530,10 +530,11 @@ export function Shell({
       selectBookIntroRows({
         mode,
         chapter,
+        shownChapter: data?.chapter,
         summary: bookHook?.summary,
         chapters: bookHook?.chapters,
       }),
-    [mode, chapter, bookHook?.summary, bookHook?.chapters],
+    [mode, chapter, data?.chapter, bookHook?.summary, bookHook?.chapters],
   );
   const bookIntroRowsRef = useRef(bookIntroRows);
   useEffect(() => {

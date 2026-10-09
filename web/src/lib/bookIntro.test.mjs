@@ -8,7 +8,7 @@ const row = (id, sort_order) => ({ id, chapter: 0, verse: 0, sort_order });
 const ready = (...rows) => ({ kind: "ready", data: { tn: rows } });
 const cache = (state) => new Map([[0, state]]);
 
-const base = { mode: "book", chapter: 1, summary, chapters: cache(ready(row("a", 100))) };
+const base = { mode: "book", chapter: 1, shownChapter: 1, summary, chapters: cache(ready(row("a", 100))) };
 
 test("book mode on the first real chapter shows the chapter-0 rows", () => {
   assert.deepEqual(selectBookIntroRows(base).map((r) => r.id), ["a"]);
@@ -39,7 +39,7 @@ test("only the first real chapter shows it", () => {
 
 test("first real chapter is the lowest chapter >= 1, not literally 1", () => {
   const s = { book: "X", chapters: [ch(0), ch(3), ch(4)] };
-  assert.equal(selectBookIntroRows({ ...base, summary: s, chapter: 3 }).length, 1);
+  assert.equal(selectBookIntroRows({ ...base, summary: s, chapter: 3, shownChapter: 3 }).length, 1);
   assert.equal(selectBookIntroRows({ ...base, summary: s, chapter: 1 }).length, 0);
 });
 
@@ -54,6 +54,15 @@ test("no summary, no chapter-0 cache entry, or an unready one shows nothing", ()
 
 test("a book whose chapter 0 has no notes shows nothing", () => {
   assert.deepEqual(selectBookIntroRows({ ...base, chapters: cache(ready()) }), []);
+});
+
+// #567: going from the chapter-0 view to chapter 1, useChapter still holds
+// chapter 0 (whose notes ARE the intro rows) until chapter 1 loads, so listing
+// the cache's copy as well showed every intro card twice for a few seconds.
+test("nothing while the open chapter's data is still another chapter's", () => {
+  assert.deepEqual(selectBookIntroRows({ ...base, shownChapter: 0 }), []);
+  assert.deepEqual(selectBookIntroRows({ ...base, shownChapter: 2 }), []);
+  assert.deepEqual(selectBookIntroRows({ ...base, shownChapter: undefined }), []);
 });
 
 // #562 review B1: Refresh after an AI apply must reload chapter 0 even when it
