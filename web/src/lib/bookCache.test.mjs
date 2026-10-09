@@ -91,6 +91,43 @@ test("a replace op does not roll a newer fetched row back", () => {
   assert.equal(tr.land(0, tok2, payload([row("a", { version: 3 })])).tn[0].note, "mine");
 });
 
+// Review A2: a reload that supersedes an in-flight fetch keeps the edits
+// recorded against it.
+test("a superseding reload carries over ops recorded against the earlier fetch", () => {
+  const tr = new ChapterFetchTracker();
+  const first = tr.beginLoad(0);
+  tr.record(0, { t: "patch", kind: "tn", id: "a", patch: { trashed_at: 5 } });
+  const second = tr.beginReload(0);
+  tr.record(0, { t: "delete", kind: "tn", id: "b" });
+  assert.equal(tr.land(0, first, payload([row("a")])), null);
+  const merged = tr.land(0, second, payload([row("a"), row("b")]));
+  assert.deepEqual(ids(merged), ["a"]);
+  assert.equal(merged.tn[0].trashed_at, 5);
+});
+
+// Review A3: a broadcast recorded as an insert while the chapter was loading
+// still wins over an older fetched copy of the same row.
+test("insert of a row already present applies as a version-guarded replace", () => {
+  const base = payload([row("a", { version: 1, note: "old" })]);
+  assert.equal(applyCacheOp(base, { t: "insert", kind: "tn", row: row("a", { version: 2, note: "new" }) }).tn[0].note, "new");
+  assert.equal(applyCacheOp(base, { t: "insert", kind: "tn", row: row("a", { version: 1, note: "same" }) }), base);
+  const newer = payload([row("a", { version: 3, note: "server" })]);
+  assert.equal(applyCacheOp(newer, { t: "insert", kind: "tn", row: row("a", { version: 2 }) }), newer);
+  const tr = new ChapterFetchTracker();
+  const tok = tr.beginLoad(0);
+  tr.record(0, { t: "insert", kind: "tn", row: row("a", { version: 2, note: "broadcast" }) });
+  assert.equal(tr.land(0, tok, base).tn[0].note, "broadcast");
+});
+
+// Review A4: joining the intro room after missing its events resyncs chapter 0.
+test("introRoomJoined: true only on the null -> room transition", async () => {
+  const { introRoomJoined } = await import("./bookIntro.ts");
+  assert.equal(introRoomJoined(null, 0), true);
+  assert.equal(introRoomJoined(0, 0), false);
+  assert.equal(introRoomJoined(0, null), false);
+  assert.equal(introRoomJoined(null, null), false);
+});
+
 // Item 1 (#562): a broadcast row from the chapter-0 room is applied with the
 // same rules as the open chapter's room.
 test("broadcastUpsertAction: insert when missing, replace when newer, skip when older", () => {
