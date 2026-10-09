@@ -1,0 +1,24 @@
+{
+  "name": "tn_OBA.tsv",
+  "path": "tn_OBA.tsv",
+  "sha": "bb3f202a3c3640108ca8f024e140491613fdd912",
+  "last_commit_sha": "4c9a12a67b9d9cd68023810ab94f5aeee817b964",
+  "last_committer_date": "2026-08-14T21:31:25Z",
+  "last_author_date": "2026-08-14T21:31:25Z",
+  "type": "file",
+  "mode": "100644",
+  "size": 55196,
+  "encoding": "base64",
+  "content": "VHJpbW1lZA==",
+  "target": null,
+  "url": "https://git.door43.org/api/v1/repos/unfoldingWord/en_tn/contents/tn_OBA.tsv?ref=master",
+  "html_url": "https://git.door43.org/unfoldingWord/en_tn/src/branch/master/tn_OBA.tsv",
+  "git_url": "https://git.door43.org/api/v1/repos/unfoldingWord/en_tn/git/blobs/bb3f202a3c3640108ca8f024e140491613fdd912",
+  "download_url": "https://git.door43.org/unfoldingWord/en_tn/raw/branch/master/tn_OBA.tsv",
+  "submodule_git_url": null,
+  "_links": {
+    "self": "https://git.door43.org/api/v1/repos/unfoldingWord/en_tn/contents/tn_OBA.tsv?ref=master",
+    "git": "https://git.door43.org/api/v1/repos/unfoldingWord/en_tn/git/blobs/bb3f202a3c3640108ca8f024e140491613fdd912",
+    "html": "https://git.door43.org/unfoldingWord/en_tn/src/branch/master/tn_OBA.tsv"
+  }
+}
