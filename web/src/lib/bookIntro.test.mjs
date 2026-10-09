@@ -55,3 +55,16 @@ test("no summary, no chapter-0 cache entry, or an unready one shows nothing", ()
 test("a book whose chapter 0 has no notes shows nothing", () => {
   assert.deepEqual(selectBookIntroRows({ ...base, chapters: cache(ready()) }), []);
 });
+
+// #562 item 1: book mode on the first real chapter also listens to the
+// chapter-0 room, so intro edits and intro-only AI hints reach this tab.
+test("introRoomChapter: book mode on the first real chapter of a book with a front", async () => {
+  const { introRoomChapter } = await import("./bookIntro.ts");
+  assert.equal(introRoomChapter({ mode: "book", chapter: 1, summary }), 0);
+  assert.equal(introRoomChapter({ mode: "rows", chapter: 1, summary }), null);
+  assert.equal(introRoomChapter({ mode: "book", chapter: 2, summary }), null);
+  // Already in the chapter-0 room as the open chapter.
+  assert.equal(introRoomChapter({ mode: "book", chapter: 0, summary }), null);
+  assert.equal(introRoomChapter({ mode: "book", chapter: 1, summary: { book: "ZEC", chapters: [ch(1), ch(2)] } }), null);
+  assert.equal(introRoomChapter({ mode: "book", chapter: 1, summary: null }), null);
+});
