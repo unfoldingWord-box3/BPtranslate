@@ -632,6 +632,17 @@ console.log("fetchMemberOrgs");
   assert(seen.length === 2, "pagination stops at the first EMPTY page, not at a short one");
 }
 {
+  // #572: `username` is deprecated in Door43's swagger; `name` alone must count.
+  let call = 0;
+  const orgs = await fetchMemberOrgs({}, "tok", {
+    fetch: async () => ({
+      ok: true,
+      json: async () => (call++ === 0 ? [{ name: "BSOJ" }, { name: "afii", username: null }, {}] : []),
+    }),
+  });
+  assert(orgs.has("bsoj") && orgs.has("afii") && orgs.size === 2, "orgs with only `name` are members");
+}
+{
   // Two full pages, a short (server-capped) one, then empty — all followed.
   const page = (n, prefix) => Array.from({ length: n }, (_, i) => ({ username: `${prefix}${i}` }));
   const bodies = [page(50, "a"), page(50, "b"), page(3, "c"), []];

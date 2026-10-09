@@ -42,7 +42,7 @@ import { autoClaimWorkspaceForAdmin } from "./workspaceAutoClaim.ts";
 import { presetForOrg, seedProjectConfigIfAbsent } from "./projectConfig.ts";
 import { z } from "zod";
 import { parseJson } from "./httpJson.ts";
-import { DcsOrgsResponse, warnOnSchemaError } from "./dcsSchemas.ts";
+import { DcsOrgsResponse, orgListIncludes, warnOnSchemaError } from "./dcsSchemas.ts";
 
 // Schemas for the DCS OAuth boundary (#484). These replace the unchecked
 // `(await res.json()) as T` casts in the callback below: a token or profile
@@ -170,7 +170,7 @@ async function isViewerOrgMember(
       });
       if (!res.ok) return false;
       const orgs = await parseJson(res, DcsOrgsResponse, "DCS user orgs (authenticated)");
-      return orgs.some((o) => (o.username ?? "").toLowerCase() === orgName);
+      return orgListIncludes(orgs, orgName);
     }
     // Unauthenticated path (refresh): only sees public memberships, but the
     // uW org membership is public so this is sufficient in practice. If the
@@ -183,7 +183,7 @@ async function isViewerOrgMember(
     );
     if (!res.ok) return false;
     const orgs = await parseJson(res, DcsOrgsResponse, "DCS user orgs (unauthenticated)");
-    return orgs.some((o) => (o.username ?? "").toLowerCase() === orgName);
+    return orgListIncludes(orgs, orgName);
   } catch (e) {
     warnOnSchemaError(e, "auth");
     return false;
