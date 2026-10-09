@@ -161,6 +161,16 @@ await t("orgs match: an entry with only `username` still matches", async () => {
   assert.equal(orgListIncludes(orgs, "unfoldingword"), true);
 });
 
+await t("orgs match: either field matching counts when the two differ", async () => {
+  const orgs = await parseJson(
+    json([{ id: 1, name: "uw-renamed", username: "unfoldingWord" }]),
+    DcsOrgsResponse,
+    "DCS user orgs",
+  );
+  assert.equal(orgListIncludes(orgs, "unfoldingword"), true);
+  assert.equal(orgListIncludes(orgs, "uw-renamed"), true);
+});
+
 await t("orgs match: other orgs and empty entries do not match", async () => {
   const orgs = await parseJson(
     json([{ id: 1, name: "BSOJ", username: "BSOJ" }, { id: 2 }, { id: 3, name: "" }]),
