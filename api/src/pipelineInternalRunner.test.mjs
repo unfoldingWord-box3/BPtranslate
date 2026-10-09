@@ -924,3 +924,140 @@ test("import (internal): a traversing manifest path is rejected before it addres
   const tn = sqlite.prepare(`SELECT note FROM tn_rows WHERE id = 'ab12'`).all()[0];
   assert.equal(tn.note, "The vision of Obadiah", "no cross-prefix bytes were applied");
 });
+
+// ---------------------------------------------------------------------------
+// Row- and verse-scoped translate jobs (#559)
+// ---------------------------------------------------------------------------
+//
+// The output file is the WHOLE target book: the rows the job translated plus
+// every other row as it sits on DCS. A single-note "rerun AI" on LUK 7
+// (rowIds ["xgg9"]) applied all 174 rows of the chapter, replacing 173 Arabic
+// notes (170 validated) with the English source text. Only the rows the job
+// selected may land; the rest of the file is the DCS copy, which can be older
+// than D1.
+
+// Row cd34 is the one the job does NOT select. Its D1 copy is newer than the
+// DCS copy in the file (validated Arabic in D1, English in the file).
+const SCOPE_TN_TSV = [
+  "Reference\tID\tTags\tSupportReference\tQuote\tOccurrence\tNote",
+  "1:1\tab12\t\t\tחֲז֖וֹן\t1\tرؤيا عوبديا",
+  "1:2\tcd34\t\t\tקָטֹ֛ן\t1\tThe English source note",
+].join("\n");
+
+function seedScopeTnRows(sqlite) {
+  seedTargetTnRow(sqlite);
+  sqlite
+    .prepare(
+      `INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, quote, occurrence, note, translation_state, version, updated_at)
+       VALUES ('cd34', 'OBA', 1, 2, '1:2', 'קָטֹ֛ן', 1, 'ملاحظة عربية معتمدة', 'validated', 7, 100)`,
+    )
+    .run();
+}
+
+const SCOPE_TQ_TSV = [
+  "Reference\tID\tTags\tQuote\tOccurrence\tQuestion\tResponse",
+  "1:1\tqa12\t\t\t\tسؤال مترجم\tجواب مترجم",
+  "1:2\tqb34\t\t\t\tThe English question\tThe English response",
+].join("\n");
+
+function seedScopeTqRows(sqlite) {
+  sqlite
+    .prepare(
+      `INSERT INTO tq_rows (id, book, chapter, verse, ref_raw, question, response, translation_state, version, updated_at)
+       VALUES ('qa12', 'OBA', 1, 1, '1:1', 'Old question', 'Old response', NULL, 1, 100),
+              ('qb34', 'OBA', 1, 2, '1:2', 'سؤال عربي معتمد', 'جواب عربي معتمد', 'validated', 4, 100)`,
+    )
+    .run();
+}
+
+const TQ_MANIFEST = [{ delivery: "editor", type: "tq", repo: "BSOJ/ar_tq", path: "tq_OBA.tsv", file: "tq_OBA.tsv" }];
+
+async function runScopedImport(sqlite, { manifest, file, bytes, options }) {
+  seedRunningInternalJob(sqlite, wf("done", { status: "done" }, manifest), { options });
+  const env = freshEnv(sqlite);
+  env.blobs.map.set(outKey(env.WORKSPACE_SLUG, "job-1", file), bytes);
+  env.blobs.map.set(outKey(env.WORKSPACE_SLUG, "job-1", "translate-report-1-1.json"), "{}");
+  await withNoFetch(async () => pollAllNonTerminal(env));
+  assert.equal(jobRow(sqlite).state, "done", "the import completed");
+}
+
+function tnRow(sqlite, id) {
+  return { ...sqlite.prepare(`SELECT note, translation_state, version FROM tn_rows WHERE id = ?`).all(id)[0] };
+}
+function tqRow(sqlite, id) {
+  return { ...sqlite.prepare(`SELECT question, response, translation_state, version FROM tq_rows WHERE id = ?`).all(id)[0] };
+}
+
+test("import (internal, #559): a rowIds tn job updates only the named row; a newer D1 row it did not name is untouched", async () => {
+  const sqlite = freshSqlite();
+  seedScopeTnRows(sqlite);
+  await runScopedImport(sqlite, { manifest: MANIFEST, file: "tn_OBA.tsv", bytes: SCOPE_TN_TSV, options: { rowIds: ["ab12"] } });
+
+  const a = tnRow(sqlite, "ab12");
+  assert.equal(a.note, "رؤيا عوبديا", "the named row got its translation");
+  assert.equal(a.translation_state, "ai_draft");
+  assert.equal(a.version, 2);
+
+  assert.deepEqual(
+    tnRow(sqlite, "cd34"),
+    { note: "ملاحظة عربية معتمدة", translation_state: "validated", version: 7 },
+    "the row the job did not name keeps its D1 note, state and version",
+  );
+  const audit = sqlite.prepare(`SELECT row_key FROM edit_log WHERE kind = 'tn'`).all().map((r) => r.row_key);
+  assert.deepEqual(audit, ["ab12"], "only the named row was written");
+});
+
+test("import (internal, #559): a rowIds tq job updates only the named row", async () => {
+  const sqlite = freshSqlite();
+  seedScopeTqRows(sqlite);
+  await runScopedImport(sqlite, { manifest: TQ_MANIFEST, file: "tq_OBA.tsv", bytes: SCOPE_TQ_TSV, options: { rowIds: ["qa12"] } });
+
+  const a = tqRow(sqlite, "qa12");
+  assert.equal(a.question, "سؤال مترجم", "the named question got its translation");
+  assert.equal(a.translation_state, "ai_draft");
+  assert.equal(a.version, 2);
+
+  assert.deepEqual(
+    tqRow(sqlite, "qb34"),
+    { question: "سؤال عربي معتمد", response: "جواب عربي معتمد", translation_state: "validated", version: 4 },
+    "the question the job did not name keeps its D1 text, state and version",
+  );
+});
+
+test("import (internal, #559): a verse-range tn job leaves rows outside the range untouched", async () => {
+  const sqlite = freshSqlite();
+  seedScopeTnRows(sqlite);
+  // Select verse 1 only; cd34 (1:2) is outside it.
+  await runScopedImport(sqlite, { manifest: MANIFEST, file: "tn_OBA.tsv", bytes: SCOPE_TN_TSV, options: { verseStart: 1, verseEnd: 1 } });
+
+  assert.equal(tnRow(sqlite, "ab12").version, 2, "the in-range row was drafted");
+  assert.deepEqual(
+    tnRow(sqlite, "cd34"),
+    { note: "ملاحظة عربية معتمدة", translation_state: "validated", version: 7 },
+    "the out-of-range row keeps its D1 note, state and version",
+  );
+});
+
+test("import (internal, #559): a verse-range tq job leaves rows outside the range untouched", async () => {
+  const sqlite = freshSqlite();
+  seedScopeTqRows(sqlite);
+  // verseStart alone: the end defaults to the start, as in selectRows.
+  await runScopedImport(sqlite, { manifest: TQ_MANIFEST, file: "tq_OBA.tsv", bytes: SCOPE_TQ_TSV, options: { verseStart: 2 } });
+
+  assert.equal(tqRow(sqlite, "qb34").version, 5, "the in-range question was drafted");
+  assert.deepEqual(
+    tqRow(sqlite, "qa12"),
+    { question: "Old question", response: "Old response", translation_state: null, version: 1 },
+    "the out-of-range question is untouched",
+  );
+});
+
+test("import (internal, #559): a whole-chapter job (no rowIds, no verse range) still applies every row", async () => {
+  const sqlite = freshSqlite();
+  seedScopeTnRows(sqlite);
+  await runScopedImport(sqlite, { manifest: MANIFEST, file: "tn_OBA.tsv", bytes: SCOPE_TN_TSV, options: null });
+
+  assert.equal(tnRow(sqlite, "ab12").version, 2);
+  assert.equal(tnRow(sqlite, "cd34").version, 8, "whole-chapter scope is unchanged by the fix");
+  assert.equal(tnRow(sqlite, "cd34").translation_state, "ai_draft");
+});
