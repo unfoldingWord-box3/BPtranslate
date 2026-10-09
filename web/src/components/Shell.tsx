@@ -60,7 +60,7 @@ import { buildVerseIndex, concatSourceRange, formatVerseLabel, noteCoveredVerses
 import { buildTnQuickRequest } from "../lib/tnQuickRequest";
 import { isAiProviderNotConfigured } from "../lib/aiProviderErrors";
 import { isApprovableRow } from "../lib/reviewApproval";
-import { introRoomChapter, selectBookIntroRows } from "../lib/bookIntro";
+import { introRoomChapter, introRoomJoined, selectBookIntroRows } from "../lib/bookIntro";
 import { broadcastUpsertAction } from "../lib/bookCache";
 import { reviewStatePatches, reviewStateSnapshot } from "../lib/reviewStateSweep";
 import { versionLabel } from "../lib/versionLabels";
@@ -301,6 +301,7 @@ export function Shell({
   // (#562). Outbox results already reach the cache through useBook's own
   // listener.
   const bookPatchRow = bookHook?.applyLocalRowPatch;
+  const bookReplaceRow = bookHook?.applyLocalRowReplacement;
   const bookInsertRow = bookHook?.applyLocalRowInsert;
   const bookDeleteRow = bookHook?.applyLocalRowDelete;
   const applyLocalRowPatch = useCallback<typeof applyChapterRowPatch>(
@@ -313,9 +314,11 @@ export function Shell({
   const applyLocalRowReplacement = useCallback<typeof applyChapterRowReplacement>(
     (kind, row) => {
       applyChapterRowReplacement(kind, row);
-      if (kind === "tn" && row.chapter === 0) bookPatchRow?.("tn", 0, row.id, row);
+      // Full server row: version-guarded replace, not a patch (a patch replayed
+      // onto a newer chapter-0 fetch would roll it back).
+      if (kind === "tn" && row.chapter === 0) bookReplaceRow?.("tn", row);
     },
-    [applyChapterRowReplacement, bookPatchRow],
+    [applyChapterRowReplacement, bookReplaceRow],
   );
   const applyLocalRowInsert = useCallback<typeof applyChapterRowInsert>(
     (kind, row, position) => {
@@ -547,17 +550,35 @@ export function Shell({
   // there too and route them into the chapter-0 cache (#562). Rooms are
   // listen-only (no presence), so the second socket shows nothing to others.
   const noop = () => {};
-  useChapterRoom(book, introRoomChapter({ mode, chapter, summary: bookHook?.summary }), {
+  const introRoom = introRoomChapter({ mode, chapter, summary: bookHook?.summary });
+  // Events sent to the intro room while this tab wasn't listening were missed,
+  // so on joining it, refetch a chapter 0 that is already cached (a first load
+  // is the effect above). One refetch per entry into book mode on the first
+  // chapter, by design; useBook replays local edits onto the response, so it
+  // can't clobber them.
+  const prevIntroRoomRef = useRef<number | null>(null);
+  const introCacheReady = bookHook?.chapters.get(0)?.kind === "ready";
+  useEffect(() => {
+    const joined = introRoomJoined(prevIntroRoomRef.current, introRoom);
+    prevIntroRoomRef.current = introRoom;
+    if (joined && introCacheReady) reloadBookChapter?.(0);
+    // introCacheReady deliberately not a dep: only the join itself triggers.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [introRoom, reloadBookChapter]);
+  useChapterRoom(book, introRoom, {
     onUpsert: (kind, row) => {
       if (kind !== "tn" || row.chapter !== 0) return;
-      const front = bookHook?.chapters.get(0);
-      const existing = front?.kind === "ready" ? front.data.tn.find((r) => r.id === row.id) : undefined;
-      const action = broadcastUpsertAction("tn", existing, row);
-      if (action === "insert") bookInsertRow?.("tn", row);
-      else if (action === "replace") bookPatchRow?.("tn", 0, row.id, row);
+      // An insert of a row the cache already has applies by the broadcast
+      // rule (newer version, or a same-version preserve/hint/trash flip) —
+      // also when replayed onto a chapter-0 fetch still in flight.
+      bookInsertRow?.("tn", row);
+      // Book lint covers chapter-0 tN too.
+      scheduleLintRefetch();
     },
     onDelete: (kind, id) => {
-      if (kind === "tn") bookDeleteRow?.("tn", 0, id);
+      if (kind !== "tn") return;
+      bookDeleteRow?.("tn", 0, id);
+      scheduleLintRefetch();
     },
     onPipelineApplied: (_book, _chapter, pipelineType) => {
       // Same as the open chapter's hint: offer a refresh (which also reloads

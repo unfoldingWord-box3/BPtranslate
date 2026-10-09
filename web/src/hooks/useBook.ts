@@ -49,6 +49,8 @@ export interface UseBookReturn {
     id: string,
     patch: Partial<TnRow & TqRow & TwlRow>,
   ) => void;
+  /** Swap in a full server row; skipped when the cached copy is newer. */
+  applyLocalRowReplacement: (kind: "tn" | "tq" | "twl", row: TnRow | TqRow | TwlRow) => void;
   /** Add a row to its chapter's cache (after `afterId` when given). No-op if present. */
   applyLocalRowInsert: (kind: "tn" | "tq" | "twl", row: TnRow | TqRow | TwlRow, position?: { afterId?: string }) => void;
   applyLocalRowDelete: (kind: "tn" | "tq" | "twl", chapter: number, id: string) => void;
@@ -202,6 +204,11 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
     [mutate],
   );
 
+  const applyLocalRowReplacement = useCallback<UseBookReturn["applyLocalRowReplacement"]>(
+    (kind, row) => mutate(row.chapter, { t: "replace", kind, row }),
+    [mutate],
+  );
+
   const applyLocalRowInsert = useCallback<UseBookReturn["applyLocalRowInsert"]>(
     (kind, row, position) => mutate(row.chapter, { t: "insert", kind, row, afterId: position?.afterId }),
     [mutate],
@@ -240,6 +247,7 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
     reloadChapter,
     applyLocalVerse,
     applyLocalRowPatch,
+    applyLocalRowReplacement,
     applyLocalRowInsert,
     applyLocalRowDelete,
   };

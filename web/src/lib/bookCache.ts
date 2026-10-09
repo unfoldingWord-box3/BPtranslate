@@ -34,7 +34,15 @@ export function applyCacheOp(data: ChapterPayload, op: CacheOp): ChapterPayload 
     if (!cur || cur.version > op.row.version) return data;
     next = list.map((r) => (r.id === op.row.id ? op.row : r));
   } else if (op.t === "insert") {
-    if (list.some((r) => r.id === op.row.id)) return data;
+    const cur = list.find((r) => r.id === op.row.id);
+    if (cur) {
+      // Already there (e.g. a broadcast recorded as an insert while the
+      // chapter was loading, replayed onto a fetch that has the row): keep the
+      // newer copy, by the same rule as a live broadcast.
+      if (broadcastUpsertAction(op.kind, cur, op.row) !== "replace") return data;
+      next = list.map((r) => (r.id === op.row.id ? op.row : r));
+      return { ...data, [op.kind]: next } as ChapterPayload;
+    }
     const idx = op.afterId ? list.findIndex((r) => r.id === op.afterId) : -1;
     next = idx >= 0 ? [...list.slice(0, idx + 1), op.row, ...list.slice(idx + 1)] : [...list, op.row];
   } else {
@@ -68,7 +76,9 @@ export class ChapterFetchTracker {
 
   private start(ch: number): number {
     const token = ++this.seq;
-    this.pending.set(ch, { token, ops: [] });
+    // A superseded fetch's recorded edits still post-date the server read the
+    // new fetch may return, so carry them over.
+    this.pending.set(ch, { token, ops: [...(this.pending.get(ch)?.ops ?? [])] });
     return token;
   }
 

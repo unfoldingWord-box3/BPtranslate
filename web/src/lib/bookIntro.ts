@@ -27,6 +27,15 @@ export function introRoomChapter(args: {
   return 0;
 }
 
+/**
+ * True when the tab has just started listening to the intro room. Events sent
+ * there while it wasn't listening were missed, so the cached chapter 0 must be
+ * refetched (useBook replays local edits onto the response).
+ */
+export function introRoomJoined(prev: number | null, next: number | null): boolean {
+  return prev === null && next !== null;
+}
+
 export function selectBookIntroRows(args: {
   mode: string;
   chapter: number;
