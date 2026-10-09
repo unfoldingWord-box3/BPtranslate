@@ -13,8 +13,7 @@ import { isReadOnly, type RowKind } from "./api";
 import { isLaneFrozen } from "./laneFreeze";
 import { onOutboxResult } from "./outbox";
 import { generationForSuccessfulOp } from "./draftSaveState";
-import { onFallbackConfirmed, workspaceDbName } from "./workspace";
-import { adoptSiblingRecords, boundedWait, readoptOnFocus } from "./dbReconcile";
+import { workspaceDbName } from "./workspace";
 
 // Base name; the actual per-workspace DB name is derived via workspaceDbName()
 // so drafts written in one Door43 org never surface in another (issue #228).
@@ -90,54 +89,18 @@ export type DraftMeta =
 type Subscriber = (drafts: DraftRecord[]) => void;
 
 let dbp: Promise<IDBPDatabase> | null = null;
-let dbOpenedName = "";
 function db() {
   if (!dbp) {
-    const name = workspaceDbName(DB_NAME);
-    dbOpenedName = name;
-    dbp = openDB(name, DB_VERSION, {
+    dbp = openDB(workspaceDbName(DB_NAME), DB_VERSION, {
       upgrade(d) {
         if (!d.objectStoreNames.contains(STORE)) {
           d.createObjectStore(STORE, { keyPath: "key" });
         }
       },
-    }).then(async (idb) => {
-      // #502: same boot-timing race as the outbox — a reload can open the OTHER
-      // of this workspace's two candidate DB names and strand unsaved drafts
-      // (lost typing, the very thing this store exists to prevent). Adopt any
-      // stranded drafts from the safe sibling BEFORE the handle resolves, so an
-      // editor's mount-time read already sees them. adoptSiblingRecords never
-      // throws; a failure leaves the drafts where they are and the handle opens.
-      await boundedWait(adoptInto(idb, name));
-      return idb;
     });
   }
   return dbp;
 }
-
-async function adoptInto(idb: IDBPDatabase, name: string) {
-  const { adopted } = await adoptSiblingRecords({
-    base: DB_NAME,
-    opened: name,
-    openedDb: idb,
-    store: STORE,
-  });
-  // Subscribers (UnsavedToasts / SyncStatusBar) surface the recovered "N unsaved".
-  // Not awaited: notify() reads through db(), which resolves after this returns.
-  if (adopted > 0) void notify();
-}
-
-// Run adoption again into the already-open DB: when boot first confirms the
-// fallback flag for this slug (the open-time pass may have found nothing safe
-// to adopt), and on focus / becoming visible (an old tab may have written new
-// drafts into the sibling since, or the last attempt failed).
-function readopt() {
-  const p = dbp;
-  if (!p) return; // not opened yet — the open itself will adopt
-  void p.then((idb) => adoptInto(idb, dbOpenedName)).catch(() => {});
-}
-onFallbackConfirmed(readopt);
-readoptOnFocus(readopt);
 
 const subscribers = new Set<Subscriber>();
 
