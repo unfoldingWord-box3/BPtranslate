@@ -13,7 +13,7 @@
 
 import assert from "node:assert/strict";
 import { parseJson, ResponseSchemaError } from "./httpJson.ts";
-import { DcsOrgsResponse, DcsCommitsResponse, DcsContentsMeta } from "./dcsSchemas.ts";
+import { DcsOrgsResponse, DcsCommitsResponse, DcsContentsMeta, orgListIncludes } from "./dcsSchemas.ts";
 import { fileCommitSha, dcsFileSize } from "./dcsSources.ts";
 import { readFileSync } from "node:fs";
 
@@ -143,6 +143,32 @@ await t("real: recorded Organization list parses (nulls in unread fields are fin
   const orgs = await parseJson(json(fixture("orgs.json")), DcsOrgsResponse, "DCS orgs");
   assert.equal(orgs.length, 3);
   assert.equal(typeof orgs[0].username, "string");
+  // `name` survives the schema (#572: Door43 deprecates `username`).
+  assert.equal(orgs[0].name, "acq_ol");
+  assert.equal(orgListIncludes(orgs, "afii"), true);
+});
+
+// ── orgListIncludes (auth.ts isViewerOrgMember, #572) ──
+
+await t("orgs match: an entry with only `name` matches (case-insensitive)", async () => {
+  const orgs = await parseJson(json([{ id: 1, name: "unfoldingWord" }]), DcsOrgsResponse, "DCS user orgs");
+  assert.equal(orgListIncludes(orgs, "unfoldingword"), true);
+  assert.equal(orgListIncludes(orgs, "UNFOLDINGWORD"), true);
+});
+
+await t("orgs match: an entry with only `username` still matches", async () => {
+  const orgs = await parseJson(json([{ id: 1, username: "unfoldingWord" }]), DcsOrgsResponse, "DCS user orgs");
+  assert.equal(orgListIncludes(orgs, "unfoldingword"), true);
+});
+
+await t("orgs match: other orgs and empty entries do not match", async () => {
+  const orgs = await parseJson(
+    json([{ id: 1, name: "BSOJ", username: "BSOJ" }, { id: 2 }, { id: 3, name: "" }]),
+    DcsOrgsResponse,
+    "DCS user orgs",
+  );
+  assert.equal(orgListIncludes(orgs, "unfoldingword"), false);
+  assert.equal(orgListIncludes([], "unfoldingword"), false);
 });
 
 await t("real: recorded commit list parses", async () => {
