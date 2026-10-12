@@ -8,7 +8,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-const { moveRecords, decide, runBounded, withLocks, needsAdoptionGate } = await import("./legacyAdoption.ts");
+const { moveRecords, decide, anyMovable, runBounded, withLocks, needsAdoptionGate } = await import("./legacyAdoption.ts");
 
 // A Map-backed StoreSide. `beforeUpdate(key)` runs before each update, to
 // simulate another tab writing between our read and our write.
@@ -18,6 +18,9 @@ function side(records, keyField, beforeUpdate) {
     m,
     async getAll() {
       return [...m.values()].map((r) => structuredClone(r));
+    },
+    async get(key) {
+      return m.has(key) ? structuredClone(m.get(key)) : undefined;
     },
     async update(key, decide) {
       beforeUpdate?.(key, m);
@@ -68,6 +71,82 @@ test("decide (draft): identical text drops despite different generation / expect
   const aLive = { key: "k", updatedAt: 2, content: { verseObjects: [1] }, expectedVersion: 4, sourceGeneration: 2 };
   assert.equal(decide(aLegacy, aLive, "draft"), "drop", "alignment drafts compare `content`");
   assert.equal(decide(aLegacy, { ...aLive, content: { verseObjects: [2] } }, "draft"), "keep");
+});
+
+test("decide (draft): content compares independent of object key order (#579)", () => {
+  const legacy = { key: "k", updatedAt: 1, payload: { patch: { note: "x", quote: "q" }, baseline: { a: 1, b: 2 } } };
+  const live = { key: "k", updatedAt: 2, payload: { baseline: { b: 2, a: 1 }, patch: { quote: "q", note: "x" } } };
+  assert.equal(decide(legacy, live, "draft"), "drop");
+  // Array order is content (word order), so it still counts.
+  const aLegacy = { key: "k", updatedAt: 1, content: { verseObjects: [{ text: "a", type: "word" }, { type: "word", text: "b" }] } };
+  const aLive = { key: "k", updatedAt: 2, content: { verseObjects: [{ type: "word", text: "a" }, { text: "b", type: "word" }] } };
+  assert.equal(decide(aLegacy, aLive, "draft"), "drop");
+  const swapped = { ...aLive, content: { verseObjects: [...aLive.content.verseObjects].reverse() } };
+  assert.equal(decide(aLegacy, swapped, "draft"), "keep");
+});
+
+// The boot-time check (#579): the editors are held only when adoption would
+// actually move something, i.e. decide() says copy or drop for some record.
+test("anyMovable: a legacy store holding only a kept differing draft moves nothing", async () => {
+  const legacy = side([{ key: "k", updatedAt: 1, payload: { patch: { note: "old" } } }], "key");
+  const target = side([{ key: "k", updatedAt: 2, payload: { patch: { note: "new" } } }], "key");
+  assert.equal(await anyMovable(legacy, target, byKey, "draft"), false);
+  // And moveRecords agrees: nothing changes.
+  await moveRecords(legacy, target, byKey, "draft");
+  assert.equal(legacy.m.size, 1);
+});
+
+test("anyMovable: an outbox op missing queuedAt (kept) moves nothing", async () => {
+  const legacy = side([{ id: "a", status: "pending" }], "id");
+  const target = side([{ id: "a", queuedAt: 1, status: "pending" }], "id");
+  assert.equal(await anyMovable(legacy, target, byId, "outbox"), false);
+});
+
+test("anyMovable: one adoptable record beside a kept one is movable", async () => {
+  const legacy = side(
+    [
+      { key: "k", updatedAt: 1, payload: { patch: { note: "old" } } },
+      { key: "fresh", updatedAt: 1, payload: { patch: { note: "only in legacy" } } },
+    ],
+    "key",
+  );
+  const target = side([{ key: "k", updatedAt: 2, payload: { patch: { note: "new" } } }], "key");
+  assert.equal(await anyMovable(legacy, target, byKey, "draft"), true);
+});
+
+test("anyMovable: an identical-text leftover is movable (it would be dropped)", async () => {
+  const legacy = side([{ key: "k", updatedAt: 1, payload: { a: 1, b: 2 } }], "key");
+  const target = side([{ key: "k", updatedAt: 2, payload: { b: 2, a: 1 } }], "key");
+  assert.equal(await anyMovable(legacy, target, byKey, "draft"), true);
+});
+
+test("decide (draft): drafts differing only in a Date are kept, not dropped (#579 review)", () => {
+  const legacy = { key: "k", updatedAt: 1, payload: { note: "x", at: new Date(1000) } };
+  const live = { key: "k", updatedAt: 2, payload: { note: "x", at: new Date(2000) } };
+  assert.equal(decide(legacy, live, "draft"), "keep");
+  const same = { ...live, payload: { at: new Date(1000), note: "x" } };
+  assert.equal(decide(legacy, same, "draft"), "drop");
+});
+
+test("anyMovable: a legacy record missing its key counts as movable", async () => {
+  const legacy = side([{ updatedAt: 1, payload: "orphan" }], "key");
+  assert.equal(await anyMovable(legacy, side([], "key"), byKey, "draft"), true);
+});
+
+test("anyCheck: a check that throws counts as movable and does not hide later sources", async () => {
+  const { anyCheck } = await import("./legacyAdoption.ts");
+  let laterRan = false;
+  const throwing = async () => {
+    throw new DOMException("bad key", "DataError");
+  };
+  assert.equal(await anyCheck([throwing, async () => ((laterRan = true), false)]), true);
+  assert.equal(await anyCheck([async () => false, async () => false]), false);
+  assert.equal(await anyCheck([async () => false, async () => ((laterRan = true), true)]), true);
+  assert.equal(laterRan, true, "a check after a false one still runs");
+});
+
+test("anyMovable: an empty legacy store moves nothing", async () => {
+  assert.equal(await anyMovable(side([], "key"), side([], "key"), byKey, "draft"), false);
 });
 
 test("moves outbox ops into the live store and empties the legacy one", async () => {

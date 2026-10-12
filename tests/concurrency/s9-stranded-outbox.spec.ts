@@ -292,9 +292,9 @@ const LIVE_DRAFTS = "bible-editor-drafts-bsoj";
 
 // Write one tn row draft into `dbName` with the drafts schema every build
 // uses (v1, store `drafts` keyed by `key`), as an older build would have.
-function seedRowDraft(page: Page, dbName: string, row: TnRow, text: string) {
+function seedRowDraft(page: Page, dbName: string, row: TnRow, text: string, updatedAt = Date.now()) {
   return page.evaluate(
-    async ({ dbName, row, text }) => {
+    async ({ dbName, row, text, updatedAt }) => {
       const db = await new Promise<IDBDatabase>((resolve, reject) => {
         const req = indexedDB.open(dbName, 1);
         req.onupgradeneeded = () => {
@@ -314,8 +314,8 @@ function seedRowDraft(page: Page, dbName: string, row: TnRow, text: string) {
             baseline: { quote: row.quote, note: row.note, support_reference: row.support_reference },
           },
           expectedVersion: row.version,
-          updatedAt: Date.now(),
-          generation: `s9-${Date.now()}`,
+          updatedAt,
+          generation: `s9-${updatedAt}`,
           meta: { kind: "row", rowKind: "tn", id: row.id, book: row.book, chapter: row.chapter, verse: row.verse },
         });
         await new Promise<void>((resolve, reject) => {
@@ -326,7 +326,7 @@ function seedRowDraft(page: Page, dbName: string, row: TnRow, text: string) {
         db.close();
       }
     },
-    { dbName, row, text },
+    { dbName, row, text, updatedAt },
   );
 }
 
@@ -438,3 +438,67 @@ for (const { name, holdMs, adoptedOnFirstBoot } of [
     await context.close();
   });
 }
+
+// ── A legacy draft adoption would keep does not hold the boot (#579) ──
+//
+// decide() keeps a legacy draft whose text differs from an older-or-tied live
+// one, forever. The boot check used to count it anyway, so every boot of the
+// fallback workspace held the editors and asked for the adoption lock (up to
+// 5s + 1s when the lock was busy). Now a boot whose legacy records would all
+// be kept never asks for the lock, and the kept record stays where it is.
+test("legacy draft: a draft adoption would keep does not hold the boot (#579)", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const probe = await apiRequest.newContext({ baseURL: BASE });
+  const probeAuth = await mintToken(probe, "probe");
+  const chapter = await fetchChapter(probe, probeAuth.token, "ZEC", 6);
+  const row = chapter.tn.find((r) => r.verse === 4) ?? chapter.tn.find((r) => r.verse === 1);
+  expect(row, "expected a TN row on ZEC 6 in the seed").toBeTruthy();
+  await probe.dispose();
+
+  const { context } = await newUserContext(browser, "alice");
+  await context.addInitScript(() => {
+    try {
+      localStorage.setItem("bible-editor.workspace", "bsoj");
+    } catch {
+      /* about:blank has no localStorage */
+    }
+  });
+
+  const holder = await context.newPage();
+  await holder.goto("/api/health");
+  const now = Date.now();
+  const legacyText = `KEPT LEGACY DRAFT ${now}`;
+  const liveText = `LIVE DRAFT ${now}`;
+  // The legacy draft is older and differs, so decide() keeps it.
+  await seedRowDraft(holder, LEGACY_DRAFTS, row!, legacyText, now - 60_000);
+  await seedRowDraft(holder, LIVE_DRAFTS, row!, liveText, now);
+  // Hold the adoption lock well past the boot's wait, so a boot that asks for
+  // it shows up as a pending request for about 5 seconds.
+  await holdAdoptLock(holder, 12_000);
+
+  const page = await context.newPage();
+  const textarea = noteTextarea(page, row!.id);
+  let sawPending = false;
+  let booted = false;
+  const watch = (async () => {
+    while (!booted) {
+      const pending = await holder.evaluate(async () =>
+        ((await navigator.locks.query()).pending ?? []).some((l) => l.name === "be-legacy-adopt"),
+      );
+      if (pending) sawPending = true;
+      await holder.waitForTimeout(100);
+    }
+  })();
+  await gotoVerse(page, "ZEC", 6, row!.verse);
+  await expect(textarea).toHaveValue(liveText, { timeout: 15_000 });
+  booted = true;
+  await watch;
+  expect(sawPending, "the boot asked for the adoption lock (held the editors) for a kept-only legacy draft").toBe(false);
+
+  // The kept legacy draft and the live draft are both untouched.
+  await page.waitForTimeout(1_500);
+  expect(await rowDraftNote(page, LEGACY_DRAFTS, row!)).toBe(legacyText);
+  expect(await rowDraftNote(page, LIVE_DRAFTS, row!)).toBe(liveText);
+
+  await context.close();
+});

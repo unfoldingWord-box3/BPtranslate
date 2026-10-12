@@ -29,7 +29,7 @@ import {
   targetKey,
 } from "./outboxTargeting.ts";
 import { legacyDbNames, workspaceDbName } from "./workspace";
-import { adoptFromLegacyDbs } from "./legacyAdoption";
+import { adoptFromLegacyDbs, type LegacySource } from "./legacyAdoption";
 import i18n from "../i18n";
 
 // DISPLAY-ONLY fallback for the freeze reason stamped on a quarantined op —
@@ -1236,8 +1236,14 @@ export async function drain() {
 }
 
 // Where adoptLegacyOutbox looks, for adoptionGate.ts's lock-free emptiness check.
-export function legacyOutboxSource(fallbackSlug: string) {
-  return { names: legacyDbNames(OUTBOX_BASE, fallbackSlug), store: STORE };
+export function legacyOutboxSource(fallbackSlug: string): LegacySource {
+  return {
+    names: legacyDbNames(OUTBOX_BASE, fallbackSlug),
+    store: STORE,
+    targetName: outboxDbName(),
+    keyPath: "id",
+    rule: "outbox",
+  };
 }
 
 // Move ops an older build queued for the confirmed fallback workspace into

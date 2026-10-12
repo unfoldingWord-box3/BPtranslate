@@ -6,23 +6,29 @@
 // boot where needsAdoptionGate() is true (named fallback slug, confirmed by
 // /api/auth/me). Every other boot never waits.
 //
-// The lock-free emptiness check starts when this module loads, in parallel
+// The lock-free, read-only check starts when this module loads, in parallel
 // with /api/auth/me, so a boot with nothing left to adopt (every boot after
-// the first) is released as soon as auth is; it never takes a lock.
+// the first) is released as soon as auth is; it never takes a lock. It counts
+// only legacy records adoption would actually copy or drop, so a record
+// decide() keeps forever (a differing older draft) does not hold every boot
+// (#579).
 
 import { getWorkspaceSlug } from "./workspace";
-import { ADOPTION_WAIT_MS, anyLegacyRecords, runBounded } from "./legacyAdoption";
+import { ADOPTION_WAIT_MS, anyMovableLegacyRecords, runBounded } from "./legacyAdoption";
 import { adoptLegacyDrafts, legacyDraftsSource } from "./drafts";
 import { adoptLegacyAlignmentDrafts, legacyAlignmentDraftsSource } from "./alignmentDrafts";
 import { adoptLegacyOutbox, legacyOutboxSource } from "./outbox";
 
-// Started at module load for a named slug. A failed check counts as "nothing
-// to adopt": the legacy data stays where it is and the next boot checks again.
+// Started at module load for a named slug. A store whose check throws counts
+// as movable (anyCheck in legacyAdoption.ts), so the boot holds and the
+// bounded adoption run deals with it. The .catch below only guards against an
+// unexpected rejection of the whole check: that counts as "nothing to move",
+// the legacy data stays where it is, and the next boot checks again.
 const bootSlug = getWorkspaceSlug();
 let knownEmpty = bootSlug === "default";
 const legacyCheck: Promise<boolean> = knownEmpty
   ? Promise.resolve(false)
-  : anyLegacyRecords([
+  : anyMovableLegacyRecords([
       legacyDraftsSource(bootSlug),
       legacyAlignmentDraftsSource(bootSlug),
       legacyOutboxSource(bootSlug),
