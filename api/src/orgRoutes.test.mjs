@@ -9,6 +9,7 @@
 
 import { Hono } from "hono";
 import { orgRoutes } from "./orgRoutes.ts";
+import { lookupOrgRecord, canonicalOrgName } from "./orgCanonical.ts";
 
 function assert(cond, msg) {
   if (!cond) {
@@ -364,6 +365,23 @@ console.log("[verify-source] without checkBooks, no content call is made and has
     const res = await app.request("/api/orgs/verify-source?url=unfoldingWord/en_ult", {}, ENV);
     const body = await res.json();
     assert(res.status === 200 && body.ok === true && !("hasBooks" in body), "no checkBooks → hasBooks absent");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+console.log("[lookupOrgRecord] a body carrying only `name` (Door43 deprecates `username`, #581)");
+{
+  stubOrgs({ neworg: { name: "NewOrg", full_name: "New Org" }, bare: { name: "", username: "Bare" } });
+  try {
+    const rec = await lookupOrgRecord(ENV, "neworg");
+    assert(
+      rec && rec.username === "NewOrg" && rec.fullName === "New Org",
+      `name-only body → canonical record, got ${JSON.stringify(rec)}`,
+    );
+    assert((await canonicalOrgName(ENV, "neworg")) === "NewOrg", "canonicalOrgName takes Door43's casing from `name`");
+    const bare = await lookupOrgRecord(ENV, "bare");
+    assert(bare && bare.username === "Bare", "an empty `name` falls back to `username`");
   } finally {
     globalThis.fetch = realFetch;
   }

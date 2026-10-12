@@ -166,6 +166,20 @@ assert(
   roleFromTeams([{}, { organization: null }, { name: "BE-Admins" }], "BibleEditorMLTest", NAMES) === null,
   "malformed team entries are ignored, not crashed on",
 );
+// Door43 deprecates Organization.username; `name` carries the same login (#581).
+const nameOnlyTeam = (name, org) => ({ name, organization: { name: org } });
+assert(
+  roleFromTeams([nameOnlyTeam("BE-Admins", "BibleEditorMLTest")], "BibleEditorMLTest", NAMES) === "admin",
+  "a team whose organization carries only `name` still grants its role",
+);
+assert(
+  roleFromTeams([nameOnlyTeam("BE-Editors", "bibleeditormltest")], "BibleEditorMLTest", NAMES) === "editor",
+  "`name`-only org matches case-insensitively",
+);
+assert(
+  roleFromTeams([{ name: "BE-Admins", organization: { name: "", username: "BibleEditorMLTest" } }], "BibleEditorMLTest", NAMES) === "admin",
+  "an empty `name` falls back to `username`",
+);
 
 // ── 3. listUserTeams ──────────────────────────────────────────────────────────
 
@@ -285,6 +299,16 @@ console.log("resolveTeamRole — near-miss diagnostic for misnamed teams");
     assert(
       !warnings.some((w) => w.includes("none match the configured role teams")),
       "no teams in the resolved org → no near-miss warning (nothing to diagnose)",
+    );
+
+    warnings.length = 0;
+    await resolveTeamRole({}, "BibleEditorMLTest", "tok", {
+      fetch: pagedFetch([{ name: "BE-Admin", organization: { name: "BibleEditorMLTest" } }]),
+    });
+    const nameHit = warnings.find((w) => w.includes("none match the configured role teams"));
+    assert(
+      !!nameHit && nameHit.includes("BE-Admin"),
+      "near-miss warning lists a team whose organization carries only `name` (#581)",
     );
   } finally {
     console.warn = realWarn;
