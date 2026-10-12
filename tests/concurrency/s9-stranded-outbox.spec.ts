@@ -1,5 +1,6 @@
 import { expect, test, request as apiRequest, type Page } from "@playwright/test";
 import {
+  type TnRow,
   fetchChapter,
   saveNote,
   gotoVerse,
@@ -270,6 +271,170 @@ for (const legacy of ["bible-editor-outbox"]) {
       .toBe(0);
 
     await side.dispose();
+    await context.close();
+  });
+}
+
+// ── Adopted drafts reach editors (#502, review round 3) ──
+//
+// Editors such as NoteCard read their draft once, when they mount. Adoption
+// used to run after /api/auth/me in the background, so an editor that mounted
+// first found no draft and never showed the adopted one (and could clear or
+// overwrite it). Now a named-fallback boot whose legacy database holds records
+// holds the editor surfaces until adoption finishes, for at most a few seconds;
+// past that it skips adoption for this boot and leaves the legacy copy alone.
+//
+// Both cases slow adoption down the same way: another tab of the same profile
+// holds the "be-legacy-adopt" Web Lock for `holdMs`.
+
+const LEGACY_DRAFTS = "bible-editor-drafts";
+const LIVE_DRAFTS = "bible-editor-drafts-bsoj";
+
+// Write one tn row draft into `dbName` with the drafts schema every build
+// uses (v1, store `drafts` keyed by `key`), as an older build would have.
+function seedRowDraft(page: Page, dbName: string, row: TnRow, text: string) {
+  return page.evaluate(
+    async ({ dbName, row, text }) => {
+      const db = await new Promise<IDBDatabase>((resolve, reject) => {
+        const req = indexedDB.open(dbName, 1);
+        req.onupgradeneeded = () => {
+          if (!req.result.objectStoreNames.contains("drafts")) {
+            req.result.createObjectStore("drafts", { keyPath: "key" });
+          }
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+      try {
+        const tx = db.transaction("drafts", "readwrite");
+        tx.objectStore("drafts").put({
+          key: `row:tn:${row.book}:${row.id}`,
+          payload: {
+            patch: { note: text },
+            baseline: { quote: row.quote, note: row.note, support_reference: row.support_reference },
+          },
+          expectedVersion: row.version,
+          updatedAt: Date.now(),
+          generation: `s9-${Date.now()}`,
+          meta: { kind: "row", rowKind: "tn", id: row.id, book: row.book, chapter: row.chapter, verse: row.verse },
+        });
+        await new Promise<void>((resolve, reject) => {
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+        });
+      } finally {
+        db.close();
+      }
+    },
+    { dbName, row, text },
+  );
+}
+
+// The note text of the row draft in `dbName`, "" when absent, null on a
+// failed read (so no assertion passes on an error).
+function rowDraftNote(page: Page, dbName: string, row: TnRow) {
+  return page.evaluate(
+    async ({ dbName, key }) => {
+      try {
+        const meta = (await indexedDB.databases()).find((d) => d.name === dbName);
+        if (!meta) return "";
+        const db = await new Promise<IDBDatabase>((resolve, reject) => {
+          const req = indexedDB.open(dbName, meta.version);
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error);
+        });
+        try {
+          if (!db.objectStoreNames.contains("drafts")) return "";
+          const rec: { payload?: { patch?: { note?: string } } } | undefined = await new Promise(
+            (resolve, reject) => {
+              const req = db.transaction("drafts", "readonly").objectStore("drafts").get(key);
+              req.onsuccess = () => resolve(req.result);
+              req.onerror = () => reject(req.error);
+            },
+          );
+          return rec?.payload?.patch?.note ?? "";
+        } finally {
+          db.close();
+        }
+      } catch {
+        return null;
+      }
+    },
+    { dbName, key: `row:tn:${row.book}:${row.id}` },
+  );
+}
+
+// Hold the "be-legacy-adopt" lock in `page` for `holdMs`. Resolves once the
+// lock is held, so the caller's next boot is guaranteed to wait on it.
+function holdAdoptLock(page: Page, holdMs: number) {
+  return page.evaluate(
+    (holdMs) =>
+      new Promise<void>((held) => {
+        void navigator.locks.request("be-legacy-adopt", () => {
+          held();
+          return new Promise((r) => setTimeout(r, holdMs));
+        });
+      }),
+    holdMs,
+  );
+}
+
+for (const { name, holdMs, adoptedOnFirstBoot } of [
+  { name: "a slow adoption still lands before the editor opens", holdMs: 3_000, adoptedOnFirstBoot: true },
+  { name: "an adoption past the wait is skipped for this boot and retried on the next", holdMs: 12_000, adoptedOnFirstBoot: false },
+]) {
+  test(`legacy draft: ${name} (#502)`, async ({ browser }) => {
+    test.setTimeout(90_000);
+    const probe = await apiRequest.newContext({ baseURL: BASE });
+    const probeAuth = await mintToken(probe, "probe");
+    const chapter = await fetchChapter(probe, probeAuth.token, "ZEC", 6);
+    const row = chapter.tn.find((r) => r.verse === 4) ?? chapter.tn.find((r) => r.verse === 1);
+    expect(row, "expected a TN row on ZEC 6 in the seed").toBeTruthy();
+    await probe.dispose();
+
+    const { context } = await newUserContext(browser, "alice");
+    await context.addInitScript(() => {
+      try {
+        localStorage.setItem("bible-editor.workspace", "bsoj");
+      } catch {
+        /* about:blank has no localStorage */
+      }
+    });
+
+    // A tab on the app's origin that does not boot the app (so it can never
+    // adopt the draft itself), used to seed the legacy draft and hold the lock.
+    const holder = await context.newPage();
+    await holder.goto("/api/health");
+    const draftText = `LEGACY DRAFT ${holdMs} ${Date.now()}`;
+    await seedRowDraft(holder, LEGACY_DRAFTS, row!, draftText);
+    expect(await rowDraftNote(holder, LEGACY_DRAFTS, row!)).toBe(draftText);
+    await holdAdoptLock(holder, holdMs);
+
+    const page = await context.newPage();
+    await gotoVerse(page, "ZEC", 6, row!.verse);
+    const textarea = noteTextarea(page, row!.id);
+
+    if (adoptedOnFirstBoot) {
+      await expect(textarea).toHaveValue(draftText, { timeout: 10_000 });
+      // The editor's draft-write effects have run by now; the adopted draft
+      // must still be there, in the live database only.
+      await page.waitForTimeout(1_500);
+      expect(await rowDraftNote(page, LIVE_DRAFTS, row!)).toBe(draftText);
+      expect(await rowDraftNote(page, LEGACY_DRAFTS, row!)).toBe("");
+    } else {
+      // Skipped: the editor opened without it and the legacy copy is intact,
+      // even after the lock frees (nothing finishes the adoption late).
+      await expect(textarea).not.toHaveValue(draftText);
+      await page.waitForTimeout(holdMs);
+      expect(await rowDraftNote(page, LEGACY_DRAFTS, row!)).toBe(draftText);
+      expect(await rowDraftNote(page, LIVE_DRAFTS, row!)).toBe("");
+      // The next boot adopts it.
+      await page.reload();
+      await page.locator("[data-note-id]").first().waitFor({ timeout: 10_000 });
+      await expect(noteTextarea(page, row!.id)).toHaveValue(draftText, { timeout: 10_000 });
+      expect(await rowDraftNote(page, LEGACY_DRAFTS, row!)).toBe("");
+    }
+
     await context.close();
   });
 }
