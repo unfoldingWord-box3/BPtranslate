@@ -17,8 +17,10 @@
 //   - runs only after this session's /api/auth/me confirms the current slug is
 //     the fallback workspace (App.tsx), never from a persisted flag, and at
 //     most once per page load, before any editor renders;
-//   - first checks, with no lock, whether any legacy database holds records,
-//     and stops there when none does (the normal case once adopted);
+//   - first checks, with no lock and read-only, whether any legacy record is
+//     one decide() would copy or drop, and stops there when none is (the
+//     normal case once adopted; records decide() keeps forever, such as a
+//     differing older draft, do not count, #579);
 //   - moves the drafts stores first, so editors that read drafts when they
 //     open find them as early as possible, then the outbox;
 //   - runs in one tab at a time, under the "be-legacy-adopt" Web Lock, and the
@@ -65,7 +67,8 @@ export type Rule = "outbox" | "draft";
 //
 // Drafts (`updatedAt`): a strictly newer legacy draft wins. Otherwise the
 // legacy copy is deleted only when its CONTENT (the text: `payload` for text
-// drafts, `content` for alignment drafts) matches the live one; generation,
+// drafts, `content` for alignment drafts) matches the live one, compared
+// regardless of object key order; generation,
 // expectedVersion and timestamps are ignored, so identical-text leftovers do
 // not pile up. A legacy draft with different text is kept, because an editor
 // that opened before adoption may have written the live copy without ever
@@ -83,7 +86,20 @@ export function decide(legacy: unknown, current: unknown, rule: Rule): Decision 
     return (current as Record<string, unknown>).status === "in_flight" ? "keep" : "copy";
   }
   if (legacyNewer) return "copy";
-  return same(draftContent(legacy), draftContent(current)) ? "drop" : "keep";
+  return sameContent(draftContent(legacy), draftContent(current)) ? "drop" : "keep";
+}
+
+// Draft text equality that ignores object key order (two builds can serialize
+// the same payload with keys in a different order); array order still counts.
+function sameContent(a: unknown, b: unknown): boolean {
+  return a !== undefined && JSON.stringify(sortKeys(a)) === JSON.stringify(sortKeys(b));
+}
+
+function sortKeys(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(sortKeys);
+  if (v === null || typeof v !== "object") return v;
+  const o = v as Record<string, unknown>;
+  return Object.fromEntries(Object.keys(o).sort().map((k) => [k, sortKeys(o[k])]));
 }
 
 function num(record: unknown, field: string): number | undefined {
@@ -181,11 +197,65 @@ function openExisting(name: string): Promise<IDBPDatabase | null> {
   });
 }
 
-// Whether any of `sources` (legacy database names plus the store each holds)
-// has a record. No lock, creates nothing.
-export async function anyLegacyRecords(sources: { names: string[]; store: string }[]): Promise<boolean> {
-  for (const { names, store } of sources) {
-    if ((await nonEmptyLegacyDbs(names, store)).length > 0) return true;
+// Whether moving `legacy` into `target` would change anything: true when
+// decide() says "copy" or "drop" for at least one legacy record. A store whose
+// records would all be kept (a differing older draft, an op without a numeric
+// queuedAt) moves nothing, so it must not hold the boot (#579). Uses the same
+// decide() as moveRecords, so the check and the move cannot disagree.
+export async function anyMovable(
+  legacy: { getAll(): Promise<unknown[]> },
+  target: { get(key: IDBValidKey): Promise<unknown> },
+  keyOf: (record: unknown) => IDBValidKey,
+  rule: Rule,
+): Promise<boolean> {
+  for (const rec of await legacy.getAll()) {
+    if (decide(rec, await target.get(keyOf(rec)), rule) !== "keep") return true;
+  }
+  return false;
+}
+
+// One store adoption would move: its legacy databases, the live database it
+// moves into, and how decide() matches records.
+export interface LegacySource {
+  names: string[];
+  store: string;
+  targetName: string;
+  keyPath: string;
+  rule: Rule;
+}
+
+// Whether any of `sources` holds a legacy record adoption would move (see
+// anyMovable). No lock, read-only, creates nothing; a missing live database
+// or store means every legacy record would be copied.
+export async function anyMovableLegacyRecords(sources: LegacySource[]): Promise<boolean> {
+  for (const src of sources) {
+    const names = await nonEmptyLegacyDbs(
+      src.names.filter((n) => n !== src.targetName),
+      src.store,
+    );
+    if (names.length === 0) continue;
+    const target = await openExisting(src.targetName);
+    try {
+      const hasStore = !!target && target.objectStoreNames.contains(src.store);
+      if (!hasStore) return true;
+      for (const name of names) {
+        const legacy = await openExisting(name);
+        if (!legacy) continue;
+        try {
+          const movable = await anyMovable(
+            { getAll: () => legacy.getAll(src.store) },
+            { get: (key) => target.get(src.store, key) },
+            (r) => (r as Record<string, IDBValidKey>)[src.keyPath],
+            src.rule,
+          );
+          if (movable) return true;
+        } finally {
+          legacy.close();
+        }
+      }
+    } finally {
+      target?.close();
+    }
   }
   return false;
 }
@@ -270,8 +340,8 @@ export function runBounded<T>(
 // Whether this boot must hold the editors until adoption settles: /api/auth/me
 // confirmed the current slug, the server says it is the fallback workspace,
 // and the slug is a NAMED one ("default" writes the unsuffixed name itself, so
-// there is nothing to adopt). Whether the legacy databases hold anything is
-// checked separately (anyLegacyRecords), before any lock.
+// there is nothing to adopt). Whether the legacy databases hold anything to
+// move is checked separately (anyMovableLegacyRecords), before any lock.
 export function needsAdoptionGate(
   me: { workspace?: string; workspaceIsFallback?: boolean } | null | undefined,
   slug: string,

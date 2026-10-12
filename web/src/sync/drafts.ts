@@ -14,7 +14,7 @@ import { isLaneFrozen } from "./laneFreeze";
 import { onOutboxResult } from "./outbox";
 import { generationForSuccessfulOp } from "./draftSaveState";
 import { legacyDbNames, workspaceDbName } from "./workspace";
-import { adoptFromLegacyDbs } from "./legacyAdoption";
+import { adoptFromLegacyDbs, type LegacySource } from "./legacyAdoption";
 
 // Base name; the actual per-workspace DB name is derived via workspaceDbName()
 // so drafts written in one Door43 org never surface in another (issue #228).
@@ -305,8 +305,14 @@ export const drafts = {
 };
 
 // Where adoptLegacyDrafts looks, for adoptionGate.ts's lock-free emptiness check.
-export function legacyDraftsSource(fallbackSlug: string) {
-  return { names: legacyDbNames(DB_NAME, fallbackSlug), store: STORE };
+export function legacyDraftsSource(fallbackSlug: string): LegacySource {
+  return {
+    names: legacyDbNames(DB_NAME, fallbackSlug),
+    store: STORE,
+    targetName: workspaceDbName(DB_NAME),
+    keyPath: "key",
+    rule: "draft",
+  };
 }
 
 // Move drafts an older build stashed for the confirmed fallback workspace into

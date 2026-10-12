@@ -18,7 +18,7 @@ import { openDB, type IDBPDatabase } from "idb";
 import { isReadOnly } from "./api";
 import { onOutboxResult } from "./outbox";
 import { legacyDbNames, workspaceDbName } from "./workspace";
-import { adoptFromLegacyDbs } from "./legacyAdoption";
+import { adoptFromLegacyDbs, type LegacySource } from "./legacyAdoption";
 
 // Base name; the actual per-workspace DB name is derived via workspaceDbName()
 // so alignment drafts written in one Door43 org never surface in another
@@ -132,8 +132,14 @@ export async function adoptLegacyAlignmentDrafts(fallbackSlug: string, signal?: 
 }
 
 // Where adoptLegacyAlignmentDrafts looks, for adoptionGate.ts's emptiness check.
-export function legacyAlignmentDraftsSource(fallbackSlug: string) {
-  return { names: legacyDbNames(DB_NAME, fallbackSlug), store: STORE };
+export function legacyAlignmentDraftsSource(fallbackSlug: string): LegacySource {
+  return {
+    names: legacyDbNames(DB_NAME, fallbackSlug),
+    store: STORE,
+    targetName: workspaceDbName(DB_NAME),
+    keyPath: "key",
+    rule: "draft",
+  };
 }
 
 // Belt-and-suspenders: when the verse's PATCH lands (200), the alignment the
