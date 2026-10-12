@@ -120,6 +120,31 @@ test("anyMovable: an identical-text leftover is movable (it would be dropped)", 
   assert.equal(await anyMovable(legacy, target, byKey, "draft"), true);
 });
 
+test("decide (draft): drafts differing only in a Date are kept, not dropped (#579 review)", () => {
+  const legacy = { key: "k", updatedAt: 1, payload: { note: "x", at: new Date(1000) } };
+  const live = { key: "k", updatedAt: 2, payload: { note: "x", at: new Date(2000) } };
+  assert.equal(decide(legacy, live, "draft"), "keep");
+  const same = { ...live, payload: { at: new Date(1000), note: "x" } };
+  assert.equal(decide(legacy, same, "draft"), "drop");
+});
+
+test("anyMovable: a legacy record missing its key counts as movable", async () => {
+  const legacy = side([{ updatedAt: 1, payload: "orphan" }], "key");
+  assert.equal(await anyMovable(legacy, side([], "key"), byKey, "draft"), true);
+});
+
+test("anyCheck: a check that throws counts as movable and does not hide later sources", async () => {
+  const { anyCheck } = await import("./legacyAdoption.ts");
+  let laterRan = false;
+  const throwing = async () => {
+    throw new DOMException("bad key", "DataError");
+  };
+  assert.equal(await anyCheck([throwing, async () => ((laterRan = true), false)]), true);
+  assert.equal(await anyCheck([async () => false, async () => false]), false);
+  assert.equal(await anyCheck([async () => false, async () => ((laterRan = true), true)]), true);
+  assert.equal(laterRan, true, "a check after a false one still runs");
+});
+
 test("anyMovable: an empty legacy store moves nothing", async () => {
   assert.equal(await anyMovable(side([], "key"), side([], "key"), byKey, "draft"), false);
 });

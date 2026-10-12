@@ -95,9 +95,14 @@ function sameContent(a: unknown, b: unknown): boolean {
   return a !== undefined && JSON.stringify(sortKeys(a)) === JSON.stringify(sortKeys(b));
 }
 
+// Only plain objects are rebuilt with sorted keys; any other object (a Date, a
+// Map, a typed array) is returned as is, so JSON.stringify serializes it as it
+// always did (a Date as its ISO string) instead of as {}.
 function sortKeys(v: unknown): unknown {
   if (Array.isArray(v)) return v.map(sortKeys);
   if (v === null || typeof v !== "object") return v;
+  const proto = Object.getPrototypeOf(v);
+  if (proto !== Object.prototype && proto !== null) return v;
   const o = v as Record<string, unknown>;
   return Object.fromEntries(Object.keys(o).sort().map((k) => [k, sortKeys(o[k])]));
 }
@@ -209,7 +214,26 @@ export async function anyMovable(
   rule: Rule,
 ): Promise<boolean> {
   for (const rec of await legacy.getAll()) {
-    if (decide(rec, await target.get(keyOf(rec)), rule) !== "keep") return true;
+    const key = keyOf(rec);
+    // A record without its key cannot be looked up (IndexedDB throws a
+    // DataError); moveRecords hits the same throw. Count it as movable so the
+    // bounded adoption run, not this check, deals with it.
+    if (key === undefined) return true;
+    if (decide(rec, await target.get(key), rule) !== "keep") return true;
+  }
+  return false;
+}
+
+// Run each check in turn; true as soon as one is true. A check that throws
+// counts as true, so an unreadable database holds the boot and leaves it to
+// the bounded adoption run instead of hiding the stores checked after it.
+export async function anyCheck(checks: (() => Promise<boolean>)[]): Promise<boolean> {
+  for (const check of checks) {
+    try {
+      if (await check()) return true;
+    } catch {
+      return true;
+    }
   }
   return false;
 }
@@ -226,36 +250,39 @@ export interface LegacySource {
 
 // Whether any of `sources` holds a legacy record adoption would move (see
 // anyMovable). No lock, read-only, creates nothing; a missing live database
-// or store means every legacy record would be copied.
-export async function anyMovableLegacyRecords(sources: LegacySource[]): Promise<boolean> {
-  for (const src of sources) {
-    const names = await nonEmptyLegacyDbs(
-      src.names.filter((n) => n !== src.targetName),
-      src.store,
-    );
-    if (names.length === 0) continue;
-    const target = await openExisting(src.targetName);
-    try {
-      const hasStore = !!target && target.objectStoreNames.contains(src.store);
-      if (!hasStore) return true;
-      for (const name of names) {
-        const legacy = await openExisting(name);
-        if (!legacy) continue;
-        try {
-          const movable = await anyMovable(
-            { getAll: () => legacy.getAll(src.store) },
-            { get: (key) => target.get(src.store, key) },
-            (r) => (r as Record<string, IDBValidKey>)[src.keyPath],
-            src.rule,
-          );
-          if (movable) return true;
-        } finally {
-          legacy.close();
-        }
+// or store means every legacy record would be copied. Each source is checked
+// on its own (anyCheck), so an error in one counts as movable rather than
+// skipping the rest.
+export function anyMovableLegacyRecords(sources: LegacySource[]): Promise<boolean> {
+  return anyCheck(sources.map((src) => () => sourceMovable(src)));
+}
+
+async function sourceMovable(src: LegacySource): Promise<boolean> {
+  const names = await nonEmptyLegacyDbs(
+    src.names.filter((n) => n !== src.targetName),
+    src.store,
+  );
+  if (names.length === 0) return false;
+  const target = await openExisting(src.targetName);
+  try {
+    if (!target || !target.objectStoreNames.contains(src.store)) return true;
+    for (const name of names) {
+      const legacy = await openExisting(name);
+      if (!legacy) continue;
+      try {
+        const movable = await anyMovable(
+          { getAll: () => legacy.getAll(src.store) },
+          { get: (key) => target.get(src.store, key) },
+          (r) => (r as Record<string, IDBValidKey>)[src.keyPath],
+          src.rule,
+        );
+        if (movable) return true;
+      } finally {
+        legacy.close();
       }
-    } finally {
-      target?.close();
     }
+  } finally {
+    target?.close();
   }
   return false;
 }
