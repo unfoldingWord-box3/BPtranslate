@@ -116,10 +116,10 @@ export const alignmentDrafts = {
 
 // Move alignment drafts an older build kept for the confirmed fallback
 // workspace into this build's store (#502; see legacyAdoption.ts's decide).
-// There is no subscriber: an aligner already open keeps what it read and sees
-// an adopted draft the next time it mounts. If it saved a different draft
-// first, the legacy one is left in place rather than deleted.
-export async function adoptLegacyAlignmentDrafts(fallbackSlug: string): Promise<void> {
+// There is no subscriber, so like every editor an aligner must not be open
+// while this runs; App.tsx holds the editor surfaces until it settles
+// (adoptionGate.ts).
+export async function adoptLegacyAlignmentDrafts(fallbackSlug: string, signal?: AbortSignal): Promise<void> {
   await adoptFromLegacyDbs({
     legacyNames: legacyDbNames(DB_NAME, fallbackSlug),
     store: STORE,
@@ -127,7 +127,13 @@ export async function adoptLegacyAlignmentDrafts(fallbackSlug: string): Promise<
     keyPath: "key",
     rule: "draft",
     locks: ["be-legacy-adopt"],
+    signal,
   });
+}
+
+// Where adoptLegacyAlignmentDrafts looks, for adoptionGate.ts's emptiness check.
+export function legacyAlignmentDraftsSource(fallbackSlug: string) {
+  return { names: legacyDbNames(DB_NAME, fallbackSlug), store: STORE };
 }
 
 // Belt-and-suspenders: when the verse's PATCH lands (200), the alignment the

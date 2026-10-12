@@ -8,7 +8,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-const { moveRecords, decide } = await import("./legacyAdoption.ts");
+const { moveRecords, decide, runBounded, withLocks, needsAdoptionGate } = await import("./legacyAdoption.ts");
 
 // A Map-backed StoreSide. `beforeUpdate(key)` runs before each update, to
 // simulate another tab writing between our read and our write.
@@ -179,4 +179,99 @@ test("outbox: a newer legacy payload waits while the live copy is in_flight", as
   assert.equal(await moveRecords(legacy, target, byId, "outbox"), 0);
   assert.deepEqual(target.m.get("a").patch, { note: "v1" });
   assert.equal(legacy.m.size, 1, "kept for the next run");
+});
+
+// ── The adoption hold (#502 review round 3): adoption runs before editors
+// mount, bounded, and a skipped run never finishes late. ──
+
+test("needsAdoptionGate: only a confirmed, named fallback slug holds the editors", () => {
+  assert.equal(needsAdoptionGate({ workspace: "bsoj", workspaceIsFallback: true }, "bsoj"), true);
+  assert.equal(needsAdoptionGate({ workspace: "default", workspaceIsFallback: true }, "default"), false);
+  assert.equal(needsAdoptionGate({ workspace: "mltest", workspaceIsFallback: false }, "mltest"), false);
+  assert.equal(needsAdoptionGate({ workspace: "bsoj" }, "bsoj"), false);
+  assert.equal(needsAdoptionGate({ workspace: "bsoj", workspaceIsFallback: true }, "mltest"), false);
+  assert.equal(needsAdoptionGate(null, "bsoj"), false);
+});
+
+test("runBounded: a run that finishes in time resolves ok with its value", async () => {
+  assert.deepEqual(await runBounded(async () => 7, 1_000), { ok: true, value: 7 });
+});
+
+test("runBounded: a run that throws (e.g. a lock failure) resolves not-ok", async () => {
+  assert.deepEqual(
+    await runBounded(async () => {
+      throw new Error("lock failed");
+    }, 1_000),
+    { ok: false },
+  );
+});
+
+// A Web Lock that is never granted; an abort rejects the wait, as the real
+// navigator.locks.request does.
+const neverGranted = (_name, { signal }) =>
+  new Promise((_resolve, reject) => {
+    signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+  });
+
+test("timeout while waiting on the lock: skipped, nothing moved, legacy untouched", async () => {
+  const legacy = side([{ key: "row:tn:ZEC:a", updatedAt: 1, payload: { note: "x" } }], "key");
+  const target = side([], "key");
+  let ran = false;
+  const r = await runBounded(
+    (signal) =>
+      withLocks(
+        ["be-legacy-adopt"],
+        async () => {
+          ran = true;
+          return moveRecords(legacy, target, byKey, "draft", signal);
+        },
+        signal,
+        neverGranted,
+      ),
+    20,
+  );
+  assert.deepEqual(r, { ok: false });
+  assert.equal(ran, false);
+  assert.equal(legacy.m.size, 1);
+  assert.equal(target.m.size, 0);
+});
+
+test("runBounded resolves only after the run has settled, even past the deadline", async () => {
+  const events = [];
+  const r = runBounded(async () => {
+    // Ignores the abort for a while, like an IndexedDB transaction already
+    // in progress when the timer fires.
+    await new Promise((res) => setTimeout(res, 60));
+    events.push("run settled");
+  }, 10).then((v) => {
+    events.push("bounded resolved");
+    return v;
+  });
+  assert.deepEqual(await r, { ok: false });
+  assert.deepEqual(events, ["run settled", "bounded resolved"]);
+});
+
+test("moveRecords: an already-aborted signal moves nothing", async () => {
+  const ctl = new AbortController();
+  ctl.abort();
+  const legacy = side([{ id: "a", queuedAt: 1 }, { id: "b", queuedAt: 1 }], "id");
+  const target = side([], "id");
+  assert.equal(await moveRecords(legacy, target, byId, "outbox", ctl.signal), 0);
+  assert.equal(legacy.m.size, 2);
+  assert.equal(target.m.size, 0);
+});
+
+test("moveRecords: an abort mid-run finishes the current record and copies no other", async () => {
+  const ctl = new AbortController();
+  // Abort as the first record's legacy copy is being deleted (its copy has
+  // already committed), i.e. the deadline passes mid-run.
+  const legacy = side(
+    [{ id: "a", queuedAt: 1 }, { id: "b", queuedAt: 1 }, { id: "c", queuedAt: 1 }],
+    "id",
+    () => ctl.abort(),
+  );
+  const target = side([], "id");
+  assert.equal(await moveRecords(legacy, target, byId, "outbox", ctl.signal), 1);
+  assert.deepEqual([...target.m.keys()], ["a"]);
+  assert.deepEqual([...legacy.m.keys()].sort(), ["b", "c"]);
 });

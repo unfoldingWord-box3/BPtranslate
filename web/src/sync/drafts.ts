@@ -304,10 +304,15 @@ export const drafts = {
   },
 };
 
+// Where adoptLegacyDrafts looks, for adoptionGate.ts's lock-free emptiness check.
+export function legacyDraftsSource(fallbackSlug: string) {
+  return { names: legacyDbNames(DB_NAME, fallbackSlug), store: STORE };
+}
+
 // Move drafts an older build stashed for the confirmed fallback workspace into
 // this build's store (#502; see legacyAdoption.ts's decide for which copy
 // wins a key both stores hold).
-export async function adoptLegacyDrafts(fallbackSlug: string): Promise<void> {
+export async function adoptLegacyDrafts(fallbackSlug: string, signal?: AbortSignal): Promise<void> {
   const moved = await adoptFromLegacyDbs({
     legacyNames: legacyDbNames(DB_NAME, fallbackSlug),
     store: STORE,
@@ -315,6 +320,7 @@ export async function adoptLegacyDrafts(fallbackSlug: string): Promise<void> {
     keyPath: "key",
     rule: "draft",
     locks: ["be-legacy-adopt"],
+    signal,
   });
   if (moved > 0) void notify();
 }
