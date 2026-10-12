@@ -41,6 +41,12 @@ export function orgListIncludes(orgs: z.infer<typeof DcsOrgsResponse>, orgName: 
   );
 }
 
+// An org object's login: `name`, falling back to the deprecated `username`
+// (#581). Empty strings count as absent. Raw, not trimmed or lowercased.
+export function orgLogin(o: { name?: string | null; username?: string | null } | null | undefined): string {
+  return o?.name || o?.username || "";
+}
+
 // GET /api/v1/repos/{owner}/{repo}/commits — the incremental-reimport
 // freshness watermark (dcsSources.ts fileCommitSha reads commits[0].sha).
 export const DcsCommitsResponse = z.array(z.object({ sha: z.string().nullish() }));
