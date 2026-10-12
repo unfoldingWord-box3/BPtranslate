@@ -25,6 +25,17 @@ export interface Workspace {
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
+// A slug an explicit workspace (WORKSPACES entry, registry row, pool slot) may
+// use. "default" is reserved for the implicit single workspace
+// (implicitWorkspace below, which never passes through here): the client keeps
+// slug "default" on the unsuffixed IndexedDB names that older builds used for
+// the fallback workspace (web/src/sync/workspace.ts), so a real org named
+// "default" would share those databases with another org's queued edits and
+// drafts (#228, #502).
+function isValidSlug(slug: string): boolean {
+  return SLUG_RE.test(slug) && slug !== "default";
+}
+
 function implicitWorkspace(env: Env): Workspace {
   const org = (env.VIEWER_ORG ?? "unfoldingWord").trim() || "unfoldingWord";
   return { slug: "default", label: org, org, binding: "DB" };
@@ -39,7 +50,7 @@ function parseEntry(env: Env, entry: unknown): Workspace | null {
     return null;
   }
   const e = entry as Record<string, unknown>;
-  if (typeof e.slug !== "string" || !SLUG_RE.test(e.slug)) {
+  if (typeof e.slug !== "string" || !isValidSlug(e.slug)) {
     console.warn("workspaces: dropping entry with invalid slug", e.slug);
     return null;
   }
@@ -471,7 +482,7 @@ export async function claimWorkspace(
     .all<{ id: number; slug: string; binding: string }>();
 
   for (const cand of candidates.results ?? []) {
-    if (!SLUG_RE.test(cand.slug)) continue; // corrupt slot row; never claim into it
+    if (!isValidSlug(cand.slug)) continue; // corrupt slot row; never claim into it
     if (!bindingIsLiveD1(env, cand.binding)) continue; // binding not deployed yet
     // Never assign two orgs to the same physical database: skip an available
     // slot whose binding is already held by a claimed row. registerPoolSlot
@@ -570,7 +581,7 @@ export interface RegisterPoolResult {
 }
 
 // Derive a slug from a binding name: "DB_POOL1" -> "pool1", "DB_MLTEST" ->
-// "mltest". Callers may override; a derivation that doesn't satisfy SLUG_RE is
+// "mltest". Callers may override; a derivation that isValidSlug rejects is
 // rejected (invalid_slug) so the operator supplies one explicitly.
 function defaultSlugForBinding(binding: string): string {
   return binding.replace(/^DB_?/i, "").toLowerCase().replace(/[^a-z0-9-]/g, "-");
@@ -588,7 +599,7 @@ export async function registerPoolSlot(
   if (!binding) return { ok: false, error: "invalid_binding" };
   if (!bindingIsLiveD1(env, binding)) return { ok: false, error: "binding_not_live" };
   const slug = (opts.slug ?? defaultSlugForBinding(binding)).trim();
-  if (!SLUG_RE.test(slug)) return { ok: false, error: "invalid_slug" };
+  if (!isValidSlug(slug)) return { ok: false, error: "invalid_slug" };
 
   const db = sharedDb(env);
   // One binding = one physical database = at most one workspace. Registering
