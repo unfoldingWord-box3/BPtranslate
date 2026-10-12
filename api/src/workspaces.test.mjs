@@ -130,28 +130,32 @@ console.log("[listWorkspaces] invalid entries dropped, never throws");
 
 // ── memoization per env object ──────────────────────────────────────────────
 
-console.log("[listWorkspaces] slug 'default' is reserved for the implicit workspace (#502)");
+console.log("[listWorkspaces] an existing entry named 'default' keeps loading, with a warning (#502)");
 {
-  // The client names its IndexedDB stores by slug, and slug "default" keeps the
-  // unsuffixed legacy name (web/src/sync/workspace.ts). A real org named
-  // "default" would share that database with the fallback org's legacy data
-  // (#228), so an explicit entry may not take the slug.
+  // Slug "default" is reserved for NEW workspaces only (the client keeps it on
+  // the unsuffixed IndexedDB names). An existing entry must not vanish from the
+  // roster: a be_ws=default cookie would then resolve to another org's DB.
   const realWarn = console.warn;
-  console.warn = () => {};
+  const warnings = [];
+  console.warn = (...a) => warnings.push(a.join(" "));
+  let list;
   try {
-    const env = {
+    list = listWorkspaces({
       DB: fakeD1("DB"),
       DB_X: fakeD1("DB_X"),
       WORKSPACES: JSON.stringify([
         { slug: "bsoj", label: "BSOJ", org: "BSOJ", binding: "DB" },
         { slug: "default", label: "Other", org: "OtherOrg", binding: "DB_X" },
       ]),
-    };
-    const list = listWorkspaces(env);
-    assert(list.length === 1 && list[0].slug === "bsoj", "explicit 'default' entry is dropped");
+    });
   } finally {
     console.warn = realWarn;
   }
+  assert(
+    list.length === 2 && list[1].slug === "default" && list[1].org === "OtherOrg" && list[1].binding === "DB_X",
+    "explicit 'default' entry is kept unchanged",
+  );
+  assert(warnings.some((w) => w.includes('slug "default" is reserved')), "loading it logs the reservation warning");
   const implicit = listWorkspaces({ DB: fakeD1("DB") });
   assert(implicit.length === 1 && implicit[0].slug === "default", "unset WORKSPACES still yields the implicit 'default'");
 }

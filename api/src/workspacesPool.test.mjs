@@ -164,6 +164,28 @@ console.log("[claimWorkspace] skips available slots whose binding isn't deployed
   assert(rowBySlug(db, "ghost").status === "available", "dead-binding slot left untouched");
 }
 
+console.log("[claimWorkspace] never claims a new org into an available slot named 'default' (#502)");
+{
+  const db = freshDb();
+  const env = makeEnv(db);
+  // Inserted directly (registerPoolSlot refuses the slug), ahead of a normal slot.
+  db.prepare("INSERT INTO workspaces (slug, binding, status) VALUES ('default', 'DB_POOL2', 'available')").run();
+  await registerPoolSlot(env, { binding: "DB_POOL1" });
+
+  const realWarn = console.warn;
+  const warnings = [];
+  console.warn = (...a) => warnings.push(a.join(" "));
+  let claim;
+  try {
+    claim = await claimWorkspace(env, { org: "RealOrg", label: "Real" });
+  } finally {
+    console.warn = realWarn;
+  }
+  assert(claim && claim.workspace.slug === "pool1", "reserved 'default' slot skipped, next slot claimed");
+  assert(rowBySlug(db, "default").status === "available", "reserved slot left untouched");
+  assert(warnings.some((w) => w.includes('reserved slug "default"')), "skip logs a warning naming the reserved slug");
+}
+
 // ── claimWorkspace: never assigns two orgs to the same physical DB ──────────
 
 console.log("[claimWorkspace] skips an available slot whose binding is already claimed");
