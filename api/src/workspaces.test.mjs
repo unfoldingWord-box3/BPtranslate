@@ -130,6 +130,32 @@ console.log("[listWorkspaces] invalid entries dropped, never throws");
 
 // ── memoization per env object ──────────────────────────────────────────────
 
+console.log("[listWorkspaces] slug 'default' is reserved for the implicit workspace (#502)");
+{
+  // The client names its IndexedDB stores by slug, and slug "default" keeps the
+  // unsuffixed legacy name (web/src/sync/workspace.ts). A real org named
+  // "default" would share that database with the fallback org's legacy data
+  // (#228), so an explicit entry may not take the slug.
+  const realWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const env = {
+      DB: fakeD1("DB"),
+      DB_X: fakeD1("DB_X"),
+      WORKSPACES: JSON.stringify([
+        { slug: "bsoj", label: "BSOJ", org: "BSOJ", binding: "DB" },
+        { slug: "default", label: "Other", org: "OtherOrg", binding: "DB_X" },
+      ]),
+    };
+    const list = listWorkspaces(env);
+    assert(list.length === 1 && list[0].slug === "bsoj", "explicit 'default' entry is dropped");
+  } finally {
+    console.warn = realWarn;
+  }
+  const implicit = listWorkspaces({ DB: fakeD1("DB") });
+  assert(implicit.length === 1 && implicit[0].slug === "default", "unset WORKSPACES still yields the implicit 'default'");
+}
+
 console.log("[listWorkspaces] memoized per env object (WeakMap)");
 {
   const env = { DB: fakeD1("DB"), WORKSPACES: '[{"slug":"a","label":"A","org":"a","binding":"DB"}]' };

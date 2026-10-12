@@ -110,6 +110,12 @@ console.log("[registerPoolSlot] registers a live binding as an 'available' slot"
 
   const badSlug = await registerPoolSlot(env, { binding: "DB_POOL1", slug: "Bad Slug!" });
   assert(!badSlug.ok && badSlug.error === "invalid_slug", "invalid explicit slug -> invalid_slug");
+
+  // "default" is reserved for the implicit workspace (#502): explicit or derived.
+  const reserved = await registerPoolSlot(env, { binding: "DB_POOL3", slug: "default" });
+  assert(!reserved.ok && reserved.error === "invalid_slug", "explicit slug 'default' -> invalid_slug");
+  const derived = await registerPoolSlot({ ...env, DB_DEFAULT: liveBinding() }, { binding: "DB_DEFAULT" });
+  assert(!derived.ok && derived.error === "invalid_slug", "binding DB_DEFAULT (derived slug 'default') -> invalid_slug");
 }
 
 // ── claimWorkspace: happy path, ordering, idempotency, exhaustion ───────────
