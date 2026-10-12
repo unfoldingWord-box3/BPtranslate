@@ -233,29 +233,38 @@ export async function withLocks<T>(
   return request(first, { signal }, async (): Promise<T> => withLocks(rest, fn, signal, request));
 }
 
-// How long a boot holds the editors for adoption before skipping it.
+// How long a boot holds the editors for adoption before skipping it, and how
+// much longer it waits, after aborting, for the run to stop.
 export const ADOPTION_WAIT_MS = 5_000;
+export const ADOPTION_GRACE_MS = 1_000;
 
-// Run `run` with a deadline. On time, resolves { ok: true, value }. Past the
-// deadline it aborts the signal handed to `run` and then WAITS for `run` to
-// settle before resolving { ok: false }, so nothing `run` started can finish
-// after the caller moves on (App.tsx renders editors right after). `run` must
-// therefore stop promptly on abort, as adoptFromLegacyDbs does. A rejection
-// also resolves { ok: false }.
-export async function runBounded<T>(
+// Run `run` with a deadline. On time, resolves { ok: true, value }. Past
+// `timeoutMs` it aborts the signal handed to `run` and waits up to `graceMs`
+// more for `run` to settle before resolving { ok: false }, so work `run` has
+// in progress (an IndexedDB transaction) completes before the caller moves on
+// (App.tsx renders editors right after). The grace cap keeps a hung step (an
+// IndexedDB open that never resolves) from holding the caller forever; `run`
+// must check the signal after every await that could hang, so a step that
+// resumes later does nothing, as adoptFromLegacyDbs and moveRecords do. A
+// rejection also resolves { ok: false }.
+export function runBounded<T>(
   run: (signal: AbortSignal) => Promise<T>,
   timeoutMs: number,
+  graceMs: number = ADOPTION_GRACE_MS,
 ): Promise<{ ok: true; value: T } | { ok: false }> {
   const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), timeoutMs);
-  try {
-    const value = await run(ctl.signal);
-    return ctl.signal.aborted ? { ok: false } : { ok: true, value };
-  } catch {
-    return { ok: false };
-  } finally {
-    clearTimeout(timer);
-  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const settled = run(ctl.signal).then(
+    (value) => (ctl.signal.aborted ? { ok: false as const } : { ok: true as const, value }),
+    () => ({ ok: false as const }),
+  );
+  const expired = new Promise<{ ok: false }>((resolve) => {
+    timer = setTimeout(() => {
+      ctl.abort();
+      timer = setTimeout(() => resolve({ ok: false }), graceMs);
+    }, timeoutMs);
+  });
+  return Promise.race([settled, expired]).finally(() => clearTimeout(timer));
 }
 
 // Whether this boot must hold the editors until adoption settles: /api/auth/me

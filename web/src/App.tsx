@@ -33,7 +33,7 @@ import {
 import { setPipelineUser } from "./sync/pipelineStore";
 import { api } from "./sync/api";
 import { getWorkspaceSlug, setWorkspaceSlug } from "./sync/workspace";
-import { adoptBeforeEditors } from "./sync/adoptionGate";
+import { adoptBeforeEditors, nothingToAdopt } from "./sync/adoptionGate";
 import { needsAdoptionGate } from "./sync/legacyAdoption";
 import {
   WorkspaceChoiceDialog,
@@ -568,7 +568,10 @@ export function App() {
   // Every other boot (slug "default", a non-fallback org) never holds.
   const [adoptionSettled, setAdoptionSettled] = useState(false);
   const holdForAdoption =
-    !adoptionSettled && auth.kind === "ready" && needsAdoptionGate(auth.me, getWorkspaceSlug());
+    !adoptionSettled &&
+    auth.kind === "ready" &&
+    needsAdoptionGate(auth.me, getWorkspaceSlug()) &&
+    !nothingToAdopt();
   useEffect(() => {
     if (!holdForAdoption) return;
     void adoptBeforeEditors(getWorkspaceSlug()).then(() => setAdoptionSettled(true));

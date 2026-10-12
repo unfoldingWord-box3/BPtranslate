@@ -19,22 +19,35 @@ import { adoptLegacyOutbox, legacyOutboxSource } from "./outbox";
 // Started at module load for a named slug. A failed check counts as "nothing
 // to adopt": the legacy data stays where it is and the next boot checks again.
 const bootSlug = getWorkspaceSlug();
-const legacyCheck: Promise<boolean> =
-  bootSlug === "default"
-    ? Promise.resolve(false)
-    : anyLegacyRecords([
-        legacyDraftsSource(bootSlug),
-        legacyAlignmentDraftsSource(bootSlug),
-        legacyOutboxSource(bootSlug),
-      ]).catch(() => false);
+let knownEmpty = bootSlug === "default";
+const legacyCheck: Promise<boolean> = knownEmpty
+  ? Promise.resolve(false)
+  : anyLegacyRecords([
+      legacyDraftsSource(bootSlug),
+      legacyAlignmentDraftsSource(bootSlug),
+      legacyOutboxSource(bootSlug),
+    ])
+      .catch(() => false)
+      .then((found) => {
+        if (!found) knownEmpty = true;
+        return found;
+      });
+
+// True once the check above found nothing to adopt, so App.tsx renders the
+// editors without even one render of the hold (the usual case, since the
+// check finishes before /api/auth/me does).
+export function nothingToAdopt(): boolean {
+  return knownEmpty;
+}
 
 let once: Promise<void> | null = null;
 
 // Adopt `slug`'s legacy records, once per page load. Resolves when adoption
 // finished, found nothing, or was skipped; never rejects. Bounded by
-// ADOPTION_WAIT_MS: past it, adoption is aborted and this resolves only after
-// it has stopped, so nothing is moved once editors render. A skipped boot
-// leaves the rest in the legacy database for the next boot.
+// ADOPTION_WAIT_MS: past it, adoption is aborted and this resolves once it has
+// stopped (or ADOPTION_GRACE_MS later at most; a step that resumes after that
+// sees the abort and moves nothing), so nothing is moved once editors render.
+// A skipped boot leaves the rest in the legacy database for the next boot.
 export function adoptBeforeEditors(slug: string): Promise<void> {
   if (!once) {
     once = runBounded(async (signal) => {

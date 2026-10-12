@@ -236,7 +236,7 @@ test("timeout while waiting on the lock: skipped, nothing moved, legacy untouche
   assert.equal(target.m.size, 0);
 });
 
-test("runBounded resolves only after the run has settled, even past the deadline", async () => {
+test("runBounded waits (within the grace period) for the run to settle after the deadline", async () => {
   const events = [];
   const r = runBounded(async () => {
     // Ignores the abort for a while, like an IndexedDB transaction already
@@ -274,4 +274,26 @@ test("moveRecords: an abort mid-run finishes the current record and copies no ot
   assert.equal(await moveRecords(legacy, target, byId, "outbox", ctl.signal), 1);
   assert.deepEqual([...target.m.keys()], ["a"]);
   assert.deepEqual([...legacy.m.keys()].sort(), ["b", "c"]);
+});
+
+test("runBounded: a run hung past the deadline releases after the grace period and does nothing when it resumes", async () => {
+  const legacy = side([{ key: "row:tn:ZEC:a", updatedAt: 1, payload: { note: "x" } }], "key");
+  const target = side([], "key");
+  let resume;
+  const hung = new Promise((res) => (resume = res));
+  const t0 = Date.now();
+  const r = await runBounded(
+    async (signal) => {
+      await hung; // e.g. an IndexedDB open that never resolves
+      return moveRecords(legacy, target, byKey, "draft", signal);
+    },
+    10,
+    20,
+  );
+  assert.deepEqual(r, { ok: false });
+  assert.ok(Date.now() - t0 < 500, "released within deadline + grace");
+  resume();
+  await new Promise((res) => setTimeout(res, 10));
+  assert.equal(target.m.size, 0);
+  assert.equal(legacy.m.size, 1);
 });
