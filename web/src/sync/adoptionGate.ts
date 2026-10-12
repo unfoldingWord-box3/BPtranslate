@@ -19,8 +19,11 @@ import { adoptLegacyDrafts, legacyDraftsSource } from "./drafts";
 import { adoptLegacyAlignmentDrafts, legacyAlignmentDraftsSource } from "./alignmentDrafts";
 import { adoptLegacyOutbox, legacyOutboxSource } from "./outbox";
 
-// Started at module load for a named slug. A failed check counts as "nothing
-// to move": the legacy data stays where it is and the next boot checks again.
+// Started at module load for a named slug. A store whose check throws counts
+// as movable (anyCheck in legacyAdoption.ts), so the boot holds and the
+// bounded adoption run deals with it. The .catch below only guards against an
+// unexpected rejection of the whole check: that counts as "nothing to move",
+// the legacy data stays where it is, and the next boot checks again.
 const bootSlug = getWorkspaceSlug();
 let knownEmpty = bootSlug === "default";
 const legacyCheck: Promise<boolean> = knownEmpty
