@@ -130,6 +130,36 @@ console.log("[listWorkspaces] invalid entries dropped, never throws");
 
 // ── memoization per env object ──────────────────────────────────────────────
 
+console.log("[listWorkspaces] an existing entry named 'default' keeps loading, with a warning (#502)");
+{
+  // Slug "default" is reserved for NEW workspaces only (the client keeps it on
+  // the unsuffixed IndexedDB names). An existing entry must not vanish from the
+  // roster: a be_ws=default cookie would then resolve to another org's DB.
+  const realWarn = console.warn;
+  const warnings = [];
+  console.warn = (...a) => warnings.push(a.join(" "));
+  let list;
+  try {
+    list = listWorkspaces({
+      DB: fakeD1("DB"),
+      DB_X: fakeD1("DB_X"),
+      WORKSPACES: JSON.stringify([
+        { slug: "bsoj", label: "BSOJ", org: "BSOJ", binding: "DB" },
+        { slug: "default", label: "Other", org: "OtherOrg", binding: "DB_X" },
+      ]),
+    });
+  } finally {
+    console.warn = realWarn;
+  }
+  assert(
+    list.length === 2 && list[1].slug === "default" && list[1].org === "OtherOrg" && list[1].binding === "DB_X",
+    "explicit 'default' entry is kept unchanged",
+  );
+  assert(warnings.some((w) => w.includes('slug "default" is reserved')), "loading it logs the reservation warning");
+  const implicit = listWorkspaces({ DB: fakeD1("DB") });
+  assert(implicit.length === 1 && implicit[0].slug === "default", "unset WORKSPACES still yields the implicit 'default'");
+}
+
 console.log("[listWorkspaces] memoized per env object (WeakMap)");
 {
   const env = { DB: fakeD1("DB"), WORKSPACES: '[{"slug":"a","label":"A","org":"a","binding":"DB"}]' };

@@ -32,7 +32,9 @@ import {
 } from "./sync/api";
 import { setPipelineUser } from "./sync/pipelineStore";
 import { api } from "./sync/api";
-import { getWorkspaceSlug, setWorkspaceSlug, setWorkspaceIsFallback } from "./sync/workspace";
+import { getWorkspaceSlug, setWorkspaceSlug } from "./sync/workspace";
+import { adoptBeforeEditors, nothingToAdopt } from "./sync/adoptionGate";
+import { needsAdoptionGate } from "./sync/legacyAdoption";
 import {
   WorkspaceChoiceDialog,
   markChooseWsPending,
@@ -521,12 +523,9 @@ export function App() {
     if (auth.kind !== "ready") return;
     const serverWs = auth.me?.workspace;
     if (serverWs === undefined) return;
-    const serverIsFallback = auth.me?.workspaceIsFallback;
     if (serverWs === getWorkspaceSlug()) {
-      // Slug already agrees — still sync the fallback flag (it's cheap and
-      // keeps outbox.ts's outboxDbName() correct even if it was never set,
-      // e.g. an install that predates the fallback flag).
-      if (serverIsFallback !== undefined) setWorkspaceIsFallback(serverIsFallback);
+      // Slug confirmed. Legacy adoption for a fallback workspace runs in the
+      // adoption hold below, before any editor renders (#502).
       try { sessionStorage.removeItem(WS_RECONCILED_KEY); } catch { /* private mode */ }
       return;
     }
@@ -534,7 +533,6 @@ export function App() {
     try { alreadyTried = sessionStorage.getItem(WS_RECONCILED_KEY) === "1"; } catch { /* private mode */ }
     if (alreadyTried) return; // already reloaded once this session — don't loop
     setWorkspaceSlug(serverWs);
-    if (serverIsFallback !== undefined) setWorkspaceIsFallback(serverIsFallback);
     try { sessionStorage.setItem(WS_RECONCILED_KEY, "1"); } catch { /* private mode */ }
     location.reload();
   }, [auth]);
@@ -561,11 +559,29 @@ export function App() {
   // auth is not "ready".
   const { alerts, dismiss } = useAlerts(auth.kind === "ready");
 
+  // Legacy adoption hold (#502, sync/adoptionGate.ts). When /api/auth/me
+  // confirms a NAMED fallback slug, records older builds left under the
+  // legacy database name are moved in before any editor mounts, because
+  // editors read their draft only once, at mount. Decided during render (an
+  // effect would run after the editors' own mount effects). Bounded: past
+  // ADOPTION_WAIT_MS adoption is skipped for this boot and the hold lifts.
+  // Every other boot (slug "default", a non-fallback org) never holds.
+  const [adoptionSettled, setAdoptionSettled] = useState(false);
+  const holdForAdoption =
+    !adoptionSettled &&
+    auth.kind === "ready" &&
+    needsAdoptionGate(auth.me, getWorkspaceSlug()) &&
+    !nothingToAdopt();
+  useEffect(() => {
+    if (!holdForAdoption) return;
+    void adoptBeforeEditors(getWorkspaceSlug()).then(() => setAdoptionSettled(true));
+  }, [holdForAdoption]);
+
   useEffect(() => {
     setPipelineUser(auth.kind === "ready" ? auth.me?.userId ?? null : null);
   }, [auth]);
 
-  if (auth.kind === "loading") {
+  if (auth.kind === "loading" || holdForAdoption) {
     return (
       // 100dvh with a 100vh fallback — see the height comment on the main Shell
       // Box further down; plain 100vh sits under mobile browsers' URL bar.

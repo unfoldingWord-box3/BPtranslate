@@ -37,7 +37,7 @@ import CheckIcon from "@mui/icons-material/Check";
 import BusinessIcon from "@mui/icons-material/Business";
 import { api, ApiError, type WorkspaceInfo } from "../sync/api";
 import { outbox, isOpPending } from "../sync/outbox";
-import { getWorkspaceSlug, setWorkspaceSlug, setWorkspaceIsFallback } from "../sync/workspace";
+import { getWorkspaceSlug, setWorkspaceSlug } from "../sync/workspace";
 
 type Variant = "menu" | "indicator" | "expanded" | "menuItem" | "submenuItem";
 
@@ -89,11 +89,6 @@ export function WorkspaceSwitcher({ variant = "menu" }: { variant?: Variant }) {
     try {
       await api.switchWorkspace(slug);
       setWorkspaceSlug(slug);
-      // Persist alongside the slug so outbox.ts's outboxDbName() picks the
-      // right IndexedDB name (unsuffixed for the fallback workspace) on the
-      // reload below, without waiting on a follow-up /api/auth/me round-trip.
-      const target = workspaces.find((w) => w.slug === slug);
-      if (target) setWorkspaceIsFallback(target.isFallback);
       // Deliberate full reload: every hook's cached chapter/book/config state
       // belongs to the old org and must not survive the switch.
       location.reload();
