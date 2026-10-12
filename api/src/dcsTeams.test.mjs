@@ -307,7 +307,7 @@ console.log("resolveTeamRole — near-miss diagnostic for misnamed teams");
     });
     const nameHit = warnings.find((w) => w.includes("none match the configured role teams"));
     assert(
-      !!nameHit && nameHit.includes("BE-Admin"),
+      !!nameHit && nameHit.includes("their teams there: BE-Admin"),
       "near-miss warning lists a team whose organization carries only `name` (#581)",
     );
   } finally {
