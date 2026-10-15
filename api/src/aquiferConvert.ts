@@ -242,7 +242,7 @@ function strip(s: string): string {
 
 // ---------- the join ----------
 
-const FLAG_LINK_QUOTE = "Aquifer note matched to its English note, but its quote differs from the en_tn row's — check the quote against the English source";
+const FLAG_LINK_QUOTE = "Aquifer note matched to its English note, but its quote or reference differs from the en_tn row's — check against the English source";
 const FLAG_ORDINAL = "Aquifer note matched by position (quote unverified) — check against the English source";
 const FLAG_UNMATCHED = "Aquifer note has no matching English source note — quote/support unverified";
 
@@ -342,11 +342,18 @@ export function convertAquiferBook(
       const claimed = claimedFor(aq.link.ref);
       const j = aq.link.ordinal - 1;
       if (j < 0 || j >= enList.length || claimed[j]) continue;
-      claimed[j] = true;
       const quoteOk = nfc(enList[j].Quote) === aq.quote;
-      linked.set(aq, fromEn(aq, enList[j], "link", quoteOk ? null : FLAG_LINK_QUOTE));
+      // The pinned Aquifer release can lag the live en_tn (a note added or removed
+      // since), so the N-th row may no longer be the one Aquifer meant. If this
+      // row's quote disagrees but another free row at the reference has exactly
+      // this note's quote, leave the note to the quote pass rather than flag it
+      // onto the wrong row.
+      if (!quoteOk && aq.quote && enList.some((r, k) => !claimed[k] && nfc(r.Quote) === aq.quote)) continue;
+      claimed[j] = true;
+      const clean = quoteOk && aq.link.ref === aq.ref;
+      linked.set(aq, fromEn(aq, enList[j], "link", clean ? null : FLAG_LINK_QUOTE));
       report.matchedLink++;
-      if (!quoteOk) report.flagged++;
+      if (!clean) report.flagged++;
     }
   }
 
