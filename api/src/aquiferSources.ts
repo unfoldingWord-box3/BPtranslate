@@ -37,6 +37,14 @@ export const AQUIFER_BOOK_NUM: Record<string, string> = {
 
 export const AQUIFER_REPO = "BibleAquifer/UWTranslationNotes";
 
+// Aquifer publishes a git tag per release. Both the per-book JSON and the
+// language's metadata.json (the translated-note -> English-note links) must come
+// from the SAME ref, or a content id in one can be missing from the other; and a
+// pinned tag makes an import repeatable. Bump deliberately, after checking the
+// new release joins cleanly. (v2026-10-14 is the release the link-first join was
+// measured against.)
+export const AQUIFER_REF = "v2026-10-14";
+
 export function aquiferLangFor(languageCode: string): string | null {
   return AQUIFER_LANG[languageCode] ?? null;
 }
@@ -56,5 +64,12 @@ export function isAquiferLang(v: string): boolean {
 export function aquiferJsonUrl(aqLang: string, book: string): string | null {
   const num = AQUIFER_BOOK_NUM[book];
   if (!num) return null;
-  return `https://raw.githubusercontent.com/${AQUIFER_REPO}/main/${aqLang}/json/${num}.content.json`;
+  return `https://raw.githubusercontent.com/${AQUIFER_REPO}/${AQUIFER_REF}/${aqLang}/json/${num}.content.json`;
+}
+
+// Raw GitHub URL for a language's metadata.json (~36 MB: far too big to parse
+// whole in a Worker — read it with fetchEnglishLinks, which streams it).
+export function aquiferMetadataUrl(aqLang: string): string | null {
+  if (!isAquiferLang(aqLang)) return null;
+  return `https://raw.githubusercontent.com/${AQUIFER_REPO}/${AQUIFER_REF}/${aqLang}/metadata.json`;
 }

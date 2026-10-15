@@ -26,6 +26,7 @@ import { getProjectConfig } from "./projectConfig.ts";
 import { makeVerseSortOrder, parseTsv, refParts } from "./importParsers";
 import { aquiferJsonUrl, aquiferLangFor } from "./aquiferSources.ts";
 import { convertAquiferBook, nfc, type EnRow } from "./aquiferConvert.ts";
+import { loadEnglishLinks } from "./aquiferLinks.ts";
 import { parseChapterScope, chapterInScope } from "./aquiferScope.ts";
 
 export const AQUIFER_SOURCE = "aquifer"; // edit_log.source tag (keeps the AI chip off)
@@ -147,7 +148,17 @@ export async function aquiferDrafts(c: Context<{ Bindings: Env; Variables: { use
     })).filter((r) => r.ID);
     const enNoteById = new Map(enRows.map((r) => [r.ID, r.Note]));
 
-    const { notes: allNotes, report } = convertAquiferBook(aqItems as Parameters<typeof convertAquiferBook>[0], enRows);
+    // Link-first join: each translated note's English counterpart (metadata.json).
+    // Failing to read it is reported, not papered over with the quote-first join
+    // it replaces, which picks the wrong en_tn row for ~16% of repeated-quote verses.
+    let links;
+    try {
+      links = await loadEnglishLinks(aqLang, aqItems as Parameters<typeof loadEnglishLinks>[1]);
+    } catch (e) {
+      console.error("aquiferDrafts: english link fetch failed", { book, aqLang, error: e instanceof Error ? e.message : String(e) });
+      return c.json({ error: "aquifer_metadata_fetch_failed", book, aqLang }, 502);
+    }
+    const { notes: allNotes, report } = convertAquiferBook(aqItems as Parameters<typeof convertAquiferBook>[0], enRows, links);
     // Restrict the merge to the requested chapters (no-op when scope is null).
     const notes = scope ? allNotes.filter((n) => chapterInScope(refParts(n.ref)[0], scope)) : allNotes;
 
