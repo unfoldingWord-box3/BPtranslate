@@ -11,8 +11,9 @@
 //  - Aquifer notes that join to an en_tn row inherit its sticky id / quote /
 //    occurrence / SupportReference (alignment works). Notes with NO en_tn match
 //    are still imported (minted id, Aquifer's own extracted quote, flagged).
-//  - Dedup is by (reference, NFC quote): Aquifer never lands a duplicate where an
-//    approved note already covers that note.
+//  - Dedup matches by en_tn id, else by (reference, NFC quote, occurrence)
+//    (aquiferMerge.ts): Aquifer never lands a duplicate where an approved note
+//    already covers that note.
 //
 // Provenance is distinct (edit_log source='aquifer', draft_meta_json.source=
 // 'aquifer') so drafts read as "Aquifer draft", never AI. The book is stamped
@@ -28,6 +29,7 @@ import { aquiferJsonUrl, aquiferLangFor } from "./aquiferSources.ts";
 import { convertAquiferBook, nfc, type EnRow } from "./aquiferConvert.ts";
 import { loadEnglishLinks } from "./aquiferLinks.ts";
 import { parseChapterScope, chapterInScope } from "./aquiferScope.ts";
+import { planAquiferMerge } from "./aquiferMerge.ts";
 
 export const AQUIFER_SOURCE = "aquifer"; // edit_log.source tag (keeps the AI chip off)
 const CHUNK = 40;
@@ -175,34 +177,17 @@ export async function aquiferDrafts(c: Context<{ Bindings: Env; Variables: { use
         .map((r) => r.id),
     );
 
-    // Dedup/replace key includes occurrence: a verse can carry the SAME quote at
-    // occurrence 1 and 2 (distinct notes). Keying on (ref,quote) alone would let
-    // an approved occ-1 suppress the occ-2 draft, and collide the two existing
-    // rows in replaceableByKey (Map.set overwrite → an orphaned leftover row).
-    const key = (ref: string, quote: string | null, occ: number | null) => `${ref}\t${nfc(quote)}\t${occ ?? ""}`;
-    const protectedKeys = new Set<string>();
-    const approveIds: string[] = [];
-    const replaceableByKey = new Map<string, string>();
-
-    for (const row of existing.results ?? []) {
-      const st = row.translation_state;
-      const k = key(row.ref_raw, row.quote, row.occurrence);
-      if (st === "validated" || st === "edited") {
-        protectedKeys.add(k);
-      } else if (st === "ai_draft") {
-        replaceableByKey.set(k, row.id);
-      } else if (isTranslatedNote(row.note, cfg.languageCode, enNoteById.get(row.id))) {
-        // Only bulk-approve rows in the requested chapters — a scoped pull must
-        // not flip out-of-scope rows to validated (issue #310). Out-of-scope
-        // notes are never merged anyway (the merge loop iterates scoped `notes`),
-        // so leaving them out of protectedKeys too would be harmless; we still
-        // protect them to keep the key set an honest whole-book picture.
-        if (chapterInScope(refParts(row.ref_raw)[0], scope)) approveIds.push(row.id);
-        protectedKeys.add(k);
-      } else {
-        replaceableByKey.set(k, row.id);
-      }
-    }
+    // Which existing rows an Aquifer note covers or replaces is decided by the
+    // pure planner (aquiferMerge.ts): by en_tn id first, falling back to
+    // (ref, NFC quote, occurrence) only for notes with no live row under their id
+    // (issue #584 — two rows can share a key). The script heuristic stays here,
+    // passed in as a callback.
+    const { approveIds, decisions } = planAquiferMerge(
+      existing.results ?? [],
+      notes,
+      (row) => isTranslatedNote(row.note, cfg.languageCode, enNoteById.get(row.id)),
+      (ref) => chapterInScope(refParts(ref)[0], scope),
+    );
 
     const now = Math.floor(Date.now() / 1000);
     const nextSort = makeVerseSortOrder();
@@ -245,15 +230,14 @@ export async function aquiferDrafts(c: Context<{ Bindings: Env; Variables: { use
     );
     const counts = { inserted: 0, replaced: 0, skippedApproved: 0 };
 
-    for (const note of notes) {
-      const k = key(note.ref, note.quote, note.occurrence);
-      if (protectedKeys.has(k)) { counts.skippedApproved++; continue; }
+    for (const [i, note] of notes.entries()) {
+      const decision = decisions[i];
+      if (decision.action === "skip") { counts.skippedApproved++; continue; }
 
-      const replacedId = replaceableByKey.get(k);
+      const replacedId = decision.replaceId;
       if (replacedId) {
         stmts.push(env.DB.prepare(`DELETE FROM tn_rows WHERE book = ?1 AND id = ?2`).bind(book, replacedId));
         usedIds.delete(replacedId);
-        replaceableByKey.delete(k);
         counts.replaced++;
       }
 
