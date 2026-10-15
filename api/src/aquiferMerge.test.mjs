@@ -161,6 +161,13 @@ test("a protected row no note owns by id still covers an enId note whose own row
   assert.deepEqual(applyImport(t, new Set(), [note("aaaa")]).decisions, [{ action: "skip" }]);
 });
 
+test("an enId-less note is still covered by an id-claimed approved row with its key", () => {
+  // A surplus unmatched Aquifer note must not land a draft beside approved content.
+  const rows = [row("aaaa", "validated")];
+  const { decisions } = planAquiferMerge(rows, [note("aaaa"), note(null)], never, inAll);
+  assert.deepEqual(decisions, [{ action: "skip" }, { action: "skip" }]);
+});
+
 test("existing target-language rows are bulk-approved and protected; scope limits approval only", () => {
   const rows = [
     row("aaaa", null, { note: "translated", ref_raw: "1:1" }),
