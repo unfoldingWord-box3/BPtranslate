@@ -140,7 +140,23 @@ test("soft-deleted ids stay used: the draft mints instead of reusing the tombsto
   assert.notEqual(table[0].id, "aaaa");
 });
 
-test("a protected row with the same key still covers an enId note whose own row is gone", () => {
+test("approved row no note owns by id still covers an id-matched placeholder with the same key", () => {
+  // e.g. a translated ar_tn row with its own id next to an English placeholder:
+  // the draft must not land a duplicate beside approved content.
+  const rows = [row("vvvv", "validated"), row("aaaa", null)];
+  const { decisions } = planAquiferMerge(rows, [note("aaaa")], never, inAll);
+  assert.deepEqual(decisions, [{ action: "skip" }]);
+});
+
+test("an id-claimed validated twin does not suppress an enId note with no live row", () => {
+  // aaaa is validated and owned by its own note; bbbb's row is gone, so the
+  // second note is a real second note and gets its draft.
+  const rows = [row("aaaa", "validated")];
+  const { decisions } = planAquiferMerge(rows, [note("aaaa"), note("bbbb")], never, inAll);
+  assert.deepEqual(decisions, [{ action: "skip" }, { action: "insert", replaceId: null }]);
+});
+
+test("a protected row no note owns by id still covers an enId note whose own row is gone", () => {
   const t = [row("zzzz", "validated")];
   assert.deepEqual(applyImport(t, new Set(), [note("aaaa")]).decisions, [{ action: "skip" }]);
 });
