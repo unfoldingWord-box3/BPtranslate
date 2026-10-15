@@ -20,8 +20,10 @@
 //  - Notes with no live row under their id (minted/unmatched notes, or an enId
 //    whose row is gone) keep the old (ref, quote, occurrence) key. Replaceable
 //    rows sharing a key are a queue, one consumed per note, never overwritten.
-//    Protected rows stay in the key pool whether or not an id claimed them, so a
-//    fallback note is still never duplicated beside approved content.
+//    A protected row covers its key only when no note owns it by id: an approved
+//    row that no note matches by id still suppresses a draft of the same
+//    ref/quote/occurrence (no duplicate beside approved content), but a validated
+//    twin does not suppress its sibling's draft.
 //  - Soft-deleted rows are not passed in (they cover nothing); their ids stay in
 //    the caller's used-id set, so the inserted draft mints a fresh id instead.
 
@@ -74,7 +76,7 @@ export function planAquiferMerge<R extends ExistingTnRow>(
 ): MergePlan {
   const approveIds: string[] = [];
   const protectedIds = new Set<string>();
-  const protectedKeys = new Set<string>();
+  const protectedRows: Array<{ id: string; key: string }> = [];
   const replaceableById = new Set<string>();
   const replaceableRows: Array<{ id: string; key: string }> = [];
 
@@ -83,7 +85,7 @@ export function planAquiferMerge<R extends ExistingTnRow>(
     const k = mergeKey(row.ref_raw, row.quote, row.occurrence);
     if (st === "validated" || st === "edited") {
       protectedIds.add(row.id);
-      protectedKeys.add(k);
+      protectedRows.push({ id: row.id, key: k });
     } else if (st === "ai_draft") {
       replaceableById.add(row.id);
       replaceableRows.push({ id: row.id, key: k });
@@ -91,7 +93,7 @@ export function planAquiferMerge<R extends ExistingTnRow>(
       // A bulk approve flips only in-scope rows, but every such row is protected.
       if (inScope(row.ref_raw)) approveIds.push(row.id);
       protectedIds.add(row.id);
-      protectedKeys.add(k);
+      protectedRows.push({ id: row.id, key: k });
     } else {
       replaceableById.add(row.id);
       replaceableRows.push({ id: row.id, key: k });
@@ -104,6 +106,11 @@ export function planAquiferMerge<R extends ExistingTnRow>(
   for (const n of notes) {
     if (n.enId && (protectedIds.has(n.enId) || replaceableById.has(n.enId))) claimed.add(n.enId);
   }
+
+  // A protected row covers a key only if no note owns it by id: otherwise a
+  // validated twin would suppress its sibling's draft (the #584 bug).
+  const protectedKeys = new Set<string>();
+  for (const r of protectedRows) if (!claimed.has(r.id)) protectedKeys.add(r.key);
 
   const byKey = new Map<string, string[]>();
   for (const r of replaceableRows) {
@@ -120,14 +127,14 @@ export function planAquiferMerge<R extends ExistingTnRow>(
       decisions.push({ action: "skip" });
       continue;
     }
-    if (n.enId && replaceableById.has(n.enId) && !takenById.has(n.enId)) {
-      takenById.add(n.enId);
-      decisions.push({ action: "insert", replaceId: n.enId });
-      continue;
-    }
     const k = mergeKey(n.ref, n.quote, n.occurrence);
     if (protectedKeys.has(k)) {
       decisions.push({ action: "skip" });
+      continue;
+    }
+    if (n.enId && replaceableById.has(n.enId) && !takenById.has(n.enId)) {
+      takenById.add(n.enId);
+      decisions.push({ action: "insert", replaceId: n.enId });
       continue;
     }
     decisions.push({ action: "insert", replaceId: byKey.get(k)?.shift() ?? null });
