@@ -24,8 +24,6 @@ export function parseEnglishTitle(title: string | undefined): { ref: string; ord
   return { ref, ordinal: parseInt(m[4], 10) };
 }
 
-const ENTRY_ID = /"content_id"\s*:\s*"?(\d+)/;
-
 // Incremental scanner for { ..., "article_metadata": { "<id>": {entry}, ... } }.
 // Tracks only string/escape state and brace depth; an entry is the object at
 // depth 3 while the top-level key is "article_metadata". Chunk boundaries may
@@ -36,7 +34,9 @@ export class EnglishLinkScanner {
   private inStr = false;
   private esc = false;
   private keyBuf = "";
-  private lastKey1 = "";
+  private lastKey1 = ""; // most recent top-level key
+  private lastKey2 = ""; // most recent key one level down (an article_metadata entry's id)
+  private entryKey = "";
   private entry: string | null = null; // text of the entry being read
   private sawArticle = false;
 
@@ -61,14 +61,16 @@ export class EnglishLinkScanner {
     for (let i = 0; i < chunk.length; i++) {
       const c = chunk.charCodeAt(i);
       if (this.inStr) {
-        if (this.esc) { this.esc = false; if (this.depth === 1) this.keyBuf += chunk[i]; continue; }
-        if (c === 92) { this.esc = true; if (this.depth === 1) this.keyBuf += "\\"; continue; }
+        const key = this.depth === 1 || this.depth === 2;
+        if (this.esc) { this.esc = false; if (key) this.keyBuf += chunk[i]; continue; }
+        if (c === 92) { this.esc = true; if (key) this.keyBuf += "\\"; continue; }
         if (c === 34) {
           this.inStr = false;
           if (this.depth === 1) this.lastKey1 = this.keyBuf;
+          else if (this.depth === 2) this.lastKey2 = this.keyBuf;
           continue;
         }
-        if (this.depth === 1) this.keyBuf += chunk[i];
+        if (key) this.keyBuf += chunk[i];
         continue;
       }
       if (c === 34) { this.inStr = true; this.keyBuf = ""; continue; }
@@ -77,11 +79,12 @@ export class EnglishLinkScanner {
         if (this.depth === 2 && this.lastKey1 === "article_metadata") this.sawArticle = true;
         else if (this.depth === 3 && this.sawArticle && this.lastKey1 === "article_metadata") {
           this.entry = "";
+          this.entryKey = this.lastKey2;
           entryFrom = i;
         }
       } else if (c === 125) { // }
         if (this.depth === 3 && this.entry !== null) {
-          this.finishEntry(this.entry + chunk.slice(entryFrom, i + 1));
+          this.finishEntry(this.entryKey, this.entry + chunk.slice(entryFrom, i + 1));
           this.entry = null;
           entryFrom = -1;
         }
@@ -91,9 +94,10 @@ export class EnglishLinkScanner {
     if (this.entry !== null && entryFrom >= 0) this.entry += chunk.slice(entryFrom);
   }
 
-  private finishEntry(text: string): void {
-    const id = ENTRY_ID.exec(text)?.[1];
-    if (!id || !this.wanted.has(id)) return;
+  // Keyed by the entry's own object key (its content_id), so field order inside
+  // the entry — or a "content_id" nested in localizations — cannot misattribute it.
+  private finishEntry(id: string, text: string): void {
+    if (!this.wanted.has(id)) return;
     let parsed: { localizations?: { eng?: { content_id?: unknown; title?: unknown } } };
     try {
       parsed = JSON.parse(text);
@@ -160,5 +164,12 @@ export async function loadEnglishLinks(
   if (!url) throw new Error(`no Aquifer metadata URL for language ${aqLang}`);
   const wanted = new Set<string>();
   for (const it of aqItems) if (it.content_id != null) wanted.add(String(it.content_id));
-  return fetchEnglishLinks(url, wanted);
+  const links = await fetchEnglishLinks(url, wanted);
+  // A whole file with no link for any note means the ids did not line up (wrong
+  // ref, changed schema), not "nothing to link": say so, since the import then
+  // runs entirely on the quote-first join.
+  if (wanted.size > 0 && links.size === 0) {
+    console.warn("loadEnglishLinks: no English links found for any note; joining by quote only", { aqLang, notes: wanted.size });
+  }
+  return links;
 }

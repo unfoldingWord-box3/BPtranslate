@@ -34,6 +34,15 @@ test("finds the English link for each wanted id and ignores the rest", () => {
   assert.equal(s.links.has("999"), false);
 });
 
+test("an entry is keyed by its object key, not by a content_id inside it", () => {
+  // The entry's own "content_id" field comes AFTER a nested one that would win a
+  // first-match search.
+  const odd = '{"article_metadata": {"700": {"localizations": {"eng": {"content_id": 701, "language": "eng", "title": "Titus 1:1 (#1)"}}, "content_id": "700"}}}';
+  const s = scanEnglishLinks([odd], new Set(["700", "701"]));
+  assert.deepEqual([...s.links.keys()], ["700"]);
+  assert.equal(s.links.get("700").engContentId, "701");
+});
+
 test("only wanted entries are retained", () => {
   const s = scanEnglishLinks([doc], new Set(["103"]));
   assert.deepEqual([...s.links.keys()], ["103"]);
