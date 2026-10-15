@@ -23,6 +23,7 @@ import { aquiferDrafts, AQUIFER_SOURCE, pickId } from "./aquiferImport.ts";
 import { aquiferRepairFormatting } from "./aquiferRepair.ts";
 import { bulkReviewState } from "./reviewState.ts";
 import { convertAquiferBook, type EnRow, type ResolvedNote } from "./aquiferConvert.ts";
+import { loadEnglishLinks } from "./aquiferLinks.ts";
 import { aquiferJsonUrl, aquiferLangFor } from "./aquiferSources.ts";
 import {
   BOOK_NUMBERS,
@@ -587,7 +588,10 @@ async function fetchAquiferRangeNotes(
   }
   if (!Array.isArray(aqItems)) throw new Error(`aquifer range: Aquifer JSON shape unexpected for ${book}`);
 
-  const { notes } = convertAquiferBook(aqItems as Parameters<typeof convertAquiferBook>[0], enRows);
+  // Link-first join (metadata.json); throws on a failed read rather than falling
+  // back to the quote-first join, which can pick the wrong en_tn row.
+  const links = await loadEnglishLinks(aqLang, aqItems as Parameters<typeof loadEnglishLinks>[1]);
+  const { notes } = convertAquiferBook(aqItems as Parameters<typeof convertAquiferBook>[0], enRows, links);
 
   return aquiferRanges.map((range) => {
     const inRange = notes.filter((n) => {
