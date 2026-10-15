@@ -356,3 +356,26 @@ test("a linked note claims its row before a quote match can take it", () => {
   assert.equal(notes.find((n) => n.note.includes("linked to second")).enId, "mtph");
   assert.equal(notes.find((n) => n.note.includes("unlinked")).enId, "excl");
 });
+
+test("link to a row whose quote disagrees yields to an exact quote match on a free row (en_tn drifted from the pinned release)", () => {
+  // The link says "#1", but en_tn has since gained a row in front, so row 1 is
+  // not the note Aquifer meant. The note's quote matches row 2 exactly.
+  const rows = [
+    en("1:1", "newr", "rc://*/ta/man/translate/figs-new", "ἄλλο", "1", "added after the release"),
+    en("1:1", "mtph", "rc://*/ta/man/translate/figs-metaphor", "ὁ ἀδελφὸς", "1", "metaphor note"),
+  ];
+  const items = [aq("n 1:1 (#1)", "57001001", "PHM 1:1", noteHtml("ὁ ἀδελφὸς", "ltr", "x", "prose"))];
+  const { notes, report } = convertAquiferBook(items, rows, links([["c-n 1:1 (#1)", "Philemon 1:1 (#1)"]]));
+  assert.equal(notes[0].enId, "mtph");
+  assert.equal(notes[0].joinMethod, "quote");
+  assert.equal(notes[0].reviewReason, null);
+  assert.equal(report.matchedLink, 0);
+});
+
+test("link whose English reference differs from the note's own reference is flagged", () => {
+  const rows = [en("1:2", "aaaa", "rc://*/ta/man/translate/figs-x", "ὁ ἀδελφὸς", "1", "n")];
+  const items = [aq("n 1:1 (#1)", "57001001", "PHM 1:1", noteHtml("ὁ ἀδελφὸς", "ltr", "x", "prose"))];
+  const { notes } = convertAquiferBook(items, rows, links([["c-n 1:1 (#1)", "Philemon 1:2 (#1)"]]));
+  assert.equal(notes[0].joinMethod, "link");
+  assert.ok(notes[0].reviewReason, "reference disagreement is flagged even when the quote matches");
+});
