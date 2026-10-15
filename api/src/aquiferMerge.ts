@@ -20,7 +20,8 @@
 //  - Notes with no live row under their id (minted/unmatched notes, or an enId
 //    whose row is gone) keep the old (ref, quote, occurrence) key. Replaceable
 //    rows sharing a key are a queue, one consumed per note, never overwritten.
-//    A protected row covers its key only when no note owns it by id: an approved
+//    A note with no enId is covered by every protected row with its key. For an
+//    enId note, a protected row covers its key only when no note owns it by id: an approved
 //    row that no note matches by id still suppresses a draft of the same
 //    ref/quote/occurrence (no duplicate beside approved content), but a validated
 //    twin does not suppress its sibling's draft.
@@ -109,8 +110,14 @@ export function planAquiferMerge<R extends ExistingTnRow>(
 
   // A protected row covers a key only if no note owns it by id: otherwise a
   // validated twin would suppress its sibling's draft (the #584 bug).
+  // A note with no enId has no id to separate it from an approved row, so it is
+  // still covered by every protected row with its key (the old behaviour).
   const protectedKeys = new Set<string>();
-  for (const r of protectedRows) if (!claimed.has(r.id)) protectedKeys.add(r.key);
+  const allProtectedKeys = new Set<string>();
+  for (const r of protectedRows) {
+    allProtectedKeys.add(r.key);
+    if (!claimed.has(r.id)) protectedKeys.add(r.key);
+  }
 
   const byKey = new Map<string, string[]>();
   for (const r of replaceableRows) {
@@ -128,7 +135,7 @@ export function planAquiferMerge<R extends ExistingTnRow>(
       continue;
     }
     const k = mergeKey(n.ref, n.quote, n.occurrence);
-    if (protectedKeys.has(k)) {
+    if ((n.enId ? protectedKeys : allProtectedKeys).has(k)) {
       decisions.push({ action: "skip" });
       continue;
     }
