@@ -26,6 +26,7 @@ const blocking = [
   'react-hooks/set-state-in-render',
   'react-hooks/config',
   'react-hooks/gating',
+  'react-hooks/preserve-manual-memoization', // #595
 ];
 
 for (const rule of blocking) {

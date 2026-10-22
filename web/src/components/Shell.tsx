@@ -1159,7 +1159,7 @@ export function Shell({
         pushPipelineToast(t("shell.couldntTranslateNote", { message: msg }), "error");
       }
     },
-    [book, chapter, pushPipelineToast, t],
+    [book, chapter, pushPipelineToast, t, setTranslatingRowIds],
   );
 
   // ── Translation mode: tQ analogues of the tN Approve + Translate handlers ──
@@ -1286,7 +1286,7 @@ export function Shell({
         pushPipelineToast(t("shell.couldntTranslateNote", { message: msg }), "error");
       }
     },
-    [book, chapter, pushPipelineToast, t],
+    [book, chapter, pushPipelineToast, t, setTranslatingQuestionIds],
   );
 
   // The note delete button. Trash is a reversible, visible soft-delete (the

@@ -480,7 +480,7 @@ export default function TranslateAlignScreen({
       );
       applyLocalVerse({ ...row, content, plain_text: plain } as VerseDto);
     },
-    [book, chapter, applyLocalVerse, canEdit],
+    [book, chapter, applyLocalVerse, canEdit, setNotice],
   );
 
   const confirmUnalignFor = useCallback(
@@ -490,7 +490,7 @@ export default function TranslateAlignScreen({
         lostWords,
         commit,
       }),
-    [book, chapter, verse],
+    [book, chapter, verse, setPendingLoss],
   );
 
   const handlePanelSave = useCallback(
@@ -522,7 +522,7 @@ export default function TranslateAlignScreen({
       return;
     }
     commit();
-  }, [canEdit, tapState, targetVerse, lane, enqueueAlignment, draftKey, book, chapter]);
+  }, [canEdit, tapState, targetVerse, lane, enqueueAlignment, draftKey, book, chapter, setNotice, setPendingLoss]);
 
   const handleTapReset = useCallback(() => {
     tapEditKeyRef.current = null;
@@ -575,7 +575,7 @@ export default function TranslateAlignScreen({
       }
       enqueueText("text_edit");
     },
-    [book, chapter, applyLocalVerse, canEdit],
+    [book, chapter, applyLocalVerse, canEdit, setNotice, setPendingLoss],
   );
 
   const dualProps = useMemo(() => {

@@ -829,42 +829,47 @@ const VerseCell = memo(function VerseCell({
     return hit ? `${hit.text}|${hit.occurrence}` : null;
   }, [activeRange, sourceHits]);
 
+  // Read once so the memos below depend on these fields, not on `dto` (the
+  // React Compiler can't match `dto?.x` deps to `dto.x` reads after a guard).
+  const dtoPlainText = dto?.plain_text;
+  const dtoContent = dto?.content;
+
   // Find marks override note highlights while the overlay is open — fewer
   // visual layers, easier to scan results. Note highlights resume when the
   // overlay closes.
   const findHTML = useMemo(() => {
-    if (!dto?.plain_text) return null;
+    if (!dtoPlainText) return null;
     // Source-language query: ULT/UST cells stay clean; UGNT uses the offset
     // painter (UHB renders via HebrewLine, ignoring findHTML).
     if (search && search.sourceQuery.kind !== "english") {
       if (!isSource || !sourceHits || sourceHits.length === 0) return null;
-      return renderFindMatchesByOffsets(dto.plain_text, sourceHits, activeRange);
+      return renderFindMatchesByOffsets(dtoPlainText, sourceHits, activeRange);
     }
     // English / regex path — unchanged.
     if (!search?.re) return null;
-    const html = renderFindMatchesHTML(dto.plain_text, search.re, activeRange);
+    const html = renderFindMatchesHTML(dtoPlainText, search.re, activeRange);
     return html.includes("be-find") ? html : null;
-  }, [search, sourceHits, dto?.plain_text, isSource, activeRange]);
+  }, [search, sourceHits, dtoPlainText, isSource, activeRange]);
 
   const highlights = useMemo<Set<HighlightKey> | null>(() => {
-    if (findHTML || !isActive || !dto?.content) return null;
+    if (findHTML || !isActive || !dtoContent) return null;
     // During a preview the yellow follows the moved/hovered note; else active.
     const aQuote = reorderHighlight?.movedQuote ?? activeNoteQuote;
     const aOcc = reorderHighlight?.movedQuote ? reorderHighlight.movedOccurrence : activeNoteOccurrence;
     if (!aQuote) return null;
-    return highlightsFor(bibleVersion, dto.content, aQuote, aOcc, activeSourceContent);
-  }, [findHTML, isActive, activeNoteQuote, activeNoteOccurrence, reorderHighlight, bibleVersion, dto?.content, activeSourceContent]);
+    return highlightsFor(bibleVersion, dtoContent, aQuote, aOcc, activeSourceContent);
+  }, [findHTML, isActive, activeNoteQuote, activeNoteOccurrence, reorderHighlight, bibleVersion, dtoContent, activeSourceContent]);
 
   // Reorder stoplight neighbour sets (green underline / red overline), active
   // verse only and only while a drag / recent arrow-move is live.
   const prevHighlights = useMemo<Set<HighlightKey> | null>(() => {
-    if (findHTML || !isActive || !reorderHighlight?.prevQuote || !dto?.content) return null;
-    return highlightsFor(bibleVersion, dto.content, reorderHighlight.prevQuote, reorderHighlight.prevOccurrence, activeSourceContent);
-  }, [findHTML, isActive, reorderHighlight, bibleVersion, dto?.content, activeSourceContent]);
+    if (findHTML || !isActive || !reorderHighlight?.prevQuote || !dtoContent) return null;
+    return highlightsFor(bibleVersion, dtoContent, reorderHighlight.prevQuote, reorderHighlight.prevOccurrence, activeSourceContent);
+  }, [findHTML, isActive, reorderHighlight, bibleVersion, dtoContent, activeSourceContent]);
   const nextHighlights = useMemo<Set<HighlightKey> | null>(() => {
-    if (findHTML || !isActive || !reorderHighlight?.nextQuote || !dto?.content) return null;
-    return highlightsFor(bibleVersion, dto.content, reorderHighlight.nextQuote, reorderHighlight.nextOccurrence, activeSourceContent);
-  }, [findHTML, isActive, reorderHighlight, bibleVersion, dto?.content, activeSourceContent]);
+    if (findHTML || !isActive || !reorderHighlight?.nextQuote || !dtoContent) return null;
+    return highlightsFor(bibleVersion, dtoContent, reorderHighlight.nextQuote, reorderHighlight.nextOccurrence, activeSourceContent);
+  }, [findHTML, isActive, reorderHighlight, bibleVersion, dtoContent, activeSourceContent]);
   const roles = useMemo(() => {
     if (!prevHighlights?.size && !nextHighlights?.size) return undefined;
     return { prev: prevHighlights, next: nextHighlights };
