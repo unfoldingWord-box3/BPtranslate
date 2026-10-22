@@ -18,6 +18,7 @@
     "typecheck": "npm-run-all --parallel typecheck:api typecheck:web",
     "typecheck:api": "npm --workspace api run typecheck",
     "typecheck:web": "npm --workspace web run typecheck",
+    "lint": "npm --workspace web run lint",
     "deploy": "npm-run-all build:web deploy:api",
     "deploy:api": "npm --workspace api run deploy",
     "train:align": "node scripts/train-aligner.mjs",
