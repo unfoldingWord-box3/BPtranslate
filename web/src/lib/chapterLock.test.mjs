@@ -115,6 +115,10 @@ test("lockJobReleased: only a known job that left the locking states releases a 
   assert.equal(lockJobReleased("j1", [{ job_id: "j1", state: "failed" }]), true);
   assert.equal(lockJobReleased("j1", [{ job_id: "j1", state: "running" }]), false);
   assert.equal(lockJobReleased("j1", [{ job_id: "j1", state: "paused_for_outage" }]), false);
+  assert.equal(lockJobReleased("j1", [{ job_id: "j1", state: "cancelled" }]), true);
+  // The store can lag the server: 'queued' there while the server already
+  // dispatched the job and refused the save. Not a release.
+  assert.equal(lockJobReleased("j1", [{ job_id: "j1", state: "queued" }]), false);
   // Absent from the store: a stale tab may not know the job yet, so keep the lock.
   assert.equal(lockJobReleased("j1", [{ job_id: "j2", state: "done" }]), false);
   assert.equal(lockJobReleased("j1", []), false);
