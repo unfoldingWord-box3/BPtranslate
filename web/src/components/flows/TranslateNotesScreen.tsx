@@ -1021,6 +1021,11 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
       if (result.kind === "conflict") {
         setConflictNotice(t("flowTranslate.conflictNotice"));
       } else if (result.kind === "locked") {
+        // The outbox dropped the op, so the server row never changed: undo the
+        // optimistic patch or the cached row would show unsaved text as saved
+        // until a refetch. The typing itself stays in draftValue and the
+        // drafts store (issue #561 review R2).
+        applyLocalRowPatch("tn", target.id, { note: target.note } as Partial<TnRow & TqRow>);
         setChapterLock(result.lockBody);
         say(t("flowTranslate.lockedEditDropped"));
       } else {
@@ -1912,7 +1917,10 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
                   />
                   <Stack direction="row" justifyContent="flex-end" sx={{ mt: 1 }}>
                     <Button
-                      disabled={busy || redoing}
+                      // editLocked: a lock that arrived mid-edit (a translate run
+                      // now holds this note) disables Save too, not just entering
+                      // edit mode; the typing waits in the drafts store (#561).
+                      disabled={busy || redoing || editLocked}
                       onClick={() => void handleSave()}
                       startIcon={<SaveIcon />}
                       sx={{ minHeight: 44, color: "text.secondary", fontWeight: 700 }}
