@@ -26,13 +26,19 @@ const NON_TERMINAL = [
   "dispatching",
 ] as const;
 
-// SQL twin of isChapterWideTnTranslate (below), over an unqualified
-// pipeline_jobs row. json_valid guards json_extract, which throws on bad JSON.
+// SQL twin of isChapterWideTnTranslate / parseTranslateScope (below), over an
+// unqualified pipeline_jobs row, and it must agree with them on every input
+// (chapterLockTranslate.test.mjs checks a table of odd options): a non-string
+// resourceType means 'tn'; only a NON-EMPTY rowIds array is a selection; only
+// a NUMERIC verseStart is a selection. json_valid guards the json_* calls,
+// which throw on bad JSON; json_type returns NULL for a missing path.
 const CHAPTER_WIDE_TN_TRANSLATE_SQL = `pipeline_type = 'translate'
              AND (options_json IS NULL OR NOT json_valid(options_json)
-                  OR (COALESCE(json_extract(options_json, '$.resourceType'), 'tn') = 'tn'
-                      AND json_extract(options_json, '$.rowIds') IS NULL
-                      AND json_extract(options_json, '$.verseStart') IS NULL))`;
+                  OR ((CASE WHEN json_type(options_json, '$.resourceType') = 'text'
+                            THEN json_extract(options_json, '$.resourceType') ELSE 'tn' END) = 'tn'
+                      AND NOT (COALESCE(json_type(options_json, '$.rowIds'), '') = 'array'
+                               AND json_array_length(options_json, '$.rowIds') > 0)
+                      AND COALESCE(json_type(options_json, '$.verseStart'), '') NOT IN ('integer', 'real')))`;
 
 // Returns the first non-terminal job covering this (book, chapter), or null
 // if the chapter is unlocked. Locks are global — any translator's pipeline
