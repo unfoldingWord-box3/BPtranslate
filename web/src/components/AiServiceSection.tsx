@@ -5,7 +5,7 @@
 // reaches preferences — kept free of prefs-rail dependencies so that's a one-line
 // import move.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Alert,
   Box,
@@ -76,13 +76,31 @@ export function AiServiceSection() {
   // secret leaves a key that looks configured but fails every run (#551 part F).
   const [keyStatus, setKeyStatus] = useState<KeyStatus | null>(null);
 
+  // Only the latest probe may set keyStatus: a slow load-time probe resolving
+  // after the post-Save one would otherwise show a stale warning under a key
+  // that was just saved. `mounted` stops a late answer landing after unmount.
+  const statusSeq = useRef(0);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
   // Best effort: a failed probe shows no warning rather than a wrong one.
   const refreshStatus = () => {
+    const seq = ++statusSeq.current;
+    const isCurrent = () => mounted.current && seq === statusSeq.current;
     setKeyStatus(null);
     api
       .getAiProviderStatus()
-      .then(setKeyStatus)
-      .catch(() => setKeyStatus(null));
+      .then((res) => {
+        if (isCurrent()) setKeyStatus(res);
+      })
+      .catch(() => {
+        if (isCurrent()) setKeyStatus(null);
+      });
   };
 
   // Map a server row into draft fields. provider=default is no longer selectable,
@@ -163,6 +181,9 @@ export function AiServiceSection() {
       if (current) {
         setSettings(current);
         applySettingsToDraft(current);
+        // Another admin may have re-entered (or cleared) the key: re-probe so
+        // the can't-be-read warning matches the reloaded row.
+        refreshStatus();
         setApiKey("");
         setReplacing(false);
       }
