@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { jobLocksChapter, jobLocksChapterNotes, jobLocksNote, noteLockedReadOnly } from "./chapterLock.ts";
+import { jobLocksChapter, jobLocksChapterNotes, jobLocksNote, lockJobReleased, noteLockedReadOnly } from "./chapterLock.ts";
 
 const job = (over = {}) => ({
   book: "ZEC",
@@ -108,4 +108,14 @@ test("jobLocksNote: a chapter-wide translate locks every note in range; other jo
   assert.equal(jobLocksNote(job({ locks_chapter_notes: false }), "ZEC", note()), false);
   assert.equal(jobLocksNote(redraft({ row_ids: ["n1"] }, { state: "queued" }), "ZEC", note()), false);
   assert.equal(jobLocksNote(redraft({ row_ids: ["n1"] }, { state: "done" }), "ZEC", note()), false);
+});
+
+test("lockJobReleased: only a known job that left the locking states releases a refused-save lock", () => {
+  assert.equal(lockJobReleased("j1", [{ job_id: "j1", state: "done" }]), true);
+  assert.equal(lockJobReleased("j1", [{ job_id: "j1", state: "failed" }]), true);
+  assert.equal(lockJobReleased("j1", [{ job_id: "j1", state: "running" }]), false);
+  assert.equal(lockJobReleased("j1", [{ job_id: "j1", state: "paused_for_outage" }]), false);
+  // Absent from the store: a stale tab may not know the job yet, so keep the lock.
+  assert.equal(lockJobReleased("j1", [{ job_id: "j2", state: "done" }]), false);
+  assert.equal(lockJobReleased("j1", []), false);
 });

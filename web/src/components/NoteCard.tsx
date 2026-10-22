@@ -443,7 +443,8 @@ function NoteCardInner({
   const isUnapprovedAiDraft = !translationMode && row.translation_state === "ai_draft";
   const lockUnapproved = isUnapprovedAiDraft && getLockUnapprovedDrafts();
   // A redraft that will write this note locks it like a chapter-wide translate
-  // run, without locking the chapter's other notes (issue #606).
+  // run (issue #606). This adds no lock to the other notes; any keep-mode they
+  // are in comes from the chapter lock (`locked`), as before.
   const noteLocked = locked || rowTranslateLocked;
   const noteLockType = rowTranslateLocked ? "translate" : lockPipelineType;
   const readOnly = trashed || lockUnapproved || noteLockedReadOnly(noteLockType, noteLocked, isPreserved, isHint);

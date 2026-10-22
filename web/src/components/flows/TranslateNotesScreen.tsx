@@ -148,7 +148,7 @@ import { realChapters } from "../../lib/bookSummary";
 import { drafts, rowKey } from "../../sync/drafts";
 import { onOutboxResult, outbox } from "../../sync/outbox";
 import { pipelineStore, getSessionKey, type PipelineJob } from "../../sync/pipelineStore";
-import { jobLocksChapterNotes, jobLocksNote } from "../../lib/chapterLock";
+import { jobLocksChapterNotes, jobLocksNote, lockJobReleased } from "../../lib/chapterLock";
 import {
   api,
   ApiError,
@@ -586,7 +586,16 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   // anyone types, not only after a save is refused. A single-note or
   // verse-range redraft locks only the notes it covers (issue #606).
   const [pipelineJobs, setPipelineJobs] = useState<PipelineJob[]>([]);
-  useEffect(() => pipelineStore.subscribe(setPipelineJobs), []);
+  useEffect(
+    () =>
+      pipelineStore.subscribe((list) => {
+        setPipelineJobs(list);
+        // Drop a refused-save banner once the run it named has finished, so
+        // going back to that note doesn't show a stale lock (issue #606).
+        setChapterLock((prev) => (prev && lockJobReleased(prev.body.jobId, list) ? null : prev));
+      }),
+    [],
+  );
   const translateLockJob = useMemo(
     () => pipelineJobs.find((j) => jobLocksChapterNotes(j, book, chapter)) ?? null,
     [pipelineJobs, book, chapter],

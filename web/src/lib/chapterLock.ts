@@ -71,6 +71,14 @@ export function jobLocksNote(job: LockJobLike, book: string, row: LockNoteLike):
   return true;
 }
 
+// True when the job a 409 chapter_locked named is known to have stopped
+// locking: it is in `jobs` and no longer in a locking state. A job missing from
+// `jobs` is NOT released — a stale tab may simply not have loaded it yet.
+export function lockJobReleased(jobId: string, jobs: ReadonlyArray<{ job_id: string; state: string }>): boolean {
+  const job = jobs.find((j) => j.job_id === jobId);
+  return job != null && !LOCKING_STATES.has(job.state);
+}
+
 function isChapterWideNotesTranslate(job: LockJobLike): boolean {
   return job.pipeline_type === "translate" && job.locks_chapter_notes === true;
 }
