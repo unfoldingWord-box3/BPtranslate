@@ -10,7 +10,7 @@
 // The pipeline menu anchors to the "more" button, never to the overflow item:
 // that item unmounts as soon as the overflow menu closes.
 import { useRef, useState } from "react";
-import { IconButton, ListItemIcon, ListItemText, Menu, MenuItem, Tooltip } from "@mui/material";
+import { IconButton, ListItemIcon, ListItemText, Menu, MenuItem, Snackbar, Tooltip } from "@mui/material";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import MoreVertIcon from "@mui/icons-material/MoreVert";
 import { useTranslation } from "react-i18next";
@@ -24,22 +24,34 @@ type Props = {
   role: Role;
   /** True below the tablet band (theme breakpoint `tablet`, layoutBands.ts). */
   phone: boolean;
-  onMessage?: (msg: string) => void;
   onImported?: () => void;
 };
 
-export function FlowAiRunAction({ book, chapter, role, phone, onMessage, onImported }: Props) {
+export function FlowAiRunAction({ book, chapter, role, phone, onImported }: Props) {
   const { t } = useTranslation();
   const placement = aiRunPlacement(role, phone ? "phone" : "tablet");
   const moreRef = useRef<HTMLButtonElement | null>(null);
   const [moreOpen, setMoreOpen] = useState(false);
+  // Own toast, not the host's: the hosts' save toasts close after 1.4s, too
+  // short to read "This organization has no AI key set up…" and the like.
+  const [msg, setMsg] = useState<string | null>(null);
   if (placement === "hidden") return null;
 
   return (
+    <>
+    <Snackbar
+      open={msg !== null}
+      message={msg ?? ""}
+      autoHideDuration={6000}
+      onClose={() => setMsg(null)}
+      anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
+      // Clear the work screens' bottom action bar.
+      sx={{ bottom: 96 }}
+    />
     <PipelineMenu
       book={book}
       chapter={chapter}
-      onMessage={onMessage}
+      onMessage={setMsg}
       onImported={onImported}
       renderTrigger={(open) =>
         placement === "topbar" ? (
@@ -82,5 +94,6 @@ export function FlowAiRunAction({ book, chapter, role, phone, onMessage, onImpor
         )
       }
     />
+    </>
   );
 }

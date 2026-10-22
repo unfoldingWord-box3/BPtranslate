@@ -1590,7 +1590,6 @@ export default function TranslateQuestionsScreen({
               chapter={chapter}
               role={role}
               phone={!isTabletUp}
-              onMessage={setToast}
               onImported={refetch}
             />
             {/* compact prev/next — the same cursor and disabled logic as the

@@ -602,8 +602,6 @@ export default function PackageHubScreen({ book, role, lastPosition }: PackageHu
   const { summary, summaryStatus } = useBook(book, true);
 
   const [open, setOpen] = useState<ExpandableSurface | null>(null);
-  // Toasts from the header's AI-run menu (#481).
-  const [aiMsg, setAiMsg] = useState<string | null>(null);
   // The AI run's chapter field starts at the chapter last worked on in this
   // book, else 1; its range input ("1-14") covers more of the book.
   const aiChapter = lastPosition && lastPosition.book === book ? Math.max(1, lastPosition.chapter) : 1;
@@ -720,7 +718,6 @@ export default function PackageHubScreen({ book, role, lastPosition }: PackageHu
               chapter={aiChapter}
               role={role}
               phone={!isTabletUp}
-              onMessage={setAiMsg}
             />
           </Stack>
           {/* Progress lives on the lifecycle card below (A4), fed by the A2
@@ -913,7 +910,6 @@ export default function PackageHubScreen({ book, role, lastPosition }: PackageHu
           </>
         )}
       </Box>
-      <Snackbar open={aiMsg != null} autoHideDuration={6000} onClose={() => setAiMsg(null)} message={aiMsg ?? ""} />
     </Box>
   );
 }

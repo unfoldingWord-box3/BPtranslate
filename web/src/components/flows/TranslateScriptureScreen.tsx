@@ -1224,7 +1224,6 @@ export default function TranslateScriptureScreen({
                 chapter={chapter}
                 role={role}
                 phone={!isTabletUp}
-                onMessage={setToast}
               />
               {/* compact prev/next — the same cursor and disabled logic as the
                   bottom buttons (goPrev/goNext), also disabled on the done view
