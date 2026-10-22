@@ -85,7 +85,7 @@ export function AdminDesk({ current, children }: { current: AdminSection; childr
   const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
 
   const go = (hash: string) => {
-    location.hash = hash;
+    location.assign(hash);
     setAnchorEl(null);
   };
 
