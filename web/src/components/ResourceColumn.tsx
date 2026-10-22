@@ -690,7 +690,7 @@ export function ResourceColumn({
       prevPinnedRef.current.notes !== pinned.notes ||
       prevPinnedRef.current.words !== pinned.words ||
       prevPinnedRef.current.questions !== pinned.questions;
-    prevPinnedRef.current = pinned;
+    prevPinnedRef.current = { notes: pinned.notes, words: pinned.words, questions: pinned.questions };
     // The verse-group / verse-end fallbacks below reposition the whole list to
     // a verse boundary. They're meant for navigation (button, verse change, pin
     // toggle) — NOT for incidental re-runs like clearing the active note when a
