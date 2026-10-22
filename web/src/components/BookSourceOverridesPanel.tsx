@@ -152,7 +152,7 @@ export function BookSourceOverridesPanel({ book }: { book: string }) {
     } finally {
       setSaving(false);
     }
-  }, [book, resource, sourceType, isAquifer, dcsPreset, fromCh, toCh, url, refetch, t]);
+  }, [book, resource, isAquifer, dcsPreset, fromCh, toCh, url, refetch, t]);
 
   const handleRemove = useCallback(
     async (o: BookSourceOverride) => {
