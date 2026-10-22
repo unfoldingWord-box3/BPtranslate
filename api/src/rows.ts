@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { Env } from "./index";
 import type { CheckLane, RowKind, TnRow, TqRow, TwlRow } from "./types";
 import { currentUserId, requireEditor } from "./auth.ts";
-import { activePipelineForChapter, lockedResponseBody } from "./chapterLock.ts";
+import { activePipelineForChapter, lockedResponseBody, translateLockForTnRow } from "./chapterLock.ts";
 import { broadcastChapter } from "./wsEvents.ts";
 import { newRowId } from "./rowId.ts";
 import { reopenLaneChecks } from "./laneReopen.ts";
@@ -634,13 +634,21 @@ rows.patch("/:kind/:id", requireEditor, async (c) => {
   // the first PATCH on an updated_by-NULL row implicitly "keeps" it; further
   // PATCHes on already-kept rows are normal edits. A TRANSLATE run ignores
   // keep/hint (applyTranslateTnRow writes its draft over whatever the row
-  // holds at apply time), so during one the chapter's notes are read-only
-  // too (issue #561, decision B).
-  {
+  // holds at apply time), so a note that run will write is read-only until it
+  // finishes (issue #561, decision B). That is every note in a chapter-wide
+  // run (the book intro too when it starts at chapter 1), and only the
+  // selected notes in a row-scoped or verse-ranged redraft.
+  if (kind !== "tn") {
     const lock = await activePipelineForChapter(c.env, current.book, current.chapter);
-    if (lock && (kind !== "tn" || lock.pipelineType === "translate")) {
-      return c.json(lockedResponseBody(lock), 409);
-    }
+    if (lock) return c.json(lockedResponseBody(lock), 409);
+  } else {
+    const lock = await translateLockForTnRow(c.env, current.book as string, {
+      id,
+      chapter: current.chapter as number,
+      verse: current.verse as number,
+      ref_raw: (current.ref_raw as string | null) ?? null,
+    });
+    if (lock) return c.json(lockedResponseBody(lock), 409);
   }
 
   // No-op short-circuit: if the precondition still holds and every patched

@@ -25,7 +25,7 @@ import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 
 import { rows } from "./rows.ts";
-import { activePipelineForChapter } from "./chapterLock.ts";
+import { activePipelineForChapter, parseTranslateScope, translateRunCoversTnRow } from "./chapterLock.ts";
 
 function makeDb(sqlite) {
   const mk = (sql, args) => ({
@@ -67,6 +67,7 @@ function fresh() {
   );
   ins.run("in01", BOOK, 0, 0, "front:intro");
   ins.run("c1v1", BOOK, 1, 1, "1:1");
+  ins.run("c1v5", BOOK, 1, 5, "1:5");
   ins.run("c2v1", BOOK, 2, 1, "2:1");
   sqlite
     .prepare(
@@ -100,13 +101,14 @@ function fresh() {
       env,
       ctx,
     );
-  const job = (pipelineType, start, end, state = "running") =>
+  let n = 0;
+  const job = (pipelineType, start, end, state = "running", options = null) =>
     sqlite
       .prepare(
-        `INSERT INTO pipeline_jobs (job_id, user_id, pipeline_type, book, start_chapter, end_chapter, session_key, state)
-         VALUES (?, 9, ?, ?, ?, ?, 's', ?)`,
+        `INSERT INTO pipeline_jobs (job_id, user_id, pipeline_type, book, start_chapter, end_chapter, session_key, state, options_json, created_at)
+         VALUES (?, 9, ?, ?, ?, ?, 's', ?, ?, ?)`,
       )
-      .run(`${pipelineType}-${start}-${state}`, pipelineType, BOOK, start, end, state);
+      .run(`job-${++n}`, pipelineType, BOOK, start, end, state, options ? JSON.stringify(options) : null, 1000 + n);
   return { sqlite, env, req, job };
 }
 
@@ -167,4 +169,57 @@ test("activePipelineForChapter: chapter 0 is covered only by a translate job tha
   const e = fresh();
   e.job("translate", 1, 1, "done");
   assert.equal(await activePipelineForChapter(e.env, BOOK, 0), null, "a finished job locks nothing");
+});
+
+// A row-scoped or verse-ranged translate redraft ("re-run AI on this note",
+// #300) only writes its own rows, so it locks only those — editing the other
+// notes in the chapter must keep working.
+test("a row-scoped translate redraft locks only the rows it will write", async () => {
+  const { req, job } = fresh();
+  job("translate", 1, 1, "running", { resourceType: "tn", rowIds: ["c1v1"] });
+
+  assert.equal((await req("PATCH", "tn", "c1v1", { note: "human edit" })).status, 409, "the redrafted note is locked");
+  assert.equal((await req("PATCH", "tn", "c1v5", { note: "human edit" })).status, 200, "another note in the chapter stays editable");
+  assert.equal((await req("PATCH", "tn", "in01", { note: "human edit" })).status, 200, "the intro is not in the selection");
+});
+
+test("a row-scoped redraft of the book intro locks the intro", async () => {
+  const { req, job } = fresh();
+  job("translate", 1, 1, "running", { resourceType: "tn", rowIds: ["in01"] });
+  assert.equal((await req("PATCH", "tn", "in01", { note: "human edit" })).status, 409);
+  assert.equal((await req("PATCH", "tn", "c1v1", { note: "human edit" })).status, 200);
+});
+
+test("a verse-ranged translate locks the notes on those verses, not the intro", async () => {
+  const { req, job } = fresh();
+  job("translate", 1, 1, "running", { resourceType: "tn", verseStart: 1, verseEnd: 2 });
+  assert.equal((await req("PATCH", "tn", "c1v1", { note: "human edit" })).status, 409);
+  assert.equal((await req("PATCH", "tn", "c1v5", { note: "human edit" })).status, 200);
+  assert.equal((await req("PATCH", "tn", "in01", { note: "human edit" })).status, 200);
+});
+
+test("a translate run of another resource (tq) does not lock notes", async () => {
+  const { req, job } = fresh();
+  job("translate", 1, 1, "running", { resourceType: "tq" });
+  assert.equal((await req("PATCH", "tn", "c1v1", { note: "human edit" })).status, 200);
+});
+
+test("a chapter-wide run is found even when an older row-scoped job covers the chapter too", async () => {
+  const { req, job } = fresh();
+  job("translate", 1, 1, "running", { resourceType: "tn", rowIds: ["c1v1"] });
+  job("translate", 1, 1, "running", { resourceType: "tn" });
+  assert.equal((await req("PATCH", "tn", "c1v5", { note: "human edit" })).status, 409);
+});
+
+test("translateRunCoversTnRow / parseTranslateScope", () => {
+  const r = (id, chapter, verse, ref_raw) => ({ id, chapter, verse, ref_raw });
+  const all = parseTranslateScope(null);
+  assert.deepEqual(all, { resourceType: "tn", rowIds: null, verseStart: null, verseEnd: null });
+  assert.equal(translateRunCoversTnRow(all, r("a", 1, 3, "1:3")), true);
+  assert.equal(translateRunCoversTnRow(all, r("i", 0, 0, "front:intro")), true);
+  assert.equal(translateRunCoversTnRow(parseTranslateScope("not json"), r("a", 1, 3, "1:3")), true, "unreadable options = whole range");
+  const bridge = parseTranslateScope(JSON.stringify({ verseStart: 4 }));
+  assert.equal(translateRunCoversTnRow(bridge, r("b", 1, 3, "1:3-4")), true, "a bridged note overlapping the range is covered");
+  assert.equal(translateRunCoversTnRow(bridge, r("c", 1, 0, "1:intro")), false, "a chapter intro is not in a verse range");
+  assert.equal(translateRunCoversTnRow(parseTranslateScope(JSON.stringify({ resourceType: "tq" })), r("a", 1, 3, "1:3")), false);
 });
