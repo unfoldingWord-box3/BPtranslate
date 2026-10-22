@@ -52,8 +52,7 @@
     "draftAllDone": "{{n}} modelo(s) redigido(s).",
     "draftAllDonePartial": "{{n}} modelo(s) redigido(s); {{failed}} falharam.",
     "draftAllCancelled": "Interrompido. {{n}} modelo(s) redigido(s).",
-    "draftAllFailed": "Interrompido após falhas repetidas ({{code}}). {{n}} modelo(s) redigido(s).",
-    "draftAllDisabled": "A IA não está configurada — um administrador deve definir BT_API_TOKEN."
+    "draftAllFailed": "Interrompido após falhas repetidas ({{code}}). {{n}} modelo(s) redigido(s)."
   },
   "topbar": {
     "showVerseList": "mostrar lista de versículos",
@@ -632,10 +631,8 @@
     },
     "aiService": {
       "title": "Serviço de IA",
-      "intro": "Escolha qual IA executa as tarefas do pipeline de tradução desta organização (tradução de notas, perguntas, palavras e artigos): a assinatura compartilhada da unfoldingWord, ou seu próprio provedor com sua própria chave de API. Outros recursos de IA, como geração de notas e rascunhos rápidos, sempre usam a assinatura compartilhada da unfoldingWord independentemente desta configuração. Importante: depois de salvar uma chave aqui, ela não pode ser vista novamente, apenas substituída ou apagada.",
       "providerLabel": "Provedor",
       "provider": {
-        "default": "Padrão (assinatura uW)",
         "claude": "Claude (API)",
         "openai": "OpenAI",
         "gemini": "Google Gemini",

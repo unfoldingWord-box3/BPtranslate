@@ -293,7 +293,6 @@
       "noKey": "No AI key: AI translation is off for this organization until an admin adds one.",
       "providerLabel": "Provider",
       "provider": {
-        "default": "Default (uW subscription)",
         "claude": "Claude (API)",
         "openai": "OpenAI",
         "gemini": "Google Gemini",

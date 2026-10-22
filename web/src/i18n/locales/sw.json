@@ -52,8 +52,7 @@
     "draftAllDone": "Violezo {{n}} vimeandaliwa.",
     "draftAllDonePartial": "Violezo {{n}} vimeandaliwa; {{failed}} vimeshindwa.",
     "draftAllCancelled": "Imesimamishwa. Violezo {{n}} vimeandaliwa.",
-    "draftAllFailed": "Imesimamishwa baada ya kushindwa mara kwa mara ({{code}}). Violezo {{n}} vimeandaliwa.",
-    "draftAllDisabled": "AI haijasanidiwa — msimamizi lazima aweke BT_API_TOKEN."
+    "draftAllFailed": "Imesimamishwa baada ya kushindwa mara kwa mara ({{code}}). Violezo {{n}} vimeandaliwa."
   },
   "topbar": {
     "showVerseList": "onyesha orodha ya mistari",
@@ -618,10 +617,8 @@
     },
     "aiService": {
       "title": "Huduma ya AI",
-      "intro": "Chagua AI itakayoendesha michakato ya bomba la tafsiri ya shirika hili (kutafsiri madondoo, maswali, maneno, na makala): usajili wa pamoja wa unfoldingWord, au mtoa huduma wako mwenyewe ukiwa na ufunguo wako wa API. Vipengele vingine vya AI, kama uundaji wa madondoo na rasimu za haraka, hutumia usajili wa pamoja wa unfoldingWord kila wakati bila kujali mpangilio huu. Muhimu: baada ya kuhifadhi ufunguo hapa, hauwezi kuonekana tena — unaweza tu kubadilishwa au kufutwa.",
       "providerLabel": "Mtoa huduma",
       "provider": {
-        "default": "Chaguo-msingi (usajili wa uW)",
         "claude": "Claude (API)",
         "openai": "OpenAI",
         "gemini": "Google Gemini",
