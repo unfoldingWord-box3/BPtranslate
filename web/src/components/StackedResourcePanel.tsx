@@ -77,6 +77,7 @@ export function StackedResourcePanel({
   onQuestionDelete,
   onQuestionCreate,
   locked = false,
+  lockPipelineType = null,
   onSetNotePreserve,
   onSetNoteHint,
   onNoteApprove,
@@ -241,6 +242,7 @@ export function StackedResourcePanel({
       aiRecentlyCompletedAt={noteAiRecentlyCompletedAt?.(r.id) ?? null}
       onVisibilityChange={onNoteVisibilityChange}
       locked={locked}
+      lockPipelineType={lockPipelineType}
       onSetPreserve={onSetNotePreserve ? (value) => onSetNotePreserve(r.id, value) : undefined}
       onSetHint={onSetNoteHint ? (value) => onSetNoteHint(r.id, value) : undefined}
       onTranslateQuote={onNoteTranslateQuote && !isForeign(r) ? (english) => onNoteTranslateQuote(r, english) : undefined}

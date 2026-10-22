@@ -1550,6 +1550,12 @@ export interface PipelineJobRow {
    * them ("requested by X"). Undefined/null on the current user's own rows.
    */
   started_by_username?: string | null;
+  /**
+   * True for a tn translate run with no row or verse selection: it rewrites
+   * every note in its chapters, so they are read-only until it finishes
+   * (issue #561). Set by GET /api/pipelines; seeded on start.
+   */
+  locks_chapter_notes?: boolean;
 }
 
 // Global queue context returned alongside GET /api/pipelines so the chip can

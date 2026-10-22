@@ -379,6 +379,12 @@ export const pipelineStore = {
       last_polled_at: null,
       notified_user_at: null,
       started_by_username: null,
+      // Same rule as the server's isChapterWideTnTranslate (api/src/chapterLock.ts).
+      locks_chapter_notes:
+        req.pipelineType === "translate" &&
+        (req.translate?.resourceType ?? "tn") === "tn" &&
+        !req.translate?.rowIds?.length &&
+        req.translate?.verseStart == null,
     };
     jobs.set(res.jobId, jobs.get(res.jobId) ?? seeded);
     notify();
