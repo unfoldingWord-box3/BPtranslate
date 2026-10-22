@@ -1555,6 +1555,12 @@ export interface PipelineJobRow {
    * (issue #561). Set by GET /api/pipelines; seeded on start.
    */
   locks_chapter_notes?: boolean;
+  /**
+   * For a single-note or verse-range tn translate redraft: which notes it will
+   * write, so just those are read-only until it finishes (issue #606). Null or
+   * absent for every other job. Set by GET /api/pipelines; seeded on start.
+   */
+  note_selection?: { row_ids: string[] | null; verse_start: number | null; verse_end: number | null } | null;
 }
 
 // Global queue context returned alongside GET /api/pipelines so the chip can

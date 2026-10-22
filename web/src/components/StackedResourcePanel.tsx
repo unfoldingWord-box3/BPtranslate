@@ -84,6 +84,7 @@ export function StackedResourcePanel({
   onApproveAllNotes,
   onNoteTranslate,
   translatingNoteIds,
+  translateLockedNoteIds,
   onQuestionApprove,
   onApproveAllQuestions,
   onQuestionTranslate,
@@ -252,6 +253,7 @@ export function StackedResourcePanel({
       onUnapprove={onNoteApprove ? () => onNoteApprove(r.id, false) : undefined}
       onTranslate={onNoteTranslate ? () => onNoteTranslate(r.id) : undefined}
       isTranslating={translatingNoteIds?.has(r.id) ?? false}
+      rowTranslateLocked={translateLockedNoteIds?.has(r.id) ?? false}
     />
   );
 

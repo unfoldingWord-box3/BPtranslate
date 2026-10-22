@@ -121,6 +121,27 @@ export function isChapterWideTnTranslate(pipelineType: string, optionsJson: stri
   return s.resourceType === "tn" && s.rowIds === null && s.verseStart === null;
 }
 
+// The notes a row-scoped or verse-ranged tn translate will write, for the
+// pipeline_jobs list field note_selection (issue #606): the client disables
+// just those notes' buttons up front. Null for every other job — a chapter-wide
+// run is locks_chapter_notes, and a tq/twl run never writes notes. Only the
+// selection leaves the server, never the rest of options_json (hints live there).
+export interface NoteSelection {
+  row_ids: string[] | null;
+  verse_start: number | null;
+  verse_end: number | null;
+}
+
+export function translateNoteSelection(
+  pipelineType: string,
+  optionsJson: string | null | undefined,
+): NoteSelection | null {
+  if (pipelineType !== "translate") return null;
+  const s = parseTranslateScope(optionsJson);
+  if (s.resourceType !== "tn" || (s.rowIds === null && s.verseStart === null)) return null;
+  return { row_ids: s.rowIds, verse_start: s.verseStart, verse_end: s.verseEnd };
+}
+
 // True when a translate job with this scope will write over this tn row on
 // apply. A chapter-wide run covers every row in its range (the book intro
 // included when the range starts at chapter 1 — the caller's query handles

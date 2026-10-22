@@ -28,6 +28,7 @@ import { rows } from "./rows.ts";
 import {
   activePipelineForChapter,
   isChapterWideTnTranslate,
+  translateNoteSelection,
   parseTranslateScope,
   translateRunCoversTnRow,
 } from "./chapterLock.ts";
@@ -298,4 +299,27 @@ test("chapter-wide SQL and isChapterWideTnTranslate agree on odd options", async
   }
   // The case the review named: an empty rowIds array is chapter-wide on both paths.
   assert.equal(isChapterWideTnTranslate("translate", JSON.stringify({ rowIds: [] })), true);
+});
+
+// Issue #606: GET /api/pipelines tells the client which notes a row-scoped or
+// verse-ranged tn translate will write, so the covered note's buttons disable
+// up front. Only a tn translate WITH a selection reports one; a chapter-wide
+// run is already locks_chapter_notes, and a tq run never writes notes.
+test("translateNoteSelection: only a tn translate with a row or verse selection", () => {
+  assert.equal(translateNoteSelection("translate", null), null);
+  assert.equal(translateNoteSelection("translate", "{bad"), null);
+  assert.equal(translateNoteSelection("translate", JSON.stringify({ rowIds: [] })), null);
+  assert.equal(translateNoteSelection("translate", JSON.stringify({ verseStart: "2" })), null);
+  assert.equal(translateNoteSelection("translate", JSON.stringify({ resourceType: "tq", rowIds: ["a"] })), null);
+  assert.equal(translateNoteSelection("notes", JSON.stringify({ rowIds: ["a"] })), null);
+  assert.deepEqual(translateNoteSelection("translate", JSON.stringify({ rowIds: ["a", 7], hint: "secret" })), {
+    row_ids: ["a", "7"],
+    verse_start: null,
+    verse_end: null,
+  });
+  assert.deepEqual(translateNoteSelection("translate", JSON.stringify({ resourceType: "tn", verseStart: 2, verseEnd: 4 })), {
+    row_ids: null,
+    verse_start: 2,
+    verse_end: 4,
+  });
 });

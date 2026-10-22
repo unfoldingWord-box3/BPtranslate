@@ -157,6 +157,10 @@ interface Props {
   onNoteTranslate?: (id: string) => void;
   // Rows with an in-flight single-note / chapter translate run (spinner).
   translatingNoteIds?: Set<string>;
+  // Notes an in-flight translate run will write — a single-note or verse-range
+  // redraft's own notes, or every note under a chapter-wide run. Read-only
+  // until it finishes, since the server refuses edits to them (issue #606).
+  translateLockedNoteIds?: Set<string>;
   // ── Translation mode, tQ analogues ── Approve/un-approve + single-question
   // Translate for translationQuestions. Absent in the English root project.
   onQuestionApprove?: (id: string, value: boolean) => void;
@@ -313,6 +317,7 @@ export function ResourceColumn({
   onApproveAllNotes,
   onNoteTranslate,
   translatingNoteIds,
+  translateLockedNoteIds,
   onQuestionApprove,
   onApproveAllQuestions,
   onQuestionTranslate,
@@ -1098,6 +1103,7 @@ export function ResourceColumn({
           onUnapprove={onNoteApprove ? () => onNoteApprove(r.id, false) : undefined}
           onTranslate={onNoteTranslate ? () => onNoteTranslate(r.id) : undefined}
           isTranslating={translatingNoteIds?.has(r.id) ?? false}
+          rowTranslateLocked={translateLockedNoteIds?.has(r.id) ?? false}
         />
         {showAfter && <DropIndicator />}
       </Fragment>
