@@ -150,6 +150,7 @@ import { jobLocksChapterNotes } from "../../lib/chapterLock";
 import {
   api,
   ApiError,
+  isChapterLockedBody,
   type ChapterLockedBody,
   type TnRow,
   type TqRow,
@@ -1072,6 +1073,10 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) {
         say(t("flowTranslate.approveNeedsDraft"));
+      } else if (err instanceof ApiError && isChapterLockedBody(err.body)) {
+        // A stale tab that missed the translate lock (issue #602).
+        setChapterLock(err.body);
+        say(t("flowTranslate.noteLockedByTranslate"));
       } else {
         say(
           t("flowTranslate.approveFailed", {
@@ -1136,6 +1141,11 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
       setToast(t("flowTranslate.toastNotNeeded"));
       advanceAfter(row.id, "skipped");
     } catch (err) {
+      if (err instanceof ApiError && isChapterLockedBody(err.body)) {
+        setChapterLock(err.body);
+        say(t("flowTranslate.noteLockedByTranslate"));
+        return;
+      }
       say(
         t("flowTranslate.notNeededFailed", {
           status: err instanceof ApiError ? err.status : t("flowTranslate.genericError"),
@@ -2185,7 +2195,9 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
               {t("flowTranslate.redo")}
             </Button>
             <Button
-              disabled={busy || redoing}
+              // A chapter-wide translate run would write the AI draft into the
+              // set-aside note, so the server refuses it (issue #602).
+              disabled={busy || redoing || translateLockJob != null}
               onClick={() => void handleNotNeeded()}
               sx={{
                 flex: 1,
@@ -2200,10 +2212,11 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
               {t("flowTranslate.notNeeded")}
             </Button>
             <Button
-              // An unsaved edit cannot be saved while a chapter-wide translate
-              // run holds the chapter (the server refuses it); it waits in the
-              // draft store until the run finishes (issue #561).
-              disabled={busy || redoing || (translateLockJob != null && hasDiff)}
+              // Neither an unsaved edit nor the approval can land while a
+              // chapter-wide translate run holds the chapter: the run would
+              // undo the approval when it applies, so the server refuses both
+              // (issues #561, #602). Typing waits in the draft store.
+              disabled={busy || redoing || translateLockJob != null}
               onClick={() => void handleApprove()}
               startIcon={<CheckIcon />}
               sx={{
