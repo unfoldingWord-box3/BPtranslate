@@ -71,12 +71,17 @@ export function jobLocksNote(job: LockJobLike, book: string, row: LockNoteLike):
   return true;
 }
 
+// States a job reaches only after it stopped locking. 'queued' is not one: the
+// store can lag the server and still show 'queued' for a job the server has
+// already dispatched and is locking with.
+const RELEASED_STATES = new Set(["done", "failed", "cancelled"]);
+
 // True when the job a 409 chapter_locked named is known to have stopped
-// locking: it is in `jobs` and no longer in a locking state. A job missing from
-// `jobs` is NOT released — a stale tab may simply not have loaded it yet.
+// locking: it is in `jobs` and in a state that follows a lock. A job missing
+// from `jobs` is NOT released — a stale tab may simply not have loaded it yet.
 export function lockJobReleased(jobId: string, jobs: ReadonlyArray<{ job_id: string; state: string }>): boolean {
   const job = jobs.find((j) => j.job_id === jobId);
-  return job != null && !LOCKING_STATES.has(job.state);
+  return job != null && RELEASED_STATES.has(job.state);
 }
 
 function isChapterWideNotesTranslate(job: LockJobLike): boolean {
