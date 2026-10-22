@@ -27,7 +27,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
-import { ERROR_COPY_KEY, errorCopy } from "./aiErrorCopy.ts";
+import { ERROR_COPY_KEY, errorCopy, orgKeyStatusCopyKey } from "./aiErrorCopy.ts";
 
 const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const apiSrc = path.resolve(webRoot, "..", "api", "src");
@@ -149,4 +149,16 @@ test("errorCopy falls back to the unrecognized-error copy for an unknown kind", 
     assert.equal(errorCopy(k, t), `aiStudio.unrecognizedError|${k}`, k);
   }
   assert.equal(errorCopy("rate_limited", t), "aiStudio.errors.rate_limited");
+});
+
+// #551 part E: the AI-studio banner says "No AI key" only when the org has no
+// key. A stored-but-unusable key gets the job-failure copy instead.
+test("orgKeyStatusCopyKey: no-key reasons vs. unusable-key reasons", () => {
+  assert.equal(orgKeyStatusCopyKey(null), null, "available → no banner");
+  assert.equal(orgKeyStatusCopyKey("ai_provider_not_configured"), "preferences.aiService.noKey");
+  assert.equal(orgKeyStatusCopyKey("api_key_missing"), "preferences.aiService.noKey");
+  assert.equal(orgKeyStatusCopyKey("ai_provider_key_decrypt_failed"), ERROR_COPY_KEY.ai_provider_key_decrypt_failed);
+  assert.equal(orgKeyStatusCopyKey("ai_key_encryption_unavailable"), ERROR_COPY_KEY.ai_provider_unavailable);
+  assert.equal(orgKeyStatusCopyKey("model_missing"), ERROR_COPY_KEY.ai_provider_unavailable);
+  assert.equal(orgKeyStatusCopyKey("something_new"), null, "unknown reason → no banner, not a wrong one");
 });

@@ -51,7 +51,7 @@ import {
   isAiProviderNotConfigured,
   PIPELINE_TYPES_NEEDING_ORG_KEY,
 } from "../../lib/aiProviderErrors";
-import { errorCopy } from "../../lib/aiErrorCopy";
+import { errorCopy, orgKeyStatusCopyKey } from "../../lib/aiErrorCopy";
 import {
   api,
   ApiError,
@@ -163,9 +163,10 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
   const [jobs, setJobs] = useState<PipelineJob[]>([]);
   const [jobsUnavailable, setJobsUnavailable] = useState(false);
   const [aiDisabled, setAiDisabled] = useState(false);
-  // This org has no usable AI key (#551 part E). Separate from aiDisabled,
-  // which is the deployment-level "no AI service on this server" state.
-  const [noOrgKey, setNoOrgKey] = useState(false);
+  // i18n key for "this org's AI key is missing or unusable" (#551 part E), or
+  // null. Separate from aiDisabled, which is the deployment-level "no AI
+  // service on this server" state.
+  const [orgKeyCopy, setOrgKeyCopy] = useState<string | null>(null);
   const [pendingCount, setPendingCount] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
   const [retrying, setRetrying] = useState<string | null>(null);
@@ -241,7 +242,7 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
     api
       .getAiProviderStatus()
       .then((res) => {
-        if (!cancelled) setNoOrgKey(!res.available);
+        if (!cancelled) setOrgKeyCopy(res.available ? null : orgKeyStatusCopyKey(res.reason));
       })
       .catch(() => {
         /* best effort */
@@ -386,9 +387,9 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
             </Typography>
           </Alert>
         )}
-        {noOrgKey && role === "editor" && (
+        {orgKeyCopy && role === "editor" && (
           <Alert severity="info" icon={<AutoAwesomeIcon fontSize="small" />}>
-            {t("preferences.aiService.noKey")}
+            {t(orgKeyCopy)}
           </Alert>
         )}
         {lockingJob && (

@@ -59,6 +59,26 @@ export const ERROR_COPY_KEY: Record<PipelineErrorKind, string> = {
   ai_needs_org_key: "aiStudio.errors.ai_needs_org_key",
 };
 
+// i18n key for the AI-studio banner, from GET /api/ai-provider/status's
+// `reason` (#551 part E). "No AI key" only when the org really has none; a key
+// that is stored but unusable gets the copy dispatch would fail the job with
+// (decrypt failure, or ai_provider_unavailable for the other reasons). null =
+// no banner: available, or a reason this build doesn't know.
+export function orgKeyStatusCopyKey(reason: string | null): string | null {
+  switch (reason) {
+    case "ai_provider_not_configured":
+    case "api_key_missing":
+      return "preferences.aiService.noKey";
+    case "ai_provider_key_decrypt_failed":
+      return ERROR_COPY_KEY.ai_provider_key_decrypt_failed;
+    case "ai_key_encryption_unavailable":
+    case "model_missing":
+      return ERROR_COPY_KEY.ai_provider_unavailable;
+    default:
+      return null;
+  }
+}
+
 // `kind` is whatever string the server wrote, so it may be a kind this build
 // doesn't know. Own-property check: a plain index would return Object.prototype
 // members for "constructor" or "toString" and hand a function to t().

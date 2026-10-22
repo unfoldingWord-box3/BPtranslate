@@ -19,7 +19,7 @@ import { z } from "zod";
 import type { Env } from "./index";
 import { requireAdmin, requireEditor, currentUserId } from "./auth.ts";
 import { parseIfMatch } from "./translationMemoryLib.ts";
-import { wrappingKeyAvailable, encryptApiKey } from "./aiKeyCrypto.ts";
+import { wrappingKeyAvailable, encryptApiKey, decryptApiKey } from "./aiKeyCrypto.ts";
 
 // 'default' = no org key configured (what Clear leaves behind); AI features
 // refuse to run in that state (#551). It is a stored/read state only: PUT
@@ -145,9 +145,19 @@ aiProvider.get("/", requireAdmin, async (c) => {
 // with a yes/no and the reason dispatch would refuse with, nothing from the row
 // itself. Deployment-level availability (no bot token and no internal runner)
 // is a separate answer: GET /api/pipelines/:jobId's pipeline_api_disabled.
+// A stored key is only "available" if it actually decrypts, as dispatchNext
+// does: a rotated wrapping secret leaves a key that looks configured but fails
+// every run with ai_provider_key_decrypt_failed. The plaintext is discarded
+// unread and never logged.
 aiProvider.get("/status", requireEditor, async (c) => {
   const ai = resolveDispatchAi(await getAiProviderConfig(c.env.DB), c.env.AI_KEY_WRAPPING_KEY);
-  return c.json(ai.kind === "configured" ? { available: true, reason: null } : { available: false, reason: ai.reason });
+  if (ai.kind === "error") return c.json({ available: false, reason: ai.reason });
+  try {
+    await decryptApiKey(c.env.AI_KEY_WRAPPING_KEY!, ai.ciphertext, ai.iv);
+  } catch {
+    return c.json({ available: false, reason: "ai_provider_key_decrypt_failed" });
+  }
+  return c.json({ available: true, reason: null });
 });
 
 const PutBody = z

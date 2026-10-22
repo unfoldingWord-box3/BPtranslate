@@ -455,6 +455,21 @@ await t("GET /status: a stored key that can't be decrypted is unavailable, with 
   assert.deepEqual(await res.json(), { available: false, reason: "ai_key_encryption_unavailable" });
 });
 
+await t("GET /status: a key encrypted under a since-rotated wrapping secret → ai_provider_key_decrypt_failed", async () => {
+  const db = freshDb();
+  await req(app, baseEnv(db), "PUT", {
+    token: adminTok,
+    ifMatch: 0,
+    body: { provider: "gemini", model: "gemini-3.6-flash", apiKey: PLAINTEXT_KEY },
+  });
+  const rotated = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64");
+  const res = await req(app, baseEnv(db, { wrappingKey: rotated }), "GET", { path: STATUS, token: editorTok });
+  const text = await res.text();
+  assert.equal(res.status, 200);
+  assert.deepEqual(JSON.parse(text), { available: false, reason: "ai_provider_key_decrypt_failed" });
+  assert.ok(!text.includes(PLAINTEXT_KEY));
+});
+
 await t("GET /status on an unmigrated workspace → no key, not a 500", async () => {
   const res = await req(app, baseEnv(freshDb({ withTable: false })), "GET", { path: STATUS, token: editorTok });
   assert.equal(res.status, 200);
