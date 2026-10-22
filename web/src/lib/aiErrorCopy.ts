@@ -90,6 +90,10 @@ export function adminKeyWarningCopyKey(
 ): string | null {
   if (!configured || !status || status.available) return null;
   if (status.reason === "ai_key_encryption_unavailable") return null;
+  // `configured` (publicShape) needs only key_ciphertext; dispatch also needs
+  // key_iv and reports api_key_missing without it. The stored key is unusable
+  // and must be re-entered, the same fix as a decrypt failure.
+  if (status.reason === "api_key_missing") return ERROR_COPY_KEY.ai_provider_key_decrypt_failed;
   const key = orgKeyStatusCopyKey(status.reason);
   return key === "preferences.aiService.noKey" ? null : key;
 }

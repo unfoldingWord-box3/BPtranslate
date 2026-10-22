@@ -177,6 +177,16 @@ test("adminKeyWarningCopyKey: warn only for a stored key the probe says can't be
   assert.equal(adminKeyWarningCopyKey(true, { available: true, reason: null }), null, "usable key → no warning");
   assert.equal(adminKeyWarningCopyKey(true, null), null, "probe not back yet, or failed → no warning");
   assert.equal(adminKeyWarningCopyKey(false, down("ai_provider_not_configured")), null, "no key → the section's own noKey line");
+  // publicShape's `configured` only needs key_ciphertext; resolveDispatchAi
+  // also needs key_iv and says api_key_missing without it. The settings then
+  // read "Configured" while every run fails, so it gets the re-enter warning.
+  assert.equal(
+    adminKeyWarningCopyKey(true, down("api_key_missing")),
+    ERROR_COPY_KEY.ai_provider_key_decrypt_failed,
+    "ciphertext without IV → re-enter warning, not 'Configured'",
+  );
+  // Same row can't be both configured and not_configured; only a race with
+  // another admin's Clear produces it, so no warning rather than a wrong one.
   assert.equal(adminKeyWarningCopyKey(true, down("ai_provider_not_configured")), null, "stale disagreement → no warning");
   assert.equal(
     adminKeyWarningCopyKey(true, down("ai_key_encryption_unavailable")),
