@@ -27,7 +27,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
-import { ERROR_COPY_KEY, errorCopy, orgKeyStatusCopyKey } from "./aiErrorCopy.ts";
+import { ERROR_COPY_KEY, adminKeyWarningCopyKey, errorCopy, orgKeyStatusCopyKey } from "./aiErrorCopy.ts";
 
 const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const apiSrc = path.resolve(webRoot, "..", "api", "src");
@@ -161,4 +161,27 @@ test("orgKeyStatusCopyKey: no-key reasons vs. unusable-key reasons", () => {
   assert.equal(orgKeyStatusCopyKey("ai_key_encryption_unavailable"), ERROR_COPY_KEY.ai_provider_unavailable);
   assert.equal(orgKeyStatusCopyKey("model_missing"), ERROR_COPY_KEY.ai_provider_unavailable);
   assert.equal(orgKeyStatusCopyKey("something_new"), null, "unknown reason → no banner, not a wrong one");
+});
+
+// #551 part F: the admin AI service section showed "Configured" for a stored
+// key that no longer decrypts (wrapping secret rotated). It now reads the same
+// status probe and warns, but only about what it doesn't already show.
+test("adminKeyWarningCopyKey: warn only for a stored key the probe says can't be used", () => {
+  const down = (reason) => ({ available: false, reason });
+  assert.equal(
+    adminKeyWarningCopyKey(true, down("ai_provider_key_decrypt_failed")),
+    ERROR_COPY_KEY.ai_provider_key_decrypt_failed,
+    "the rotated-secret case",
+  );
+  assert.equal(adminKeyWarningCopyKey(true, down("model_missing")), ERROR_COPY_KEY.ai_provider_unavailable);
+  assert.equal(adminKeyWarningCopyKey(true, { available: true, reason: null }), null, "usable key → no warning");
+  assert.equal(adminKeyWarningCopyKey(true, null), null, "probe not back yet, or failed → no warning");
+  assert.equal(adminKeyWarningCopyKey(false, down("ai_provider_not_configured")), null, "no key → the section's own noKey line");
+  assert.equal(adminKeyWarningCopyKey(true, down("ai_provider_not_configured")), null, "stale disagreement → no warning");
+  assert.equal(
+    adminKeyWarningCopyKey(true, down("ai_key_encryption_unavailable")),
+    null,
+    "encryption off → the section's own encryptionUnavailable warning",
+  );
+  assert.equal(adminKeyWarningCopyKey(true, down("something_new")), null);
 });

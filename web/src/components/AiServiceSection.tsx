@@ -25,6 +25,9 @@ import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import SaveIcon from "@mui/icons-material/Save";
 import { useTranslation } from "react-i18next";
 import { api, ApiError, type AiProviderSettings } from "../sync/api";
+import { adminKeyWarningCopyKey } from "../lib/aiErrorCopy";
+
+type KeyStatus = { available: boolean; reason: string | null };
 
 // "default" is not in the picker: it means "no org key", and there is no shared
 // account behind it (#551), so the server refuses it on PUT. Clear (DELETE) is
@@ -68,6 +71,19 @@ export function AiServiceSection() {
   const [replacing, setReplacing] = useState(false);
   const [clearOpen, setClearOpen] = useState(false);
   const [clearing, setClearing] = useState(false);
+  // GET /api/ai-provider/status: `configured` above only says a key is stored;
+  // this says whether it can actually be used (it decrypts). A rotated wrapping
+  // secret leaves a key that looks configured but fails every run (#551 part F).
+  const [keyStatus, setKeyStatus] = useState<KeyStatus | null>(null);
+
+  // Best effort: a failed probe shows no warning rather than a wrong one.
+  const refreshStatus = () => {
+    setKeyStatus(null);
+    api
+      .getAiProviderStatus()
+      .then(setKeyStatus)
+      .catch(() => setKeyStatus(null));
+  };
 
   // Map a server row into draft fields. provider=default is no longer selectable,
   // so treat it as an empty slate pre-filled with Gemini + its first model.
@@ -87,6 +103,7 @@ export function AiServiceSection() {
       const res = await api.getAiProvider();
       setSettings(res);
       applySettingsToDraft(res);
+      refreshStatus();
     } catch {
       setLoadError(true);
     }
@@ -125,6 +142,8 @@ export function AiServiceSection() {
   // Key field and Replace need the wrapping secret; Clear still works without it
   // (server-side Clear wipes the key without needing to encrypt a new one).
   const keyActionsDisabled = !encryptionAvailable;
+  // Shown in place of "Configured •••• hint" when the stored key can't be used.
+  const keyWarning = adminKeyWarningCopyKey(settings.configured, keyStatus);
 
   const handleProviderChange = (next: string) => {
     setDraftProvider(next);
@@ -176,6 +195,7 @@ export function AiServiceSection() {
       const res = await api.putAiProvider(settings.version, body);
       setSettings(res);
       applySettingsToDraft(res);
+      refreshStatus();
       setApiKey("");
       setReplacing(false);
       save.setMsg(t("preferences.saved"));
@@ -192,6 +212,7 @@ export function AiServiceSection() {
       const res = await api.clearAiProvider(settings.version);
       setSettings(res);
       applySettingsToDraft(res);
+      refreshStatus();
       setApiKey("");
       setReplacing(false);
       save.setMsg(t("preferences.saved"));
@@ -258,11 +279,19 @@ export function AiServiceSection() {
           ))}
         </TextField>
 
+        {!showKeyField && keyWarning && (
+          <Alert severity="warning" role="alert">
+            {t(keyWarning)}
+          </Alert>
+        )}
+
         {!showKeyField && (
           <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" gap={1}>
-            <Typography variant="body2">
-              {t("preferences.aiService.configured", { hint: settings.keyHint ?? "" })}
-            </Typography>
+            {!keyWarning && (
+              <Typography variant="body2">
+                {t("preferences.aiService.configured", { hint: settings.keyHint ?? "" })}
+              </Typography>
+            )}
             <Button size="small" onClick={() => setReplacing(true)} disabled={keyActionsDisabled}>
               {t("preferences.aiService.replace")}
             </Button>
