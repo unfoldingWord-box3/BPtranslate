@@ -15,14 +15,15 @@ import tseslint from 'typescript-eslint';
 const preset = reactHooks.configs.flat.recommended;
 
 // Listed by name, not derived, so a preset upgrade's new rules start at "warn".
+// `incompatible-library` and `unsupported-syntax` stay "warn" even at zero
+// cases: the plugin rates them as "compilation skipped" notices, not bugs, so
+// ordinary code (a table/virtualizer hook, a class in a component) would trip them.
 const blocking = [
   'react-hooks/rules-of-hooks',
   'react-hooks/static-components',
   'react-hooks/use-memo',
-  'react-hooks/incompatible-library',
   'react-hooks/error-boundaries',
   'react-hooks/set-state-in-render',
-  'react-hooks/unsupported-syntax',
   'react-hooks/config',
   'react-hooks/gating',
 ];
