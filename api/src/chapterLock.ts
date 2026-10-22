@@ -26,15 +26,26 @@ const NON_TERMINAL = [
   "dispatching",
 ] as const;
 
+// SQL twin of isChapterWideTnTranslate (below), over an unqualified
+// pipeline_jobs row. json_valid guards json_extract, which throws on bad JSON.
+const CHAPTER_WIDE_TN_TRANSLATE_SQL = `pipeline_type = 'translate'
+             AND (options_json IS NULL OR NOT json_valid(options_json)
+                  OR (COALESCE(json_extract(options_json, '$.resourceType'), 'tn') = 'tn'
+                      AND json_extract(options_json, '$.rowIds') IS NULL
+                      AND json_extract(options_json, '$.verseStart') IS NULL))`;
+
 // Returns the first non-terminal job covering this (book, chapter), or null
 // if the chapter is unlocked. Locks are global — any translator's pipeline
 // locks the chapter for everyone, by design.
 //
-// The book introduction (chapter 0, front:intro) is covered by a TRANSLATE job
-// that starts at chapter 1: that job translates the intro too (the same rule
-// as sliceChapterRows, parseOutputEntry's frontInScope and
+// The book introduction (chapter 0, front:intro) is covered by a chapter-wide
+// tn TRANSLATE job that starts at chapter 1: that job translates the intro too
+// (the same rule as sliceChapterRows, parseOutputEntry's frontInScope and
 // applyTranslateTnRow's `chapter = 0 AND start = 1`), so the intro has to be
-// locked with it (issue #561). Other job types never write chapter 0.
+// locked with it (issue #561). Other job types never write chapter 0, and a
+// row-scoped or verse-ranged redraft writes the intro only when it selected it
+// — the tn PATCH check (translateLockForTnRow) handles that per row.
+// Unreadable options_json counts as chapter-wide, as in parseTranslateScope.
 export async function activePipelineForChapter(
   env: Env,
   book: string,
@@ -46,7 +57,7 @@ export async function activePipelineForChapter(
        FROM pipeline_jobs
       WHERE book = ?1
         AND ((start_chapter <= ?2 AND end_chapter >= ?2)
-             OR (?2 = 0 AND start_chapter = 1 AND pipeline_type = 'translate'))
+             OR (?2 = 0 AND start_chapter = 1 AND ${CHAPTER_WIDE_TN_TRANSLATE_SQL}))
         AND state IN (${statePlaceholders})
       ORDER BY created_at ASC
       LIMIT 1`,
@@ -93,6 +104,15 @@ export function parseTranslateScope(optionsJson: string | null | undefined): Tra
     verseStart: typeof o.verseStart === "number" ? o.verseStart : null,
     verseEnd: typeof o.verseEnd === "number" ? o.verseEnd : null,
   };
+}
+
+// A tn translate with no row or verse selection: it rewrites every note in its
+// range. The client uses this (as pipeline_jobs list field
+// locks_chapter_notes) to make the whole chapter's notes read-only.
+export function isChapterWideTnTranslate(pipelineType: string, optionsJson: string | null | undefined): boolean {
+  if (pipelineType !== "translate") return false;
+  const s = parseTranslateScope(optionsJson);
+  return s.resourceType === "tn" && s.rowIds === null && s.verseStart === null;
 }
 
 // True when a translate job with this scope will write over this tn row on

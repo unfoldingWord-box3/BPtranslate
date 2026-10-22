@@ -41,6 +41,7 @@ import { applyContextRef } from "./assistedContextRef.ts";
 import { getLatestSuccessfulContextExport } from "./contextExportResults.ts";
 import { broadcastChapter } from "./wsEvents.ts";
 import { sameDcsName } from "./repoUrl.ts";
+import { isChapterWideTnTranslate } from "./chapterLock.ts";
 import {
   assertLaneWritable,
   type LaneKey,
@@ -2219,7 +2220,7 @@ pipelines.get("/", requireEditor, async (c) => {
             start_chapter, end_chapter, session_key, state, priority,
             current_skill, current_status, error_kind, error_message,
             output_json, follow_up_job_id, created_at, updated_at,
-            last_polled_at, notified_user_at`;
+            last_polled_at, notified_user_at, options_json`;
 
   if (stateList === null) {
     // Default: the live queue is visible to everyone (active + waiting jobs,
@@ -2267,7 +2268,7 @@ pipelines.get("/", requireEditor, async (c) => {
   }
 
   const snap = await queueSnapshot(c.env);
-  const jobs = (rs.results ?? []).map((row) => {
+  const jobs = (rs.results ?? []).map(({ options_json, ...row }) => {
     // Another user's row rides the shared-queue clause. Strip the internal
     // fields the UI never renders for a foreign job (session key, the bot's
     // upstream id, produced output, error detail) so the shared queue only
@@ -2284,11 +2285,18 @@ pipelines.get("/", requireEditor, async (c) => {
             error_message: null,
           }
         : row;
-    if (sanitized.state === "queued") {
-      const pos = snap.positions.get(sanitized.job_id);
-      return { ...sanitized, queue_position: pos?.position ?? null, queue_ahead: pos?.ahead ?? null };
+    // options_json itself stays server-side (a notes run's hints live there);
+    // the client only needs to know whether this run rewrites every note in
+    // its chapters, so it can make them read-only up front (issue #561).
+    const withLock = {
+      ...sanitized,
+      locks_chapter_notes: isChapterWideTnTranslate(row.pipeline_type, options_json),
+    };
+    if (withLock.state === "queued") {
+      const pos = snap.positions.get(withLock.job_id);
+      return { ...withLock, queue_position: pos?.position ?? null, queue_ahead: pos?.ahead ?? null };
     }
-    return sanitized;
+    return withLock;
   });
 
   return c.json({
@@ -2318,6 +2326,7 @@ interface PipelineRowSelect {
   updated_at: number;
   last_polled_at: number | null;
   notified_user_at: number | null;
+  options_json: string | null;
   // Present only on the default (shared-queue) list where we JOIN users, so the
   // UI can attribute another user's run. Absent on the explicit-state branch.
   started_by_username?: string | null;

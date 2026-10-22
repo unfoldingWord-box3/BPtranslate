@@ -25,7 +25,12 @@ import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 
 import { rows } from "./rows.ts";
-import { activePipelineForChapter, parseTranslateScope, translateRunCoversTnRow } from "./chapterLock.ts";
+import {
+  activePipelineForChapter,
+  isChapterWideTnTranslate,
+  parseTranslateScope,
+  translateRunCoversTnRow,
+} from "./chapterLock.ts";
 
 function makeDb(sqlite) {
   const mk = (sql, args) => ({
@@ -222,4 +227,37 @@ test("translateRunCoversTnRow / parseTranslateScope", () => {
   assert.equal(translateRunCoversTnRow(bridge, r("b", 1, 3, "1:3-4")), true, "a bridged note overlapping the range is covered");
   assert.equal(translateRunCoversTnRow(bridge, r("c", 1, 0, "1:intro")), false, "a chapter intro is not in a verse range");
   assert.equal(translateRunCoversTnRow(parseTranslateScope(JSON.stringify({ resourceType: "tq" })), r("a", 1, 3, "1:3")), false);
+});
+
+test("activePipelineForChapter: a row-scoped, verse-ranged or tq translate does not lock the book intro", async () => {
+  for (const options of [
+    { resourceType: "tn", rowIds: ["c1v1"] },
+    { resourceType: "tn", verseStart: 1, verseEnd: 2 },
+    { resourceType: "tq" },
+  ]) {
+    const a = fresh();
+    a.job("translate", 1, 1, "running", options);
+    assert.equal(await activePipelineForChapter(a.env, BOOK, 0), null, JSON.stringify(options));
+    assert.ok(await activePipelineForChapter(a.env, BOOK, 1), "chapter 1 itself is still locked for tq/twl/verses");
+  }
+  const b = fresh();
+  b.job("translate", 1, 1, "running", { resourceType: "tn" });
+  assert.ok(await activePipelineForChapter(b.env, BOOK, 0), "explicit chapter-wide tn options lock the intro");
+  const c = fresh();
+  c.sqlite
+    .prepare(
+      `INSERT INTO pipeline_jobs (job_id, user_id, pipeline_type, book, start_chapter, end_chapter, session_key, state, options_json)
+       VALUES ('bad', 9, 'translate', ?, 1, 1, 's', 'running', 'not json')`,
+    )
+    .run(BOOK);
+  assert.ok(await activePipelineForChapter(c.env, BOOK, 0), "unreadable options count as chapter-wide and do not throw");
+});
+
+test("isChapterWideTnTranslate", () => {
+  assert.equal(isChapterWideTnTranslate("translate", null), true);
+  assert.equal(isChapterWideTnTranslate("translate", JSON.stringify({ resourceType: "tn" })), true);
+  assert.equal(isChapterWideTnTranslate("translate", JSON.stringify({ rowIds: ["a"] })), false);
+  assert.equal(isChapterWideTnTranslate("translate", JSON.stringify({ verseStart: 2 })), false);
+  assert.equal(isChapterWideTnTranslate("translate", JSON.stringify({ resourceType: "tq" })), false);
+  assert.equal(isChapterWideTnTranslate("notes", null), false);
 });
