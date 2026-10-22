@@ -629,13 +629,18 @@ rows.patch("/:kind/:id", requireEditor, async (c) => {
     }
   }
 
-  // Lock check for non-tn kinds. TN edits are always allowed during a run —
+  // Chapter lock. tq/twl have no carve-out: any pipeline writing to this
+  // chapter overwrites them. TN edits stay allowed during a non-translate run —
   // the first PATCH on an updated_by-NULL row implicitly "keeps" it; further
-  // PATCHes on already-kept rows are normal edits. tq/twl have no such
-  // carve-out: any pipeline writing to this chapter overwrites them.
-  if (kind !== "tn") {
+  // PATCHes on already-kept rows are normal edits. A TRANSLATE run ignores
+  // keep/hint (applyTranslateTnRow writes its draft over whatever the row
+  // holds at apply time), so during one the chapter's notes are read-only
+  // too (issue #561, decision B).
+  {
     const lock = await activePipelineForChapter(c.env, current.book, current.chapter);
-    if (lock) return c.json(lockedResponseBody(lock), 409);
+    if (lock && (kind !== "tn" || lock.pipelineType === "translate")) {
+      return c.json(lockedResponseBody(lock), 409);
+    }
   }
 
   // No-op short-circuit: if the precondition still holds and every patched

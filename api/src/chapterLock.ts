@@ -2,7 +2,8 @@
 // for a given (book, chapter), the chapter is read-only for mutations on
 // tn / tq / twl / verses — the AI run will overwrite anything edited mid-flight
 // when it completes. See docs/ai-pipeline-handoff.md (Phase 2c) and the plan
-// for the exemption rules (tn PATCH, /preserve, /hint, legacy /keep alias).
+// for the exemption rules (/preserve, /hint, legacy /keep alias; tn PATCH is
+// exempt only for non-translate runs — issue #561).
 
 import type { Env } from "./index";
 
@@ -27,6 +28,12 @@ const NON_TERMINAL = [
 // Returns the first non-terminal job covering this (book, chapter), or null
 // if the chapter is unlocked. Locks are global — any translator's pipeline
 // locks the chapter for everyone, by design.
+//
+// The book introduction (chapter 0, front:intro) is covered by a TRANSLATE job
+// that starts at chapter 1: that job translates the intro too (the same rule
+// as sliceChapterRows, parseOutputEntry's frontInScope and
+// applyTranslateTnRow's `chapter = 0 AND start = 1`), so the intro has to be
+// locked with it (issue #561). Other job types never write chapter 0.
 export async function activePipelineForChapter(
   env: Env,
   book: string,
@@ -37,7 +44,8 @@ export async function activePipelineForChapter(
     `SELECT job_id, pipeline_type, user_id, created_at
        FROM pipeline_jobs
       WHERE book = ?1
-        AND start_chapter <= ?2 AND end_chapter >= ?2
+        AND ((start_chapter <= ?2 AND end_chapter >= ?2)
+             OR (?2 = 0 AND start_chapter = 1 AND pipeline_type = 'translate'))
         AND state IN (${statePlaceholders})
       ORDER BY created_at ASC
       LIMIT 1`,
