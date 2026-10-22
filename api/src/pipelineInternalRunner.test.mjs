@@ -407,9 +407,36 @@ test("dispatchNext (#551): a queued translate job whose org has no key fails, an
       assert.equal(env.created.length, 0, `${tag}: no Workflow instance`);
       const row = jobRow(sqlite);
       assert.equal(row.state, "failed", `${tag}: the job fails loudly instead of waiting forever`);
-      assert.equal(row.error_kind, "sdk_error", tag);
-      assert.equal(row.error_message, "ai_provider_unavailable: ai_provider_not_configured", tag);
+      // #575: the real reason, so the UI says "an admin should check the AI
+      // settings" instead of "retrying usually fixes this".
+      assert.equal(row.error_kind, "ai_provider_unavailable", tag);
+      assert.equal(row.error_message, "ai_provider_not_configured", tag);
     }
+  }
+});
+
+test("dispatchNext (#575): a queued translate job whose stored key can't be decrypted fails as ai_provider_key_decrypt_failed, and nothing is posted", async () => {
+  for (const mode of [undefined, "internal"]) {
+    const sqlite = freshSqlite();
+    seedQueuedTranslateJob(sqlite);
+    await seedByoKey(sqlite);
+    // The key was wrapped with WRAPPING_KEY; dispatch now holds a different
+    // (valid-length) wrapping key, as after a rotation.
+    const rotated = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64");
+    const env = freshEnv(sqlite, { ...(mode ? { PIPELINE_MODE: mode } : {}), AI_KEY_WRAPPING_KEY: rotated });
+
+    const fetchCount = await withNoFetch(async (count) => {
+      await dispatchNext(env);
+      return count();
+    });
+
+    const tag = `PIPELINE_MODE=${mode ?? "unset"}`;
+    assert.equal(fetchCount, 0, `${tag}: no upstream POST`);
+    assert.equal(env.created.length, 0, `${tag}: no Workflow instance`);
+    const row = jobRow(sqlite);
+    assert.equal(row.state, "failed", tag);
+    assert.equal(row.error_kind, "ai_provider_key_decrypt_failed", tag);
+    assert.equal(row.error_message, "stored provider key could not be decrypted (wrapping key rotated?)", tag);
   }
 });
 
