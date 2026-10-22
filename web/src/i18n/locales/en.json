@@ -289,7 +289,8 @@
     },
     "aiService": {
       "title": "AI service",
-      "intro": "Choose which AI provider runs this org's translation pipeline jobs (translating notes, questions, words, and articles). Gemini is the recommended starting point — enter your own API key to use it. Other AI features, like note generation and quick drafts, always use the shared unfoldingWord subscription regardless of this setting. Important: once you save a key here it cannot be viewed again, only replaced or cleared.",
+      "intro": "Choose which AI provider runs this org's AI translation (notes, questions, words, and articles). It runs on this org's own API key, so the usage is billed to this org. Gemini is the recommended starting point. Important: once you save a key here it cannot be viewed again, only replaced or cleared.",
+      "noKey": "No AI key: AI features are off for this org until you add one.",
       "providerLabel": "Provider",
       "provider": {
         "default": "Default (uW subscription)",

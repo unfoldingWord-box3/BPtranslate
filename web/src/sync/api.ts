@@ -1160,9 +1160,8 @@ export interface AiProviderSettings {
   encryptionAvailable: boolean;
   catalog: AiProviderCatalog;
 }
-export type AiProviderInput =
-  | { provider: "default" }
-  | { provider: string; model: string; apiKey?: string };
+// No `provider: "default"` variant: PUT refuses it (#551). Clear is DELETE.
+export type AiProviderInput = { provider: string; model: string; apiKey?: string };
 
 export interface ContextExportStatus {
   status: string;
@@ -2152,6 +2151,9 @@ export const api = {
 
   // ── Org-wide AI provider config (migration 0065) ──
   getAiProvider: () => request<AiProviderSettings>(`/api/ai-provider`),
+  // Editor-readable "can this org's AI run?" probe (#551 part E).
+  getAiProviderStatus: () =>
+    request<{ available: boolean; reason: string | null }>(`/api/ai-provider/status`),
   putAiProvider: (expectedVersion: number, body: AiProviderInput) =>
     request<AiProviderSettings>(`/api/ai-provider`, {
       method: "PUT",
