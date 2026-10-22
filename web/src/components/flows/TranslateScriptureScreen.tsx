@@ -494,7 +494,6 @@ export default function TranslateScriptureScreen({
         }
       });
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [book, chapter, verseNum, bases]);
 
   // Adopt new SERVER content while the lane is clean (a sibling editor's save,

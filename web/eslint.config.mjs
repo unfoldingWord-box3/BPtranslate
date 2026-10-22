@@ -5,17 +5,38 @@
 // React Compiler rules). No eslint:recommended, no typescript-eslint rule
 // sets; typescript-eslint is here only as the parser.
 //
-// Warn-only for now (product decision on #485: warn first, block later).
-// Every preset rule is forced to "warn", so `npm run lint` exits 0 and CI
-// never blocks on it. Each rule moves to "error" in its own PR once its
-// existing cases are cleaned up.
+// Warn first, block later (product decision on #485). Every preset rule is
+// forced to "warn"; the rules listed in `blocking` are "error" and fail CI.
+// A rule moves into `blocking` in its own PR once its existing cases are
+// cleaned up (#591 promoted the ones that already had zero cases).
 import reactHooks from 'eslint-plugin-react-hooks';
 import tseslint from 'typescript-eslint';
 
 const preset = reactHooks.configs.flat.recommended;
 
-const warnOnly = Object.fromEntries(
-  Object.keys(preset.rules).map((rule) => [rule, 'warn']),
+// Listed by name, not derived, so a preset upgrade's new rules start at "warn".
+// `incompatible-library` and `unsupported-syntax` stay "warn" even at zero
+// cases: the plugin rates them as "compilation skipped" notices, not bugs, so
+// ordinary code (a table/virtualizer hook, a class in a component) would trip them.
+const blocking = [
+  'react-hooks/rules-of-hooks',
+  'react-hooks/static-components',
+  'react-hooks/use-memo',
+  'react-hooks/error-boundaries',
+  'react-hooks/set-state-in-render',
+  'react-hooks/config',
+  'react-hooks/gating',
+];
+
+for (const rule of blocking) {
+  if (!(rule in preset.rules)) throw new Error(`eslint: ${rule} is not in the react-hooks preset`);
+}
+
+const rules = Object.fromEntries(
+  Object.keys(preset.rules).map((rule) => [
+    rule,
+    blocking.includes(rule) ? 'error' : 'warn',
+  ]),
 );
 
 export default [
@@ -32,7 +53,9 @@ export default [
         ecmaFeatures: { jsx: true },
       },
     },
+    // A disable comment that no longer suppresses anything fails lint.
+    linterOptions: { reportUnusedDisableDirectives: 'error' },
     plugins: preset.plugins,
-    rules: warnOnly,
+    rules,
   },
 ];
