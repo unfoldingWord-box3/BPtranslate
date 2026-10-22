@@ -2,7 +2,7 @@
 // docs/ai-pipeline-integration.md). Three pipeline types, ~1h each, run on
 // the bot; we kick off and surface status via the bottom pill.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   Button,
   Menu,
@@ -55,6 +55,13 @@ interface Props {
   onMessage?: (msg: string) => void;
   /** Called after a Door43 import completes so the parent can refetch the chapter. */
   onImported?: () => void;
+  /**
+   * Custom trigger (#481): an icon button in a header row, or an item in a
+   * host's overflow menu. Call `open` with the element the pipeline menu
+   * should anchor to — a stable one, not a menu item that is about to
+   * unmount. Omitted, the menu renders its default outlined "AI" button.
+   */
+  renderTrigger?: (open: (anchor: HTMLElement) => void) => ReactNode;
 }
 
 interface PipelineOption {
@@ -219,7 +226,7 @@ function relativeMinutes(seconds: number): string {
   return `${Math.floor(diff / 3600)}h ${Math.floor((diff % 3600) / 60)} min`;
 }
 
-export function PipelineMenu({ book, chapter, onMessage, onImported }: Props) {
+export function PipelineMenu({ book, chapter, onMessage, onImported, renderTrigger }: Props) {
   const { t } = useTranslation();
   const projectConfig = useProjectConfig();
   // Gateway-language projects also offer "Translate chapter" (drafts the whole
@@ -461,14 +468,18 @@ export function PipelineMenu({ book, chapter, onMessage, onImported }: Props) {
 
   return (
     <>
-      <Button
-        size="small"
-        variant="outlined"
-        startIcon={<AutoAwesomeIcon fontSize="small" />}
-        onClick={(e) => setAnchorEl(e.currentTarget)}
-      >
-        {t("pipeline.aiButton")}
-      </Button>
+      {renderTrigger ? (
+        renderTrigger(setAnchorEl)
+      ) : (
+        <Button
+          size="small"
+          variant="outlined"
+          startIcon={<AutoAwesomeIcon fontSize="small" />}
+          onClick={(e) => setAnchorEl(e.currentTarget)}
+        >
+          {t("pipeline.aiButton")}
+        </Button>
+      )}
       <Menu anchorEl={anchorEl} open={Boolean(anchorEl)} onClose={close}>
         {visibleOptions.map((opt) => {
           const running = runningType(opt.type);
