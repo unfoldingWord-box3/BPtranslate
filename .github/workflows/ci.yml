@@ -34,13 +34,12 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      # React hooks lint (web/eslint.config.mjs). Warn-only for now (#485):
-      # every rule is set to "warn", so this lists problems. continue-on-error
-      # keeps a lint crash or parse error from blocking PRs too; drop it once
-      # the first rule moves to "error".
-      - name: Lint (warn-only)
+      # React hooks lint (web/eslint.config.mjs). Rules in that file's
+      # `blocking` list are "error" and fail this step, as do stale
+      # eslint-disable comments and lint crashes; every other preset rule is
+      # still "warn" (#485, #591) and is only listed.
+      - name: Lint
         run: npm run lint
-        continue-on-error: true
 
       # UI translation coverage. Fails on: a gated locale (see
       # web/src/i18n/coverage.json) missing a key or CLDR plural category, or
