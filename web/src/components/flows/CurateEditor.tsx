@@ -41,6 +41,7 @@ import { useTemplateAiDraft } from "../../hooks/useTemplateAiDraft";
 import { drafts as draftStore, templateKey } from "../../sync/drafts";
 import { ApiError, api, type TemplateUnit } from "../../sync/api";
 import { formatEpochSecondsDateTime } from "../../lib/formatDate";
+import { QUICK_DRAFTS_NEED_ORG_KEY } from "../../lib/aiProviderErrors";
 
 export const CURATE_STATE_LABEL_KEYS: Record<string, string> = {
   ai_draft: "moreTools.curate.stateAiDraft",
@@ -429,13 +430,23 @@ export function CurateEditor({
               ? t("moreTools.curate.savedAt", { time: formatEpochSecondsDateTime(unit.updated_at) })
               : t("moreTools.curate.notSavedYet")}
         </Typography>
-        <Tooltip title={isValidated ? t("moreTools.curate.approvedNoRedraft") : aiDisabledGlobal ? t("moreTools.curate.aiNotConfigured") : ""}>
+        <Tooltip
+          title={
+            QUICK_DRAFTS_NEED_ORG_KEY
+              ? t("ai.needsOrgKey") // #551: can't use the org's own AI key yet
+              : isValidated
+                ? t("moreTools.curate.approvedNoRedraft")
+                : aiDisabledGlobal
+                  ? t("moreTools.curate.aiNotConfigured")
+                  : ""
+          }
+        >
           <span>
             <Button
               size="small"
               variant="outlined"
               startIcon={aiDrafting ? <CircularProgress size={14} color="inherit" /> : <AutoAwesomeIcon sx={{ fontSize: "18px !important" }} />}
-              disabled={dirty || saving || aiDrafting || isValidated || aiDisabledGlobal}
+              disabled={QUICK_DRAFTS_NEED_ORG_KEY || dirty || saving || aiDrafting || isValidated || aiDisabledGlobal}
               onClick={handleDraftWithAi}
               sx={{ minHeight: 44 }}
             >

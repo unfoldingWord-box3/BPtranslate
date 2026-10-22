@@ -53,6 +53,7 @@ import { taShort, parseTaRef } from "../lib/taArticle";
 import { TCM, buildSH } from "../lib/noteTemplates";
 import { getLockUnapprovedDrafts } from "../lib/editorPrefs";
 import { formatEpochSecondsDateTime } from "../lib/formatDate";
+import { QUICK_DRAFTS_NEED_ORG_KEY } from "../lib/aiProviderErrors";
 import { drafts, rowKey, draftDirtyBorderSx } from "../sync/drafts";
 import { isAquiferDraftRow } from "./flows/translateShared";
 
@@ -930,7 +931,7 @@ function NoteCardInner({
   });
 
   const handleAiClick = () => {
-    if (!onStartAi || !aiPrereqsMet || isAiPending) return;
+    if (QUICK_DRAFTS_NEED_ORG_KEY || !onStartAi || !aiPrereqsMet || isAiPending) return;
     if (note.trim().length > 0) {
       setAiConfirmOpen(true);
       return;
@@ -1647,7 +1648,9 @@ function NoteCardInner({
             title={
               isAiPending
                 ? t("noteCard.draftingInBackground")
-                : !onStartAi
+                : QUICK_DRAFTS_NEED_ORG_KEY
+                  ? t("ai.needsOrgKey") // #551: tn-quick can't use the org's own key yet
+                  : !onStartAi
                   ? t("noteCard.aiUnavailable")
                   : !supportRef
                     ? t("noteCard.pickSupportRefFirst")
@@ -1661,7 +1664,7 @@ function NoteCardInner({
                 size="small"
                 variant="text"
                 onClick={handleAiClick}
-                disabled={!onStartAi || !aiPrereqsMet || isAiPending || readOnly}
+                disabled={QUICK_DRAFTS_NEED_ORG_KEY || !onStartAi || !aiPrereqsMet || isAiPending || readOnly}
                 startIcon={
                   isAiPending ? (
                     <CircularProgress size={12} color="inherit" />

@@ -46,7 +46,11 @@ import { PipelineMenu } from "../PipelineMenu";
 import { AiServiceSection } from "../AiServiceSection";
 import { pipelineStore, type PipelineJob } from "../../sync/pipelineStore";
 import { useProjectConfig, isTranslationProject } from "../../hooks/useProjectConfig";
-import { isAiProviderNotConfigured } from "../../lib/aiProviderErrors";
+import {
+  isAiNeedsOrgKey,
+  isAiProviderNotConfigured,
+  PIPELINE_TYPES_NEEDING_ORG_KEY,
+} from "../../lib/aiProviderErrors";
 import { errorCopy } from "../../lib/aiErrorCopy";
 import {
   api,
@@ -278,6 +282,8 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
       // Checked before the bare 409 below, which would misread it as "already running".
       if (isAiProviderNotConfigured(e)) {
         setNotice(t("pipeline.aiKeyNotConfigured"));
+      } else if (isAiNeedsOrgKey(e)) {
+        setNotice(t("ai.needsOrgKey"));
       } else if (e instanceof ApiError && e.status === 503) {
         setAiDisabled(true);
         setNotice(t("aiStudio.retryUnavailable"));
@@ -699,14 +705,21 @@ function JobRowActions({
                 ? t("aiStudio.notConfiguredTitle")
                 : job.pipeline_type === "translate"
                   ? t("aiStudio.cantRetryTranslate")
-                  : ""
+                  : PIPELINE_TYPES_NEEDING_ORG_KEY.has(job.pipeline_type)
+                    ? t("ai.needsOrgKey")
+                    : ""
             }
           >
             <span>
               <Button
                 size="small"
                 onClick={onRetry}
-                disabled={aiDisabled || retrying || job.pipeline_type === "translate"}
+                disabled={
+                  aiDisabled ||
+                  retrying ||
+                  job.pipeline_type === "translate" ||
+                  PIPELINE_TYPES_NEEDING_ORG_KEY.has(job.pipeline_type)
+                }
                 startIcon={retrying ? <CircularProgress size={12} /> : undefined}
               >
                 {t("common.retry")}

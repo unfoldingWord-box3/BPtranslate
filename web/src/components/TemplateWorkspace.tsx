@@ -30,6 +30,7 @@ import { useProjectConfig, isTranslationProject } from "../hooks/useProjectConfi
 import { useTemplates } from "../hooks/useTemplates";
 import { useTemplateAiDraft } from "../hooks/useTemplateAiDraft";
 import { useTemplateBulkDraft } from "../hooks/useTemplateBulkDraft";
+import { AI_NEEDS_ORG_KEY, QUICK_DRAFTS_NEED_ORG_KEY } from "../lib/aiProviderErrors";
 import { MarkdownView } from "./MarkdownView";
 import { TemplateHistoryDialog } from "./TemplateHistoryDialog";
 
@@ -164,7 +165,8 @@ export function TemplateWorkspace({ templateId, onNavigate, onBack }: Props) {
   const bulkMessage = useMemo(() => {
     if (!bulkResult) return null;
     const { drafted, failed, reason, lastErrorCode } = bulkResult;
-    if (reason === "disabled") return t("templates.draftAllDisabled");
+    if (reason === "disabled")
+      return lastErrorCode === AI_NEEDS_ORG_KEY ? t("ai.needsOrgKey") : t("templates.draftAllDisabled");
     if (reason === "aborted_failures")
       return t("templates.draftAllFailed", { n: drafted, code: lastErrorCode ?? "unknown" });
     if (reason === "cancelled") return t("templates.draftAllCancelled", { n: drafted });
@@ -226,15 +228,21 @@ export function TemplateWorkspace({ templateId, onNavigate, onBack }: Props) {
               </Button>
             </Stack>
           ) : draftableUnits.length > 0 ? (
-            <Button
-              size="small"
-              variant="outlined"
-              startIcon={<AutoAwesomeIcon fontSize="small" />}
-              onClick={handleDraftAll}
-              sx={{ alignSelf: "flex-start", fontSize: 11 }}
-            >
-              {t("templates.draftAll", { n: draftableUnits.length })}
-            </Button>
+            // #551: template drafting can't use the org's own AI key yet.
+            <Tooltip title={QUICK_DRAFTS_NEED_ORG_KEY ? t("ai.needsOrgKey") : ""}>
+              <span style={{ alignSelf: "flex-start" }}>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  startIcon={<AutoAwesomeIcon fontSize="small" />}
+                  onClick={handleDraftAll}
+                  disabled={QUICK_DRAFTS_NEED_ORG_KEY}
+                  sx={{ fontSize: 11 }}
+                >
+                  {t("templates.draftAll", { n: draftableUnits.length })}
+                </Button>
+              </span>
+            </Tooltip>
           ) : null}
           {bulkMessage ? (
             <Alert
@@ -622,7 +630,15 @@ function TemplateEditor({ templateId, direction, onServerChange }: EditorProps) 
             <HistoryIcon fontSize="small" />
           </IconButton>
         </Tooltip>
-        <Tooltip title={isValidated ? t("templates.draftDisabledValidated") : ""}>
+        <Tooltip
+          title={
+            QUICK_DRAFTS_NEED_ORG_KEY
+              ? t("ai.needsOrgKey") // #551: can't use the org's own AI key yet
+              : isValidated
+                ? t("templates.draftDisabledValidated")
+                : ""
+          }
+        >
           <span>
             <Button
               size="small"
@@ -634,7 +650,7 @@ function TemplateEditor({ templateId, direction, onServerChange }: EditorProps) 
                   <AutoAwesomeIcon sx={{ fontSize: "18px !important" }} />
                 )
               }
-              disabled={dirty || saving || aiDrafting || isValidated}
+              disabled={QUICK_DRAFTS_NEED_ORG_KEY || dirty || saving || aiDrafting || isValidated}
               onClick={handleDraftWithAi}
             >
               {t("templates.draftWithAi")}

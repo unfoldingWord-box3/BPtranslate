@@ -843,6 +843,9 @@
     "dontShowAgain": "Don't show this again",
     "ok": "OK"
   },
+  "ai": {
+    "needsOrgKey": "This needs your organization's AI key, and it can't use one yet."
+  },
   "pipeline": {
     "aiButton": "AI",
     "generateUltUst": "Generate ULT + UST",
@@ -1561,7 +1564,8 @@
       "merge_failed": "The AI's work couldn't be merged into the chapter, so the chapter was not changed. Running it again will likely fail the same way; please report it to an admin.",
       "merge_shrink_refused": "The AI's result was rejected because it would have removed existing content. The chapter was not changed.",
       "lane_fenced": "The project's source text changed or was locked after this run was queued, so it did not start. Nothing was changed — start a new run.",
-      "pipeline_api_disabled": "The external AI service isn't set up on this server, so this run could not start. An admin needs to check the AI settings."
+      "pipeline_api_disabled": "The external AI service isn't set up on this server, so this run could not start. An admin needs to check the AI settings.",
+      "ai_needs_org_key": "This needs your organization's AI key, and it can't use one yet, so this run did not start. Nothing was changed."
     }
   },
   "flowTranslate": {

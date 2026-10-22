@@ -41,7 +41,11 @@ import type {
 import { getSessionKey, pipelineStore, type PipelineJob } from "../sync/pipelineStore";
 import { currentPipelineUserId } from "../sync/pipelineSession";
 import { parseChapterRange } from "../lib/refParser";
-import { isAiProviderNotConfigured } from "../lib/aiProviderErrors";
+import {
+  isAiNeedsOrgKey,
+  isAiProviderNotConfigured,
+  PIPELINE_TYPES_NEEDING_ORG_KEY,
+} from "../lib/aiProviderErrors";
 import { useTranslation } from "react-i18next";
 import { useProjectConfig, isTranslationProject } from "../hooks/useProjectConfig";
 
@@ -360,6 +364,9 @@ export function PipelineMenu({ book, chapter, onMessage, onImported }: Props) {
         } else if (isAiProviderNotConfigured(e)) {
           onMessage?.(t("pipeline.aiKeyNotConfigured"));
           setConfirm(null);
+        } else if (isAiNeedsOrgKey(e)) {
+          onMessage?.(t("ai.needsOrgKey"));
+          setConfirm(null);
         } else if (e.status === 401) {
           onMessage?.(t("pipeline.signInToStart"));
         } else {
@@ -465,10 +472,13 @@ export function PipelineMenu({ book, chapter, onMessage, onImported }: Props) {
       <Menu anchorEl={anchorEl} open={Boolean(anchorEl)} onClose={close}>
         {visibleOptions.map((opt) => {
           const running = runningType(opt.type);
+          // #551: generate/notes/tqs would bill unfoldingWord's shared account,
+          // so they stay listed but switched off, with the reason as the second line.
+          const needsOrgKey = PIPELINE_TYPES_NEEDING_ORG_KEY.has(opt.type);
           return (
             <MenuItem
               key={opt.key}
-              disabled={Boolean(running)}
+              disabled={Boolean(running) || needsOrgKey}
               onClick={() => {
                 close();
                 setConfirm(opt);
@@ -477,9 +487,11 @@ export function PipelineMenu({ book, chapter, onMessage, onImported }: Props) {
               <ListItemText
                 primary={t(opt.label)}
                 secondary={
-                  running
-                    ? t("pipeline.alreadyRunningState", { state: running.state })
-                    : `${t(opt.description)} ${t(opt.approxDuration)}`
+                  needsOrgKey
+                    ? t("ai.needsOrgKey")
+                    : running
+                      ? t("pipeline.alreadyRunningState", { state: running.state })
+                      : `${t(opt.description)} ${t(opt.approxDuration)}`
                 }
               />
             </MenuItem>

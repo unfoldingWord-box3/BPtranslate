@@ -56,6 +56,7 @@ export const ERROR_COPY_KEY: Record<PipelineErrorKind, string> = {
   // Dispatch-time kinds (pipelines.ts dispatchNext).
   lane_fenced: "aiStudio.errors.lane_fenced",
   pipeline_api_disabled: "aiStudio.errors.pipeline_api_disabled",
+  ai_needs_org_key: "aiStudio.errors.ai_needs_org_key",
 };
 
 // `kind` is whatever string the server wrote, so it may be a kind this build

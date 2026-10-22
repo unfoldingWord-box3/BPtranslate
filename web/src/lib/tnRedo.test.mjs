@@ -53,6 +53,19 @@ test("verse-note redo still requires support_reference and quote", () => {
   );
 });
 
+test("#551 switch-off: verse-note redo (tn-quick) is blocked with the org-key message; intro redo is not", () => {
+  const off = { ...msgs, quickNeedsOrgKey: "needs-org-key" };
+  const complete = {
+    verse: 1,
+    support_reference: "rc://*/ta/man/translate/figs-metaphor",
+    quote: "the word",
+  };
+  assert.equal(tnRedoBlockedReason(complete, off), "needs-org-key");
+  // Before the quote/support-ref hints: no point asking for a quote it can't use.
+  assert.equal(tnRedoBlockedReason({ verse: 1, support_reference: null, quote: null }, off), "needs-org-key");
+  assert.equal(tnRedoBlockedReason({ verse: 0, support_reference: null, quote: null }, off), null);
+});
+
 test("intro redo timeout scales up when start() answers already_running (#376)", () => {
   // A row-scoped Redo that latches onto a broader in-flight chapter job (~1h)
   // must not be flipped to a false `timeout` failure by the 15-minute budget.
