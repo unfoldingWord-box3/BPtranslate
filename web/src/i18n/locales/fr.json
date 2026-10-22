@@ -52,8 +52,7 @@
     "draftAllDone": "{{n}} modèle(s) rédigé(s).",
     "draftAllDonePartial": "{{n}} modèle(s) rédigé(s) ; {{failed}} en échec.",
     "draftAllCancelled": "Arrêté. {{n}} modèle(s) rédigé(s).",
-    "draftAllFailed": "Arrêté après des échecs répétés ({{code}}). {{n}} modèle(s) rédigé(s).",
-    "draftAllDisabled": "L'IA n'est pas configurée — un administrateur doit définir BT_API_TOKEN."
+    "draftAllFailed": "Arrêté après des échecs répétés ({{code}}). {{n}} modèle(s) rédigé(s)."
   },
   "topbar": {
     "showVerseList": "afficher la liste des versets",
@@ -636,10 +635,8 @@
     },
     "aiService": {
       "title": "Service d'IA",
-      "intro": "Choisissez quelle IA exécute les tâches du pipeline de traduction de cette organisation (traduction des notes, questions, mots et articles) : l'abonnement partagé unfoldingWord, ou votre propre fournisseur avec votre propre clé API. Les autres fonctionnalités d'IA, comme la génération de notes et les brouillons rapides, continuent toujours d'utiliser l'abonnement partagé unfoldingWord, quel que soit ce paramètre. Important : une fois la clé enregistrée ici, elle ne peut plus être consultée, seulement remplacée ou effacée.",
       "providerLabel": "Fournisseur",
       "provider": {
-        "default": "Par défaut (abonnement uW)",
         "claude": "Claude (API)",
         "openai": "OpenAI",
         "gemini": "Google Gemini",

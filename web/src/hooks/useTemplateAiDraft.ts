@@ -57,8 +57,8 @@ function classifyTemplateDraftError(err: unknown): TemplateDraftErrorCode | null
 }
 
 // DISPLAY ONLY — rendered as the workspace's error banner. Translated on every
-// call (never at module load) so the active UI language wins. HTTP statuses and
-// BT_API_TOKEN are interpolated/literal, never translated.
+// call (never at module load) so the active UI language wins. HTTP statuses are
+// interpolated, never translated.
 function describeTemplateDraftError(code: TemplateDraftErrorCode, err: unknown): string {
   switch (code) {
     case "disabled":

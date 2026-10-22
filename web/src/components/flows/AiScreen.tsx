@@ -381,9 +381,7 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
           <Alert severity="info" icon={<AutoAwesomeIcon fontSize="small" />}>
             <Typography sx={{ fontWeight: 700, fontSize: "0.9rem" }}>{t("aiStudio.notConfiguredTitle")}</Typography>
             <Typography variant="body2" sx={{ mt: 0.25 }}>
-              {t("aiStudio.notConfiguredBodyBefore")}
-              <code>BT_API_TOKEN</code>
-              {t("aiStudio.notConfiguredBodyAfter")}
+              {t("aiStudio.notConfiguredBody")}
             </Typography>
           </Alert>
         )}

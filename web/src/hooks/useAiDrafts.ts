@@ -75,7 +75,7 @@ export interface StartOptions {
 // stays the logic value (see the 502/model_call_failed retry branch in start()),
 // so nothing ever branches on this prose. Translated inside the function on
 // every call (never at module load) so the active UI language wins; HTTP status
-// codes and BT_API_TOKEN are interpolated/literal, never translated.
+// codes are interpolated, never translated.
 function mapAiError(err: unknown): string {
   if (err instanceof ApiError) {
     const code =

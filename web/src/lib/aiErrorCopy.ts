@@ -79,6 +79,25 @@ export function orgKeyStatusCopyKey(reason: string | null): string | null {
   }
 }
 
+// i18n key for the warning in the admin AI service section (#551 part F): a key
+// is stored (`configured`) but the status probe says it can't be used, e.g. the
+// wrapping secret was rotated and the key no longer decrypts. null when the
+// section already says it another way: no key (its noKey line), encryption off
+// (its encryptionUnavailable warning), or the probe isn't back / failed.
+export function adminKeyWarningCopyKey(
+  configured: boolean,
+  status: { available: boolean; reason: string | null } | null,
+): string | null {
+  if (!configured || !status || status.available) return null;
+  if (status.reason === "ai_key_encryption_unavailable") return null;
+  // `configured` (publicShape) needs only key_ciphertext; dispatch also needs
+  // key_iv and reports api_key_missing without it. The stored key is unusable
+  // and must be re-entered, the same fix as a decrypt failure.
+  if (status.reason === "api_key_missing") return ERROR_COPY_KEY.ai_provider_key_decrypt_failed;
+  const key = orgKeyStatusCopyKey(status.reason);
+  return key === "preferences.aiService.noKey" ? null : key;
+}
+
 // `kind` is whatever string the server wrote, so it may be a kind this build
 // doesn't know. Own-property check: a plain index would return Object.prototype
 // members for "constructor" or "toString" and hand a function to t().

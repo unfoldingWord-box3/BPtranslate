@@ -36,3 +36,32 @@ test("no locale still promises a fallback to the uW subscription", () => {
     assert.doesNotMatch(body, /uW|unfoldingWord/, `${file}: clearConfirmBody still mentions the uW subscription`);
   }
 });
+
+// #551 part F: the shared account is gone, so no copy may point at it. An org
+// admin can't set the server's BT_API_TOKEN, and the "Default (uW subscription)"
+// provider no longer exists. Outdated translations were deleted (they fall back
+// to English) rather than rewritten in languages nobody here can check.
+const allStrings = (obj, out = []) => {
+  for (const v of Object.values(obj)) {
+    if (typeof v === "string") out.push(v);
+    else if (v && typeof v === "object") allStrings(v, out);
+  }
+  return out;
+};
+
+test("no locale tells anyone to set BT_API_TOKEN", () => {
+  for (const file of readdirSync(localesDir).filter((f) => f.endsWith(".json"))) {
+    const hits = allStrings(readLocale(file.replace(/\.json$/, ""))).filter((s) => s.includes("BT_API_TOKEN"));
+    assert.deepEqual(hits, [], `${file}: copy still mentions BT_API_TOKEN`);
+  }
+});
+
+test("no locale keeps the shared-subscription provider label or intro", () => {
+  for (const file of readdirSync(localesDir).filter((f) => f.endsWith(".json"))) {
+    const svc = readLocale(file.replace(/\.json$/, "")).preferences?.aiService;
+    assert.equal(svc?.provider?.default, undefined, `${file}: "Default (uW subscription)" label is still there`);
+    if (svc?.intro !== undefined) {
+      assert.doesNotMatch(svc.intro, /uW|unfoldingWord/, `${file}: AI service intro still mentions the shared subscription`);
+    }
+  }
+});
