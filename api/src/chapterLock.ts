@@ -176,6 +176,45 @@ export async function translateLockForTnRow(
   return null;
 }
 
+// translateLockForTnRow over many rows of one book with a single job query —
+// the admin review-state sweep checks a whole chapter range at once (#602).
+// Same coverage rule: the job's chapter range, plus the book intro for a job
+// starting at chapter 1, then translateRunCoversTnRow for its selection.
+export async function translateLockForTnRows(
+  env: Env,
+  book: string,
+  rows: Array<{ id: string; chapter: number; verse: number; ref_raw: string | null }>,
+): Promise<ActiveLock | null> {
+  if (rows.length === 0) return null;
+  const statePlaceholders = NON_TERMINAL.map((_, i) => `?${i + 2}`).join(", ");
+  const res = await env.DB.prepare(
+    `SELECT job_id, pipeline_type, user_id, created_at, start_chapter, end_chapter, options_json
+       FROM pipeline_jobs
+      WHERE book = ?1 AND pipeline_type = 'translate' AND state IN (${statePlaceholders})
+      ORDER BY created_at ASC`,
+  )
+    .bind(book.toUpperCase(), ...NON_TERMINAL)
+    .all<{
+      job_id: string;
+      pipeline_type: string;
+      user_id: number;
+      created_at: number;
+      start_chapter: number;
+      end_chapter: number;
+      options_json: string | null;
+    }>();
+  for (const j of res.results ?? []) {
+    const scope = parseTranslateScope(j.options_json);
+    const hit = rows.some(
+      (r) =>
+        ((j.start_chapter <= r.chapter && j.end_chapter >= r.chapter) || (r.chapter === 0 && j.start_chapter === 1)) &&
+        translateRunCoversTnRow(scope, r),
+    );
+    if (hit) return { jobId: j.job_id, pipelineType: j.pipeline_type, userId: j.user_id, startedAt: j.created_at };
+  }
+  return null;
+}
+
 // Shape of the 409 body when a write is rejected due to an active lock.
 // The client uses this to render "AI run in progress (started X min ago)"
 // without a second request.

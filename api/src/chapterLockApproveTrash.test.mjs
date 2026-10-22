@@ -231,7 +231,6 @@ test("an approve sweep over a chapter a translate run will write is refused with
 
   assert.equal((await sweep({ resource: "tn", state: "approved", allChapters: true })).status, 409, "a whole-book sweep too");
   assert.equal((await sweep({ resource: "tn", state: "approved", chapter: 1 }, "?dryRun=1")).status, 409, "the dry run says so up front");
-  assert.equal((await sweep({ resource: "tn", state: "approved", chapter: 0 })).status, 409, "the book intro rides with a run starting at chapter 1");
 
   const ok = await sweep({ resource: "tn", state: "approved", chapter: 2 });
   assert.equal(ok.status, 200, "a chapter outside the run can be swept");
@@ -255,8 +254,15 @@ test("an approve sweep is refused only when it reaches a row a row-scoped redraf
   const { sweep, job, sqlite } = fresh();
   job("translate", 1, 1, "running", { resourceType: "tn", rowIds: ["c1v1"] });
   assert.equal((await sweep({ resource: "tn", state: "approved", chapter: 1 })).status, 409, "c1v1 is in chapter 1");
-  assert.equal((await sweep({ resource: "tn", state: "approved", chapter: 0 })).status, 200, "the intro is not selected");
+  assert.equal((await sweep({ resource: "tn", state: "approved", chapter: 2 })).status, 200, "another chapter is not selected");
   // A trashed row is not swept, so it does not block the sweep either.
   sqlite.prepare(`UPDATE tn_rows SET trashed_at = 1 WHERE id = 'c1v1'`).run();
   assert.equal((await sweep({ resource: "tn", state: "approved", chapter: 1 })).status, 200);
+});
+
+test("a whole-book approve sweep is refused when a redraft of the book intro is running", async () => {
+  const { sweep, job } = fresh();
+  job("translate", 1, 1, "running", { resourceType: "tn", rowIds: ["in01"] });
+  assert.equal((await sweep({ resource: "tn", state: "approved", allChapters: true })).status, 409);
+  assert.equal((await sweep({ resource: "tn", state: "approved", chapter: 1 })).status, 200, "chapter 1 holds no selected row");
 });

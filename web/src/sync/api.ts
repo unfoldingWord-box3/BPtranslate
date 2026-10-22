@@ -2009,7 +2009,7 @@ export const api = {
     }),
 
   // Translation-mode "Approve" action. value=true → translation_state
-  // 'validated'; value=false → 'edited' (un-approve). Refused (409
+  // 'validated'; value=false → 'edited' (un-approve). Approving is refused (409
   // chapter_locked) while a translate run will write the note (#602). Non-version-
   // bumping, mirrors setPreserveNote. Returns the updated row so the caller can
   // refresh local state (the collapsed/green treatment keys off the new state).

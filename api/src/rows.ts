@@ -1243,8 +1243,8 @@ rows.post("/tn/:id/hint", requireEditor, async (c) => {
 
 // POST /api/rows/tn/:id/validate — the translation-mode "Approve" action.
 // Body: { value: 0 | 1 | boolean } (1 → validated, 0 → back to edited).
-// Non-version-bumping, idempotent. Refused (409 chapter_locked) while a
-// translate run will write this note (#602). Marks a
+// Non-version-bumping, idempotent. Approving (value=1) is refused (409
+// chapter_locked) while a translate run will write this note (#602). Marks a
 // reviewed AI draft as human-approved so the nightly context export can turn
 // it into a validated few-shot example (PIPELINE-SPEC §4.2).
 rows.post("/tn/:id/validate", requireEditor, async (c) => {
@@ -1265,8 +1265,13 @@ rows.post("/tn/:id/validate", requireEditor, async (c) => {
   // value=1 → validated; value=0 → 'edited' (un-approve keeps it in the
   // reviewed-but-not-validated state rather than pretending it's a fresh draft).
   const nextState = coerceBitValue(parsed.data.value) === 1 ? "validated" : "edited";
-  const lock = await translateLockForTnId(c.env, id, book);
-  if (lock) return c.json(lockedResponseBody(lock), 409);
+  // Only approving is refused during a translate run: the apply would undo it.
+  // Un-approve ("Revoke example") is let through — the apply resets the row to
+  // ai_draft anyway, so refusing it protects nothing.
+  if (nextState === "validated") {
+    const lock = await translateLockForTnId(c.env, id, book);
+    if (lock) return c.json(lockedResponseBody(lock), 409);
+  }
   const updated = await setTnTranslationState(c.env, id, book, userId, nextState);
   if (!updated) return c.json({ error: "not_found" }, 404);
   c.executionCtx.waitUntil(

@@ -87,6 +87,7 @@ import i18n from "../i18n";
 import {
   api,
   ApiError,
+  isChapterLockedBody,
   type ChapterLockedBody,
   type TnRow,
   type TqRow,
@@ -740,6 +741,10 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) {
         say(t("flowReview.queue.approveNeedsDraft"), "warning");
+      } else if (err instanceof ApiError && isChapterLockedBody(err.body)) {
+        // An AI translation will write this note; the server refuses the
+        // approval until it finishes (issue #602).
+        say(t("shell.noteLockedByTranslate"), "warning");
       } else {
         say(t("flowReview.queue.approveFailed", { status: statusOf(err) }), "warning");
       }
@@ -766,7 +771,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
     if (list.length === 0) return;
     setApproveAllProgress({ done: 0, total: list.length });
     let approved = 0;
-    let firstFailure: { row: QueueRow; status: number | null } | null = null;
+    let firstFailure: { row: QueueRow; status: number | null; locked: boolean } | null = null;
     for (let i = 0; i < list.length; i++) {
       const row = list[i];
       try {
@@ -781,7 +786,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
         // client row, a server guard 404) must never abort the rest of the batch (#238).
         const failStatus = err instanceof ApiError ? err.status : null;
         if (!firstFailure) {
-          firstFailure = { row, status: failStatus };
+          firstFailure = { row, status: failStatus, locked: err instanceof ApiError && isChapterLockedBody(err.body) };
         }
         // ...with one exception: 401 (session dead) and 403 (role refused) are
         // properties of the CALLER, not of this row, so they are certain to repeat
@@ -797,10 +802,15 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
     setApproveAllProgress(null);
     if (firstFailure) {
       const st = firstFailure.status;
-      // The validate endpoints are lock-exempt (api/src/rows.ts:1186-1189), so
-      // a 409 here can only be workspace_mismatch, which reloads the page —
-      // there is no reachable "chapter locked by an AI run" case to hint at.
-      const extra = st === 404 ? t("flowReview.queue.approveAllExtraNoDraft") : "";
+      // A 409 is either workspace_mismatch (which reloads the page) or, for a
+      // note, chapter_locked: an AI translation will write it, so the server
+      // refuses the approval until the run finishes (issue #602).
+      const extra =
+        st === 404
+          ? t("flowReview.queue.approveAllExtraNoDraft")
+          : firstFailure.locked
+            ? ` ${t("shell.noteLockedByTranslate")}`
+            : "";
       setApproveAllError(
         t("flowReview.queue.approveAllPartial", {
           ref: refFor(book, firstFailure.row),
@@ -877,6 +887,10 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
           : t("flowReview.queue.movedToTrash"),
       );
     } catch (err) {
+      if (err instanceof ApiError && isChapterLockedBody(err.body)) {
+        say(t("shell.noteLockedByTranslate"), "warning");
+        return;
+      }
       say(t("flowReview.queue.trashFailed", { status: statusOf(err) }), "warning");
     }
   }
