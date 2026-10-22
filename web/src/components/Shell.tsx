@@ -49,6 +49,7 @@ import {
   markLaneFrozen,
 } from "../sync/laneFreeze";
 import { smartEditVerse } from "../lib/replace";
+import { errorCopy } from "../lib/aiErrorCopy";
 import { extractEditableText, extractPlainText, normalizeEditable, SECTION_HEADER_TAGS } from "../lib/usfm";
 import { verseHasUnalignedWork, countUnalignedTargetWords } from "../lib/alignment";
 import {
@@ -1023,7 +1024,7 @@ export function Shell({
             reloadBookChapter?.(0);
           }
         } else if (job.state === "failed" && prev !== "failed") {
-          pushPipelineToast(t("shell.aiFailed", { pipelineType: job.pipeline_type, where, error: job.error_kind ?? t("shell.error") }), "error");
+          pushPipelineToast(t("shell.aiFailed", { pipelineType: job.pipeline_type, where, error: job.error_kind ? errorCopy(job.error_kind, t) : t("shell.error") }), "error");
         }
       }),
     [pushPipelineToast, promptChapterRefresh, reloadBookChapter, book, chapter, mode, hasBookFront, t],

@@ -17,6 +17,7 @@ import {
   type PipelineJobRow,
 } from "../../sync/api";
 import { FlowStatusChip, type FlowStatusKind } from "./FlowStatusChip";
+import { errorCopy } from "../../lib/aiErrorCopy";
 import { Panel, PanelBody, PanelFoot, PanelTop, ListRow } from "./BooksPanel";
 
 function errorText(e: unknown): string {
@@ -209,7 +210,7 @@ export function BooksActivityPanel({ book }: { book: string }) {
                 </Typography>
                 {j.state === "failed" && (j.error_message || j.error_kind) && (
                   <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
-                    {j.error_kind ?? t("flowBooks.activity.errorKindFallback")}:{" "}
+                    {j.error_kind ? errorCopy(j.error_kind, t) : t("flowBooks.activity.errorKindFallback")}{" — "}
                     {j.error_message ?? t("flowBooks.activity.noMessage")}
                   </Typography>
                 )}

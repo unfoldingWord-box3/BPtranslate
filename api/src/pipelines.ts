@@ -686,14 +686,16 @@ export async function dispatchNext(env: Env): Promise<void> {
     const row = await getAiProviderConfig(env.DB);
     const ai = resolveDispatchAi(row, env.AI_KEY_WRAPPING_KEY);
     if (ai.kind === "error") {
-      await fail("sdk_error", `ai_provider_unavailable: ${ai.reason}`);
+      // Same kind + message as the internal runner (translate/workflowSteps.ts),
+      // so the UI shows "an admin should check the AI settings" (#575).
+      await fail("ai_provider_unavailable", ai.reason);
       return;
     }
     dispatchAi = ai;
     try {
       aiApiKey = await decryptApiKey(env.AI_KEY_WRAPPING_KEY!, ai.ciphertext, ai.iv);
     } catch {
-      await fail("sdk_error", "ai_provider_key_decrypt_failed");
+      await fail("ai_provider_key_decrypt_failed", "stored provider key could not be decrypted (wrapping key rotated?)");
       return;
     }
     aiProvider = ai.provider;
