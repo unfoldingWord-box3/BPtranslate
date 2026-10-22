@@ -51,7 +51,7 @@ import {
   isAiProviderNotConfigured,
   PIPELINE_TYPES_NEEDING_ORG_KEY,
 } from "../../lib/aiProviderErrors";
-import { errorCopy } from "../../lib/aiErrorCopy";
+import { errorCopy, orgKeyStatusCopyKey } from "../../lib/aiErrorCopy";
 import {
   api,
   ApiError,
@@ -163,6 +163,10 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
   const [jobs, setJobs] = useState<PipelineJob[]>([]);
   const [jobsUnavailable, setJobsUnavailable] = useState(false);
   const [aiDisabled, setAiDisabled] = useState(false);
+  // i18n key for "this org's AI key is missing or unusable" (#551 part E), or
+  // null. Separate from aiDisabled, which is the deployment-level "no AI
+  // service on this server" state.
+  const [orgKeyCopy, setOrgKeyCopy] = useState<string | null>(null);
   const [pendingCount, setPendingCount] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
   const [retrying, setRetrying] = useState<string | null>(null);
@@ -223,6 +227,25 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
           const body = err.body as { error?: string } | undefined;
           if (body?.error === "pipeline_api_disabled") setAiDisabled(true);
         }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [role]);
+
+  // Org-level probe: does this org have a usable AI key? Only editors need it
+  // as a banner; admins get the same line inside AiServiceSection below, which
+  // also updates live on Save / Clear key. A failed probe shows nothing.
+  useEffect(() => {
+    if (role !== "editor") return;
+    let cancelled = false;
+    api
+      .getAiProviderStatus()
+      .then((res) => {
+        if (!cancelled) setOrgKeyCopy(res.available ? null : orgKeyStatusCopyKey(res.reason));
+      })
+      .catch(() => {
+        /* best effort */
       });
     return () => {
       cancelled = true;
@@ -362,6 +385,11 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
               <code>BT_API_TOKEN</code>
               {t("aiStudio.notConfiguredBodyAfter")}
             </Typography>
+          </Alert>
+        )}
+        {orgKeyCopy && role === "editor" && (
+          <Alert severity="info" icon={<AutoAwesomeIcon fontSize="small" />}>
+            {t(orgKeyCopy)}
           </Alert>
         )}
         {lockingJob && (

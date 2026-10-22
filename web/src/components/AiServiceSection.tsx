@@ -26,9 +26,10 @@ import SaveIcon from "@mui/icons-material/Save";
 import { useTranslation } from "react-i18next";
 import { api, ApiError, type AiProviderSettings } from "../sync/api";
 
-// Temporary: hide the shared uW subscription ("default") from the picker and
-// steer orgs toward Gemini (bsoj has a key; Gemini/Grok have been strongest for
-// translation). Backend still accepts provider=default / Clear → default.
+// "default" is not in the picker: it means "no org key", and there is no shared
+// account behind it (#551), so the server refuses it on PUT. Clear (DELETE) is
+// what leaves the org on it. Gemini is the suggested starting point for a new
+// key (bsoj has a key; Gemini/Grok have been strongest for translation).
 const PROVIDER_ORDER = ["gemini", "xai", "claude", "openai"] as const;
 const UI_DEFAULT_PROVIDER = "gemini" as const;
 
@@ -212,6 +213,15 @@ export function AiServiceSection() {
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
         {t("preferences.aiService.intro")}
       </Typography>
+
+      {/* `configured` = a usable key is stored (server's publicShape), so this
+          also covers a never-written row and the moment after Clear key. The
+          form below keeps its Gemini pre-fill as the start for a new key. */}
+      {!settings.configured && (
+        <Alert severity="info" sx={{ mb: 2 }}>
+          {t("preferences.aiService.noKey")}
+        </Alert>
+      )}
 
       {!encryptionAvailable && (
         <Alert severity="warning" sx={{ mb: 2 }}>

@@ -110,7 +110,7 @@ function buildApp() {
 const PATH = "/api/ai-provider";
 
 // Fires a request with the auth cookie and (for writes) the CSRF pair wired.
-function req(app, env, method, { token, body, ifMatch } = {}) {
+function req(app, env, method, { token, body, ifMatch, path = PATH } = {}) {
   const cookies = [];
   const headers = {};
   if (token) cookies.push(`be_access=${token}`);
@@ -125,7 +125,7 @@ function req(app, env, method, { token, body, ifMatch } = {}) {
     headers["content-type"] = "application/json";
     init.body = JSON.stringify(body);
   }
-  return app.request(PATH, init, env);
+  return app.request(path, init, env);
 }
 
 const storedRow = (db) => db.prepare("SELECT * FROM ai_provider_config WHERE id = 1").get() ?? null;
@@ -312,7 +312,7 @@ await t("BYO provider on a virgin row without a key → 400 api_key_required", a
 
 // ── Body validation ─────────────────────────────────────────────────────────
 
-await t("validation: unknown model, missing model, unknown provider, extra fields, default+extras", async () => {
+await t("validation: unknown model, missing model, unknown provider, extra fields", async () => {
   const env = () => baseEnv(freshDb());
 
   const unknownModel = await req(app, env(), "PUT", {
@@ -347,29 +347,44 @@ await t("validation: unknown model, missing model, unknown provider, extra field
   assert.equal(extra.status, 400, "strict() rejects unknown fields");
   assert.equal((await extra.json()).error, "validation_failed");
 
-  const defaultWithModel = await req(app, env(), "PUT", {
-    token: adminTok,
-    ifMatch: 0,
-    body: { provider: "default", model: "claude-sonnet-5" },
-  });
-  assert.equal(defaultWithModel.status, 400);
-  assert.equal((await defaultWithModel.json()).error, "unexpected_fields");
-
-  const defaultWithKey = await req(app, env(), "PUT", {
-    token: adminTok,
-    ifMatch: 0,
-    body: { provider: "default", apiKey: PLAINTEXT_KEY },
-  });
-  assert.equal(defaultWithKey.status, 400);
-  assert.equal((await defaultWithKey.json()).error, "unexpected_fields");
 });
 
-// ── Clear: PUT default and DELETE share one path ────────────────────────────
+// ── PUT provider:"default" is refused (#551 part E) ─────────────────────────
+// "default" means "no org key", and there is no shared account behind it, so
+// it is not something an admin can choose. DELETE is the only way to clear.
 
-for (const [label, clear] of [
-  ["PUT provider:default", (env) => req(app, env, "PUT", { token: adminTok, ifMatch: 1, body: { provider: "default" } })],
-  ["DELETE", (env) => req(app, env, "DELETE", { token: adminTok, ifMatch: 1 })],
+for (const [label, body] of [
+  ["bare", { provider: "default" }],
+  ["with a model", { provider: "default", model: "claude-sonnet-5" }],
+  ["with a key", { provider: "default", apiKey: PLAINTEXT_KEY }],
 ]) {
+  await t(`PUT provider:default (${label}) → 400 default_provider_not_allowed, stored key untouched`, async () => {
+    const db = freshDb();
+    const env = baseEnv(db);
+    await req(app, env, "PUT", {
+      token: adminTok,
+      ifMatch: 0,
+      body: { provider: "claude", model: "claude-sonnet-5", apiKey: PLAINTEXT_KEY },
+    });
+    const before = storedRow(db);
+    const res = await req(app, env, "PUT", { token: adminTok, ifMatch: 1, body });
+    assert.equal(res.status, 400);
+    assert.equal((await res.json()).error, "default_provider_not_allowed");
+    assert.deepEqual(storedRow(db), before, "a refused PUT changes nothing");
+  });
+}
+
+await t("PUT provider:default on a never-written row → 400, no row created", async () => {
+  const db = freshDb();
+  const res = await req(app, baseEnv(db), "PUT", { token: adminTok, ifMatch: 0, body: { provider: "default" } });
+  assert.equal(res.status, 400);
+  assert.equal((await res.json()).error, "default_provider_not_allowed");
+  assert.equal(storedRow(db), null);
+});
+
+// ── Clear: DELETE ───────────────────────────────────────────────────────────
+
+for (const [label, clear] of [["DELETE", (env) => req(app, env, "DELETE", { token: adminTok, ifMatch: 1 })]]) {
   await t(`${label} NULLs the key columns, keeps the row, and bumps version`, async () => {
     const db = freshDb();
     const env = baseEnv(db);
@@ -395,6 +410,71 @@ for (const [label, clear] of [
     assert.equal(row.model, null);
   });
 }
+
+// ── Availability probe: GET /status (#551 part E) ───────────────────────────
+
+const STATUS = `${PATH}/status`;
+const NOT_CONFIGURED_STATUS = { available: false, reason: "ai_provider_not_configured" };
+
+await t("GET /status: 401 anon; editors and admins may read it", async () => {
+  const env = baseEnv(freshDb());
+  assert.equal((await req(app, env, "GET", { path: STATUS })).status, 401);
+  assert.equal((await req(app, env, "GET", { path: STATUS, token: editorTok })).status, 200);
+  assert.equal((await req(app, env, "GET", { path: STATUS, token: adminTok })).status, 200);
+});
+
+await t("GET /status reports a missing org key: no row, after a key is saved, after Clear", async () => {
+  const db = freshDb();
+  const env = baseEnv(db);
+  const status = async () => (await req(app, env, "GET", { path: STATUS, token: editorTok })).json();
+
+  assert.deepEqual(await status(), NOT_CONFIGURED_STATUS, "never-written row = no key");
+
+  await req(app, env, "PUT", {
+    token: adminTok,
+    ifMatch: 0,
+    body: { provider: "gemini", model: "gemini-3.6-flash", apiKey: PLAINTEXT_KEY },
+  });
+  const configured = await req(app, env, "GET", { path: STATUS, token: editorTok });
+  const text = await configured.text();
+  assert.deepEqual(JSON.parse(text), { available: true, reason: null });
+  assert.ok(!text.includes(PLAINTEXT_KEY) && !text.includes(storedRow(db).key_ciphertext), "nothing from the row leaks");
+
+  await req(app, env, "DELETE", { token: adminTok, ifMatch: 1 });
+  assert.deepEqual(await status(), NOT_CONFIGURED_STATUS, "Clear puts the org back to no key");
+});
+
+await t("GET /status: a stored key that can't be decrypted is unavailable, with the reason", async () => {
+  const db = freshDb();
+  await req(app, baseEnv(db), "PUT", {
+    token: adminTok,
+    ifMatch: 0,
+    body: { provider: "gemini", model: "gemini-3.6-flash", apiKey: PLAINTEXT_KEY },
+  });
+  const res = await req(app, baseEnv(db, { wrappingKey: undefined }), "GET", { path: STATUS, token: editorTok });
+  assert.deepEqual(await res.json(), { available: false, reason: "ai_key_encryption_unavailable" });
+});
+
+await t("GET /status: a key encrypted under a since-rotated wrapping secret → ai_provider_key_decrypt_failed", async () => {
+  const db = freshDb();
+  await req(app, baseEnv(db), "PUT", {
+    token: adminTok,
+    ifMatch: 0,
+    body: { provider: "gemini", model: "gemini-3.6-flash", apiKey: PLAINTEXT_KEY },
+  });
+  const rotated = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64");
+  const res = await req(app, baseEnv(db, { wrappingKey: rotated }), "GET", { path: STATUS, token: editorTok });
+  const text = await res.text();
+  assert.equal(res.status, 200);
+  assert.deepEqual(JSON.parse(text), { available: false, reason: "ai_provider_key_decrypt_failed" });
+  assert.ok(!text.includes(PLAINTEXT_KEY));
+});
+
+await t("GET /status on an unmigrated workspace → no key, not a 500", async () => {
+  const res = await req(app, baseEnv(freshDb({ withTable: false })), "GET", { path: STATUS, token: editorTok });
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), NOT_CONFIGURED_STATUS);
+});
 
 await t("a stale DELETE → 409, key left intact", async () => {
   const db = freshDb();
@@ -427,8 +507,9 @@ await t("no wrapping secret → 503 on a PUT carrying a key, encryptionAvailable
   assert.equal((await res.json()).error, "ai_key_encryption_unavailable");
   assert.equal(storedRow(db), null, "no half-written row");
 
-  // A key-free write still works — model selection isn't gated on encryption.
-  const clear = await req(app, env, "PUT", { token: adminTok, ifMatch: 0, body: { provider: "default" } });
+  // Clear still works without the wrapping secret: it writes no key, so it
+  // needs nothing encrypted.
+  const clear = await req(app, env, "DELETE", { token: adminTok, ifMatch: 0 });
   assert.equal(clear.status, 200);
 });
 
