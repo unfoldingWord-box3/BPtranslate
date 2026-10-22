@@ -56,6 +56,7 @@ import { formatEpochSecondsDateTime } from "../lib/formatDate";
 import { QUICK_DRAFTS_NEED_ORG_KEY } from "../lib/aiProviderErrors";
 import { drafts, rowKey, draftDirtyBorderSx } from "../sync/drafts";
 import { isAquiferDraftRow } from "./flows/translateShared";
+import { noteLockedReadOnly } from "../lib/chapterLock";
 
 const NoteHistoryDialog = lazy(() =>
   import("./NoteHistoryDialog").then((m) => ({ default: m.NoteHistoryDialog })),
@@ -139,8 +140,10 @@ interface Props {
   onVisibilityChange?: (rowId: string, isVisible: boolean) => void;
   // Chapter has an active AI pipeline (state from pipelineStore). When true
   // and the row is neither preserved nor a hint, the card is read-only.
-  // Preserved or hinted rows stay editable even during a run.
+  // Preserved or hinted rows stay editable during a non-translate run.
   locked?: boolean;
+  // Pipeline type of the job holding the lock (see lib/chapterLock.ts).
+  lockPipelineType?: string | null;
   // Toggle the row's "survive future AI pipeline sweeps" bit. Always
   // available — these are pre-run intent signals, not in-run claims.
   // Fires POST /api/rows/tn/:id/preserve upstream.
@@ -391,6 +394,7 @@ function NoteCardInner({
   onStartAi,
   onVisibilityChange,
   locked = false,
+  lockPipelineType = null,
   onSetPreserve,
   onSetHint,
   onTranslateQuote,
@@ -413,7 +417,8 @@ function NoteCardInner({
   // Two explicit bits drive lock-time behavior now:
   //   - preserve=1: translator marked this row "survive AI runs"
   //   - hint=1:    this row is a stub queued for AI expansion in place
-  // Either bit keeps the card editable during a locked chapter. The legacy
+  // Either bit keeps the card editable during a locked chapter, except under a
+  // translate run, which overwrites every note it covers (issue #561). The legacy
   // implicit "kept = updated_by IS NOT NULL" signal is folded into the
   // preserve bit on the server (see rows.ts /keep alias).
   const isPreserved = row.preserve === 1;
@@ -432,7 +437,7 @@ function NoteCardInner({
   // when the flag is off, Editor mode behaves exactly as before. See editorPrefs.ts.
   const isUnapprovedAiDraft = !translationMode && row.translation_state === "ai_draft";
   const lockUnapproved = isUnapprovedAiDraft && getLockUnapprovedDrafts();
-  const readOnly = trashed || lockUnapproved || (locked && !isPreserved && !isHint);
+  const readOnly = trashed || lockUnapproved || noteLockedReadOnly(lockPipelineType, locked, isPreserved, isHint);
   const [quote, setQuote] = useState(tsvToDisplay(row.quote));
   const [note, setNote] = useState(tsvToDisplay(row.note));
   // Find-highlight: the active match note shows a read view (with the match
@@ -2127,6 +2132,7 @@ function areNotePropsEqual(a: Props, b: Props): boolean {
     a.isAiPending === b.isAiPending &&
     a.aiRecentlyCompletedAt === b.aiRecentlyCompletedAt &&
     a.locked === b.locked &&
+    (a.lockPipelineType ?? null) === (b.lockPipelineType ?? null) &&
     a.quoteBuildMode === b.quoteBuildMode &&
     a.quoteBuildSelectionCount === b.quoteBuildSelectionCount &&
     (a.flashArrow ?? null) === (b.flashArrow ?? null) &&

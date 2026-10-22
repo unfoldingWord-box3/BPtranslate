@@ -52,6 +52,7 @@ import { smartEditVerse } from "../lib/replace";
 import { errorCopy } from "../lib/aiErrorCopy";
 import { extractEditableText, extractPlainText, normalizeEditable, SECTION_HEADER_TAGS } from "../lib/usfm";
 import { verseHasUnalignedWork, countUnalignedTargetWords } from "../lib/alignment";
+import { jobLocksChapter, jobLocksChapterNotes } from "../lib/chapterLock";
 import {
   analyzeAlignmentDelta,
   guardBlocksSave,
@@ -1054,25 +1055,23 @@ export function Shell({
 
   // Derive the chapter lock from active pipeline jobs. Any non-terminal job
   // whose scope covers this (book, chapter) locks the editor; the banner
-  // surfaces the started-at time and the TN cards switch to keep-mode.
+  // surfaces the started-at time. Under a chapter-wide translate run every TN
+  // card is read-only; under other runs the cards switch to keep-mode
+  // (issue #561).
   const [activeJobs, setActiveJobs] = useState<PipelineJob[]>([]);
   useEffect(() => pipelineStore.subscribe(setActiveJobs), []);
   const chapterLock = useMemo(() => {
-    const found = activeJobs.find(
-      (j) =>
-        j.book === book &&
-        j.start_chapter <= chapter &&
-        j.end_chapter >= chapter &&
-        (j.state === "running" ||
-          j.state === "paused_for_outage" ||
-          j.state === "paused_for_usage_limit" ||
-          j.state === "dispatching"),
-    );
+    // jobLocksChapter mirrors the server rule, including the book intro
+    // (chapter 0) being covered by a translate job that starts at chapter 1.
+    // A run that locks every note wins, so the banner names it.
+    const notesJob = activeJobs.find((j) => jobLocksChapterNotes(j, book, chapter));
+    const found = notesJob ?? activeJobs.find((j) => jobLocksChapter(j, book, chapter));
     if (!found) return null;
     return {
       jobId: found.job_id,
       pipelineType: found.pipeline_type,
       startedAt: found.created_at,
+      locksAllNotes: Boolean(notesJob),
     };
   }, [activeJobs, book, chapter]);
 
@@ -3596,6 +3595,7 @@ export function Shell({
       void outbox.enqueueDeleteRow("tq", id, row.version, row.book);
     },
     locked: Boolean(chapterLock),
+    lockPipelineType: chapterLock?.locksAllNotes ? "translate" : null,
     onSetNotePreserve: handleSetNotePreserve,
     onSetNoteHint: handleSetNoteHint,
     onNoteApprove: handleApproveNote,
@@ -4221,7 +4221,7 @@ export function Shell({
             "& .MuiAlert-message": { width: "100%" },
           }}
         >
-          {t("shell.chapterLockBanner", {
+          {t(chapterLock.locksAllNotes ? "shell.chapterLockBannerTranslate" : "shell.chapterLockBanner", {
             pipelineType: chapterLock.pipelineType,
             book,
             chapter,

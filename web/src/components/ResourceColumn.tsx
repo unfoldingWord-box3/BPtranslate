@@ -137,6 +137,9 @@ interface Props {
   // Chapter is locked for editing because an AI pipeline is mid-flight.
   // Hides "new" buttons, propagates read-only to children.
   locked?: boolean;
+  // Pipeline type of the job holding the lock. A translate run makes every
+  // note read-only, kept and hint notes included (issue #561).
+  lockPipelineType?: string | null;
   // Toggle the TN's preserve bit ("survive future AI pipeline sweeps").
   // Threaded through to NoteCard. Always available, regardless of lock.
   onSetNotePreserve?: (id: string, value: boolean) => void;
@@ -303,6 +306,7 @@ export function ResourceColumn({
   onQuestionDelete,
   onQuestionCreate,
   locked = false,
+  lockPipelineType = null,
   onSetNotePreserve,
   onSetNoteHint,
   onNoteApprove,
@@ -1072,6 +1076,7 @@ export function ResourceColumn({
           aiRecentlyCompletedAt={noteAiRecentlyCompletedAt?.(r.id) ?? null}
           onVisibilityChange={onNoteVisibilityChange}
           locked={locked}
+          lockPipelineType={lockPipelineType}
           onSetPreserve={
             onSetNotePreserve ? (value) => onSetNotePreserve(r.id, value) : undefined
           }

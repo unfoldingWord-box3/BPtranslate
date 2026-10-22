@@ -66,11 +66,13 @@
 //                                translate pipeline instead (classic NoteCard
 //                                "Re-run" already does this — issue #300)
 //
-// Chapter locks (verified in api/src/rows.ts, findings §2.7): tn PATCH is
-// lock-EXEMPT, and /validate + /trash have no lock check at all. So every write
-// this screen makes is accepted while a run is in flight — the lock banner is
-// informational here and gates nothing. Disabling anything would block writes
-// the server accepts.
+// Chapter locks (api/src/rows.ts): a tn PATCH is refused (409 chapter_locked)
+// for a note an in-flight TRANSLATE run will write — every note of the chapter
+// for a chapter-wide run (issue #561, decision B), only the selected notes for
+// a single-note redraft. Other runs leave tn PATCH open. /validate + /trash have
+// no lock check at all. So while a chapter-wide translate covers this chapter
+// the editor is read-only and the banner shows up front (from the pipeline
+// store); other locks surface only after a refused save, as before.
 //
 // 409 handling is deliberately minimal: a banner that says another editor
 // changed the row, with a reload affordance. The full merge dialog stays on
@@ -143,7 +145,8 @@ import { isHebrewBook } from "../../lib/sourceSearch";
 import { realChapters } from "../../lib/bookSummary";
 import { drafts, rowKey } from "../../sync/drafts";
 import { onOutboxResult, outbox } from "../../sync/outbox";
-import { pipelineStore, getSessionKey } from "../../sync/pipelineStore";
+import { pipelineStore, getSessionKey, type PipelineJob } from "../../sync/pipelineStore";
+import { jobLocksChapterNotes } from "../../lib/chapterLock";
 import {
   api,
   ApiError,
@@ -570,6 +573,18 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   const [notice, setNotice] = useState<{ text: string; severity: "info" | "warning" } | null>(null);
   const [conflictNotice, setConflictNotice] = useState<string | null>(null);
   const [chapterLock, setChapterLock] = useState<ChapterLockedBody | null>(null);
+  // A chapter-wide translate run rewrites every note here when it applies, so
+  // the server refuses note edits until it finishes (issue #561). Read it from
+  // the pipeline store so the banner and the read-only editor show before
+  // anyone types, not only after a save is refused.
+  const [translateLockJob, setTranslateLockJob] = useState<PipelineJob | null>(null);
+  useEffect(
+    () =>
+      pipelineStore.subscribe((list) =>
+        setTranslateLockJob(list.find((j) => jobLocksChapterNotes(j, book, chapter)) ?? null),
+      ),
+    [book, chapter],
+  );
   // Sticky once the server tells us the AI proxy isn't configured — there is no
   // capability flag to read up front, so the first 503 is how we learn.
   const [aiUnavailable, setAiUnavailable] = useState<string | null>(null);
@@ -644,8 +659,10 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   // While THIS row has a background redraft in flight the inline editor is
   // read-only: settling a done job clears the row's draft and refetches, so
   // anything typed in that window would be thrown away. Only the pending row
-  // locks — a redraft on one note must not block editing another.
-  const editLocked = introRedoRowId != null && row?.id === introRedoRowId;
+  // locks — a redraft on one note must not block editing another. A
+  // chapter-wide translate run locks every note (issue #561); typing already in
+  // the draft store stays there.
+  const editLocked = translateLockJob != null || (introRedoRowId != null && row?.id === introRedoRowId);
 
   // Stash every keystroke. Nothing leaves the browser here — the draft store
   // is what makes "no save on blur, no save on unmount" safe.
@@ -1530,12 +1547,12 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   // container differs (phone: the centred column; md+: the detail pane).
   const detailBody = (
     <>
-        {chapterLock && (
-          // Informational only: tn PATCH is lock-exempt and /validate + /trash
-          // have no lock check, so nothing on this screen is blocked.
+        {(translateLockJob || chapterLock) && (
+          // A chapter-wide translate run (from the pipeline store) makes the
+          // editor read-only; any other lock is reported by a refused save.
           <LockBanner
-            pipelineType={chapterLock.pipelineType}
-            startedAt={chapterLock.startedAt}
+            pipelineType={translateLockJob?.pipeline_type ?? chapterLock?.pipelineType ?? null}
+            startedAt={translateLockJob?.created_at ?? chapterLock?.startedAt ?? null}
           />
         )}
 
