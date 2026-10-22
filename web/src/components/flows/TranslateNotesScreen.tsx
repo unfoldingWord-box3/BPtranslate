@@ -2192,7 +2192,10 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
               {t("flowTranslate.notNeeded")}
             </Button>
             <Button
-              disabled={busy || redoing}
+              // An unsaved edit cannot be saved while a chapter-wide translate
+              // run holds the chapter (the server refuses it); it waits in the
+              // draft store until the run finishes (issue #561).
+              disabled={busy || redoing || (translateLockJob != null && hasDiff)}
               onClick={() => void handleApprove()}
               startIcon={<CheckIcon />}
               sx={{
