@@ -385,6 +385,17 @@ export const pipelineStore = {
         (req.translate?.resourceType ?? "tn") === "tn" &&
         !req.translate?.rowIds?.length &&
         req.translate?.verseStart == null,
+      // Same rule as the server's translateNoteSelection (issue #606).
+      note_selection:
+        req.pipelineType === "translate" &&
+        (req.translate?.resourceType ?? "tn") === "tn" &&
+        (req.translate?.rowIds?.length || req.translate?.verseStart != null)
+          ? {
+              row_ids: req.translate?.rowIds?.length ? req.translate.rowIds : null,
+              verse_start: req.translate?.verseStart ?? null,
+              verse_end: req.translate?.verseEnd ?? null,
+            }
+          : null,
     };
     jobs.set(res.jobId, jobs.get(res.jobId) ?? seeded);
     notify();

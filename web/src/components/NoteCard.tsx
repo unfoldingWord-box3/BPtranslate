@@ -190,6 +190,10 @@ interface Props {
   onTranslate?: () => void;
   // This row has an in-flight translate pipeline — show a working affordance.
   isTranslating?: boolean;
+  // An in-flight translate run (anyone's) will write this note — a single-note
+  // or verse-range redraft that covers it. Read-only like a chapter-wide
+  // translate lock, since the server refuses the edit (issue #606).
+  rowTranslateLocked?: boolean;
 }
 
 // Notes coming from TSV imports use literal "\n" (two characters) as the
@@ -408,6 +412,7 @@ function NoteCardInner({
   onUnapprove,
   onTranslate,
   isTranslating = false,
+  rowTranslateLocked = false,
 }: Props) {
   const { t } = useTranslation();
   // The notes pane publishes the EFFECTIVE axis (it collapses side-by-side to
@@ -437,11 +442,15 @@ function NoteCardInner({
   // when the flag is off, Editor mode behaves exactly as before. See editorPrefs.ts.
   const isUnapprovedAiDraft = !translationMode && row.translation_state === "ai_draft";
   const lockUnapproved = isUnapprovedAiDraft && getLockUnapprovedDrafts();
-  const readOnly = trashed || lockUnapproved || noteLockedReadOnly(lockPipelineType, locked, isPreserved, isHint);
+  // A redraft that will write this note locks it like a chapter-wide translate
+  // run, without locking the chapter's other notes (issue #606).
+  const noteLocked = locked || rowTranslateLocked;
+  const noteLockType = rowTranslateLocked ? "translate" : lockPipelineType;
+  const readOnly = trashed || lockUnapproved || noteLockedReadOnly(noteLockType, noteLocked, isPreserved, isHint);
   // A translate run writes this note whether or not it is trashed, so Restore
   // is refused too until it finishes (issue #602). Approve and delete already
   // hide under readOnly.
-  const translateLocked = locked && lockPipelineType === "translate";
+  const translateLocked = noteLocked && noteLockType === "translate";
   const [quote, setQuote] = useState(tsvToDisplay(row.quote));
   const [note, setNote] = useState(tsvToDisplay(row.note));
   // Find-highlight: the active match note shows a read view (with the match
@@ -2151,7 +2160,8 @@ function areNotePropsEqual(a: Props, b: Props): boolean {
     (a.flashArrow ?? null) === (b.flashArrow ?? null) &&
     a.translationMode === b.translationMode &&
     (a.sourceNote ?? null) === (b.sourceNote ?? null) &&
-    a.isTranslating === b.isTranslating
+    a.isTranslating === b.isTranslating &&
+    (a.rowTranslateLocked ?? false) === (b.rowTranslateLocked ?? false)
   );
 }
 

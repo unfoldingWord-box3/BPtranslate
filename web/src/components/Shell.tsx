@@ -52,7 +52,7 @@ import { smartEditVerse } from "../lib/replace";
 import { errorCopy } from "../lib/aiErrorCopy";
 import { extractEditableText, extractPlainText, normalizeEditable, SECTION_HEADER_TAGS } from "../lib/usfm";
 import { verseHasUnalignedWork, countUnalignedTargetWords } from "../lib/alignment";
-import { jobLocksChapter, jobLocksChapterNotes } from "../lib/chapterLock";
+import { jobLocksChapter, jobLocksChapterNotes, jobLocksNote } from "../lib/chapterLock";
 import {
   analyzeAlignmentDelta,
   guardBlocksSave,
@@ -1080,6 +1080,20 @@ export function Shell({
       locksAllNotes: Boolean(notesJob),
     };
   }, [activeJobs, book, chapter]);
+
+  // Notes an in-flight translate run will write: every note under a
+  // chapter-wide run, or just a single-note / verse-range redraft's own notes.
+  // The server refuses edits to them (issue #606), so their cards go read-only
+  // up front. jobLocksNote mirrors the server's translateLockForTnRow.
+  const translateLockedNoteIds = useMemo(() => {
+    const ids = new Set<string>();
+    const translateJobs = activeJobs.filter((j) => j.pipeline_type === "translate");
+    if (translateJobs.length === 0) return ids;
+    for (const r of [...(data?.tn ?? []), ...bookIntroRows]) {
+      if (translateJobs.some((j) => jobLocksNote(j, book, r))) ids.add(r.id);
+    }
+    return ids;
+  }, [activeJobs, data?.tn, bookIntroRows, book]);
 
   const handleSetNotePreserve = useCallback(
     async (id: string, value: boolean) => {
@@ -3624,6 +3638,7 @@ export function Shell({
     onApproveAllNotes: handleApproveAllNotes,
     onNoteTranslate: handleTranslateNote,
     translatingNoteIds: translatingRowIds,
+    translateLockedNoteIds,
     onQuestionApprove: handleApproveQuestion,
     onApproveAllQuestions: handleApproveAllQuestions,
     onQuestionTranslate: handleTranslateQuestion,

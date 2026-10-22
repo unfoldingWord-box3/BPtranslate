@@ -41,7 +41,7 @@ import { applyContextRef } from "./assistedContextRef.ts";
 import { getLatestSuccessfulContextExport } from "./contextExportResults.ts";
 import { broadcastChapter } from "./wsEvents.ts";
 import { sameDcsName } from "./repoUrl.ts";
-import { isChapterWideTnTranslate } from "./chapterLock.ts";
+import { isChapterWideTnTranslate, translateNoteSelection } from "./chapterLock.ts";
 import {
   assertLaneWritable,
   type LaneKey,
@@ -2287,10 +2287,13 @@ pipelines.get("/", requireEditor, async (c) => {
         : row;
     // options_json itself stays server-side (a notes run's hints live there);
     // the client only needs to know whether this run rewrites every note in
-    // its chapters, so it can make them read-only up front (issue #561).
+    // its chapters, so it can make them read-only up front (issue #561), and
+    // for a single-note or verse-range redraft which notes it will write
+    // (issue #606).
     const withLock = {
       ...sanitized,
       locks_chapter_notes: isChapterWideTnTranslate(row.pipeline_type, options_json),
+      note_selection: translateNoteSelection(row.pipeline_type, options_json),
     };
     if (withLock.state === "queued") {
       const pos = snap.positions.get(withLock.job_id);

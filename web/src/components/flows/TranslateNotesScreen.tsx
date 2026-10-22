@@ -69,10 +69,12 @@
 // Chapter locks (api/src/rows.ts): a tn PATCH is refused (409 chapter_locked)
 // for a note an in-flight TRANSLATE run will write — every note of the chapter
 // for a chapter-wide run (issue #561, decision B), only the selected notes for
-// a single-note redraft. Other runs leave tn PATCH open. /validate + /trash have
-// no lock check at all. So while a chapter-wide translate covers this chapter
+// a single-note redraft. Other runs leave tn PATCH open. Approve (/validate)
+// and Not needed (/trash) follow the same rule (issue #602). So while a chapter-wide translate covers this chapter
 // the editor is read-only and the banner shows up front (from the pipeline
-// store); other locks surface only after a refused save, as before.
+// store); a single-note or verse-range redraft makes only its own notes
+// read-only, also up front (issue #606). A refused save shows the banner on
+// that note only.
 //
 // 409 handling is deliberately minimal: a banner that says another editor
 // changed the row, with a reload affordance. The full merge dialog stays on
@@ -146,7 +148,7 @@ import { realChapters } from "../../lib/bookSummary";
 import { drafts, rowKey } from "../../sync/drafts";
 import { onOutboxResult, outbox } from "../../sync/outbox";
 import { pipelineStore, getSessionKey, type PipelineJob } from "../../sync/pipelineStore";
-import { jobLocksChapterNotes } from "../../lib/chapterLock";
+import { jobLocksChapterNotes, jobLocksNote } from "../../lib/chapterLock";
 import {
   api,
   ApiError,
@@ -573,18 +575,25 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   const [toast, setToast] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ text: string; severity: "info" | "warning" } | null>(null);
   const [conflictNotice, setConflictNotice] = useState<string | null>(null);
-  const [chapterLock, setChapterLock] = useState<ChapterLockedBody | null>(null);
+  // A save/approve/set-aside the server refused with 409 chapter_locked, and
+  // the note it was for. The refusal is about that note — a single-note
+  // redraft locks only its own notes — so the banner shows on that note only
+  // (issue #606).
+  const [chapterLock, setChapterLock] = useState<{ body: ChapterLockedBody; rowId: string } | null>(null);
   // A chapter-wide translate run rewrites every note here when it applies, so
   // the server refuses note edits until it finishes (issue #561). Read it from
   // the pipeline store so the banner and the read-only editor show before
-  // anyone types, not only after a save is refused.
-  const [translateLockJob, setTranslateLockJob] = useState<PipelineJob | null>(null);
-  useEffect(
-    () =>
-      pipelineStore.subscribe((list) =>
-        setTranslateLockJob(list.find((j) => jobLocksChapterNotes(j, book, chapter)) ?? null),
-      ),
-    [book, chapter],
+  // anyone types, not only after a save is refused. A single-note or
+  // verse-range redraft locks only the notes it covers (issue #606).
+  const [pipelineJobs, setPipelineJobs] = useState<PipelineJob[]>([]);
+  useEffect(() => pipelineStore.subscribe(setPipelineJobs), []);
+  const translateLockJob = useMemo(
+    () => pipelineJobs.find((j) => jobLocksChapterNotes(j, book, chapter)) ?? null,
+    [pipelineJobs, book, chapter],
+  );
+  const rowTranslateLocked = useMemo(
+    () => row != null && pipelineJobs.some((j) => jobLocksNote(j, book, row)),
+    [pipelineJobs, book, row],
   );
   // Sticky once the server tells us the AI proxy isn't configured — there is no
   // capability flag to read up front, so the first 503 is how we learn.
@@ -663,7 +672,8 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   // locks — a redraft on one note must not block editing another. A
   // chapter-wide translate run locks every note (issue #561); typing already in
   // the draft store stays there.
-  const editLocked = translateLockJob != null || (introRedoRowId != null && row?.id === introRedoRowId);
+  const editLocked =
+    translateLockJob != null || rowTranslateLocked || (introRedoRowId != null && row?.id === introRedoRowId);
 
   // Stash every keystroke. Nothing leaves the browser here — the draft store
   // is what makes "no save on blur, no save on unmount" safe.
@@ -757,12 +767,13 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
         if (op.target.kind !== "row" || op.target.rowKind !== "tn" || op.target.book !== book) {
           return;
         }
+        const rowId = op.target.id;
         if (result.kind === "ok") {
-          setChapterLock(null);
+          setChapterLock((prev) => (prev?.rowId === rowId ? null : prev));
           return;
         }
         if (result.kind === "locked") {
-          setChapterLock(result.lockBody);
+          setChapterLock({ body: result.lockBody, rowId });
           return;
         }
         // Only a settled conflict is a question for the user: the outbox
@@ -1027,7 +1038,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
         // until a refetch. The typing itself stays in draftValue and the
         // drafts store (issue #561 review R2).
         applyLocalRowPatch("tn", target.id, { note: target.note } as Partial<TnRow & TqRow>);
-        setChapterLock(result.lockBody);
+        setChapterLock({ body: result.lockBody, rowId: target.id });
         say(t("flowTranslate.lockedEditDropped"));
       } else {
         say(t("flowTranslate.saveFailed", { reason: result.reason }));
@@ -1075,7 +1086,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
         say(t("flowTranslate.approveNeedsDraft"));
       } else if (err instanceof ApiError && isChapterLockedBody(err.body)) {
         // A stale tab that missed the translate lock (issue #602).
-        setChapterLock(err.body);
+        setChapterLock({ body: err.body, rowId: row.id });
         say(t("flowTranslate.noteLockedByTranslate"));
       } else {
         say(
@@ -1142,7 +1153,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
       advanceAfter(row.id, "skipped");
     } catch (err) {
       if (err instanceof ApiError && isChapterLockedBody(err.body)) {
-        setChapterLock(err.body);
+        setChapterLock({ body: err.body, rowId: row.id });
         say(t("flowTranslate.noteLockedByTranslate"));
         return;
       }
@@ -1558,17 +1569,25 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
       </Box>
     ) : null;
 
+  const noteLock = chapterLock && chapterLock.rowId === row?.id ? chapterLock.body : null;
+
   // Everything inside the reading column — identical at every width; only the
   // container differs (phone: the centred column; md+: the detail pane).
   const detailBody = (
     <>
-        {(translateLockJob || chapterLock) && (
+        {(translateLockJob || noteLock) && (
           // A chapter-wide translate run (from the pipeline store) makes the
-          // editor read-only; any other lock is reported by a refused save.
+          // editor read-only; any other lock is reported by a refused save,
+          // on the note it was refused for (issue #606).
           <LockBanner
-            pipelineType={translateLockJob?.pipeline_type ?? chapterLock?.pipelineType ?? null}
-            startedAt={translateLockJob?.created_at ?? chapterLock?.startedAt ?? null}
+            pipelineType={translateLockJob?.pipeline_type ?? noteLock?.pipelineType ?? null}
+            startedAt={translateLockJob?.created_at ?? noteLock?.startedAt ?? null}
           />
+        )}
+        {rowTranslateLocked && !translateLockJob && !noteLock && (
+          // A single-note or verse-range redraft covers this note only: say so
+          // here instead of a chapter-wide banner (issue #606).
+          <Alert severity="info">{t("flowTranslate.noteLockedByTranslate")}</Alert>
         )}
 
         {conflictNotice && (
@@ -2196,8 +2215,9 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
             </Button>
             <Button
               // A chapter-wide translate run would write the AI draft into the
-              // set-aside note, so the server refuses it (issue #602).
-              disabled={busy || redoing || translateLockJob != null}
+              // set-aside note, so the server refuses it (issue #602); so does
+              // a single-note redraft covering this note (#606).
+              disabled={busy || redoing || editLocked}
               onClick={() => void handleNotNeeded()}
               sx={{
                 flex: 1,
@@ -2215,8 +2235,10 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
               // Neither an unsaved edit nor the approval can land while a
               // chapter-wide translate run holds the chapter: the run would
               // undo the approval when it applies, so the server refuses both
-              // (issues #561, #602). Typing waits in the draft store.
-              disabled={busy || redoing || translateLockJob != null}
+              // (issues #561, #602). The same holds for a single-note or
+              // verse-range redraft covering this note (#606). Typing waits in
+              // the draft store.
+              disabled={busy || redoing || editLocked}
               onClick={() => void handleApprove()}
               startIcon={<CheckIcon />}
               sx={{

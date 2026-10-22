@@ -49,6 +49,7 @@ import type { FlowScreenContext } from "./types";
 import {
   api,
   ApiError,
+  isChapterLockedBody,
   type BookListEntry,
   type BookSummary,
   type ReviewSweepApplyResponse,
@@ -194,6 +195,8 @@ export default function AdminReviewStateScreen({ role, me }: FlowScreenContext) 
   const errorText = (e: unknown) => {
     if (e instanceof ApiError) {
       if (e.status === 403) return t("adminPages.reviewState.errForbidden");
+      // An approve sweep over notes an AI translation is rewriting (issue #602).
+      if (isChapterLockedBody(e.body)) return t("adminPages.reviewState.errLockedByTranslate");
       const code = (e.body as { error?: string } | undefined)?.error;
       return `${e.status} — ${code ?? t("adminPages.common.loadFailed")}`;
     }
