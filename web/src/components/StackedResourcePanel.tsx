@@ -244,6 +244,7 @@ export function StackedResourcePanel({
       aiRecentlyCompletedAt={noteAiRecentlyCompletedAt?.(r.id) ?? null}
       onVisibilityChange={onNoteVisibilityChange}
       locked={noteCardsLocked}
+      createLocked={locked}
       lockPipelineType={lockPipelineType}
       onSetPreserve={onSetNotePreserve ? (value) => onSetNotePreserve(r.id, value) : undefined}
       onSetHint={onSetNoteHint ? (value) => onSetNoteHint(r.id, value) : undefined}

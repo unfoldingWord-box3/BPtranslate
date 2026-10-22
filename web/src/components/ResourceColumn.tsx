@@ -1087,6 +1087,7 @@ export function ResourceColumn({
           aiRecentlyCompletedAt={noteAiRecentlyCompletedAt?.(r.id) ?? null}
           onVisibilityChange={onNoteVisibilityChange}
           locked={noteCardsLocked}
+          createLocked={locked}
           lockPipelineType={lockPipelineType}
           onSetPreserve={
             onSetNotePreserve ? (value) => onSetNotePreserve(r.id, value) : undefined
