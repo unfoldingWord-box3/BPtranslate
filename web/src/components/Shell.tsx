@@ -999,6 +999,12 @@ export function Shell({
     laneSettledRef.current = onLaneSettled;
   }, [onLaneSettled]);
 
+  // Rows with an in-flight single-note translate (and the tq equivalent).
+  // Cleared when the chapter's translate job reaches a terminal state (see the
+  // onComplete effect below).
+  const [translatingRowIds, setTranslatingRowIds] = useState<Set<string>>(() => new Set());
+  const [translatingQuestionIds, setTranslatingQuestionIds] = useState<Set<string>>(() => new Set());
+
   useEffect(
     () =>
       pipelineStore.onComplete((job, prev) => {
@@ -1122,10 +1128,6 @@ export function Shell({
     },
     [book, applyLocalRowReplacement, pushPipelineToast, t],
   );
-
-  // Rows with an in-flight single-note translate. Cleared when the chapter's
-  // translate job reaches a terminal state (see the onComplete effect).
-  const [translatingRowIds, setTranslatingRowIds] = useState<Set<string>>(() => new Set());
 
   const handleTranslateNote = useCallback(
     async (id: string) => {
@@ -1258,8 +1260,6 @@ export function Shell({
       );
     }
   }, [data, book, applyLocalRowReplacement, pushPipelineToast, t]);
-
-  const [translatingQuestionIds, setTranslatingQuestionIds] = useState<Set<string>>(() => new Set());
 
   const handleTranslateQuestion = useCallback(
     async (id: string) => {
@@ -1868,6 +1868,40 @@ export function Shell({
     };
   }, [quoteBuildTarget, data, verseIndexByVersion]);
 
+  // The row save pipe: optimistic local patch + outbox enqueue. A memoized
+  // callback (declared above its first hook-level user, commitQuoteBuild) so
+  // memoized callers never hold a previous render's copy bound to a stale
+  // applyLocalRowPatch.
+  const enqueueRow = useCallback(
+    <T extends TnRow | TqRow | TwlRow>(
+      kind: "tn" | "tq" | "twl",
+      row: T,
+      patch: Partial<T>,
+      opts?: { restoredFromVersion?: number },
+    ) => {
+      // Optimistic local apply mirrors what the server will do: any non-revert
+      // patch clears the restored_from_version marker so the chip immediately
+      // drops the v{N} override instead of waiting for the round-trip.
+      const localPatch = {
+        ...patch,
+        restored_from_version:
+          opts?.restoredFromVersion !== undefined ? opts.restoredFromVersion : null,
+      } as Partial<TnRow & TqRow & TwlRow>;
+      // Capture the pre-edit baseline (the row's current value for each patched
+      // field) BEFORE the optimistic apply, so a later 409 can distinguish a
+      // spurious conflict (server changed a different field / already has our
+      // value) from a genuine one and auto-heal the former (see
+      // classifyRowPatchConflict). Read from `row`, which still holds the version
+      // we branched from — applyLocalRowPatch produces a new cached object.
+      const rowRecord = row as unknown as Record<string, unknown>;
+      const baseline: Record<string, unknown> = {};
+      for (const field of Object.keys(patch)) baseline[field] = rowRecord[field];
+      applyLocalRowPatch(kind, row.id, localPatch);
+      void outbox.enqueueRow(kind, row.id, row.version, patch as Record<string, unknown>, { ...opts, book: row.book, baseline });
+    },
+    [applyLocalRowPatch],
+  );
+
   // Materialize the in-flight quote-build selection into a row patch and
   // fire the existing note save pipe. Pulls UHB verseObjects for the
   // current verse — the buildQuoteFromSelection helper does the grouping
@@ -1919,7 +1953,7 @@ export function Shell({
     }
     setQuoteBuildTarget(null);
     setQuoteBuildSelectedKeys(new Set());
-  }, [quoteBuildTarget, quoteBuildSelectedKeys, data, verseIndexByVersion]);
+  }, [quoteBuildTarget, quoteBuildSelectedKeys, data, verseIndexByVersion, enqueueRow]);
 
   // Promote a per-verse TWL suggestion to a real link. Resolve its matched ULT
   // English span to an OL quote + occurrence against the verse alignment
@@ -2916,33 +2950,6 @@ export function Shell({
       </Box>
     );
   }
-
-  const enqueueRow = <T extends TnRow | TqRow | TwlRow>(
-    kind: "tn" | "tq" | "twl",
-    row: T,
-    patch: Partial<T>,
-    opts?: { restoredFromVersion?: number },
-  ) => {
-    // Optimistic local apply mirrors what the server will do: any non-revert
-    // patch clears the restored_from_version marker so the chip immediately
-    // drops the v{N} override instead of waiting for the round-trip.
-    const localPatch = {
-      ...patch,
-      restored_from_version:
-        opts?.restoredFromVersion !== undefined ? opts.restoredFromVersion : null,
-    } as Partial<TnRow & TqRow & TwlRow>;
-    // Capture the pre-edit baseline (the row's current value for each patched
-    // field) BEFORE the optimistic apply, so a later 409 can distinguish a
-    // spurious conflict (server changed a different field / already has our
-    // value) from a genuine one and auto-heal the former (see
-    // classifyRowPatchConflict). Read from `row`, which still holds the version
-    // we branched from — applyLocalRowPatch produces a new cached object.
-    const rowRecord = row as unknown as Record<string, unknown>;
-    const baseline: Record<string, unknown> = {};
-    for (const field of Object.keys(patch)) baseline[field] = rowRecord[field];
-    applyLocalRowPatch(kind, row.id, localPatch);
-    void outbox.enqueueRow(kind, row.id, row.version, patch as Record<string, unknown>, { ...opts, book: row.book, baseline });
-  };
 
   // Draft-write path. Every keystroke in a verse-text cell calls this; it
   // stashes the plain text in IndexedDB so unsaved typing survives tab

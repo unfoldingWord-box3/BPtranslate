@@ -27,6 +27,9 @@ const blocking = [
   'react-hooks/config',
   'react-hooks/gating',
   'react-hooks/preserve-manual-memoization', // #595
+  'react-hooks/immutability', // #596
+  'react-hooks/purity', // #596
+  'react-hooks/globals', // #596
 ];
 
 for (const rule of blocking) {

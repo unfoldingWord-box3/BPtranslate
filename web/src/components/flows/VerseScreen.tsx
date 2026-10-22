@@ -1095,8 +1095,10 @@ function AuditMode({
       ? { borderInlineEnd: `1px solid ${theme.palette.divider}`, paddingInlineEnd: 2 }
       : { borderInlineStart: `1px solid ${theme.palette.divider}`, paddingInlineStart: 2 };
 
-  let prevLit: string | null = null;
-  let prevSim: string | null = null;
+  // Each lane's text per source word, so a row can compare against the row
+  // above it (cell's "same phrase" marker) without mutating during the map.
+  const litTexts = words.map((w) => (lit.present ? laneTextFor(lit, w.position) : ""));
+  const simTexts = words.map((w) => (sim.present ? laneTextFor(sim, w.position) : ""));
 
   const cell = (text: string, prev: string | null) => {
     if (!text) {
@@ -1156,13 +1158,9 @@ function AuditMode({
           </tr>
         </thead>
         <tbody>
-          {words.map((w) => {
-            const litText = lit.present ? laneTextFor(lit, w.position) : "";
-            const simText = sim.present ? laneTextFor(sim, w.position) : "";
-            const litCell = lit.present ? cell(litText, prevLit) : "—";
-            const simCell = sim.present ? cell(simText, prevSim) : "—";
-            prevLit = litText;
-            prevSim = simText;
+          {words.map((w, i) => {
+            const litCell = lit.present ? cell(litTexts[i], i > 0 ? litTexts[i - 1] : null) : "—";
+            const simCell = sim.present ? cell(simTexts[i], i > 0 ? simTexts[i - 1] : null) : "—";
             const marks = notesAt.get(w.position) ?? [];
             const selected = selectedPositions.has(w.position);
             return (

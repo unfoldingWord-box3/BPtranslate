@@ -108,6 +108,12 @@ function scopeOf(job: PipelineJob, t: TFunction): string {
     : `${job.book} ${job.start_chapter}–${job.end_chapter}`;
 }
 
+// A fresh session key per Retry click; the timestamp keeps it unique across
+// clicks and reloads. Only called from the Retry handler, never during render.
+function retrySessionKey(pipelineType: string): string {
+  return `retry-${pipelineType}-${Date.now()}`;
+}
+
 function timeAgo(unixSeconds: number | null | undefined, t: TFunction): string {
   if (!unixSeconds) return "—";
   const deltaMs = Date.now() - unixSeconds * 1000;
@@ -270,7 +276,7 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
   async function handleRetry(job: PipelineJob) {
     if (aiDisabled || retrying) return;
     setRetrying(job.job_id);
-    const sessionKey = `retry-${job.pipeline_type}-${Date.now()}`;
+    const sessionKey = retrySessionKey(job.pipeline_type);
     try {
       await pipelineStore.start({
         pipelineType: job.pipeline_type,

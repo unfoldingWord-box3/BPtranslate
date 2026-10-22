@@ -1153,11 +1153,10 @@ function ArticleDetail({
   // is how we learn (no capability flag exists up front).
   const [aiUnavailable, setAiUnavailable] = useState<string | null>(null);
   const [lang, setLang] = useState<Lang>(sessionLang);
-
-  const setLangRemembered = (l: Lang) => {
-    sessionLang = l;
-    setLang(l);
-  };
+  // Remember the choice for the next mount of this screen (this tab only).
+  useEffect(() => {
+    sessionLang = lang;
+  }, [lang]);
 
   // Load full units, then let a persisted draft (unsaved typing from this
   // browser) win over the server's target — mirrors ArticlesScreen:513-560.
@@ -1471,7 +1470,7 @@ function ArticleDetail({
         onClick={() => {
           if (lang !== value) {
             setEditingPath(null);
-            setLangRemembered(value);
+            setLang(value);
           }
         }}
         aria-pressed={active}
