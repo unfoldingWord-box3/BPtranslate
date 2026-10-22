@@ -843,6 +843,9 @@
     "dontShowAgain": "Don't show this again",
     "ok": "OK"
   },
+  "ai": {
+    "needsOrgKey": "This needs your organization's AI key, and it can't use one yet."
+  },
   "pipeline": {
     "aiButton": "AI",
     "generateUltUst": "Generate ULT + UST",

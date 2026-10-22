@@ -19,6 +19,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import i18n from "../i18n";
 import { ApiError, api, type TnRow, type TnQuickRequest, type TnQuickResponse } from "../sync/api";
+import { AI_NEEDS_ORG_KEY } from "../lib/aiProviderErrors";
 
 const PULSE_MS = 4000;
 const RETRY_DELAY_MS = 2000;
@@ -98,6 +99,8 @@ function mapAiError(err: unknown): string {
         return i18n.t("messages.aiDraft.serviceUnavailable");
       case "tn_quick_disabled":
         return i18n.t("messages.aiDraft.notConfiguredToken");
+      case AI_NEEDS_ORG_KEY:
+        return i18n.t("ai.needsOrgKey");
       case "anthropic_api_key_missing":
         return i18n.t("messages.aiDraft.notConfiguredKey");
       case "cache_unavailable":

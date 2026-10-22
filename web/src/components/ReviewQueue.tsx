@@ -77,6 +77,7 @@ import {
   verseObjectsOf,
 } from "../lib/verseRange";
 import { buildTnQuickRequest } from "../lib/tnQuickRequest";
+import { isAiNeedsOrgKey, QUICK_DRAFTS_NEED_ORG_KEY } from "../lib/aiProviderErrors";
 import { isApprovableRow } from "../lib/reviewApproval";
 import { buildQuoteFromSelection, selectionFromQuote } from "../lib/quoteBuilder";
 import { shortSupport } from "../lib/supportReference";
@@ -987,6 +988,8 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
 
   // ── draft toolbar: Suggest (tn-quick) + Template ──────────────────────────
   const suggestBlockedReason = (() => {
+    // #551: tn-quick can't use the org's own AI key yet, so Suggest is off.
+    if (QUICK_DRAFTS_NEED_ORG_KEY) return t("ai.needsOrgKey");
     if (activeKind !== "tn") return t("flowReview.queue.suggestNotesOnly");
     if (!selectedRow) return t("flowReview.queue.noNoteSelected");
     const row = selectedRow as TnRow;
@@ -1028,7 +1031,8 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
         res.warnings.length > 0 ? "warning" : "info",
       );
     } catch (err) {
-      say(t("flowReview.queue.aiSuggestFailed", { status: statusOf(err) }), "warning");
+      if (isAiNeedsOrgKey(err)) say(t("ai.needsOrgKey"), "warning");
+      else say(t("flowReview.queue.aiSuggestFailed", { status: statusOf(err) }), "warning");
     } finally {
       setSuggesting(false);
     }

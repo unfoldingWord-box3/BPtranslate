@@ -132,7 +132,11 @@ import {
   tnRedoBlockedReason,
   tnRedoUsesPipeline,
 } from "../../lib/tnRedo";
-import { isAiProviderNotConfigured } from "../../lib/aiProviderErrors";
+import {
+  isAiNeedsOrgKey,
+  isAiProviderNotConfigured,
+  QUICK_DRAFTS_NEED_ORG_KEY,
+} from "../../lib/aiProviderErrors";
 import { resolveFlowChipStatus, flowChipKind, type FlowChipStatus } from "../../lib/flowStatusChip";
 import { flowLaneSegmentsAcross, type FlowSegment } from "../../lib/flowHighlight";
 import { isHebrewBook } from "../../lib/sourceSearch";
@@ -1125,6 +1129,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
     noNoteSelected: t("flowTranslate.noNoteSelected"),
     needsSupportRef: t("flowTranslate.redoNeedsSupportRef"),
     needsQuote: t("flowTranslate.redoNeedsQuote"),
+    quickNeedsOrgKey: QUICK_DRAFTS_NEED_ORG_KEY ? t("ai.needsOrgKey") : null,
   });
 
   const clearIntroRedoTimer = useCallback(() => {
@@ -1292,6 +1297,9 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
         // key (#551). Not latched like the case below: a verse note's Redo goes
         // through tn-quick, which this does not affect.
         say(t("pipeline.aiKeyNotConfigured"));
+      } else if (isAiNeedsOrgKey(err)) {
+        // #551: tn-quick is switched off. Not latched: intro Redo still works.
+        say(t("ai.needsOrgKey"));
       } else if (redoErrorIsAiUnconfigured(code)) {
         // Calm and specific: this workspace simply has no AI drafting yet. This
         // is the ONE case that greys Redo permanently — it's genuinely not set
