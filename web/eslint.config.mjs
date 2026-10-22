@@ -30,6 +30,7 @@ const blocking = [
   'react-hooks/immutability', // #596
   'react-hooks/purity', // #596
   'react-hooks/globals', // #596
+  'react-hooks/exhaustive-deps', // #592
 ];
 
 for (const rule of blocking) {
