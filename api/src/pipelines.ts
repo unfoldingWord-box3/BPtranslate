@@ -609,6 +609,17 @@ export async function dispatchNext(env: Env): Promise<void> {
       .run();
   };
 
+  // #551: a legacy generate/notes/tqs job queued before /start began refusing
+  // them (or a follow-up enqueued server-side) would run on the shared account.
+  // Fail it before anything else, so nothing reaches the bot. Then move on to
+  // the next queued job at once, so leftover legacy jobs don't each hold a
+  // job behind them for a cron tick. Bounded: each pass takes one row out of
+  // 'queued', and the failed row frees the slot for the next claim.
+  if (NEEDS_ORG_KEY_TYPES.has(job.pipeline_type)) {
+    await fail("ai_needs_org_key", "this pipeline type cannot run on the organization's own AI key yet");
+    return dispatchNext(env);
+  }
+
   // Our OWN dispatch-POST timeout firing does NOT mean the upstream request
   // never landed — only that WE gave up waiting (see DISPATCH_TIMEOUT_ERROR_
   // KIND/MESSAGE's doc comment for the full reasoning). Unlike `fail`, this
@@ -618,14 +629,6 @@ export async function dispatchNext(env: Env): Promise<void> {
   // pollAllNonTerminal (keyed on exactly this marker) can find it. Guarded on
   // `state = 'dispatching'` so this can never resurrect a row some other
   // caller (force-fail) has already moved on from.
-  // #551: a legacy generate/notes/tqs job queued before /start began refusing
-  // them (or a follow-up enqueued server-side) would run on the shared account.
-  // Fail it before anything else, so nothing reaches the bot.
-  if (NEEDS_ORG_KEY_TYPES.has(job.pipeline_type)) {
-    await fail("ai_needs_org_key", "this pipeline type cannot run on the organization's own AI key yet");
-    return;
-  }
-
   const markDispatchAmbiguous = async () => {
     await env.DB.prepare(
       `UPDATE pipeline_jobs
@@ -1513,6 +1516,18 @@ pipelines.post("/start", requireEditor, async (c) => {
   const username = await resolveUsername(c, userId);
   if (!username) return c.json({ error: "username_missing" }, 400);
 
+  // #551: generate/notes/tqs can't run on the org's own key yet, so they are
+  // refused outright (key or no key), before dedup and the bot-token gate.
+  // That includes a followUpChain step of those types: the child would only
+  // fail at dispatch. (followUpOptions makes a same-type child, so a translate
+  // parent can't produce a legacy one that way.)
+  if (
+    NEEDS_ORG_KEY_TYPES.has(parsed.data.pipelineType) ||
+    parsed.data.followUpChain?.some((step) => NEEDS_ORG_KEY_TYPES.has(step.pipelineType))
+  ) {
+    return c.json({ error: "ai_needs_org_key" }, 409);
+  }
+
   // Org-key gate (#551): a translate job runs on the org's own AI key or not at
   // all, so with no key configured (no row, or provider='default' after Clear)
   // refuse it here, before anything is enqueued. It sits before the dedup
@@ -1521,12 +1536,6 @@ pipelines.post("/start", requireEditor, async (c) => {
   // needs to add a key" is the more actionable error. A BYO row that is
   // configured but broken (no key or model, wrapping key unavailable) is not
   // refused here; dispatchNext fails it with its reason.
-  // #551: generate/notes/tqs can't run on the org's own key yet, so they are
-  // refused outright (key or no key), before dedup and the bot-token gate.
-  if (NEEDS_ORG_KEY_TYPES.has(parsed.data.pipelineType)) {
-    return c.json({ error: "ai_needs_org_key" }, 409);
-  }
-
   let translateAi: DispatchAi | null = null;
   if (parsed.data.pipelineType === "translate") {
     const aiRow = await getAiProviderConfig(c.env.DB);

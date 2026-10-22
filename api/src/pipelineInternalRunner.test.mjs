@@ -472,6 +472,37 @@ test("dispatchNext (#551 switch-off): a queued legacy generate/notes/tqs job fai
   }
 });
 
+test("dispatchNext (#551 switch-off): legacy jobs queued ahead of a translate job are failed and the translate job dispatches in the same call", async () => {
+  const sqlite = freshSqlite();
+  for (const [jobId, type, created] of [["legacy-a", "notes", 10], ["legacy-b", "generate", 20]]) {
+    sqlite
+      .prepare(
+        `INSERT INTO pipeline_jobs
+           (job_id, user_id, pipeline_type, book, start_chapter, end_chapter,
+            session_key, state, options_json, created_at, updated_at)
+         VALUES (?, 1, ?, 'OBA', 1, 1, ?, 'queued', NULL, ?, ?)`,
+      )
+      .run(jobId, type, `sess-${jobId}`, created, created);
+  }
+  seedQueuedTranslateJob(sqlite); // created_at 100: behind both legacy jobs
+  await seedByoKey(sqlite);
+  const env = freshEnv(sqlite);
+  await withFetch(
+    async () => new Response(JSON.stringify({ jobId: "bot-1", provider: "claude" }), { status: 200 }),
+    async (calls) => {
+      await dispatchNext(env);
+      assert.equal(calls.length, 1, "exactly one POST: the translate job");
+      assert.equal(JSON.parse(calls[0].init.body).pipelineType, "translate");
+    },
+  );
+  for (const id of ["legacy-a", "legacy-b"]) {
+    const row = jobRow(sqlite, id);
+    assert.equal(row.state, "failed", id);
+    assert.equal(row.error_kind, "ai_needs_org_key", id);
+  }
+  assert.equal(jobRow(sqlite).state, "running", "the translate job was not left waiting for the next cron tick");
+});
+
 // A translate job with an org key still dispatches with that key: covered by
 // "dispatchNext: every gate-off case still dispatches to the bot" above and
 // "POST /start (#551): translate with an org key gets past the key check" below.
@@ -596,6 +627,25 @@ test("POST /start (#551 switch-off): generate/notes/tqs are refused with 409 ai_
       assert.equal(jobs, 0, `${tag}: no pipeline_jobs row was enqueued`);
     }
   }
+});
+
+test("POST /start (#551 switch-off): a translate job whose followUpChain holds a legacy step is refused; nothing is enqueued", async () => {
+  const sqlite = freshSqlite();
+  await seedByoKey(sqlite);
+  const env = freshEnv(sqlite, { JWT_SIGNING_KEY: ROUTE_SIGNING, JWT_ISSUER: ROUTE_ISSUER });
+  const tok = await editorToken("1");
+  const { res, fetchCount } = await withNoFetch(async (count) => {
+    const res = await routeApp().request(
+      "/api/pipelines/start",
+      postReq(tok, { ...START_TRANSLATE, followUpChain: [{ pipelineType: "notes" }] }),
+      env,
+    );
+    return { res, fetchCount: count() };
+  });
+  assert.equal(res.status, 409, await res.clone().text());
+  assert.deepEqual(await res.json(), { error: "ai_needs_org_key" });
+  assert.equal(fetchCount, 0);
+  assert.equal(sqlite.prepare(`SELECT COUNT(*) AS n FROM pipeline_jobs`).all()[0].n, 0);
 });
 
 function sideRouteApp() {
