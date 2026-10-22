@@ -26,6 +26,7 @@ import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 
 import { rows } from "./rows.ts";
+import { bulkReviewState } from "./reviewState.ts";
 
 function makeDb(sqlite) {
   const mk = (sql, args) => ({
@@ -80,6 +81,7 @@ function fresh() {
     await next();
   });
   app.route("/api/rows", rows);
+  app.post("/api/books/:book/review-state", bulkReviewState);
   const env = { DB: makeDb(sqlite) };
   const ctx = {
     waitUntil(p) {
@@ -107,7 +109,14 @@ function fresh() {
       )
       .run(`job-${++n}`, pipelineType, BOOK, start, end, state, options ? JSON.stringify(options) : null, 1000 + n);
   const row = (id) => sqlite.prepare(`SELECT translation_state, trashed_at FROM tn_rows WHERE id = ?`).get(id);
-  return { post, job, row };
+  const sweep = (body, query = "") =>
+    app.request(
+      `/api/books/${BOOK}/review-state${query}`,
+      { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
+      env,
+      ctx,
+    );
+  return { post, job, row, sweep, sqlite };
 }
 
 const approve = (post, id) => post(id, "validate", { value: 1 });
@@ -193,4 +202,61 @@ test("preserve and hint stay lock-exempt during a chapter-wide translate (the ap
   job("translate", 1, 1);
   assert.equal((await post("c1v1", "preserve", { value: 1 })).status, 200);
   assert.equal((await post("c1v1", "hint", { value: 1 })).status, 200);
+});
+
+// Review R2: un-approve ("Revoke example") protects nothing by being refused —
+// the apply resets the row to ai_draft anyway — so only approving is locked.
+test("un-approve (validate value=0) is let through during a chapter-wide translate", async () => {
+  const { post, job, row } = fresh();
+  job("translate", 1, 1);
+  const r = await post("c1v1", "validate", { value: 0 });
+  assert.equal(r.status, 200);
+  assert.equal(row("c1v1").translation_state, "edited");
+});
+
+// Review R1: the admin bulk review-state sweep set rows to validated with no
+// version bump, so the translate apply's CAS did not catch it and the run
+// silently undid the sweep. An approve sweep that reaches any note a running
+// translate will write is refused as a whole.
+test("an approve sweep over a chapter a translate run will write is refused with 409 chapter_locked", async () => {
+  const { sweep, job, row } = fresh();
+  job("translate", 1, 1);
+
+  const r = await sweep({ resource: "tn", state: "approved", chapter: 1 });
+  assert.equal(r.status, 409);
+  const body = await r.json();
+  assert.equal(body.error, "chapter_locked");
+  assert.equal(body.pipelineType, "translate");
+  assert.equal(row("c1v1").translation_state, "ai_draft", "nothing was swept");
+
+  assert.equal((await sweep({ resource: "tn", state: "approved", allChapters: true })).status, 409, "a whole-book sweep too");
+  assert.equal((await sweep({ resource: "tn", state: "approved", chapter: 1 }, "?dryRun=1")).status, 409, "the dry run says so up front");
+  assert.equal((await sweep({ resource: "tn", state: "approved", chapter: 0 })).status, 409, "the book intro rides with a run starting at chapter 1");
+
+  const ok = await sweep({ resource: "tn", state: "approved", chapter: 2 });
+  assert.equal(ok.status, 200, "a chapter outside the run can be swept");
+  assert.equal(row("c2v1").translation_state, "validated");
+
+  assert.equal((await sweep({ resource: "tn", state: "needs_review", chapter: 1 })).status, 200, "a needs_review sweep is let through");
+});
+
+test("an approve sweep with no job, a finished job, or a non-translate job succeeds", async () => {
+  const a = fresh();
+  assert.equal((await a.sweep({ resource: "tn", state: "approved", chapter: 1 })).status, 200);
+  assert.equal(a.row("c1v1").translation_state, "validated");
+
+  const b = fresh();
+  b.job("translate", 1, 1, "done");
+  b.job("notes", 1, 1);
+  assert.equal((await b.sweep({ resource: "tn", state: "approved", chapter: 1 })).status, 200);
+});
+
+test("an approve sweep is refused only when it reaches a row a row-scoped redraft will write", async () => {
+  const { sweep, job, sqlite } = fresh();
+  job("translate", 1, 1, "running", { resourceType: "tn", rowIds: ["c1v1"] });
+  assert.equal((await sweep({ resource: "tn", state: "approved", chapter: 1 })).status, 409, "c1v1 is in chapter 1");
+  assert.equal((await sweep({ resource: "tn", state: "approved", chapter: 0 })).status, 200, "the intro is not selected");
+  // A trashed row is not swept, so it does not block the sweep either.
+  sqlite.prepare(`UPDATE tn_rows SET trashed_at = 1 WHERE id = 'c1v1'`).run();
+  assert.equal((await sweep({ resource: "tn", state: "approved", chapter: 1 })).status, 200);
 });
