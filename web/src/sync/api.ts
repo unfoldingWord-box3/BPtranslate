@@ -2009,7 +2009,8 @@ export const api = {
     }),
 
   // Translation-mode "Approve" action. value=true → translation_state
-  // 'validated'; value=false → 'edited' (un-approve). Lock-exempt, non-version-
+  // 'validated'; value=false → 'edited' (un-approve). Approving is refused (409
+  // chapter_locked) while a translate run will write the note (#602). Non-version-
   // bumping, mirrors setPreserveNote. Returns the updated row so the caller can
   // refresh local state (the collapsed/green treatment keys off the new state).
   validateNote: (id: string, book: string, value: boolean) =>
@@ -2224,7 +2225,9 @@ export const api = {
 
   // Move a note to the visible "trash" state (the delete button). Returns the
   // updated row with trashed_at set. Reversible via restoreNote; finalized to a
-  // deleted_at tombstone by the nightly job. Lock-exempt, no If-Match.
+  // deleted_at tombstone by the nightly job. No If-Match. Refused (409
+  // chapter_locked) while a translate run will write the note (#602); so is
+  // restoreNote.
   trashNote: (id: string, book: string) =>
     request<TnRow>(`/api/rows/tn/${encodeURIComponent(id)}/trash?book=${encodeURIComponent(book)}`, {
       method: "POST",

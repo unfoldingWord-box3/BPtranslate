@@ -27,7 +27,7 @@ import { useTwlFilters } from "../hooks/useTwlFilters";
 import { useUnsavedGuard } from "../hooks/useUnsavedGuard";
 import { useLayoutBand } from "../hooks/useLayoutBand";
 import { outbox } from "../sync/outbox";
-import { api, ApiError, CHECK_LANES } from "../sync/api";
+import { api, ApiError, CHECK_LANES, isChapterLockedBody } from "../sync/api";
 import type { BookLintIssue, ChapterPayload, CheckLane, TnRow, TqRow, TwlRow, VerseDto, TwlSuggestion, LaneReplacementEvent } from "../sync/api";
 import { refreshProjectConfig, useProjectConfig, useWorkflowLayouts } from "../hooks/useProjectConfig";
 import {
@@ -263,6 +263,12 @@ interface Props {
   meUserId?: number | null;
   // Current signed-in username, for the TopBar Account menu's identity line.
   meUsername?: string | null;
+}
+
+// The server refused a note action because an AI translation will write the
+// note (409 chapter_locked, issue #602) — a stale tab that missed the lock.
+function isNoteTranslateLocked(e: unknown): boolean {
+  return e instanceof ApiError && isChapterLockedBody(e.body);
 }
 
 export function Shell({
@@ -1121,6 +1127,10 @@ export function Shell({
         const updated = await api.validateNote(id, book, value);
         applyLocalRowReplacement("tn", updated);
       } catch (e) {
+        if (isNoteTranslateLocked(e)) {
+          pushPipelineToast(t("shell.noteLockedByTranslate"), "error");
+          return;
+        }
         const msg = e instanceof Error ? e.message : t("appShell.common.unknownError");
         pushPipelineToast(t("shell.couldntApproveNote", { message: msg }), "error");
       }
@@ -1187,6 +1197,12 @@ export function Shell({
   const approveAllNotesInFlightRef = useRef(false);
   const handleApproveAllNotes = useCallback(async () => {
     if (!data || approveAllNotesInFlightRef.current) return;
+    // A chapter-wide translate run would undo every approval when it applies,
+    // and the server refuses each one (issue #602).
+    if (chapterLock?.locksAllNotes) {
+      pushPipelineToast(t("shell.noteLockedByTranslate"), "error");
+      return;
+    }
     const list = data.tn.filter(isApprovableRow);
     if (list.length === 0) return;
     approveAllNotesInFlightRef.current = true;
@@ -1220,7 +1236,7 @@ export function Shell({
         "error",
       );
     }
-  }, [data, book, applyLocalRowReplacement, pushPipelineToast, t]);
+  }, [data, book, chapterLock, applyLocalRowReplacement, pushPipelineToast, t]);
 
   const approveAllQuestionsInFlightRef = useRef(false);
   const handleApproveAllQuestions = useCallback(async () => {
@@ -1317,7 +1333,10 @@ export function Shell({
       } catch (e) {
         applyLocalRowPatch("tn", id, { trashed_at: null });
         const msg = e instanceof Error ? e.message : t("appShell.common.unknownError");
-        pushPipelineToast(t("shell.couldntDeleteNote", { message: msg }), "error");
+        pushPipelineToast(
+          isNoteTranslateLocked(e) ? t("shell.noteLockedByTranslate") : t("shell.couldntDeleteNote", { message: msg }),
+          "error",
+        );
         return false;
       }
     },
@@ -1336,7 +1355,10 @@ export function Shell({
       } catch (e) {
         applyLocalRowPatch("tn", id, { trashed_at: Math.floor(Date.now() / 1000) });
         const msg = e instanceof Error ? e.message : t("appShell.common.unknownError");
-        pushPipelineToast(t("shell.couldntRestoreNote", { message: msg }), "error");
+        pushPipelineToast(
+          isNoteTranslateLocked(e) ? t("shell.noteLockedByTranslate") : t("shell.couldntRestoreNote", { message: msg }),
+          "error",
+        );
       }
     },
     [book, applyLocalRowPatch, applyLocalRowReplacement, pushPipelineToast, scheduleLintRefetch, t],

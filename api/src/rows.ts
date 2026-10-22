@@ -1155,6 +1155,22 @@ async function setTnTrashed(
   return env.DB.prepare(`SELECT * FROM tn_rows WHERE id = ?1${bookClause(2)}`).bind(id, book).first<TnRow>();
 }
 
+// The translate run, if any, that will write over this tn row when it applies
+// (issue #602, decision B on #561). Approve, Not needed and Restore check it:
+// applyTranslateTnRow sets translation_state='ai_draft' and replaces the note
+// whatever its trashed_at, so an approval or trash made mid-run would be
+// silently undone. /preserve and /hint stay exempt — the apply never writes
+// those bits. An unknown row returns null so the route still answers 404.
+async function translateLockForTnId(env: Env, id: string, book: string) {
+  const row = await env.DB.prepare(
+    `SELECT id, book, chapter, verse, ref_raw FROM tn_rows WHERE id = ?1 AND deleted_at IS NULL${bookClause(2)}`,
+  )
+    .bind(id, book)
+    .first<{ id: string; book: string; chapter: number; verse: number; ref_raw: string | null }>();
+  if (!row) return null;
+  return translateLockForTnRow(env, row.book, row);
+}
+
 // POST /api/rows/tn/:id/preserve — toggle the "survive future AI pipeline
 // sweeps" bit. Body: { value: 0 | 1 | boolean }. Lock-exempt. Idempotent.
 rows.post("/tn/:id/preserve", requireEditor, async (c) => {
@@ -1227,7 +1243,8 @@ rows.post("/tn/:id/hint", requireEditor, async (c) => {
 
 // POST /api/rows/tn/:id/validate — the translation-mode "Approve" action.
 // Body: { value: 0 | 1 | boolean } (1 → validated, 0 → back to edited).
-// Lock-exempt, non-version-bumping, idempotent — mirrors /preserve. Marks a
+// Non-version-bumping, idempotent. Approving (value=1) is refused (409
+// chapter_locked) while a translate run will write this note (#602). Marks a
 // reviewed AI draft as human-approved so the nightly context export can turn
 // it into a validated few-shot example (PIPELINE-SPEC §4.2).
 rows.post("/tn/:id/validate", requireEditor, async (c) => {
@@ -1248,6 +1265,13 @@ rows.post("/tn/:id/validate", requireEditor, async (c) => {
   // value=1 → validated; value=0 → 'edited' (un-approve keeps it in the
   // reviewed-but-not-validated state rather than pretending it's a fresh draft).
   const nextState = coerceBitValue(parsed.data.value) === 1 ? "validated" : "edited";
+  // Only approving is refused during a translate run: the apply would undo it.
+  // Un-approve ("Revoke example") is let through — the apply resets the row to
+  // ai_draft anyway, so refusing it protects nothing.
+  if (nextState === "validated") {
+    const lock = await translateLockForTnId(c.env, id, book);
+    if (lock) return c.json(lockedResponseBody(lock), 409);
+  }
   const updated = await setTnTranslationState(c.env, id, book, userId, nextState);
   if (!updated) return c.json({ error: "not_found" }, 404);
   c.executionCtx.waitUntil(
@@ -1303,13 +1327,16 @@ rows.post("/tn/:id/keep", requireEditor, async (c) => {
 // POST /api/rows/tn/:id/trash — the note delete button. Moves the note to the
 // visible "trash" state: the card grays out, drops to the bottom of the verse,
 // and gains a Restore button. Reversible via /restore; finalized to a
-// permanent deleted_at tombstone by the nightly 06:00 UTC job. Lock-exempt and
+// permanent deleted_at tombstone by the nightly 06:00 UTC job. Refused while a
+// translate run will write this note (#602); otherwise
 // non-version-bumping, like /preserve. No If-Match — idempotent state flip.
 rows.post("/tn/:id/trash", requireEditor, async (c) => {
   const id = c.req.param("id");
   const book = c.req.query("book");
   if (!book) return c.json({ error: "book_required" }, 400);
   const userId = currentUserId(c);
+  const lock = await translateLockForTnId(c.env, id, book);
+  if (lock) return c.json(lockedResponseBody(lock), 409);
   const updated = await setTnTrashed(c.env, id, book, userId, true);
   if (!updated) return c.json({ error: "not_found" }, 404);
   c.executionCtx.waitUntil(
@@ -1324,6 +1351,8 @@ rows.post("/tn/:id/restore", requireEditor, async (c) => {
   const book = c.req.query("book");
   if (!book) return c.json({ error: "book_required" }, 400);
   const userId = currentUserId(c);
+  const lock = await translateLockForTnId(c.env, id, book);
+  if (lock) return c.json(lockedResponseBody(lock), 409);
   const updated = await setTnTrashed(c.env, id, book, userId, false);
   if (!updated) return c.json({ error: "not_found" }, 404);
   c.executionCtx.waitUntil(

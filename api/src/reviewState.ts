@@ -64,6 +64,7 @@ import type { Env } from "./index";
 import { currentUserId } from "./auth.ts";
 import { BOOK_NUMBERS } from "./dcsSources.ts";
 import { broadcastChapter } from "./wsEvents.ts";
+import { lockedResponseBody, translateLockForTnRows } from "./chapterLock.ts";
 
 /** edit_log.source tag for a bulk sweep, and the value stamped on the rows. */
 export const ADMIN_BULK_SOURCE = "admin_bulk_state";
@@ -346,6 +347,23 @@ export async function bulkReviewState(c: Context<{ Bindings: Env; Variables: { u
 
   const { resource, target, range } = parsed;
   const dryRun = c.req.query("dryRun") === "1" || body.dryRun === true;
+
+  // An approve sweep over notes an AI translate run will write is undone when
+  // the run applies (it sets ai_draft, and the sweep bumps no version for its
+  // CAS to catch), so refuse the whole request, dry run included, with the
+  // same 409 the per-row Approve returns (issue #602). A needs_review sweep is
+  // let through: the apply resets those rows to ai_draft anyway.
+  if (resource === "tn" && target === "approved") {
+    const rs = await c.env.DB.prepare(
+      `SELECT id, chapter, verse, ref_raw FROM tn_rows
+        WHERE book = ?1 AND ${liveRowsClause(resource)}
+          ${range ? "AND chapter >= ?2 AND chapter <= ?3" : ""}`,
+    )
+      .bind(...(range ? [book, range.start, range.end] : [book]))
+      .all<{ id: string; chapter: number; verse: number; ref_raw: string | null }>();
+    const lock = await translateLockForTnRows(c.env, book, rs.results ?? []);
+    if (lock) return c.json(lockedResponseBody(lock), 409);
+  }
 
   if (dryRun) {
     const table = resource === "tn" ? "tn_rows" : "tq_rows";

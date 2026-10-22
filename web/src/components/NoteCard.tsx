@@ -438,6 +438,10 @@ function NoteCardInner({
   const isUnapprovedAiDraft = !translationMode && row.translation_state === "ai_draft";
   const lockUnapproved = isUnapprovedAiDraft && getLockUnapprovedDrafts();
   const readOnly = trashed || lockUnapproved || noteLockedReadOnly(lockPipelineType, locked, isPreserved, isHint);
+  // A translate run writes this note whether or not it is trashed, so Restore
+  // is refused too until it finishes (issue #602). Approve and delete already
+  // hide under readOnly.
+  const translateLocked = locked && lockPipelineType === "translate";
   const [quote, setQuote] = useState(tsvToDisplay(row.quote));
   const [note, setNote] = useState(tsvToDisplay(row.note));
   // Find-highlight: the active match note shows a read view (with the match
@@ -1426,10 +1430,19 @@ function NoteCardInner({
               variant="outlined"
               sx={{ height: 22, fontSize: 11, color: "text.secondary", borderColor: "divider" }}
             />
-            <Tooltip title={t("noteCard.restoreNote")}>
-              <IconButton size="small" aria-label={t("noteCard.restoreNote")} onClick={onRestore} color="primary" sx={{ p: 0.25 }}>
-                <RestoreFromTrashIcon fontSize="inherit" />
-              </IconButton>
+            <Tooltip title={translateLocked ? t("shell.noteLockedByTranslate") : t("noteCard.restoreNote")}>
+              <span>
+                <IconButton
+                  size="small"
+                  aria-label={t("noteCard.restoreNote")}
+                  onClick={onRestore}
+                  disabled={translateLocked}
+                  color="primary"
+                  sx={{ p: 0.25 }}
+                >
+                  <RestoreFromTrashIcon fontSize="inherit" />
+                </IconButton>
+              </span>
             </Tooltip>
           </>
         )}
