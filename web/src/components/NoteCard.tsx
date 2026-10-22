@@ -142,6 +142,11 @@ interface Props {
   // and the row is neither preserved nor a hint, the card is read-only.
   // Preserved or hinted rows stay editable during a non-translate run.
   locked?: boolean;
+  // Any active pipeline locks this chapter. The server refuses new rows for
+  // the whole chapter during any run (rows.ts create), so the insert-after
+  // button hides even on cards that stay editable (preserved/hint notes, or
+  // every note outside a single-note redraft, issue #607).
+  createLocked?: boolean;
   // Pipeline type of the job holding the lock (see lib/chapterLock.ts).
   lockPipelineType?: string | null;
   // Toggle the row's "survive future AI pipeline sweeps" bit. Always
@@ -398,6 +403,7 @@ function NoteCardInner({
   onStartAi,
   onVisibilityChange,
   locked = false,
+  createLocked = false,
   lockPipelineType = null,
   onSetPreserve,
   onSetHint,
@@ -1417,7 +1423,7 @@ function NoteCardInner({
         )}
         {!readOnly && (
           <>
-            {onInsertAfter && (
+            {onInsertAfter && !createLocked && (
               <Tooltip title={t("noteCard.addNoteAfter")}>
                 <IconButton size="small" aria-label={t("noteCard.addNoteAfter")} onClick={onInsertAfter} color="success" sx={{ p: 0.25 }}>
                   <AddIcon fontSize="inherit" />
@@ -2155,6 +2161,7 @@ function areNotePropsEqual(a: Props, b: Props): boolean {
     a.isAiPending === b.isAiPending &&
     a.aiRecentlyCompletedAt === b.aiRecentlyCompletedAt &&
     a.locked === b.locked &&
+    (a.createLocked ?? false) === (b.createLocked ?? false) &&
     (a.lockPipelineType ?? null) === (b.lockPipelineType ?? null) &&
     a.quoteBuildMode === b.quoteBuildMode &&
     a.quoteBuildSelectionCount === b.quoteBuildSelectionCount &&

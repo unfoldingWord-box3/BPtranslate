@@ -4,7 +4,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { jobLocksChapter, jobLocksChapterNotes, jobLocksNote, lockJobReleased, noteLockedReadOnly } from "./chapterLock.ts";
+import {
+  jobLocksChapter,
+  jobLocksChapterNoteCards,
+  jobLocksChapterNotes,
+  jobLocksNote,
+  lockJobReleased,
+  noteLockedReadOnly,
+} from "./chapterLock.ts";
 
 const job = (over = {}) => ({
   book: "ZEC",
@@ -122,4 +129,30 @@ test("lockJobReleased: only a known job that left the locking states releases a 
   // Absent from the store: a stale tab may not know the job yet, so keep the lock.
   assert.equal(lockJobReleased("j1", [{ job_id: "j2", state: "done" }]), false);
   assert.equal(lockJobReleased("j1", []), false);
+});
+
+// Issue #607: in the classic editor a single-note or verse-range redraft must
+// not put the chapter's other notes into keep-mode. The server refuses PATCH
+// only on the notes the redraft covers (translateLockForTnRow); scripture, tq,
+// twl and note create/delete stay chapter-locked, so jobLocksChapter is
+// unchanged for it.
+test("jobLocksChapterNoteCards: a row-scoped tn redraft leaves the chapter's note cards out of the lock", () => {
+  const single = redraft({ row_ids: ["n1"] });
+  const range = redraft({ verse_start: 2, verse_end: 4 });
+  assert.equal(jobLocksChapterNoteCards(single, "ZEC", 1), false);
+  assert.equal(jobLocksChapterNoteCards(range, "ZEC", 1), false);
+  assert.equal(jobLocksChapter(single, "ZEC", 1), true, "scripture/tq/twl still locked");
+});
+
+test("jobLocksChapterNoteCards: every other locking job reaches the note cards, as before", () => {
+  assert.equal(jobLocksChapterNoteCards(job(), "ZEC", 1), true, "chapter-wide tn translate");
+  assert.equal(jobLocksChapterNoteCards(job(), "ZEC", 0), true, "chapter-wide translate covers the intro");
+  assert.equal(jobLocksChapterNoteCards(job({ pipeline_type: "notes", locks_chapter_notes: false }), "ZEC", 1), true);
+  // A tq/twl translate has no note_selection: unchanged keep-mode.
+  assert.equal(jobLocksChapterNoteCards(job({ locks_chapter_notes: false, note_selection: null }), "ZEC", 1), true);
+  // An older server that sends neither field: unchanged.
+  assert.equal(jobLocksChapterNoteCards(job({ locks_chapter_notes: undefined }), "ZEC", 1), true);
+  // Out of range or not locking: nothing.
+  assert.equal(jobLocksChapterNoteCards(job(), "ZEC", 2), false);
+  assert.equal(jobLocksChapterNoteCards(job({ state: "queued" }), "ZEC", 1), false);
 });
