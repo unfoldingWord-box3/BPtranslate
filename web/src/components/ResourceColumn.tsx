@@ -451,6 +451,7 @@ export function ResourceColumn({
       setResourceTab(requestTab.tab);
       setTabRequestScroll((n) => n + 1);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the request nonce by design: a switch happens once per new request. `tabs` is a fresh array every render and `requestTab.tab` only matters alongside a new nonce.
   }, [requestTab?.nonce]);
 
   // Lazily mount the Search iframe on first visit, then keep it alive (the body
@@ -557,6 +558,7 @@ export function ResourceColumn({
   const noteFocusRef = useRef<{ id: string; dir: "up" | "down" } | null>(null);
   const [recentNoteMove, setRecentNoteMove] = useState<{ id: string; dir: "up" | "down" } | null>(null);
   const noteFlashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- runs after every commit on purpose: it consumes the focus request the arrow handlers leave in noteFocusRef and clears it on first read, so the setState fires once per move, never in a loop.
   useLayoutEffect(() => {
     const pending = noteFocusRef.current;
     if (!pending) return;
