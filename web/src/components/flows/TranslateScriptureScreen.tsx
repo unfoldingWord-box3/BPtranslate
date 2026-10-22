@@ -256,7 +256,7 @@ export default function TranslateScriptureScreen({
   const targetLabel = projectConfig?.languageName || t("flowScripture.target");
   const canEditRole = role === "admin" || role === "editor";
 
-  const { status, data, applyLocalVerse, applyLocalVerseStatus } = useChapter(book, chapter);
+  const { status, data, refetch, applyLocalVerse, applyLocalVerseStatus } = useChapter(book, chapter);
   const { summary } = useBook(book, true);
   const chapterCount = summary ? realChapters(summary).length : null;
 
@@ -1224,6 +1224,7 @@ export default function TranslateScriptureScreen({
                 chapter={chapter}
                 role={role}
                 phone={!isTabletUp}
+                onImported={refetch}
               />
               {/* compact prev/next — the same cursor and disabled logic as the
                   bottom buttons (goPrev/goNext), also disabled on the done view
