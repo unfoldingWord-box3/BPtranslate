@@ -809,6 +809,7 @@
     "editLeftUnaligned_other": "This edit left {{count}} words unaligned in {{ref}} {{bibleVersion}} — re-align in the Alignment panel.",
     "chapterLockBanner": "AI {{pipelineType}} run in progress for {{book}} {{chapter}} — started {{started}}. Editing is locked for this chapter. You can still mark notes to keep before the new set lands.",
     "chapterLockBannerTranslate": "AI translation in progress for {{book}} {{chapter}} — started {{started}}. Notes in this chapter are read-only until it finishes.",
+    "chapterLockBannerRedraft": "AI translation of selected notes in progress for {{book}} {{chapter}} — started {{started}}. Scripture, questions and words in this chapter are locked until it finishes, and so are the notes being translated. Other notes can still be edited.",
     "bulkCheckTitle": "Check all {{label}} for this chapter?",
     "bulkClearTitle": "Clear all {{label}} for this chapter?",
     "bulkCheckBody": "This marks {{label}} as checked by you for all {{verseCount}} applicable verses in {{ref}}.",

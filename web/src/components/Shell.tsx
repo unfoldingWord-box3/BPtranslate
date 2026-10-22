@@ -52,7 +52,7 @@ import { smartEditVerse } from "../lib/replace";
 import { errorCopy } from "../lib/aiErrorCopy";
 import { extractEditableText, extractPlainText, normalizeEditable, SECTION_HEADER_TAGS } from "../lib/usfm";
 import { verseHasUnalignedWork, countUnalignedTargetWords } from "../lib/alignment";
-import { jobLocksChapter, jobLocksChapterNotes, jobLocksNote } from "../lib/chapterLock";
+import { jobLocksChapter, jobLocksChapterNoteCards, jobLocksChapterNotes, jobLocksNote } from "../lib/chapterLock";
 import {
   analyzeAlignmentDelta,
   guardBlocksSave,
@@ -1063,21 +1063,26 @@ export function Shell({
   // whose scope covers this (book, chapter) locks the editor; the banner
   // surfaces the started-at time. Under a chapter-wide translate run every TN
   // card is read-only; under other runs the cards switch to keep-mode
-  // (issue #561).
+  // (issue #561). A single-note or verse-range translate redraft leaves the
+  // TN cards out of the chapter lock: only the notes it will write go
+  // read-only, via translateLockedNoteIds (issue #607).
   const [activeJobs, setActiveJobs] = useState<PipelineJob[]>([]);
   useEffect(() => pipelineStore.subscribe(setActiveJobs), []);
   const chapterLock = useMemo(() => {
     // jobLocksChapter mirrors the server rule, including the book intro
     // (chapter 0) being covered by a translate job that starts at chapter 1.
-    // A run that locks every note wins, so the banner names it.
+    // A run that locks every note wins, then one that reaches the note cards,
+    // so the banner names the job that explains what the user sees.
     const notesJob = activeJobs.find((j) => jobLocksChapterNotes(j, book, chapter));
-    const found = notesJob ?? activeJobs.find((j) => jobLocksChapter(j, book, chapter));
+    const noteCardsJob = notesJob ?? activeJobs.find((j) => jobLocksChapterNoteCards(j, book, chapter));
+    const found = noteCardsJob ?? activeJobs.find((j) => jobLocksChapter(j, book, chapter));
     if (!found) return null;
     return {
       jobId: found.job_id,
       pipelineType: found.pipeline_type,
       startedAt: found.created_at,
       locksAllNotes: Boolean(notesJob),
+      locksNoteCards: Boolean(noteCardsJob),
     };
   }, [activeJobs, book, chapter]);
 
@@ -3631,6 +3636,7 @@ export function Shell({
       void outbox.enqueueDeleteRow("tq", id, row.version, row.book);
     },
     locked: Boolean(chapterLock),
+    noteCardsLocked: Boolean(chapterLock?.locksNoteCards),
     lockPipelineType: chapterLock?.locksAllNotes ? "translate" : null,
     onSetNotePreserve: handleSetNotePreserve,
     onSetNoteHint: handleSetNoteHint,
@@ -4258,12 +4264,19 @@ export function Shell({
             "& .MuiAlert-message": { width: "100%" },
           }}
         >
-          {t(chapterLock.locksAllNotes ? "shell.chapterLockBannerTranslate" : "shell.chapterLockBanner", {
-            pipelineType: chapterLock.pipelineType,
-            book,
-            chapter,
-            started: formatRelative(chapterLock.startedAt, t),
-          })}
+          {t(
+            chapterLock.locksAllNotes
+              ? "shell.chapterLockBannerTranslate"
+              : chapterLock.locksNoteCards
+                ? "shell.chapterLockBanner"
+                : "shell.chapterLockBannerRedraft",
+            {
+              pipelineType: chapterLock.pipelineType,
+              book,
+              chapter,
+              started: formatRelative(chapterLock.startedAt, t),
+            },
+          )}
         </Alert>
       )}
       <LayoutDragProvider value={layoutDrag}>
