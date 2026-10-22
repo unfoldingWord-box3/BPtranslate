@@ -264,6 +264,7 @@ export function PipelineMenu({ book, chapter, onMessage, onImported }: Props) {
   // `t` is a dep because parseChapterRange returns a translated error message;
   // without it the message stays in the previous language after a switch. Safe
   // here — pure derivation, no fetch.
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- `t` is a deliberate recompute signal (see above); the linter cannot see that parseChapterRange reads the active language.
   const refParsed = useMemo(() => parseChapterRange(refInput, book), [refInput, book, t]);
 
   // "In progress" for the chapter = queued/dispatching/running/paused. A

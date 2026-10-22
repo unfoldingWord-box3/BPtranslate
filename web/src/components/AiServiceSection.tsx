@@ -129,6 +129,7 @@ export function AiServiceSection() {
 
   useEffect(() => {
     void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only load; `load` is a new function every render (the Retry button calls it directly), so listing it would refetch on every render.
   }, []);
 
   if (settings === null) {

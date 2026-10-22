@@ -105,9 +105,12 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
   // When the book toggles or `enabled` drops, abort every in-flight chapter
   // load (the effect above already clears the cache).
   useEffect(() => {
+    // The ref holds one Map for the hook's lifetime (never reassigned), so
+    // capturing it here is the same object the cleanup would have read.
+    const ctrls = chapterCtrls.current;
     return () => {
-      for (const ctrl of chapterCtrls.current.values()) ctrl.abort();
-      chapterCtrls.current.clear();
+      for (const ctrl of ctrls.values()) ctrl.abort();
+      ctrls.clear();
       trackerRef.current = null;
     };
   }, [book, enabled]);

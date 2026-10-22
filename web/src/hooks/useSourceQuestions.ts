@@ -77,13 +77,17 @@ export function useSourceQuestions(
   source: { org: string; repo: string } | null,
 ): SourceQuestionMap {
   const [map, setMap] = useState<SourceQuestionMap>(EMPTY);
+  // Depend on the two strings, not the object, so a caller that builds `source`
+  // fresh each render does not refetch on every render.
+  const org = source?.org ?? null;
+  const repo = source?.repo ?? null;
   useEffect(() => {
-    if (!book || !source) {
+    if (!book || org === null || repo === null) {
       setMap(EMPTY);
       return;
     }
     let mounted = true;
-    fetchSourceQuestions(source.org, source.repo, book)
+    fetchSourceQuestions(org, repo, book)
       .then((m) => {
         if (mounted) setMap(m);
       })
@@ -93,6 +97,6 @@ export function useSourceQuestions(
     return () => {
       mounted = false;
     };
-  }, [book, source?.org, source?.repo]);
+  }, [book, org, repo]);
   return map;
 }

@@ -577,6 +577,7 @@ function ArticleEditor({
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `pathsKey` is the content key for `paths`; the array itself is a new reference every render, so listing it would refetch on every render.
   }, [resource, articleId, pathsKey, reloadKey]);
 
   // A finished translate run (single-slot queue → one at a time) clears the

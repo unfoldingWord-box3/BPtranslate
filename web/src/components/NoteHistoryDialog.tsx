@@ -115,7 +115,7 @@ export function NoteHistoryDialog({
     return () => {
       cancelled = true;
     };
-  }, [open, noteId, effectiveVersion]);
+  }, [open, noteId, book, effectiveVersion]);
 
   // Most recent first; phantom revert entries (same snapshot as the
   // version they restored) are filtered out — the user wanted "the other

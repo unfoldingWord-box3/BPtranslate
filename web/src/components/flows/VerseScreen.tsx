@@ -259,6 +259,7 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
   // the previous language until the verse data changes. Safe here — this memo
   // is pure derivation, no fetch (contrast the loader effects, which must NOT
   // depend on `t` or they refire on every language change).
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- `t` is a deliberate recompute signal (see above); the linter cannot see that collectOriginalWords reads the active language.
   const words = useMemo(() => collectOriginalWords(sourceVO), [sourceVO, t]);
 
   const lit = useMemo(

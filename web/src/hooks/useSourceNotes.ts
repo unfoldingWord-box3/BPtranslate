@@ -83,13 +83,17 @@ export function useSourceNotes(
   source: { org: string; repo: string } | null,
 ): SourceNoteMap {
   const [map, setMap] = useState<SourceNoteMap>(EMPTY);
+  // Depend on the two strings, not the object, so a caller that builds `source`
+  // fresh each render does not refetch on every render.
+  const org = source?.org ?? null;
+  const repo = source?.repo ?? null;
   useEffect(() => {
-    if (!book || !source) {
+    if (!book || org === null || repo === null) {
       setMap(EMPTY);
       return;
     }
     let mounted = true;
-    fetchSourceNotes(source.org, source.repo, book)
+    fetchSourceNotes(org, repo, book)
       .then((m) => {
         if (mounted) setMap(m);
       })
@@ -99,6 +103,6 @@ export function useSourceNotes(
     return () => {
       mounted = false;
     };
-  }, [book, source?.org, source?.repo]);
+  }, [book, org, repo]);
   return map;
 }
