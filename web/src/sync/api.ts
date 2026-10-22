@@ -1367,7 +1367,9 @@ export type PipelineErrorKind =
   | "merge_shrink_refused"
   // Dispatch-time failures written by api/src/pipelines.ts dispatchNext.
   | "lane_fenced"
-  | "pipeline_api_disabled";
+  | "pipeline_api_disabled"
+  // #551: a queued generate/notes/tqs job, which can't run on the org's own key yet.
+  | "ai_needs_org_key";
 // The union is hand-kept; the wire value is any string. Fields that carry an
 // errorKind from the server are typed `string`, and lib/aiErrorCopy.ts falls
 // back for a kind it doesn't know. lib/aiErrorCopy.test.mjs scans api/src and

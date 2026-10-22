@@ -56,6 +56,14 @@ const DEFAULT_BASE = "https://uw-bt-bot.fly.dev";
 const PIPELINE_TYPES = ["generate", "notes", "tqs", "translate"] as const;
 type PipelineType = (typeof PIPELINE_TYPES)[number];
 
+// #551: every AI call made for an org runs on that org's own AI key. The bot
+// accepts a per-request key only for translate, so these three older types
+// (Generate ULT/UST, Write tN, Write tQ) would still run on unfoldingWord's
+// shared account. They are switched off until they can take the org key:
+// /start refuses them and dispatchNext fails any that are already queued.
+// They stay in PIPELINE_TYPES because history and import code still read them.
+const NEEDS_ORG_KEY_TYPES: ReadonlySet<string> = new Set(["generate", "notes", "tqs"]);
+
 // States that occupy the single bot slot. While any job is in one of these,
 // dispatchNext refuses to send another job upstream. 'dispatching' is the
 // transient "claimed the slot, upstream POST in flight" state.
@@ -610,6 +618,14 @@ export async function dispatchNext(env: Env): Promise<void> {
   // pollAllNonTerminal (keyed on exactly this marker) can find it. Guarded on
   // `state = 'dispatching'` so this can never resurrect a row some other
   // caller (force-fail) has already moved on from.
+  // #551: a legacy generate/notes/tqs job queued before /start began refusing
+  // them (or a follow-up enqueued server-side) would run on the shared account.
+  // Fail it before anything else, so nothing reaches the bot.
+  if (NEEDS_ORG_KEY_TYPES.has(job.pipeline_type)) {
+    await fail("ai_needs_org_key", "this pipeline type cannot run on the organization's own AI key yet");
+    return;
+  }
+
   const markDispatchAmbiguous = async () => {
     await env.DB.prepare(
       `UPDATE pipeline_jobs
@@ -1505,6 +1521,12 @@ pipelines.post("/start", requireEditor, async (c) => {
   // needs to add a key" is the more actionable error. A BYO row that is
   // configured but broken (no key or model, wrapping key unavailable) is not
   // refused here; dispatchNext fails it with its reason.
+  // #551: generate/notes/tqs can't run on the org's own key yet, so they are
+  // refused outright (key or no key), before dedup and the bot-token gate.
+  if (NEEDS_ORG_KEY_TYPES.has(parsed.data.pipelineType)) {
+    return c.json({ error: "ai_needs_org_key" }, 409);
+  }
+
   let translateAi: DispatchAi | null = null;
   if (parsed.data.pipelineType === "translate") {
     const aiRow = await getAiProviderConfig(c.env.DB);

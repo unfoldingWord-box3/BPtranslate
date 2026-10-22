@@ -7,12 +7,12 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { Env } from "./index";
 import type { TemplateUnit } from "./types";
-import { currentUserId, requireEditor, requireAdmin } from "./auth";
-import { syncTemplates, ensureTemplatesPopulated } from "./templateSync";
-import { getProjectConfig } from "./projectConfig";
-import { nextPreDraftJson } from "./preDraftSnapshot";
-import { getLatestSuccessfulContextExport } from "./contextExportResults";
-import { applyContextRef, derivedTargetLang } from "./assistedContextRef";
+import { currentUserId, requireEditor, requireAdmin } from "./auth.ts";
+import { syncTemplates, ensureTemplatesPopulated } from "./templateSync.ts";
+import { getProjectConfig } from "./projectConfig.ts";
+import { nextPreDraftJson } from "./preDraftSnapshot.ts";
+import { getLatestSuccessfulContextExport } from "./contextExportResults.ts";
+import { applyContextRef, derivedTargetLang } from "./assistedContextRef.ts";
 
 export const templates = new Hono<{ Bindings: Env; Variables: { userId?: number } }>();
 
@@ -154,7 +154,16 @@ templates.patch("/unit", requireEditor, async (c) => {
 // (export gate) is computed identically to every other AI-draft producer.
 // If-Match CAS guards against clobbering a concurrent human edit — same
 // mechanics as PATCH /unit above.
+// #551: every AI call for an org must run on that org's own key. The bot's
+// template-quick schema can't take one, so "Draft with AI" for templates is
+// switched off until it can. The code below is kept for then; flip this to
+// false once the call carries the org key.
+const TEMPLATE_DRAFT_NEEDS_ORG_KEY: boolean = true;
+
 templates.post("/unit/draft", requireEditor, async (c) => {
+  if (TEMPLATE_DRAFT_NEEDS_ORG_KEY) {
+    return c.json({ error: "ai_needs_org_key" }, 409);
+  }
   if (!c.env.BT_API_TOKEN) {
     return c.json({ error: "template_draft_disabled" }, 503);
   }

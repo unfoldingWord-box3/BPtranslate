@@ -36,6 +36,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { dispatchNext, pollAllNonTerminal } from "./pipelines.ts";
+import { encryptApiKey } from "./aiKeyCrypto.ts";
 
 let failed = 0;
 function assert(cond, msg) {
@@ -50,18 +51,36 @@ function assert(cond, msg) {
 // Fake D1 for dispatchNext, with bind-value capture on fail()'s and
 // markDispatchAmbiguous's UPDATEs so these tests can assert error_kind/
 // error_message and which one ran, not just that some query ran. The seeded
-// job is pipeline_type 'notes', which skips this fork's generate stamp check
-// and translate per-org AI provider block — the dispatch POST path under
-// test is shared by all pipeline types.
+// job is a translate job with an org AI key configured (#551: the older
+// generate/notes/tqs types now fail before the POST, and a translate job runs
+// only on the org's key). PIPELINE_MODE is unset, so it routes to the bot,
+// which is the dispatch POST path under test.
+const WRAPPING_KEY = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64");
+const KEY_SEALED = await encryptApiKey(WRAPPING_KEY, "sk-test-dispatch-timeout");
+const AI_ROW = {
+  id: 1,
+  provider: "claude",
+  model: "claude-opus-5",
+  key_ciphertext: KEY_SEALED.ciphertextB64,
+  key_iv: KEY_SEALED.ivB64,
+  key_hint: "eout",
+  version: 1,
+  updated_at: 0,
+  updated_by: null,
+};
 function fakeDispatchEnv() {
   const env = {
     BT_API_TOKEN: "tok",
+    AI_KEY_WRAPPING_KEY: WRAPPING_KEY,
     queries: [],
     failCalls: [],
     ambiguousCalls: [],
     DB: {
       prepare(sql) {
         env.queries.push(sql);
+        if (/FROM ai_provider_config WHERE id = 1/.test(sql)) {
+          return { first: async () => AI_ROW, bind: () => ({ first: async () => AI_ROW }) };
+        }
         if (/SELECT dcs_username FROM users/.test(sql)) {
           return { bind: () => ({ first: async () => ({ dcs_username: "translator" }) }) };
         }
@@ -72,7 +91,7 @@ function fakeDispatchEnv() {
           const dispatchingJob = {
             job_id: "job-dispatch",
             user_id: 1,
-            pipeline_type: "notes",
+            pipeline_type: "translate",
             book: "NUM",
             start_chapter: 27,
             end_chapter: 27,
