@@ -261,3 +261,41 @@ test("isChapterWideTnTranslate", () => {
   assert.equal(isChapterWideTnTranslate("translate", JSON.stringify({ resourceType: "tq" })), false);
   assert.equal(isChapterWideTnTranslate("notes", null), false);
 });
+
+// Review R1: the SQL twin (activePipelineForChapter's chapter-0 clause) and the
+// JS parser (isChapterWideTnTranslate) must give the same answer for every
+// options_json, including non-standard shapes.
+test("chapter-wide SQL and isChapterWideTnTranslate agree on odd options", async () => {
+  const cases = [
+    null,
+    "not json",
+    "{}",
+    "[]",
+    "5",
+    JSON.stringify({ rowIds: [] }),
+    JSON.stringify({ rowIds: ["a"] }),
+    JSON.stringify({ rowIds: "a" }),
+    JSON.stringify({ rowIds: null }),
+    JSON.stringify({ verseStart: 2 }),
+    JSON.stringify({ verseStart: 2.5 }),
+    JSON.stringify({ verseStart: "2" }),
+    JSON.stringify({ verseStart: null }),
+    JSON.stringify({ resourceType: "tq" }),
+    JSON.stringify({ resourceType: 5 }),
+    JSON.stringify({ resourceType: null }),
+    JSON.stringify({ resourceType: "tn", rowIds: [], verseStart: "x" }),
+  ];
+  for (const options of cases) {
+    const a = fresh();
+    a.sqlite
+      .prepare(
+        `INSERT INTO pipeline_jobs (job_id, user_id, pipeline_type, book, start_chapter, end_chapter, session_key, state, options_json)
+         VALUES ('odd', 9, 'translate', ?, 1, 1, 's', 'running', ?)`,
+      )
+      .run(BOOK, options);
+    const sql = (await activePipelineForChapter(a.env, BOOK, 0)) !== null;
+    assert.equal(sql, isChapterWideTnTranslate("translate", options), `options_json=${options}`);
+  }
+  // The case the review named: an empty rowIds array is chapter-wide on both paths.
+  assert.equal(isChapterWideTnTranslate("translate", JSON.stringify({ rowIds: [] })), true);
+});
