@@ -81,9 +81,13 @@ export function useSourceScripture(
 ): SourceScripture {
   const key = book && source ? `${source.org}/${source.repo}/${book.toUpperCase()}` : null;
   const [loaded, setLoaded] = useState<LoadedBook | null>(null);
+  // Depend on the two strings, not the object, so a caller that builds `source`
+  // fresh each render does not refetch on every render.
+  const org = source?.org ?? null;
+  const repo = source?.repo ?? null;
   useEffect(() => {
-    if (!key || !book || !source) return;
-    const pending = fetchSourceBook(source.org, source.repo, book, bibleVersion);
+    if (!key || !book || org === null || repo === null) return;
+    const pending = fetchSourceBook(org, repo, book, bibleVersion);
     if (!pending) {
       setLoaded({ key, status: "error" });
       return;
@@ -99,7 +103,7 @@ export function useSourceScripture(
     return () => {
       mounted = false;
     };
-  }, [key, book, source?.org, source?.repo, bibleVersion]);
+  }, [key, book, org, repo, bibleVersion]);
 
   if (!key) return IDLE;
   if (!loaded || loaded.key !== key) return { status: "loading", verses: undefined };
