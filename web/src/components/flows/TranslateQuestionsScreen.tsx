@@ -634,7 +634,7 @@ export default function TranslateQuestionsScreen({
 
   const say = useCallback((text: string, severity: "info" | "warning" = "warning") => {
     setNotice({ text, severity });
-  }, []);
+  }, [setNotice]);
 
   // Hydrate both fields on card change: a persisted draft (unsaved typing
   // from this browser) wins over the row's own content.
@@ -845,7 +845,7 @@ export default function TranslateQuestionsScreen({
       if (nxt === -1) setView("done");
       else setCursor(nxt);
     },
-    [queueIds, statuses, reviewing, cursor, nextUnstatused],
+    [queueIds, statuses, reviewing, cursor, nextUnstatused, setView, setCursor],
   );
 
   // Swipe anywhere on the card stack to page between questions — the same
