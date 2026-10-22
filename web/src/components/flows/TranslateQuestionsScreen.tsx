@@ -89,6 +89,7 @@ import CheckIcon from "@mui/icons-material/Check";
 import SaveIcon from "@mui/icons-material/Save";
 import ViewColumnIcon from "@mui/icons-material/ViewColumn";
 
+import { FlowAiRunAction } from "./FlowAiRunAction";
 import { LockBanner } from "./FlowBanners";
 import { FlowStatusChip, type FlowStatusKind } from "./FlowStatusChip";
 import { isAquiferDraftRow, unescapeNewlines, waitForOp } from "./translateShared";
@@ -425,6 +426,7 @@ export default function TranslateQuestionsScreen({
   chapter,
   verse,
   rowId,
+  role,
 }: TranslateQuestionsScreenProps) {
   const { t } = useTranslation();
   const theme = useTheme();
@@ -1581,6 +1583,16 @@ export default function TranslateQuestionsScreen({
                 <ViewColumnIcon fontSize="small" />
               </IconButton>
             )}
+            {/* AI run for this chapter (#481): top bar on tablet+, "more"
+                menu on phone; nothing for viewers. */}
+            <FlowAiRunAction
+              book={book}
+              chapter={chapter}
+              role={role}
+              phone={!isTabletUp}
+              onMessage={setToast}
+              onImported={refetch}
+            />
             {/* compact prev/next — the same cursor and disabled logic as the
                 bottom Previous/Next buttons */}
             <Stack direction="row" spacing={0.25} sx={{ flex: "none" }}>
