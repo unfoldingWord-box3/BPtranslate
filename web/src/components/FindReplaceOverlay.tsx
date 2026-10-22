@@ -320,6 +320,7 @@ export function FindReplaceOverlay({
   const noteMatches = useMemo<NoteMatch[]>(() => {
     if (!open || !scope.tn || !find) return [];
     return collectNoteMatches(searchNotes(), compiled.re, noteOverrides);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `chapters` is a deliberate recompute signal: searchNotes() is a stable getter, so a note edit only re-reads the notes through the new `chapters` identity (see the comment above noteOverrides).
   }, [open, scope.tn, find, compiled.re, searchNotes, chapters, noteOverrides]);
 
   // Merge + order both scopes by chapter then verse, bible before note within
