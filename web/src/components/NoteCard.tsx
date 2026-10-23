@@ -1,4 +1,4 @@
-import { lazy, Suspense, memo, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
+import { lazy, Suspense, memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import {
   Paper,
   Stack,
@@ -533,21 +533,30 @@ function NoteCardInner({
   // lockstep and hasRowDiff would never go true. Pinning the baseline to
   // version means it only rebases on a real server confirmation (PATCH 200,
   // restore, AI completion, or WS row.upserted), all of which bump version.
-  const savedRef = useRef({
+  //
+  // `saved` (state) is what render reads; `savedRef` mirrors it at commit for
+  // the handlers below, one of which (handleDelete) reads it after an await,
+  // where a closure value would be stale. The rebase is adjusted during
+  // render and converges once saved.version equals row.version.
+  const [saved, setSaved] = useState(() => ({
     quote: row.quote,
     note: row.note,
     support_reference: row.support_reference,
     version: row.version,
-  });
+  }));
+  const savedRef = useRef(saved);
   const [savePendingVersion, setSavePendingVersion] = useState<number | null>(null);
-  if (row.version !== savedRef.current.version) {
-    savedRef.current = {
+  if (row.version !== saved.version) {
+    setSaved({
       quote: row.quote,
       note: row.note,
       support_reference: row.support_reference,
       version: row.version,
-    };
+    });
   }
+  useLayoutEffect(() => {
+    savedRef.current = saved;
+  }, [saved]);
   // Clear the in-flight gate once the server-confirmed version moves past
   // the one we saved against. A conflict (409) keeps row.version stuck and
   // savePendingVersion stays set — that's intentional, the user has to
@@ -583,7 +592,9 @@ function NoteCardInner({
   // BODY drives nothing outside this card, so it never propagates (it persists
   // via the draft store and saves through flushPending).
   const quoteRef = useRef(quote);
-  quoteRef.current = quote;
+  useLayoutEffect(() => {
+    quoteRef.current = quote;
+  }, [quote]);
   const quotePropagateTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scheduleQuotePropagate = () => {
     if (quotePropagateTimer.current !== null) clearTimeout(quotePropagateTimer.current);
@@ -668,12 +679,14 @@ function NoteCardInner({
       // Save button honest.
       const baseline = payload?.baseline;
       if (baseline) {
-        savedRef.current = {
+        const next = {
           quote: baseline.quote,
           note: baseline.note,
           support_reference: baseline.support_reference,
           version: rec?.expectedVersion ?? savedRef.current.version,
         };
+        savedRef.current = next;
+        setSaved(next);
       }
       if (typeof patch.quote === "string") setQuote(tsvToDisplay(patch.quote));
       if (typeof patch.note === "string") setNote(tsvToDisplay(patch.note));
@@ -990,11 +1003,11 @@ function NoteCardInner({
   // from hasNetChanges because we want drafts to track divergence from the
   // *saved* state, not from the session entry point.
   const rowDiff: Partial<TnRow> = {};
-  const rowQuoteDisplay = tsvToDisplay(savedRef.current.quote);
-  const rowNoteDisplay = tsvToDisplay(savedRef.current.note);
+  const rowQuoteDisplay = tsvToDisplay(saved.quote);
+  const rowNoteDisplay = tsvToDisplay(saved.note);
   if (quote !== rowQuoteDisplay) rowDiff.quote = quote;
   if (note !== rowNoteDisplay) rowDiff.note = note;
-  if (supportRef !== savedRef.current.support_reference) rowDiff.support_reference = supportRef;
+  if (supportRef !== saved.support_reference) rowDiff.support_reference = supportRef;
   const hasRowDiff = Object.keys(rowDiff).length > 0;
   // A validated card sits collapsed unless the user is actively editing it,
   // has expanded it for review, or has unsaved edits (which would auto-demote).
