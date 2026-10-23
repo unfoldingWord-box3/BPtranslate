@@ -244,9 +244,10 @@ export function rowDraftAfterOp(
 // "locked", or fatally failed), nothing else knows what this op landed, so the
 // draft would keep a stale baseline and a phantom "unsaved" reminder. So the
 // held fields this op sent are recorded on the draft (DraftRecord.confirmed),
-// with the version they landed at (confirmedVersion), and rowDraftAfterRelease
-// re-settles from them once the holding op leaves. With no landed version
-// nothing is recorded.
+// with the version they landed at (confirmedVersion). rowDraftAfterRelease
+// re-settles from them when the holding op is discarded after a 409 that
+// carried the server row; otherwise the record waits for a later confirm that
+// chained from it (#650). With no landed version nothing is recorded.
 //
 // The record is folded into a later confirm only when that op chained from it
 // (its expectedVersion is the recorded version, as version threading makes
@@ -299,16 +300,21 @@ export function rowDraftAfterConfirm(
 //     (conflictCurrent). Only fields where that row still equals the record
 //     are settled; the others are proven stale and leave the record. No server
 //     row: nothing is known, the draft is left.
-//   * fatal, or a discarded pending/failed op: the refused op did not move the
-//     server, so the record holds, if the op chained from it (its
-//     expectedVersion is the recorded version). Otherwise the record cannot be
-//     vouched for and is dropped unused.
+//   * fatal, or a discarded failed op: nothing is known, so the draft is left
+//     as it is, record included (#650). The row PATCH handler
+//     (api/src/rows.ts) returns its fatal refusals (400, 403, 404, 428) before
+//     it compares versions, so a refusal does not prove the row is still at
+//     the recorded version: another user may have written since. A
+//     max-attempts op's last 5xx may have committed. A stale "unsaved"
+//     reminder is safe; clearing text the server does not hold is not. The
+//     record stays, since a later confirm folds it in only when that op
+//     chained from the recorded version and got a 200, which proves it.
 // A draft with no record, or whose patch cannot be read, is left alone, as is
 // one the released op could not have held (it sent none of the recorded
 // fields).
 export function rowDraftAfterRelease(
   draft: DraftRecord | undefined,
-  released: Pick<OutboxOp, "target" | "patch" | "status" | "expectedVersion"> &
+  released: Pick<OutboxOp, "target" | "patch" | "status"> &
     Partial<Pick<OutboxOp, "action" | "conflictCurrent">>,
   reason: "locked" | "fatal" | "drop",
   queued: OutboxOp[] | null,
@@ -324,16 +330,13 @@ export function rowDraftAfterRelease(
     typeof rp !== "object" ||
     Object.keys(confirmed).some((k) => k in (rp as Record<string, unknown>));
   if (!couldHold) return undefined;
-  let trusted: Record<string, unknown> = {};
-  if (released.status === "conflict") {
-    const current = released.conflictCurrent as unknown;
-    if (!current || typeof current !== "object") return undefined;
-    const cur = current as Record<string, unknown>;
-    for (const [k, v] of Object.entries(confirmed)) {
-      if (k in cur && rowValueKey(cur[k]) === rowValueKey(v)) trusted[k] = v;
-    }
-  } else if (released.expectedVersion === draft.confirmedVersion) {
-    trusted = { ...confirmed };
+  if (released.status !== "conflict") return undefined;
+  const current = released.conflictCurrent as unknown;
+  if (!current || typeof current !== "object") return undefined;
+  const cur = current as Record<string, unknown>;
+  const trusted: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(confirmed)) {
+    if (k in cur && rowValueKey(cur[k]) === rowValueKey(v)) trusted[k] = v;
   }
   if (Object.keys(trusted).length === 0) return withoutRecord(draft);
   const next = rowDraftAfterConfirm(

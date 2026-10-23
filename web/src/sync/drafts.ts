@@ -531,8 +531,9 @@ export function draftDirtyBorderSx() {
 // wipe the recovery copy the freeze handler just preserved. drainPass
 // re-reads the op and forwards the quarantined flag on the listener op.
 onOutboxResult((op, result) => {
-  // A row op that ended fatally failed no longer holds its row draft;
-  // re-settle from what an earlier save confirmed (#632 item 1). A "locked"
+  // A row op that ended fatally failed no longer holds its row draft
+  // (#632 item 1). rowDraftAfterRelease leaves the draft as it is: a refusal
+  // does not prove the row is still at the recorded version (#650). A "locked"
   // drop is not re-settled: an AI apply is about to overwrite the row, so the
   // record is no longer known to be the server's (rowDraftAfterRelease).
   if (result.kind === "fatal" && op.target.kind === "row") {

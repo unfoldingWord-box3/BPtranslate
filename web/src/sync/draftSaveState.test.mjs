@@ -385,9 +385,11 @@ assert.equal(
   undefined,
   "#632.1: no landed version, nothing recorded",
 );
-const failedB = opB({ status: "failed", lastError: "http 422" });
-assert.equal(rowDraftAfterRelease(heldN1, failedB, "fatal", [failedB]), "clear", "#632.1: B failed fatally (never re-sends), the draft settles");
-assert.equal(rowDraftAfterRelease(heldN1, opB({ status: "failed", lastError: "max_attempts_exceeded" }), "drop", []), "clear", "#632.1: B discarded after failing, the draft settles");
+const failedB = opB({ status: "failed", lastError: "http 403" });
+// #650: a fatal release or a discarded failed op proves nothing about the
+// server row, so the draft is left as it is, record included (it waits for a
+// later confirm that chains from it). Only a discarded 409 settles (below).
+assert.equal(rowDraftAfterRelease(heldN1, failedB, "fatal", [failedB]), undefined, "#650: B failed fatally, the draft is left as it is");
 assert.equal(
   rowDraftAfterRelease(heldN1, failedB, "fatal", [opB({ id: "C", status: "conflict" })]),
   undefined,
@@ -408,10 +410,18 @@ for (const lastError of ["http 403", "http 404", "http 400", "http 428"]) {
 const droppedFailed = rowDraftAfterRelease(heldN1, opB({ status: "failed", lastError: "max_attempts_exceeded" }), "drop", []);
 assert.notEqual(droppedFailed, "clear", "#650: discarding a max-attempts op never clears the draft");
 assert.deepEqual((droppedFailed ?? heldN1).payload, heldN1.payload, "#650: ...and leaves its patch and baseline");
+// The kept record still settles the draft once a later save that chained from
+// it (C, another field at v7) gets a 200, which proves the row was at v7.
+assert.equal(
+  rowDraftAfterConfirm(heldN1, opB({ id: "C", status: "in_flight", patch: { quote: "Q2" } }), [], 8),
+  "clear",
+  "#650: a later chained confirm still settles against the kept record",
+);
 // The refused save's own text is never cleared or shrunk: only the baseline
-// moves to what A landed, so typing back to N0 later is a real change.
+// moves to what A landed (here proven by a discarded 409 whose row holds N1),
+// so typing back to N0 later is a real change.
 const heldN2 = rowDraftAfterConfirm(based({ note: "N2" }, { note: "N0" }), opA, [opB()], 7);
-const releasedN2 = rowDraftAfterRelease(heldN2, failedB, "fatal", []);
+const releasedN2 = rowDraftAfterRelease(heldN2, opB({ status: "conflict", conflictCurrent: { note: "N1", version: 8 } }), "drop", []);
 assert.deepEqual(
   releasedN2?.payload,
   { patch: { note: "N2" }, baseline: { note: "N1" } },
@@ -433,19 +443,15 @@ assert.equal(
 );
 assert.equal(rowDraftAfterRelease(heldN1, conflictedB(undefined), "drop", []), undefined, "F1: a conflict with no server row proves nothing");
 assert.equal(rowDraftAfterRelease(heldN1, opB(), "locked", []), undefined, "F1: locked (an AI apply will overwrite the row): leave the draft");
-// F5: a record is trusted only by an op that chained from it.
+// F5: a fatal op that did not chain from the record does not settle against it
+// either (#650: no fatal release does).
 assert.equal(
-  rowDraftAfterRelease(heldN1, opB({ status: "failed", lastError: "http 422", expectedVersion: 12 }), "fatal", [])?.confirmed,
+  rowDraftAfterRelease(heldN1, opB({ status: "failed", lastError: "http 403", expectedVersion: 12 }), "fatal", []),
   undefined,
-  "F5: an op that did not chain from the record drops it",
-);
-assert.notEqual(
-  rowDraftAfterRelease(heldN1, opB({ status: "failed", lastError: "http 422", expectedVersion: 12 }), "fatal", []),
-  "clear",
-  "F5: ...without settling against it",
+  "F5: an op that did not chain from the record leaves the draft as it is",
 );
 assert.equal(
-  rowDraftAfterRelease(heldN1, opB({ status: "failed", lastError: "http 422", patch: { sort_order: 3 } }), "fatal", []),
+  rowDraftAfterRelease(heldN1, opB({ status: "failed", lastError: "http 403", patch: { sort_order: 3 } }), "fatal", []),
   undefined,
   "#632.1: a released op that could not hold the draft (a reorder) changes nothing",
 );
