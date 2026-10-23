@@ -1015,9 +1015,12 @@ function NoteCardInner({
   if (note !== rowNoteDisplay) rowDiff.note = note;
   if (supportRef !== saved.support_reference) rowDiff.support_reference = supportRef;
   const hasRowDiff = Object.keys(rowDiff).length > 0;
-  // A validated card sits collapsed unless the user is actively editing it,
-  // has expanded it for review, or has unsaved edits (which would auto-demote).
-  const collapsedValidated = isValidated && !active && !expanded && !hasRowDiff;
+  // A validated card sits collapsed unless the user has expanded it for review
+  // or has unsaved edits (which would auto-demote). Being active does not open
+  // it: the card activates on mousedown, so an `active` term here unmounted the
+  // preview before its click could set `expanded`, and Collapse / Un-approve
+  // (gated on `expanded`) were unreachable (#641). Matches QuestionCard.
+  const collapsedValidated = isValidated && !expanded && !hasRowDiff;
   // State chip descriptor for the header. null → no chip (English root project,
   // or a non-null-but-uninteresting case). Colors mirror the mockup: violet for
   // AI draft, blue for edited, green for validated, neutral for untranslated.
