@@ -256,6 +256,7 @@ export function PipelineMenu({ book, chapter, onMessage, onImported }: Props) {
   // Re-load from localStorage whenever the dialog opens for a generate run, so
   // a change made in a different tab is reflected.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- loadGenOpts() reads localStorage (an external store another tab can change) each time the dialog opens; that read belongs after commit, not in render.
     if (confirm?.type === "generate") setGenOpts(loadGenOpts());
     if (confirm) setRefInput(String(chapter));
   }, [confirm, book, chapter]);
