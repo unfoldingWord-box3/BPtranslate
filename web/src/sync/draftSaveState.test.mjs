@@ -18,6 +18,8 @@ import {
   rowDraftSettledByOp,
   verseDraftHasActiveSave,
   withPendingReverts,
+  isPendingRowSave,
+  rowSaveEnded,
 } from "./draftSaveState.ts";
 
 const draft = {
@@ -600,4 +602,32 @@ assert.deepEqual(
   "#632.2: a sent field the editor does not show is ignored",
 );
 
-console.log("draftSaveState: 76 passed");
+// #632 item 2 review A1/A2: an editor's protection lasts exactly as long as
+// its save can still land. It ends on the outbox result of THAT save (ok,
+// fatal, locked) or when the user discards it; a 409 waiting for keep-mine
+// or a retry keeps it. The save is recognised by row and patch, since
+// NoteCard's save goes through Shell and never sees its op id.
+const tnTarget = { rowKind: "tn", id: "abcd", book: "ZEC" };
+const savedPatch = { note: "N1" };
+const tnOp = (over = {}) => ({
+  id: "x",
+  target: { kind: "row", rowKind: "tn", id: "abcd", book: "ZEC" },
+  action: "patch",
+  patch: { note: "N1" },
+  expectedVersion: 4,
+  ...over,
+});
+assert.equal(isPendingRowSave(savedPatch, tnOp(), tnTarget), true, "A1: the editor's own save is recognised");
+assert.equal(isPendingRowSave(savedPatch, tnOp({ expectedVersion: 9 }), tnTarget), true, "A1: a re-sent save (healed conflict) is still recognised");
+assert.equal(isPendingRowSave(savedPatch, tnOp({ patch: { note: "N2" } }), tnTarget), false, "A1: another save of the row is not");
+assert.equal(isPendingRowSave(savedPatch, tnOp({ patch: { note: "N1", quote: "q" } }), tnTarget), false, "A1: a wider patch is not");
+assert.equal(isPendingRowSave(savedPatch, tnOp({ target: { kind: "row", rowKind: "tn", id: "other", book: "ZEC" } }), tnTarget), false, "A1: another row is not");
+assert.equal(isPendingRowSave(savedPatch, tnOp({ target: { kind: "row", rowKind: "tn", id: "abcd", book: "HAG" } }), tnTarget), false, "A1: another book is not");
+assert.equal(isPendingRowSave(savedPatch, tnOp({ action: "delete" }), tnTarget), false, "A1: a delete is not");
+assert.equal(rowSaveEnded({ kind: "ok" }), true, "A1: a 200 ends the protection");
+assert.equal(rowSaveEnded({ kind: "fatal", reason: "http 422" }), true, "A1: a refusal ends it");
+assert.equal(rowSaveEnded({ kind: "locked" }), true, "A1: a locked drop ends it");
+assert.equal(rowSaveEnded({ kind: "conflict" }), false, "A1: a 409 awaiting keep-mine keeps it");
+assert.equal(rowSaveEnded({ kind: "retry", reason: "http 503" }), false, "A1: a retry keeps it");
+
+console.log("draftSaveState: 88 passed");
