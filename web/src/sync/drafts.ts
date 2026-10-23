@@ -169,6 +169,37 @@ function releasePendingMark(key: string, generation: string | undefined) {
   }
 }
 
+// Per-row-key chains that run drafts.settleRowAfterOp one at a time.
+const settleChains = new Map<string, Promise<void>>();
+
+// One row op's settle; see drafts.settleRowAfterOp.
+async function settleRowNow(key: string, op: OutboxOp): Promise<void> {
+  let queued: OutboxOp[] | null;
+  try {
+    queued = await outbox.list();
+  } catch {
+    queued = null;
+  }
+  const idb = await db();
+  const tx = idb.transaction(STORE, "readwrite");
+  const rec = (await tx.store.get(key)) as DraftRecord | undefined;
+  const next = rec && !rec.quarantined ? rowDraftAfterOp(rec, op, queued) : undefined;
+  if (next === undefined) {
+    await tx.done;
+    return;
+  }
+  if (next !== "clear") {
+    await tx.store.put(next);
+    await tx.done;
+    void notify();
+    return;
+  }
+  await tx.store.delete(key);
+  await tx.done;
+  releasePendingMark(key, rec?.generation);
+  void notify();
+}
+
 export function verseKey(
   book: string,
   chapter: number,
@@ -311,36 +342,23 @@ export const drafts = {
   // op settled it, else rebase its baseline. The outbox is read first, then
   // the draft is read, decided on and written in one drafts transaction, so an
   // editor's re-write cannot slip between them. The outbox read cannot share
-  // that transaction (separate database). Remaining race: an op enqueued in the
-  // gap between the two reads is not seen. That only matters if the draft
-  // still holds exactly what this op sent while the new op sends something
-  // else; an editor's draft holds what it is about to save, so the new op would
-  // send the draft's text too, and the clear loses nothing.
-  async settleRowAfterOp(key: string, op: OutboxOp): Promise<void> {
-    let queued: OutboxOp[] | null;
-    try {
-      queued = await outbox.list();
-    } catch {
-      queued = null;
-    }
-    const idb = await db();
-    const tx = idb.transaction(STORE, "readwrite");
-    const rec = (await tx.store.get(key)) as DraftRecord | undefined;
-    const next = rec && !rec.quarantined ? rowDraftAfterOp(rec, op, queued) : undefined;
-    if (next === undefined) {
-      await tx.done;
-      return;
-    }
-    if (next !== "clear") {
-      await tx.store.put(next);
-      await tx.done;
-      void notify();
-      return;
-    }
-    await tx.store.delete(key);
-    await tx.done;
-    releasePendingMark(key, rec?.generation);
-    void notify();
+  // that transaction (separate database), so settles for one row run one at a
+  // time (settleChains): a later op's settle cannot start between an earlier
+  // one's outbox read and its write. Remaining race: an op enqueued in the gap
+  // between the two reads is not seen. That only matters if the draft still
+  // holds exactly what this op sent while the new op sends something else; an
+  // editor's draft holds what it is about to save, so the new op would send
+  // the draft's text too, and the clear loses nothing.
+  settleRowAfterOp(key: string, op: OutboxOp): Promise<void> {
+    // A failed settle leaves the draft as it was (kept, the safe side) and must
+    // not stall the row's later settles.
+    const run = () => settleRowNow(key, op).catch((e) => console.warn("row draft settle failed", key, e));
+    const next = (settleChains.get(key) ?? Promise.resolve()).then(run);
+    settleChains.set(key, next);
+    void next.then(() => {
+      if (settleChains.get(key) === next) settleChains.delete(key);
+    });
+    return next;
   },
 
   // Delete a row draft only if it holds nothing but the saved values

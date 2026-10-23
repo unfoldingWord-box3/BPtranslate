@@ -125,11 +125,18 @@ export function rowDraftSettledByOp(
 // N1, unmount: clearing on N1's 200 would leave N2 on the server and lose N1).
 // A fatal failed op never re-sends, so it does not hold the draft.
 //
-// A draft that is not cleared gets its baseline rebased: each field this op
-// sent and the baseline holds takes the sent value, which the server now
-// holds. Otherwise a remounted editor restores the pre-save baseline, typing
-// back to it reads as "no change" and silently drops the draft, and the next
-// Save carries the wrong baseline into 409 classification.
+// A deferred draft is left exactly as it is, baseline included: the later op
+// will settle it. Rebasing it to this op's values would let a reopened editor
+// see the draft (N1) equal to its baseline (N1) and drop it before the later
+// op lands N2, which is the loss above; and a settle working from a stale
+// outbox read could write its baseline over the later op's (#618 review).
+//
+// When this op is the last live one and the draft survives, its baseline is
+// rebased: each field this op sent and the baseline holds takes the sent
+// value, which the server now holds. Otherwise a remounted editor restores the
+// pre-save baseline, typing back to it reads as "no change" and silently drops
+// the draft, and the next Save carries the wrong baseline into 409
+// classification.
 export function rowDraftAfterOp(
   draft: DraftRecord | undefined,
   op: Pick<OutboxOp, "id" | "target" | "patch"> & Partial<Pick<OutboxOp, "action">>,
@@ -146,7 +153,8 @@ export function rowDraftAfterOp(
         targetKey(o.target) === key &&
         (o.status === "pending" || o.status === "in_flight" || o.status === "conflict" || isMaxAttemptsBlocked(o)),
     );
-  if (!laterQueued && rowDraftSettledByOp(draft, op)) return "clear";
+  if (laterQueued) return undefined;
+  if (rowDraftSettledByOp(draft, op)) return "clear";
   const payload = draft.payload as { baseline?: unknown };
   const baseline = payload.baseline;
   const sent = op.patch as unknown;
