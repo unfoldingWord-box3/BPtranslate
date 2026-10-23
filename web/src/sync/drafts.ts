@@ -12,7 +12,7 @@ import { openDB, type IDBPDatabase } from "idb";
 import { isReadOnly, type RowKind } from "./api";
 import { isLaneFrozen } from "./laneFreeze";
 import { onOutboxResult, type OutboxOp } from "./outbox";
-import { generationForSuccessfulOp, rowDraftSettledByOp } from "./draftSaveState";
+import { generationForSuccessfulOp, rowDraftHoldsSaved, rowDraftSettledByOp } from "./draftSaveState";
 import { legacyDbNames, workspaceDbName } from "./workspace";
 import { adoptFromLegacyDbs, type LegacySource } from "./legacyAdoption";
 
@@ -140,6 +140,29 @@ async function notify() {
   if (subscribers.size === 0) return;
   const all = await listAll();
   for (const s of subscribers) s(all);
+}
+
+// Delete a row draft only if `settled` accepts it. Read + conditional delete
+// share one transaction so an editor's re-write cannot slip between them.
+async function clearRowIf(key: string, settled: (rec: DraftRecord) => boolean): Promise<boolean> {
+  const idb = await db();
+  const tx = idb.transaction(STORE, "readwrite");
+  const rec = (await tx.store.get(key)) as DraftRecord | undefined;
+  if (!rec || rec.quarantined || !settled(rec)) {
+    await tx.done;
+    return false;
+  }
+  await tx.store.delete(key);
+  await tx.done;
+  // Drop the dirty mark unless a newer set() has started but not committed
+  // (set() always tracks its generation). A key marked pending with no
+  // tracked generation (legacy-key migration in get()) is released too.
+  if (!latestGenerationByKey.has(key) || latestGenerationByKey.get(key) === rec.generation) {
+    latestGenerationByKey.delete(key);
+    pendingKeys.delete(key);
+  }
+  void notify();
+  return true;
 }
 
 export function verseKey(
@@ -284,22 +307,14 @@ export const drafts = {
   // (rowDraftSettledByOp). Read + conditional delete share one transaction so
   // an editor's re-write cannot slip between them.
   async clearRowSettledBy(key: string, op: Pick<OutboxOp, "expectedVersion">): Promise<boolean> {
-    const idb = await db();
-    const tx = idb.transaction(STORE, "readwrite");
-    const rec = (await tx.store.get(key)) as DraftRecord | undefined;
-    if (!rec || rec.quarantined || !rowDraftSettledByOp(rec, op)) {
-      await tx.done;
-      return false;
-    }
-    await tx.store.delete(key);
-    await tx.done;
-    // A newer set() may have started but not committed; keep its dirty mark.
-    if (latestGenerationByKey.get(key) === rec.generation) {
-      latestGenerationByKey.delete(key);
-      pendingKeys.delete(key);
-    }
-    void notify();
-    return true;
+    return clearRowIf(key, (rec) => rowDraftSettledByOp(rec, op));
+  },
+
+  // Delete a row draft only if it holds nothing but the saved values
+  // (rowDraftHoldsSaved), in one transaction. For editors whose baseline moves
+  // after the save's 200 (#616 review).
+  async clearRowIfSaved(key: string, saved: Record<string, unknown>): Promise<boolean> {
+    return clearRowIf(key, (rec) => rowDraftHoldsSaved(rec, saved));
   },
 
   async list(): Promise<DraftRecord[]> {

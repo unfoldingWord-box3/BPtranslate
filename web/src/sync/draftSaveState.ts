@@ -71,12 +71,30 @@ export function generationForSuccessfulOp(
 // settles the draft only if the draft was written at or before the version the
 // save was sent against. A draft written against a later version holds typing
 // the editor re-persisted after the save was confirmed, and must survive
-// (#616). Older drafts (the save was re-based after a 409) are still settled.
+// (#616). Older drafts (the save was re-based after a 409) are still settled,
+// and so is a legacy/adopted record with no numeric version (the old
+// unconditional clear), so it can't leave a permanent stale reminder.
 export function rowDraftSettledByOp(
   draft: DraftRecord | undefined,
   op: Pick<OutboxOp, "expectedVersion">,
 ): boolean {
-  return !!draft && draft.expectedVersion <= op.expectedVersion;
+  if (!draft) return false;
+  if (typeof draft.expectedVersion !== "number") return true;
+  return draft.expectedVersion <= op.expectedVersion;
+}
+
+// True when a row draft's patch holds nothing but the given saved values. An
+// editor that moves its baseline only after the save's 200 calls this to drop
+// a draft it wrote with the already-saved text (#616 review); any other
+// content is newer typing and must survive.
+export function rowDraftHoldsSaved(
+  draft: DraftRecord | undefined,
+  saved: Record<string, unknown>,
+): boolean {
+  const patch = (draft?.payload as { patch?: Record<string, unknown> } | undefined)?.patch;
+  if (!patch || typeof patch !== "object") return false;
+  const keys = Object.keys(patch);
+  return keys.length > 0 && keys.every((k) => k in saved && patch[k] === saved[k]);
 }
 
 // Associate a save only with the draft whose payload it actually captured.
