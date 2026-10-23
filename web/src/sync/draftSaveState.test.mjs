@@ -167,6 +167,11 @@ assert.equal(rowDraftSettledByOp(rowDraft({ occurrence: 2 }), rowOp({ occurrence
 assert.equal(rowDraftSettledByOp(rowDraft({ occurrence: 2 }), rowOp({ occurrence: 3 })), false, "different number survives");
 assert.equal(rowDraftSettledByOp(undefined, rowOp({ note: "x" })), false, "no draft means nothing to clear");
 assert.equal(
+  rowDraftSettledByOp(rowDraft({ note: "typing" }), { ...rowOp({}), action: "delete" }),
+  true,
+  "a confirmed delete settles the deleted row's draft (as before)",
+);
+assert.equal(
   rowDraftSettledByOp({ ...rowDraft({}), payload: { note: "legacy shape" } }, rowOp({ note: "x" })),
   true,
   "a draft with no readable patch keeps the old unconditional clear",
@@ -210,4 +215,4 @@ assert.equal(
 assert.equal(rowDraftHoldsSaved(tnDraft({}), { note: "saved" }), false, "empty patch is not ours to clear");
 assert.equal(rowDraftHoldsSaved(undefined, { note: "saved" }), false, "no draft");
 
-console.log("draftSaveState: 40 passed");
+console.log("draftSaveState: 41 passed");

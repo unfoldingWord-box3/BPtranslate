@@ -67,20 +67,39 @@ export function generationForSuccessfulOp(
   return legacyOpCapturedDraft(draft, op) ? generation : undefined;
 }
 
-// Row drafts carry no generation, so a row save's 200 is fenced by version: it
-// settles the draft only if the draft was written at or before the version the
-// save was sent against. A draft written against a later version holds typing
-// the editor re-persisted after the save was confirmed, and must survive
-// (#616). Older drafts (the save was re-based after a 409) are still settled,
-// and so is a legacy/adopted record with no numeric version (the old
-// unconditional clear), so it can't leave a permanent stale reminder.
+// Row editors keep display text in their drafts (NoteCard: real newlines) but
+// NoteCard's Save sends TSV text (a literal backslash-n). Compare both in
+// display form, the same conversion tsvToDisplay does.
+function rowValueKey(v: unknown): unknown {
+  return typeof v === "string" ? v.replace(/\\n/g, "\n") : v;
+}
+
+// A row save's 200 settles the row draft by content: only when every field in
+// the draft's patch was sent with an equal value. Every row editor stores only
+// the fields it changed (NoteCard, QuestionCard/QuestionsTable, WordsTable,
+// ReviewQueue card and grid, flows Translate Notes/Questions), so such a draft
+// holds nothing the server does not now have, however often it was re-written
+// and at whatever version. A draft holding a field the save did not send, or a
+// different value, is typing done after the Save and survives — even when the
+// editor unmounted before the 200 and never re-wrote it (#618). Version (#616)
+// and per-write generation fences each failed one of those cases.
+//
+// A confirmed delete settles any draft (the row is gone, and no editor would
+// ever reopen it). A record with no readable patch (an older or adopted shape)
+// keeps the old unconditional clear, so it can't leave a permanent stale
+// reminder.
 export function rowDraftSettledByOp(
   draft: DraftRecord | undefined,
-  op: Pick<OutboxOp, "expectedVersion">,
+  op: Pick<OutboxOp, "patch"> & Partial<Pick<OutboxOp, "action">>,
 ): boolean {
   if (!draft) return false;
-  if (typeof draft.expectedVersion !== "number") return true;
-  return draft.expectedVersion <= op.expectedVersion;
+  if (op.action === "delete") return true;
+  const patch = (draft.payload as { patch?: unknown }).patch;
+  if (!patch || typeof patch !== "object") return true;
+  const sent = op.patch;
+  return Object.entries(patch as Record<string, unknown>).every(
+    ([k, v]) => k in sent && rowValueKey(v) === rowValueKey(sent[k]),
+  );
 }
 
 // True when a row draft's patch is exactly the given saved values: every saved

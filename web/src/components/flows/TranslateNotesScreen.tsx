@@ -1055,11 +1055,12 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
       return false;
     }
     baselineRef.current = draftValue;
-    // If the row reached a new version before this 200 (a refetch during the
-    // save), the persist effect re-wrote the saved text as a draft at that
-    // version, and the outbox's version-fenced clear keeps it. The effect won't
-    // re-run for the moved baseline, so drop a draft that holds only the saved
-    // text; newer typing stays (#616 review).
+    // The outbox's 200 handler clears a draft holding only the saved text, but
+    // only one written before it ran. If the row reached a new version between
+    // that clear and the baseline move above (a refetch, or the confirmed row
+    // landing first), the persist effect re-wrote the saved text as a draft,
+    // and it won't re-run for the moved baseline. Drop that draft; newer typing
+    // stays (#616 review, #618).
     void drafts.clearRowIfSaved(rowKey("tn", book, target.id), { note: draftValue });
     setEditedIds((prev) => new Set(prev).add(target.id));
     // Mirror the server's demotion locally so the row object stays consistent

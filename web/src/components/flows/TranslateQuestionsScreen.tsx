@@ -891,9 +891,11 @@ export default function TranslateQuestionsScreen({
       return false;
     }
     baselineRef.current = { ...values };
-    // A draft re-written at a newer version before this 200 (refetch during the
-    // save) holds only the saved text and the persist effect won't re-run for
-    // the moved baseline, so drop it; newer typing stays (#616 review).
+    // The outbox's 200 handler clears a draft holding only the saved text, but
+    // only one written before it ran. A draft re-written at a newer version
+    // between that clear and the baseline move above holds only the saved text
+    // and the persist effect won't re-run for the moved baseline, so drop it;
+    // newer typing stays (#616 review, #618).
     void drafts.clearRowIfSaved(rowKey("tq", book, target.id), patch);
     setEditedIds((prev) => new Set(prev).add(target.id));
     // Mirror the server's demotion locally so the row object stays consistent
