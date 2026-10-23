@@ -444,6 +444,7 @@ function LaneCard({ lane, label, cfg }: { lane: "lit" | "sim"; label: string; cf
   // the shared config (which clears replacementJobId, so the poll won't re-arm).
   useEffect(() => {
     if (!replacementJobId) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- clear the job when replacementJobId goes away; without it the finished job's staging status stays on screen after the config no longer points at it.
       setJob(null);
       return;
     }

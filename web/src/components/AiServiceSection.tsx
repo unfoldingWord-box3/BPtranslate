@@ -128,6 +128,7 @@ export function AiServiceSection() {
   };
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- mount-time load; the same `load` backs the Retry button, so it must clear loadError at start or a retry keeps showing the failure alert while it refetches.
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only load; `load` is a new function every render (the Retry button calls it directly), so listing it would refetch on every render.
   }, []);
