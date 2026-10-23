@@ -26,7 +26,7 @@
 // accordion replaces the tile grid below `tablet`; the two-pane shell collapses
 // below `md`.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { FlowHeader } from "./FlowHeader";
 import { useTranslation } from "react-i18next";
 import {
@@ -551,8 +551,11 @@ export default function BooksScreen({ role, lastPosition, book: routeBook }: Boo
   // afterwards the user's click wins.
   const seededRef = useRef(false);
   // Read inside refetchBooks without making the callback depend on the route.
+  // Synced after every commit (no deps), before the passive effect that fetches.
   const routeBookRef = useRef(routeBook);
-  routeBookRef.current = routeBook;
+  useLayoutEffect(() => {
+    routeBookRef.current = routeBook;
+  });
 
   const setStatus = useCallback((s: BooksFetchStatus) => {
     statusRef.current = s;
