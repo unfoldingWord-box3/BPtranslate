@@ -67,6 +67,39 @@ export function generationForSuccessfulOp(
   return legacyOpCapturedDraft(draft, op) ? generation : undefined;
 }
 
+// Row drafts carry no generation, so a row save's 200 is fenced by version: it
+// settles the draft only if the draft was written at or before the version the
+// save was sent against. A draft written against a later version holds typing
+// the editor re-persisted after the save was confirmed, and must survive
+// (#616). Older drafts (the save was re-based after a 409) are still settled,
+// and so is a legacy/adopted record with no numeric version (the old
+// unconditional clear), so it can't leave a permanent stale reminder.
+export function rowDraftSettledByOp(
+  draft: DraftRecord | undefined,
+  op: Pick<OutboxOp, "expectedVersion">,
+): boolean {
+  if (!draft) return false;
+  if (typeof draft.expectedVersion !== "number") return true;
+  return draft.expectedVersion <= op.expectedVersion;
+}
+
+// True when a row draft's patch is exactly the given saved values: every saved
+// field present with an equal value, and no other field. An editor that moves
+// its baseline only after the save's 200 calls this to drop a draft it wrote
+// with the already-saved text (#616 review). When in doubt it keeps the draft:
+// a field missing from the patch means "equal to the draft's baseline", which
+// may be newer typing (e.g. a response typed back to its old value).
+export function rowDraftHoldsSaved(
+  draft: DraftRecord | undefined,
+  saved: Record<string, unknown>,
+): boolean {
+  const patch = (draft?.payload as { patch?: Record<string, unknown> } | undefined)?.patch;
+  if (!patch || typeof patch !== "object") return false;
+  const savedKeys = Object.keys(saved);
+  if (savedKeys.length === 0 || Object.keys(patch).length !== savedKeys.length) return false;
+  return savedKeys.every((k) => k in patch && patch[k] === saved[k]);
+}
+
 // Associate a save only with the draft whose payload it actually captured.
 // If typing raced ahead after the click, the payload differs and the older save
 // must not clear that newer generation when it succeeds.
