@@ -184,6 +184,7 @@ const Row = memo(function Row({
 
   return (
     <Box
+      data-question-id={row.id}
       sx={{
         ...responsiveGridSx,
         px: 1,

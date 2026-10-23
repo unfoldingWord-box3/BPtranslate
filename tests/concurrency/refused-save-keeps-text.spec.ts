@@ -1,0 +1,236 @@
+import { expect, test, request as apiRequest, type Page } from "@playwright/test";
+import { fetchChapter, gotoVerse, mintToken, newUserContext, noteTextarea, saveNote } from "./helpers";
+
+// Honor BE_BASE_URL so the suite runs on a relocated port (mirrors s8).
+const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
+
+// Issue #647. When a classic editor's save is refused (a fatal 4xx, or a 409
+// "chapter_locked" that the outbox drops), the typed text must still be kept
+// somewhere: on screen, in the drafts store (so "N unsaved" shows), and across
+// a remount and a reload. Before the fix the tQ table cleared its draft at
+// Save (its fields then equal the optimistically patched row), so a refused
+// save left the text only in React state.
+//
+// The PATCH is answered by page.route, never by the server, so the server row
+// stays as seeded. ZEC 9 is used because no other spec writes to it.
+const CHAPTER = 9;
+
+interface TqRow {
+  id: string;
+  verse: number;
+  question: string | null;
+  version: number;
+}
+
+interface NoteRow {
+  id: string;
+  verse: number;
+  note: string | null;
+}
+
+async function pickRows(): Promise<{ tq: TqRow; tn: NoteRow }> {
+  const probe = await apiRequest.newContext({ baseURL: BASE });
+  const auth = await mintToken(probe, "probe-647");
+  const chapter = await fetchChapter(probe, auth.token, "ZEC", CHAPTER);
+  await probe.dispose();
+  const tq = (chapter.tq as TqRow[]).find((r) => r.verse > 1);
+  const tn = (chapter.tn as NoteRow[]).find((r) => r.verse > 1);
+  expect(tq, `expected a tQ row after verse 1 on ZEC ${CHAPTER}`).toBeTruthy();
+  expect(tn, `expected a tN row after verse 1 on ZEC ${CHAPTER}`).toBeTruthy();
+  return { tq: tq!, tn: tn! };
+}
+
+// The row draft's patch as stored in IndexedDB, searched across every
+// "bible-editor-drafts*" database (the name carries a workspace suffix; see
+// s7's note on why a fixed name is wrong). Opens only databases that exist.
+function readDraftPatch(page: Page, key: string) {
+  return page.evaluate(async (k) => {
+    try {
+      const dbs = (await indexedDB.databases()).filter((d) => (d.name ?? "").startsWith("bible-editor-drafts"));
+      for (const meta of dbs) {
+        const db = await new Promise<IDBDatabase>((resolve, reject) => {
+          const req = indexedDB.open(meta.name!, meta.version);
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error);
+        });
+        try {
+          if (!db.objectStoreNames.contains("drafts")) continue;
+          const rec = await new Promise<{ payload?: { patch?: Record<string, unknown> } } | undefined>(
+            (resolve, reject) => {
+              const req = db.transaction("drafts", "readonly").objectStore("drafts").get(k);
+              req.onsuccess = () => resolve(req.result);
+              req.onerror = () => reject(req.error);
+            },
+          );
+          if (rec) return rec.payload?.patch ?? {};
+        } finally {
+          db.close();
+        }
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }, key);
+}
+
+async function openQuestions(page: Page, verse: number) {
+  await gotoVerse(page, "ZEC", CHAPTER, verse);
+  await page.getByRole("button", { name: /^Questions/ }).click();
+}
+
+function questionField(page: Page, id: string) {
+  // MUI multiline renders a hidden mirror textarea; the real one is first of
+  // the visible ones (question, then response).
+  return page.locator(`[data-question-id="${id}"]`).locator('textarea:not([aria-hidden="true"])').first();
+}
+
+// "N unsaved" sits in the top bar's status chip, unless a failed save (the
+// fatal case) takes the chip's label; then it is in the chip's popover.
+async function expectOneUnsaved(page: Page) {
+  const unsaved = page.getByText(/^1 unsaved$/);
+  if (!(await unsaved.first().isVisible())) await page.getByText(/^\d+ failed$/).first().click();
+  await expect(unsaved.first()).toBeVisible();
+  await page.keyboard.press("Escape");
+}
+
+async function saveQuestion(page: Page, id: string) {
+  await page.locator(`[data-question-id="${id}"]`).locator('button:has([data-testid="SaveIcon"])').click();
+}
+
+const refusals = [
+  {
+    name: "a fatal 422",
+    status: 422,
+    body: { error: "validation_failed" },
+  },
+  {
+    name: 'a "locked" 409',
+    status: 409,
+    body: { error: "chapter_locked", jobId: "job-647", pipelineType: "translate", startedAt: 1 },
+  },
+];
+
+for (const refusal of refusals) {
+  test(`tQ table: text refused with ${refusal.name} stays on screen, in drafts, and across remount and reload`, async ({
+    browser,
+  }) => {
+    test.setTimeout(60_000);
+    const { tq } = await pickRows();
+    const key = `row:tq:ZEC:${tq.id}`;
+    const { context } = await newUserContext(browser, `refused-tq-${refusal.status}`);
+    const page = await context.newPage();
+
+    let refused = 0;
+    await context.route(`**/api/rows/tq/${tq.id}**`, async (route, request) => {
+      if (request.method() !== "PATCH") return route.continue();
+      refused++;
+      await route.fulfill({ status: refusal.status, contentType: "application/json", body: JSON.stringify(refusal.body) });
+    });
+
+    await openQuestions(page, tq.verse);
+    const typed = `REFUSED ${refusal.status} ${Date.now()}`;
+    await questionField(page, tq.id).fill(typed);
+    await saveQuestion(page, tq.id);
+    await expect.poll(() => refused, { message: "the PATCH should reach the route" }).toBeGreaterThan(0);
+
+    // Still on screen, and kept in the drafts store as unsaved text.
+    await expect(questionField(page, tq.id)).toHaveValue(typed);
+    await expect
+      .poll(() => readDraftPatch(page, key), { message: "the refused text should be in the drafts store" })
+      .toEqual(expect.objectContaining({ question: typed }));
+    await expectOneUnsaved(page);
+
+    // A remount without a reload (chapter away and back) must not clear it.
+    await page.evaluate(() => {
+      location.hash = "#/ZEC/8/2";
+    });
+    await page.locator(`[data-question-id="${tq.id}"]`).waitFor({ state: "detached", timeout: 10_000 });
+    await page.waitForTimeout(500);
+    await page.evaluate((v) => {
+      location.hash = `#/ZEC/9/${v}`;
+    }, tq.verse);
+    await expect(questionField(page, tq.id)).toHaveValue(typed);
+    expect(await readDraftPatch(page, key)).toEqual(expect.objectContaining({ question: typed }));
+
+    // A reload restores it from the drafts store (the server never got it).
+    await page.reload();
+    await page.getByRole("button", { name: /^Questions/ }).click();
+    await expect(questionField(page, tq.id)).toHaveValue(typed);
+    await expectOneUnsaved(page);
+
+    // A later successful save clears the restored draft.
+    await context.unroute(`**/api/rows/tq/${tq.id}**`);
+    await saveQuestion(page, tq.id);
+    await expect.poll(() => readDraftPatch(page, key), { message: "a 200 should clear the draft" }).toBeNull();
+
+    await context.close();
+  });
+}
+
+test("tQ table: a refused save does not overwrite text typed after it", async ({ browser }) => {
+  test.setTimeout(60_000);
+  const { tq } = await pickRows();
+  const key = `row:tq:ZEC:${tq.id}`;
+  const { context } = await newUserContext(browser, "refused-tq-newer");
+  const page = await context.newPage();
+
+  // Hold the PATCH until the newer text is typed, then refuse it.
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  let seen = 0;
+  await context.route(`**/api/rows/tq/${tq.id}**`, async (route, request) => {
+    if (request.method() !== "PATCH") return route.continue();
+    seen++;
+    await held;
+    await route.fulfill({ status: 422, contentType: "application/json", body: JSON.stringify({ error: "validation_failed" }) });
+  });
+
+  await openQuestions(page, tq.verse);
+  const first = `FIRST ${Date.now()}`;
+  await questionField(page, tq.id).fill(first);
+  await saveQuestion(page, tq.id);
+  await expect.poll(() => seen).toBeGreaterThan(0);
+  const newer = `${first} NEWER`;
+  await questionField(page, tq.id).fill(newer);
+  await expect
+    .poll(() => readDraftPatch(page, key))
+    .toEqual(expect.objectContaining({ question: newer }));
+  release();
+
+  // Give the refusal time to land, then check the newer text won.
+  await page.waitForTimeout(750);
+  await expect(questionField(page, tq.id)).toHaveValue(newer);
+  expect(await readDraftPatch(page, key)).toEqual(expect.objectContaining({ question: newer }));
+
+  await context.close();
+});
+
+test("tN card: text refused with a fatal 422 survives a reload", async ({ browser }) => {
+  test.setTimeout(60_000);
+  const { tn } = await pickRows();
+  const key = `row:tn:ZEC:${tn.id}`;
+  const { context } = await newUserContext(browser, "refused-tn-422");
+  const page = await context.newPage();
+
+  let refused = 0;
+  await context.route(`**/api/rows/tn/${tn.id}**`, async (route, request) => {
+    if (request.method() !== "PATCH") return route.continue();
+    refused++;
+    await route.fulfill({ status: 422, contentType: "application/json", body: JSON.stringify({ error: "validation_failed" }) });
+  });
+
+  await gotoVerse(page, "ZEC", CHAPTER, tn.verse);
+  const typed = `REFUSED NOTE ${Date.now()}`;
+  await noteTextarea(page, tn.id).fill(typed);
+  await saveNote(page, tn.id);
+  await expect.poll(() => refused).toBeGreaterThan(0);
+
+  await expect(noteTextarea(page, tn.id)).toHaveValue(typed);
+  await expect.poll(() => readDraftPatch(page, key)).toEqual(expect.objectContaining({ note: typed }));
+
+  await page.reload();
+  await expect(noteTextarea(page, tn.id)).toHaveValue(typed);
+
+  await context.close();
+});
