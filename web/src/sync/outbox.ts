@@ -27,6 +27,7 @@ import {
   isMaxAttemptsBlocked,
   shouldAnnounceResult,
   targetKey,
+  withUncommittedOps,
 } from "./outboxTargeting.ts";
 import { legacyDbNames, workspaceDbName } from "./workspace";
 import { adoptFromLegacyDbs, type LegacySource } from "./legacyAdoption";
@@ -267,6 +268,21 @@ function noopOp(target: OpTarget, action: OpAction, patch: Record<string, unknow
   };
 }
 
+// Row ops this tab has started writing to IndexedDB but whose write has not
+// committed yet (#637 item 2). A Save patches the cached row and calls
+// enqueueRow in the same tick; registering the op before the first await
+// makes it visible to drainPass's post-200 snapshot (withUncommittedOps) from
+// that same tick, so a listener rebuilding the row never drops it.
+const uncommittedRowOps = new Map<string, OutboxOp>();
+async function putRowOp(op: OutboxOp): Promise<void> {
+  uncommittedRowOps.set(op.id, op);
+  try {
+    await (await db()).put(STORE, op);
+  } finally {
+    uncommittedRowOps.delete(op.id);
+  }
+}
+
 // targetKey / isMaxAttemptsBlocked / eligibleForVersionThread live in
 // outboxTargeting.ts, not here — that module has no dependency on api.ts (its
 // ApiError class uses a TS parameter-property constructor Node's strip-types
@@ -305,7 +321,7 @@ export const outbox = {
         : {}),
       ...(opts.baseline !== undefined ? { baseline: opts.baseline } : {}),
     };
-    await (await db()).put(STORE, op);
+    await putRowOp(op);
     void notify();
     void drain();
     return op;
@@ -331,7 +347,7 @@ export const outbox = {
       attempts: 0,
       status: "pending",
     };
-    await (await db()).put(STORE, op);
+    await putRowOp(op);
     void notify();
     void drain();
     return op;
@@ -700,8 +716,9 @@ export type { Result as OutboxResult };
 
 // `queued` is the outbox as read after a confirmed ("ok") row op was settled,
 // before the drain dispatches anything else, so cache listeners can keep the
-// row's later live saves on screen (rowWithLivePatches, #620). Undefined for
-// every other result, and null when that read failed.
+// row's later live saves on screen (rowWithLivePatches, #620). It includes
+// this tab's row ops whose write has not committed yet (#637 item 2).
+// Undefined for every other result, and null when that read failed.
 type ResultListener = (op: OutboxOp, result: Result, queued?: OutboxOp[] | null) => void;
 const resultListeners = new Set<ResultListener>();
 export function onOutboxResult(fn: ResultListener): () => void {
@@ -1175,7 +1192,13 @@ async function drainPass() {
       let queued: OutboxOp[] | null | undefined;
       if (result.kind === "ok" && next.target.kind === "row") {
         try {
-          queued = await listAll();
+          // Merged in the same microtask the read resolves in, with no await
+          // between here and the listeners. An op whose write was created
+          // after this read's transaction cannot commit before that
+          // transaction completes (IndexedDB queues the overlapping
+          // readwrite behind it), so it is still in uncommittedRowOps here
+          // (#637 item 2).
+          queued = withUncommittedOps(await listAll(), uncommittedRowOps.values());
         } catch {
           queued = null;
         }
