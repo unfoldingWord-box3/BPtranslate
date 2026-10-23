@@ -266,6 +266,7 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
   const liveDropOp =
     confirmDropOp && failed.some((f) => f.id === confirmDropOp.id) ? confirmDropOp : null;
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- drops the click-time snapshot once its op leaves the failed list, so a later re-fail of the same op can't reopen the dialog; render already reads liveDropOp, so nothing stale paints.
     if (confirmDropOp && !liveDropOp) setConfirmDropOp(null);
   }, [confirmDropOp, liveDropOp]);
 
