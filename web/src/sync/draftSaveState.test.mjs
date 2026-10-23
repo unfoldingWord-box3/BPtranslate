@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import {
   generationForSavedPlain,
   generationForSuccessfulOp,
+  rowDraftHoldsSaved,
   rowDraftSettledByOp,
   verseDraftHasActiveSave,
 } from "./draftSaveState.ts";
@@ -119,5 +120,30 @@ assert.equal(
   "draft re-written against the confirmed version holds newer typing and survives",
 );
 assert.equal(rowDraftSettledByOp(undefined, rowOp), false, "no draft means nothing to clear");
+assert.equal(
+  rowDraftSettledByOp({ ...rowDraft(6), expectedVersion: undefined }, rowOp),
+  true,
+  "legacy/adopted draft without a numeric version keeps the old unconditional clear",
+);
 
-console.log("draftSaveState: 22 passed");
+// #616 review A1: the flows screens move their baseline only after the 200. A
+// draft re-written at v+1 before that (refetch during the save) holds exactly
+// the saved text, so it must be cleared once the baseline moves. A draft that
+// holds anything else is newer typing and stays.
+const tnDraft = (patch) => ({ ...rowDraft(7), payload: { patch, baseline: { note: "old" } } });
+assert.equal(rowDraftHoldsSaved(tnDraft({ note: "saved" }), { note: "saved" }), true, "draft equal to the saved text");
+assert.equal(rowDraftHoldsSaved(tnDraft({ note: "saved more" }), { note: "saved" }), false, "newer typing survives");
+assert.equal(
+  rowDraftHoldsSaved(tnDraft({ question: "q2" }), { question: "q2", response: "r" }),
+  true,
+  "partial patch matching the saved fields",
+);
+assert.equal(
+  rowDraftHoldsSaved(tnDraft({ question: "q2", response: "r2" }), { question: "q2", response: "r" }),
+  false,
+  "one field differs: keep",
+);
+assert.equal(rowDraftHoldsSaved(tnDraft({}), { note: "saved" }), false, "empty patch is not ours to clear");
+assert.equal(rowDraftHoldsSaved(undefined, { note: "saved" }), false, "no draft");
+
+console.log("draftSaveState: 29 passed");
