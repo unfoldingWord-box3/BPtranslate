@@ -464,10 +464,9 @@ export function ResourceColumn({
   // Lazily mount the Search iframe on first visit, then keep it alive (the body
   // toggles its visibility rather than unmounting). Avoids loading the external
   // tool on every page load for users who never open the tab.
+  // Latched during render (React's "adjust state when a prop changes" pattern).
   const [searchVisited, setSearchVisited] = useState(false);
-  useEffect(() => {
-    if (panelMode === "search") setSearchVisited(true);
-  }, [panelMode]);
+  if (panelMode === "search" && !searchVisited) setSearchVisited(true);
 
   const [rangeStart, rangeEnd] = displayVerseRange;
   // When a UST verse bridge widens the range to span multiple verses (e.g. ISA

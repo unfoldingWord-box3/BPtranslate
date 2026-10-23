@@ -1823,17 +1823,16 @@ export function Shell({
   const [quoteBuildAppliedTo, setQuoteBuildAppliedTo] = useState<
     { noteId: string; nonce: number } | null
   >(null);
-  useEffect(() => {
-    if (!quoteBuildTarget) return;
-    const stillActive =
-      quoteBuildTarget.kind === "tn"
-        ? activeNoteId === quoteBuildTarget.id
-        : activeWordId === quoteBuildTarget.id;
-    if (!stillActive) {
-      setQuoteBuildTarget(null);
-      setQuoteBuildSelectedKeys(new Set());
-    }
-  }, [activeNoteId, activeWordId, quoteBuildTarget]);
+  // Switching selection away from the target row cancels the session, adjusted
+  // during render (React's "adjust state when a prop changes" pattern); once the
+  // target is cleared the condition no longer holds, so this settles in one pass.
+  if (
+    quoteBuildTarget &&
+    (quoteBuildTarget.kind === "tn" ? activeNoteId : activeWordId) !== quoteBuildTarget.id
+  ) {
+    setQuoteBuildTarget(null);
+    setQuoteBuildSelectedKeys(new Set());
+  }
   const toggleQuoteBuildWord = useCallback(
     (key: HighlightKey) => {
       setQuoteBuildSelectedKeys((prev) => {
@@ -2415,15 +2414,19 @@ export function Shell({
   // exist there, so the intro note stayed hidden until the user clicked "i" on
   // the rail. Once this chapter's tiles are known, snap to verse 0 so the intro
   // note — the only thing in the chapter — shows on arrival.
-  useEffect(() => {
-    // Gate on data.chapter === chapter: useChapter keeps the *prior* chapter's
-    // payload visible while the new one loads, so acting on stale tiles would
-    // wrongly snap to 0 when navigating from an intro chapter into a real one.
-    if (!data || data.chapter !== chapter || activeVerse === 0) return;
-    if (verseNumbers.length > 0 && verseNumbers.every((v) => v === 0)) {
-      setActiveVerse(0);
-    }
-  }, [data, chapter, verseNumbers, activeVerse]);
+  // Adjusted during render; setting activeVerse to 0 ends the condition.
+  // Gate on data.chapter === chapter: useChapter keeps the *prior* chapter's
+  // payload visible while the new one loads, so acting on stale tiles would
+  // wrongly snap to 0 when navigating from an intro chapter into a real one.
+  if (
+    data &&
+    data.chapter === chapter &&
+    activeVerse !== 0 &&
+    verseNumbers.length > 0 &&
+    verseNumbers.every((v) => v === 0)
+  ) {
+    setActiveVerse(0);
+  }
 
   // Consume a cross-chapter TN-find jump stashed before navigation. Waits for
   // this chapter's payload (and the target note row) to load, then activates +

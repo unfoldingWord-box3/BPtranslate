@@ -344,31 +344,32 @@ export default function TranslateScriptureScreen({
   // for the current chapter — e.g. editing the URL from #/scripture/JON/2 to
   // #/scripture/JON/2/7, or Back/Forward between two verses of the same
   // chapter. Cross-chapter deep links are handled above, by the queue rebuild
-  // itself. Guarded on an actual change of `verse` (via the ref, not just its
-  // presence in the dep array) so this never fires on plain cursor navigation
-  // (Prev/Next), a status change, or unrelated re-renders — only a real prop
-  // change moves the cursor here. Mirrors TranslateNotesScreen's verse re-seek
-  // effect (#389).
-  const prevVerseRef = useRef(verse);
-  useEffect(() => {
-    if (prevVerseRef.current === verse) return;
-    prevVerseRef.current = verse;
-    if (!queueVerses || queueVerses.length === 0) return;
-    if (verse == null) {
-      // The verse segment was dropped (e.g. #/scripture/JON/2/7 → #/scripture/
-      // JON/2 via Back/Forward or a manual URL edit). Restore the same
-      // no-verse init the mount/queue-build path uses: first still-open
-      // verse, or the done view when every verse in the chapter is already
-      // statused.
-      const firstOpen = queueVerses.findIndex((v) => !statuses[v]);
-      setCursor(firstOpen < 0 ? 0 : firstOpen);
-      setView(firstOpen < 0 ? "done" : "verses");
-      return;
+  // itself. Guarded on an actual change of `verse` (via prevVerse, not just a
+  // re-render) so this never fires on plain cursor navigation (Prev/Next), a
+  // status change, or unrelated re-renders — only a real prop change moves the
+  // cursor here. Mirrors TranslateNotesScreen's verse re-seek effect (#389),
+  // but adjusted during render (React's "adjust state when a prop changes"
+  // pattern) with the previous verse held in state.
+  const [prevVerse, setPrevVerse] = useState(verse);
+  if (prevVerse !== verse) {
+    setPrevVerse(verse);
+    if (queueVerses && queueVerses.length > 0) {
+      if (verse == null) {
+        // The verse segment was dropped (e.g. #/scripture/JON/2/7 → #/scripture/
+        // JON/2 via Back/Forward or a manual URL edit). Restore the same
+        // no-verse init the mount/queue-build path uses: first still-open
+        // verse, or the done view when every verse in the chapter is already
+        // statused.
+        const firstOpen = queueVerses.findIndex((v) => !statuses[v]);
+        setCursor(firstOpen < 0 ? 0 : firstOpen);
+        setView(firstOpen < 0 ? "done" : "verses");
+      } else {
+        const seekIdx = queueVerses.findIndex((v) => v >= verse);
+        setCursor(seekIdx < 0 ? queueVerses.length - 1 : seekIdx);
+        setView("verses");
+      }
     }
-    const seekIdx = queueVerses.findIndex((v) => v >= verse);
-    setCursor(seekIdx < 0 ? queueVerses.length - 1 : seekIdx);
-    setView("verses");
-  }, [verse, queueVerses, statuses]);
+  }
 
   // ── per-lane rows + baselines ────────────────────────────────────────────
   const bases = useMemo<Record<TargetLane, VerseDto | null>>(
