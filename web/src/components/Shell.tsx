@@ -271,6 +271,13 @@ function isNoteTranslateLocked(e: unknown): boolean {
   return e instanceof ApiError && isChapterLockedBody(e.body);
 }
 
+// Id source for pipeline toasts; ids are only compared for equality (the
+// auto-dismiss timer clears its own toast, not a newer one). Module-level
+// rather than a useRef: a ref read inside pushPipelineToast made the React
+// Compiler treat every callback that calls it, and every memo holding such a
+// callback (the aligner props), as a ref, flagging each render read (#594).
+let pipelineToastSeq = 0;
+
 export function Shell({
   book,
   chapter,
@@ -847,11 +854,10 @@ export function Shell({
   const [pipelineToast, setPipelineToast] = useState<
     { id: number; text: string; kind: "success" | "error" | "info"; action?: { label: string; onClick: () => void } } | null
   >(null);
-  const pipelineToastIdRef = useRef(0);
   const pushPipelineToast = useCallback(
     (text: string, kind: "success" | "error" | "info" = "info", action?: { label: string; onClick: () => void }) => {
-      pipelineToastIdRef.current += 1;
-      setPipelineToast({ id: pipelineToastIdRef.current, text, kind, action });
+      pipelineToastSeq += 1;
+      setPipelineToast({ id: pipelineToastSeq, text, kind, action });
     },
     [],
   );
