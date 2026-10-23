@@ -393,6 +393,35 @@ export const drafts = {
     );
   },
 
+  // An editor's "no diff any more" clear for a row draft, except while a live
+  // later op for the row holds it (liveRowOpHoldsDraft; an unreadable outbox
+  // keeps it). Needed since a confirmed save's cached row carries later
+  // pending saves (#620): an editor whose baseline follows the cached row can
+  // reach "no diff" against text a later op has not landed yet, and clearing
+  // then would leave that text nowhere if the op is dropped or discarded (#618
+  // rule). Runs on the row's settle chain; it also skips when a newer set()
+  // started after the request, so typing in the outbox-read window is kept.
+  clearRowUnlessHeld(key: string): Promise<boolean> {
+    const requested = latestGenerationByKey.get(key);
+    return onRowChain(
+      key,
+      async () => {
+        let queued: OutboxOp[] | null;
+        try {
+          queued = await outbox.list();
+        } catch {
+          queued = null;
+        }
+        return clearRowIf(
+          key,
+          (rec) =>
+            latestGenerationByKey.get(key) === requested && !liveRowOpHoldsDraft(rec, key, queued),
+        );
+      },
+      false,
+    );
+  },
+
   async list(): Promise<DraftRecord[]> {
     return listAll();
   },
