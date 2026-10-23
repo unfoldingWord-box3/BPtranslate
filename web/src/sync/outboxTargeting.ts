@@ -145,7 +145,9 @@ export function isReplayableOp(o: TargetingOp): boolean {
 // Known gap (#637 item 3, left as it is): the outbox is shared by every tab of
 // the workspace, so a save waiting in another tab is re-applied here too; it
 // is about to land from that tab's drain anyway, so this is the same
-// optimistic display, just for a save typed elsewhere.
+// optimistic display, just for a save typed elsewhere. The uncommitted-write
+// merge covers this tab only: another tab's save whose write is still in
+// progress can still be missing from the read for a moment.
 export function rowWithLivePatches<R extends object>(
   row: R,
   done: Pick<OutboxOp, "id" | "target">,
