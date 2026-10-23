@@ -339,15 +339,19 @@ export default function ObserveScreen({ role, me, onNavigate }: ObserveScreenPro
   }, [isSuperAdmin]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- loadContextPack() clears the previous error as it starts the request (or marks the pack unavailable for non-admins without one); the data lands in its .then.
     loadContextPack();
   }, [loadContextPack]);
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- loadJobs() clears the previous error as it starts the request; the jobs land in its .then.
     loadJobs();
   }, [loadJobs]);
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- loadExports() clears the previous error as it starts the request; the snapshots land in its .then.
     loadExports();
   }, [loadExports]);
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- loadPool() clears the previous error as it starts the request; the pool lands in its .then.
     loadPool();
   }, [loadPool]);
 
