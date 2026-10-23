@@ -595,6 +595,7 @@ export default function BooksScreen({ role, lastPosition, book: routeBook }: Boo
   }, [refetchBooks]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- follows a new #/books/:book route; selected is also written by the click handler and the first-load seed, so it can't be derived from routeBook.
     if (routeBook) setSelected(routeBook);
   }, [routeBook]);
 

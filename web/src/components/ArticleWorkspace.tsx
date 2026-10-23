@@ -655,9 +655,13 @@ function ArticleEditor({
     [parts],
   );
 
-  useEffect(() => {
+  // Collapse again once the unit leaves the validated state (adjusted during
+  // render; the expander only exists while validated).
+  const [prevValidated, setPrevValidated] = useState(isValidated);
+  if (isValidated !== prevValidated) {
+    setPrevValidated(isValidated);
     if (!isValidated) setExpanded(false);
-  }, [isValidated]);
+  }
   const collapsedValidated = isValidated && !expanded && !anyDirty;
 
   const handleSave = useCallback(async () => {

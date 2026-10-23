@@ -161,7 +161,9 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
   const pickedChapter = Math.max(1, parseInt(chapterInput, 10) || 1);
 
   const [jobs, setJobs] = useState<PipelineJob[]>([]);
-  const [jobsUnavailable, setJobsUnavailable] = useState(false);
+  // Pipelines are gated `requireEditor` server-side, so a viewer's jobs list
+  // is "not visible for your role", not an error.
+  const jobsUnavailable = role === "viewer";
   const [aiDisabled, setAiDisabled] = useState(false);
   // i18n key for "this org's AI key is missing or unusable" (#551 part E), or
   // null. Separate from aiDisabled, which is the deployment-level "no AI
@@ -202,11 +204,7 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
   // Treat that as "not visible for your role", not an error, and skip the
   // rest of the AI machinery for that role.
   useEffect(() => {
-    if (role === "viewer") {
-      setJobsUnavailable(true);
-      return;
-    }
-    setJobsUnavailable(false);
+    if (role === "viewer") return;
     return pipelineStore.subscribe(setJobs);
   }, [role]);
 

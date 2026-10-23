@@ -178,6 +178,7 @@ export default function AdminReviewStateScreen({ role, me }: FlowScreenContext) 
   // Default the pickers to the book's first chapter once its summary lands.
   useEffect(() => {
     if (chapters.length && from == null && to == null) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- seeds the pickers once a summary lands; from/to are also written by the user and by the book-change reset, so they can't be derived from chapters.
       setFrom(chapters[0].chapter);
       setTo(chapters[0].chapter);
     }

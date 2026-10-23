@@ -171,15 +171,14 @@ function Panel({
 function BriefPanel({ prefsState }: { prefsState: PrefsState }) {
   const { t } = useTranslation();
   const { prefs, loading, apply, refetch } = prefsState;
-  const [draft, setDraft] = useState<TranslationPrefs | null>(null);
+  const [draft, setDraft] = useState<TranslationPrefs | null>(() => prefs);
   const save = useSaveState();
 
   // Seed once — a sibling section's save PUTs only its own fields, so it can't
   // change anything Brief owns; re-seeding on every prefs change would clobber
-  // in-progress typing (see PreferencesWorkspace.tsx:1382-1386).
-  useEffect(() => {
-    setDraft((d) => d ?? prefs);
-  }, [prefs]);
+  // in-progress typing (see PreferencesWorkspace.tsx BriefSection). Seeded
+  // during render once prefs arrive, when they weren't loaded at mount.
+  if (draft === null && prefs) setDraft(prefs);
 
   const onSave = async () => {
     if (!draft || !prefs) return;
@@ -314,13 +313,12 @@ function MarkdownPrefPanel({
   // loaded — coalescing null prefs into "" would render empty over saved
   // content, and a Save from that state would null the field on the server
   // (see PreferencesWorkspace.tsx:1517-1523).
-  const [value, setValue] = useState<string | null>(null);
+  const [value, setValue] = useState<string | null>(() => (prefs ? (prefs[field] ?? "") : null));
   const [preview, setPreview] = useState(false);
   const save = useSaveState();
 
-  useEffect(() => {
-    if (prefs) setValue((v) => v ?? (prefs[field] ?? ""));
-  }, [prefs, field]);
+  // Seeded during render once prefs arrive, when they weren't loaded at mount.
+  if (value === null && prefs) setValue(prefs[field] ?? "");
 
   const overLimit = (value ?? "").length > maxChars;
 
@@ -795,6 +793,7 @@ function PackStatusBar({
   // Two-way, not latching: the hook clears `error` at the start of every fetch,
   // so a later successful read must also clear this flag.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- not derivable from error alone: runExport also clears forbidden before each run, and that override must hold until error next changes.
     setForbidden(error instanceof ApiError && error.status === 403);
   }, [error]);
 

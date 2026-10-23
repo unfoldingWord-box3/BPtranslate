@@ -521,9 +521,13 @@ function TemplateEditor({ templateId, direction, onServerChange }: EditorProps) 
   const isValidated = state === "validated";
   const isDraftState = state === "ai_draft" || state === "edited";
 
-  useEffect(() => {
+  // Collapse again once the unit leaves the validated state (adjusted during
+  // render; the expander only exists while validated).
+  const [prevValidated, setPrevValidated] = useState(isValidated);
+  if (isValidated !== prevValidated) {
+    setPrevValidated(isValidated);
     if (!isValidated) setExpanded(false);
-  }, [isValidated]);
+  }
   const collapsedValidated = isValidated && !expanded && !dirty;
 
   const {
