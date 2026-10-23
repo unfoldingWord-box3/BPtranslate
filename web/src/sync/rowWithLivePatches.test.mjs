@@ -9,7 +9,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MAX_ATTEMPTS_SENTINEL, isReplayableOp, rowWithLivePatches } from "./outboxTargeting.ts";
+import { MAX_ATTEMPTS_SENTINEL, isReplayableOp, rowWithLivePatches, withUncommittedOps } from "./outboxTargeting.ts";
 
 const target = { kind: "row", rowKind: "tq", id: "q-1", book: "ZEC" };
 const otherRow = { kind: "row", rowKind: "tq", id: "q-2", book: "ZEC" };
@@ -98,4 +98,41 @@ test("a live delete is not spread onto the row as a patch", () => {
 
 test("an unreadable outbox (null) leaves the server row as-is", () => {
   assert.equal(rowWithLivePatches(server, done, null), server);
+});
+
+// #637 item 2, the snapshot window. After a 200, drainPass reads the outbox
+// once and hands that snapshot to the listeners. A Save patches the cached row
+// at once and then writes its op to IndexedDB, so an op whose write commits
+// after that read was missing from the snapshot: the listener replaced the row
+// with the server's copy plus the saves it could see, and the newest save
+// vanished from the screen until its own 200. The outbox now keeps the ops it
+// has not finished writing, and drainPass adds them to the snapshot
+// (withUncommittedOps) before calling the listeners.
+
+test("a save whose outbox write has not committed yet is still re-applied (#637 item 2)", () => {
+  const listed = [op("op-2", { response: "ABC" }, { queuedAt: 10, seq: 2 })];
+  const uncommitted = [op("op-3", { response: "ABCD", question: "Q3" }, { queuedAt: 11, seq: 3 })];
+  // The snapshot alone loses the newest save: this is the symptom.
+  assert.equal(rowWithLivePatches(server, done, listed).response, "ABC");
+  const out = rowWithLivePatches(server, done, withUncommittedOps(listed, uncommitted));
+  assert.equal(out.response, "ABCD");
+  assert.equal(out.question, "Q3");
+  assert.equal(out.version, 2);
+});
+
+test("withUncommittedOps: an op both listed and uncommitted appears once, in queue order", () => {
+  const b = op("op-2", { response: "ABC" }, { queuedAt: 10, seq: 2 });
+  const c = op("op-3", { response: "ABCD" }, { queuedAt: 10, seq: 3 });
+  assert.deepEqual(withUncommittedOps([b], [c, b]).map((o) => o.id), ["op-2", "op-3"]);
+  // Same millisecond: seq decides, as listAll sorts.
+  assert.deepEqual(withUncommittedOps([c], [b]).map((o) => o.id), ["op-2", "op-3"]);
+  // The listed copy wins over the uncommitted one (it may carry a newer status).
+  const listedB = { ...b, status: "in_flight" };
+  assert.equal(withUncommittedOps([listedB], [b]).find((o) => o.id === "op-2").status, "in_flight");
+});
+
+test("withUncommittedOps: an unreadable outbox stays null, and nothing uncommitted returns the list", () => {
+  assert.equal(withUncommittedOps(null, [op("op-3", { response: "x" })]), null);
+  const listed = [op("op-2", { response: "ABC" })];
+  assert.equal(withUncommittedOps(listed, []), listed);
 });

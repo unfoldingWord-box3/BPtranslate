@@ -138,21 +138,42 @@ export function isReplayableOp(o: TargetingOp): boolean {
 // field). Deletes are not patches and are skipped. `queued` is the outbox as
 // read after `done` was removed (it is excluded by id anyway); null or
 // undefined (unread or unreadable) falls back to the server row, as before
-// this fix. Returns `row` itself when nothing applies.
+// this fix. Returns `row` itself when nothing applies. `queued` also carries
+// this tab's ops whose outbox write has not committed yet (withUncommittedOps,
+// #637 item 2).
 //
-// Known gaps (#637 items 2 and 3, left as they are): `queued` is read once,
-// before the listeners run, so a save whose outbox write commits after that
-// read is missing from it until its own result arrives (a window of a few
-// milliseconds). And the outbox is shared by every tab of the workspace, so a
-// save waiting in another tab is re-applied here too; it is about to land
-// from that tab's drain anyway, so this is the same optimistic display, just
-// for a save typed elsewhere.
+// Known gap (#637 item 3, left as it is): the outbox is shared by every tab of
+// the workspace, so a save waiting in another tab is re-applied here too; it
+// is about to land from that tab's drain anyway, so this is the same
+// optimistic display, just for a save typed elsewhere. The uncommitted-write
+// merge covers this tab only: another tab's save whose write is still in
+// progress can still be missing from the read for a moment.
 export function rowWithLivePatches<R extends object>(
   row: R,
   done: Pick<OutboxOp, "id" | "target">,
   queued: OutboxOp[] | null | undefined,
 ): R {
   return rowWithQueuedPatches(row, done.target, queued, done.id);
+}
+
+// The outbox as read, plus this tab's ops whose IndexedDB write has not
+// committed yet (#637 item 2). A Save patches the cached row and starts its
+// outbox write in the same tick, so a read that runs before the write commits
+// leaves that op out, and a listener rebuilding the row from the read would
+// drop the save from the screen until its own 200. Ops are deduped by id (the
+// listed copy wins, as it may carry a newer status) and kept in queue order,
+// queuedAt then seq, as listAll sorts. A null read stays null.
+export function withUncommittedOps(
+  listed: OutboxOp[] | null,
+  uncommitted: Iterable<OutboxOp>,
+): OutboxOp[] | null {
+  if (!listed) return listed;
+  const ids = new Set(listed.map((o) => o.id));
+  const extra = [...uncommitted].filter((o) => !ids.has(o.id));
+  if (extra.length === 0) return listed;
+  return [...listed, ...extra].sort(
+    (a, b) => a.queuedAt - b.queuedAt || (a.seq ?? 0) - (b.seq ?? 0),
+  );
 }
 
 // rowWithLivePatches without a settled op: re-apply the row's pending or
