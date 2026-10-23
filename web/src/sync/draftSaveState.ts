@@ -125,6 +125,16 @@ export function rowDraftSettledByOp(
 // N1, unmount: clearing on N1's 200 would leave N2 on the server and lose N1).
 // A fatal failed op never re-sends, so it does not hold the draft.
 //
+// Only a later op that could settle the draft holds it: a delete, an op whose
+// patch is unreadable, or one sending at least one of the draft's fields. A
+// reorder ({sort_order}), another field's save or an AI apply never settles a
+// {note} draft, so deferring to it would strand the draft as a phantom
+// "unsaved", and typing back to the pre-save text would then clear it with
+// nothing sent while the server keeps this op's text (#618 review round 4). A
+// draft whose own patch is unreadable defers to any later op, as before.
+// Residual gap: a deferring op that is later discarded after a conflict, or
+// ends fatally failed, can still strand the draft until the row is reopened.
+//
 // A deferred draft is left exactly as it is, baseline included: the later op
 // will settle it. Rebasing it to this op's values would let a reopened editor
 // see the draft (N1) equal to its baseline (N1) and drop it before the later
@@ -145,13 +155,23 @@ export function rowDraftAfterOp(
   if (!draft) return undefined;
   if (op.action === "delete") return "clear";
   const key = targetKey(op.target);
+  const draftPatch = (draft.payload as { patch?: unknown }).patch;
+  const draftFields =
+    draftPatch && typeof draftPatch === "object" ? Object.keys(draftPatch as Record<string, unknown>) : null;
+  const couldSettle = (o: OutboxOp) => {
+    if (o.action === "delete" || draftFields === null) return true;
+    const p = o.patch as unknown;
+    if (!p || typeof p !== "object") return true;
+    return draftFields.some((k) => k in (p as Record<string, unknown>));
+  };
   const laterQueued =
     queued === null ||
     queued.some(
       (o) =>
         o.id !== op.id &&
         targetKey(o.target) === key &&
-        (o.status === "pending" || o.status === "in_flight" || o.status === "conflict" || isMaxAttemptsBlocked(o)),
+        (o.status === "pending" || o.status === "in_flight" || o.status === "conflict" || isMaxAttemptsBlocked(o)) &&
+        couldSettle(o),
     );
   if (laterQueued) return undefined;
   if (rowDraftSettledByOp(draft, op)) return "clear";
