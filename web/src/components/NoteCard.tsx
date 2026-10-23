@@ -507,10 +507,13 @@ function NoteCardInner({
   // Validated cards collapse (green, one-line preview). Local expand is
   // view-only — editing a re-expanded card auto-demotes it to 'edited'
   // server-side (rows.ts content PATCH). Re-collapses when it re-validates.
+  // Leaving the validated state resets it, adjusted during render.
   const [expanded, setExpanded] = useState(false);
-  useEffect(() => {
+  const [prevIsValidated, setPrevIsValidated] = useState(isValidated);
+  if (prevIsValidated !== isValidated) {
+    setPrevIsValidated(isValidated);
     if (!isValidated) setExpanded(false);
-  }, [isValidated]);
+  }
   const [historyOpen, setHistoryOpen] = useState(false);
   const [aiConfirmOpen, setAiConfirmOpen] = useState(false);
   // Guards the destructive note-level discard (Undo): reverting drops every
@@ -561,12 +564,12 @@ function NoteCardInner({
   // Clear the in-flight gate once the server-confirmed version moves past
   // the one we saved against. A conflict (409) keeps row.version stuck and
   // savePendingVersion stays set — that's intentional, the user has to
-  // resolve via the SyncStatusBar before sending another save.
-  useEffect(() => {
-    if (savePendingVersion !== null && row.version > savePendingVersion) {
-      setSavePendingVersion(null);
-    }
-  }, [row.version, savePendingVersion]);
+  // resolve via the SyncStatusBar before sending another save. Adjusted during
+  // render, in the same pass as the `saved` rebase above, so both react to the
+  // version bump together.
+  if (savePendingVersion !== null && row.version > savePendingVersion) {
+    setSavePendingVersion(null);
+  }
 
   // Session model: when this card becomes active, snapshot the current
   // committed values so undo can revert to "what it was when I started

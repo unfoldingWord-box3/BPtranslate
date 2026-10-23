@@ -134,10 +134,13 @@ function QuestionCardInner({
   const isUntranslated =
     translationState == null && !(row.question && row.question.trim());
 
+  // Leaving the validated state collapses the card again, adjusted during render.
   const [expanded, setExpanded] = useState(false);
-  useEffect(() => {
+  const [prevIsValidated, setPrevIsValidated] = useState(isValidated);
+  if (prevIsValidated !== isValidated) {
+    setPrevIsValidated(isValidated);
     if (!isValidated) setExpanded(false);
-  }, [isValidated]);
+  }
   const collapsedValidated = isValidated && !expanded && !isDirty;
 
   const stateChip: { label: string; color: string } | null =
