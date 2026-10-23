@@ -25,7 +25,9 @@ jobs:
   smoke:
     runs-on: ubuntu-latest
     # Normally ~2 min; the cap catches a webServer that never turns healthy.
-    timeout-minutes: 15
+    # 20 rather than 15 so a worst-case install (two capped attempts, ~10.5
+    # min) still leaves the suite room to run (#655).
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
 
@@ -40,12 +42,26 @@ jobs:
       # Normally 20-55 s. On some runners the apt half of --with-deps crawls
       # (three runs on 2026-10-23 spent 10-13 min fetching packages from the
       # Ubuntu mirror at ~40 kB/s; the browser download itself took ~5 s), so
-      # cap it: a slow runner fails here in 5 min and gets re-run, instead of
-      # running toward the 6-hour default. Caching ~/.cache/ms-playwright
-      # would not help, since the slow part is the system packages (#644).
+      # each attempt is capped at 5 min instead of running toward the 6-hour
+      # default. Caching ~/.cache/ms-playwright would not help, since the slow
+      # part is the system packages (#644).
+      #
+      # A capped attempt is retried once here, because a manual re-run has
+      # always passed (#655). Each attempt carries its own `timeout`: with a
+      # bare `cmd || cmd`, a stalled first try would hang until the step's
+      # timeout-minutes killed the whole step, retry included. GNU timeout
+      # signals its whole process group (sudo relays the TERM to apt-get), then
+      # SIGKILLs after 15 s. `dpkg --configure -a` repairs dpkg if that kill
+      # landed mid-unpack; it does nothing when dpkg is clean. The step cap of
+      # 11 min covers both attempts (2 x 5 min 15 s) and is only a backstop.
       - name: Install Playwright Chromium
-        timeout-minutes: 5
-        run: npx playwright install --with-deps chromium
+        timeout-minutes: 11
+        run: |
+          timeout -k 15 5m npx playwright install --with-deps chromium || {
+            echo "::warning::Playwright install failed or hit its 5-minute cap; retrying once (#655)"
+            sudo dpkg --configure -a
+            timeout -k 15 5m npx playwright install --with-deps chromium
+          }
 
       # `wrangler dev` reads api/.dev.vars for JWT_SIGNING_KEY (sign-in 500s
       # without it) and SUPER_ADMINS=dev. The example carries both a >=32-char
@@ -81,7 +97,7 @@ jobs:
   concurrency:
     runs-on: ubuntu-latest
     # Normally 5-8 min of real work; 30 leaves room for a slow day plus the
-    # install step's own 5-minute cap.
+    # install step's worst case (two capped attempts, ~10.5 min; #655).
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
@@ -94,10 +110,16 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # Same 5-minute cap as the smoke job's install step (#644).
+      # Same 5-minute cap per attempt and single retry as the smoke job's
+      # install step; the comment there explains why (#644, #655).
       - name: Install Playwright Chromium
-        timeout-minutes: 5
-        run: npx playwright install --with-deps chromium
+        timeout-minutes: 11
+        run: |
+          timeout -k 15 5m npx playwright install --with-deps chromium || {
+            echo "::warning::Playwright install failed or hit its 5-minute cap; retrying once (#655)"
+            sudo dpkg --configure -a
+            timeout -k 15 5m npx playwright install --with-deps chromium
+          }
 
       # Same JWT_SIGNING_KEY / SUPER_ADMINS requirement as the smoke job. `npm
       # run dev` (scripts/dev.mjs) would auto-create this file, but the migrate
