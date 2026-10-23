@@ -467,6 +467,7 @@ function NoteCardInner({
   // A new find target (different occurrence / note) always returns to the read
   // view so the highlight shows; clicking sets editingBody back to true.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- find-target reset, kept post-commit beside the focus effect below that keys on editingBody; the find path is not covered by the classic-card live test, so it stays as it was.
     setEditingBody(false);
   }, [activeMatchOccurrence, row.id]);
   // When the user clicks the read view to edit, focus the now-shown textarea
@@ -899,6 +900,7 @@ function NoteCardInner({
     if (!aiRecentlyCompletedAt) return;
     const newQuote = tsvToDisplay(row.quote);
     const newNote = tsvToDisplay(row.note);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- consumes a one-shot AI-completion signal from Shell and also clears pendingRef and rebaselines sessionSnapshotRef, so it has to run after commit, not during render.
     setQuote(newQuote);
     setNote(newNote);
     pendingRef.current = {};
@@ -922,6 +924,7 @@ function NoteCardInner({
   useEffect(() => {
     if (quoteBuildAppliedAt == null) return;
     const newQuote = tsvToDisplay(row.quote);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- consumes a one-shot quote-builder commit signal from Shell and also clears pendingRef and rebaselines sessionSnapshotRef, so it has to run after commit, not during render.
     setQuote(newQuote);
     pendingRef.current = {};
     if (sessionSnapshotRef.current !== null) {
