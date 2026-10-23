@@ -394,6 +394,20 @@ assert.equal(
   "#632.1: another conflicted op still holds it",
 );
 assert.equal(rowDraftAfterRelease(heldN1, failedB, "fatal", null), undefined, "#632.1: an unreadable outbox holds it");
+// #650: a refusal does not prove the row is still at the recorded version. The
+// row PATCH handler (api/src/rows.ts) returns its 400/403/404/428 refusals
+// before it compares versions, and returns no other fatal status after it, so
+// another user may have written X at v8 before B was refused. A draft equal to
+// the record (N1) must be kept, not cleared. Same for a discarded max-attempts
+// op, whose last 5xx may have committed.
+for (const lastError of ["http 403", "http 404", "http 400", "http 428"]) {
+  const refused = rowDraftAfterRelease(heldN1, opB({ status: "failed", lastError }), "fatal", []);
+  assert.notEqual(refused, "clear", `#650: a fatal ${lastError} release never clears the draft`);
+  assert.deepEqual((refused ?? heldN1).payload, heldN1.payload, `#650: ...and leaves its patch and baseline (${lastError})`);
+}
+const droppedFailed = rowDraftAfterRelease(heldN1, opB({ status: "failed", lastError: "max_attempts_exceeded" }), "drop", []);
+assert.notEqual(droppedFailed, "clear", "#650: discarding a max-attempts op never clears the draft");
+assert.deepEqual((droppedFailed ?? heldN1).payload, heldN1.payload, "#650: ...and leaves its patch and baseline");
 // The refused save's own text is never cleared or shrunk: only the baseline
 // moves to what A landed, so typing back to N0 later is a real change.
 const heldN2 = rowDraftAfterConfirm(based({ note: "N2" }, { note: "N0" }), opA, [opB()], 7);
