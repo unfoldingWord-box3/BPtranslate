@@ -2868,9 +2868,7 @@ export function Shell({
       onSave: enqueue("ULT", ult.targetVerse),
       onConfirmUnalign: confirmUnalign("ULT", ult.targetVerse),
       onDirtyChange: setDualLeftDirty,
-      panelRef: dualLeftRef,
       onReadingDirtyChange: setDualLeftReadingDirty,
-      readingRef: dualLeftReadingRef,
     };
     const right: PanelSlot = {
       bibleVersion: "UST",
@@ -2881,9 +2879,7 @@ export function Shell({
       onSave: enqueue("UST", ust.targetVerse),
       onConfirmUnalign: confirmUnalign("UST", ust.targetVerse),
       onDirtyChange: setDualRightDirty,
-      panelRef: dualRightRef,
       onReadingDirtyChange: setDualRightReadingDirty,
-      readingRef: dualRightReadingRef,
     };
     return {
       book,
@@ -4406,6 +4402,10 @@ export function Shell({
           lexiconMap={lexiconMap}
           left={dualAlignerProps.left}
           right={dualAlignerProps.right}
+          leftPanelRef={dualLeftRef}
+          rightPanelRef={dualRightRef}
+          leftReadingRef={dualLeftReadingRef}
+          rightReadingRef={dualRightReadingRef}
           onPrevVerse={dualNav.prev != null ? () => dualNavTo(dualNav.prev!) : undefined}
           onNextVerse={dualNav.next != null ? () => dualNavTo(dualNav.next!) : undefined}
           onSaveReading={(bv, plain, base) =>
