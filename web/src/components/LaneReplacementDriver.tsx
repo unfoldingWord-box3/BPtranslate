@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   Alert,
   Box,
@@ -105,8 +105,11 @@ export function LaneReplacementDriver({
   // Post-activation edit/align confirmation phase.
   const [modeStatus, setModeStatus] = useState<"idle" | "confirming" | "confirmed" | "error">("idle");
   // Keep onComplete out of confirmMode's dep set (parent passes an inline arrow).
+  // Synced after every commit (no deps); confirmMode only calls it after an await.
   const onCompleteRef = useRef(onComplete);
-  onCompleteRef.current = onComplete;
+  useLayoutEffect(() => {
+    onCompleteRef.current = onComplete;
+  });
 
   // Confirm dialog state (item 9).
   const [confirmOpen, setConfirmOpen] = useState(false);

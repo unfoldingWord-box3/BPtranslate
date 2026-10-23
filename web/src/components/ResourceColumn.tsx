@@ -355,6 +355,11 @@ export function ResourceColumn({
   requestTab,
 }: Props) {
   const { t } = useTranslation();
+  // Hand the panel ref to `ref=` under its own name. Reading it straight off
+  // `alignmentProps` made the React Compiler treat the whole props object as a
+  // ref, so every other field read in render tripped react-hooks/refs. Same
+  // ref object as before; nothing reads `.current` during render.
+  const alignmentPanelRef = alignmentProps?.panelRef;
   // Translation mode: only gateway-language projects (translationSource != null)
   // show state-based cards, the source pane, and Approve/Translate affordances.
   // The English root project sees the unchanged card.
@@ -844,7 +849,7 @@ export function ResourceColumn({
             // whose useState(computedInitial) seeds the correct state
             // synchronously, closing the race.
             key={`${alignmentProps.bibleVersion}:${alignmentProps.chapter}:${alignmentProps.verseNum}`}
-            ref={alignmentProps.panelRef}
+            ref={alignmentPanelRef}
             book={alignmentProps.book}
             chapter={alignmentProps.chapter}
             verseNum={alignmentProps.verseNum}

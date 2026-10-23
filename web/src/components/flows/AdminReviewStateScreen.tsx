@@ -19,7 +19,7 @@
 // The sweep's own safety rules (never touches content, deleted or trashed rows;
 // stamps admin_bulk_state so AI few-shot examples exclude it) live server-side
 // in reviewState.ts; this page only explains them.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
 import {
@@ -108,8 +108,11 @@ export default function AdminReviewStateScreen({ role, me }: FlowScreenContext) 
   const [actionError, setActionError] = useState<string | null>(null);
   // The book currently selected, readable from async callbacks so a late
   // response for a previously selected book can be dropped.
+  // Synced after every commit (no deps), before any effect or response reads it.
   const bookRef = useRef(book);
-  bookRef.current = book;
+  useLayoutEffect(() => {
+    bookRef.current = book;
+  });
   // While a dry run is in flight, the dialog is open, or a sweep is running,
   // every scope control is locked so the scope cannot drift from what is shown.
   const locked = checking || pending != null || applying;
