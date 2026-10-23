@@ -54,7 +54,7 @@ test("the restore marker follows the replayed op, as Shell's local apply does", 
   const restored = { ...server, restored_from_version: 4 };
   const normal = rowWithLivePatches(restored, done, [op("op-2", { response: "ABC" })]);
   assert.equal(normal.restored_from_version, null, "a normal edit clears the marker");
-  const revert = rowWithLivePatches(server, done, [op("op-2", { response: "old" }, { restoredFromVersion: 1 })]);
+  const revert = rowWithLivePatches({ ...server, restored_from_version: null }, done, [op("op-2", { response: "old" }, { restoredFromVersion: 1 })]);
   assert.equal(revert.restored_from_version, 1, "a revert sets it to the restored version");
 });
 
