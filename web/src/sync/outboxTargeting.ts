@@ -102,3 +102,58 @@ export function shouldAnnounceResult(kind: OutboxResult["kind"], persisted: bool
   if (persisted) return true;
   return kind !== "locked";
 }
+
+// Whether an op is still live: pending, in flight, conflicted, or failed but
+// due to re-send on its own (isMaxAttemptsBlocked). A fatal failed op never
+// re-sends, so it is not live. The same set draftSaveState.ts's
+// liveRowOpHoldsDraft uses for "a live later op for this row" (#618).
+export function isLiveOp(o: TargetingOp): boolean {
+  return (
+    o.status === "pending" ||
+    o.status === "in_flight" ||
+    o.status === "conflict" ||
+    isMaxAttemptsBlocked(o)
+  );
+}
+
+// Whether an op is about to land on its own: pending or in flight. Narrower
+// than isLiveOp on purpose. A conflicted or max-attempts-blocked op still
+// holds its row draft, but it is not about to reach the server, so its value
+// must not be shown as part of a confirmed row (rowWithLivePatches).
+export function isReplayableOp(o: TargetingOp): boolean {
+  return o.status === "pending" || o.status === "in_flight";
+}
+
+// The row the cache should hold once the server confirms `done` (#620).
+// A Save patches the cached row at once (applyLocalRowPatch), so a later save
+// still in the outbox is already on screen. Taking the server's row as-is
+// would hide it until its own 200: save "AB", save "ABC", the 200 for "AB"
+// shows "AB", and typing from there could drop the "C". So the patches of the
+// row's pending or in-flight later ops (isReplayableOp) are re-applied, in
+// queue order, on top of the server row; the server's version and every other
+// field are kept. Each replayed op also sets restored_from_version the way
+// Shell's local apply and the server do: the op's restoredFromVersion for a
+// "switch to v{N}" revert, null for a normal edit (only on rows that carry the
+// field). Deletes are not patches and are skipped. `queued` is the outbox as
+// read after `done` was removed (it is excluded by id anyway); null or
+// undefined (unread or unreadable) falls back to the server row, as before
+// this fix. Returns `row` itself when nothing applies.
+export function rowWithLivePatches<R extends object>(
+  row: R,
+  done: Pick<OutboxOp, "id" | "target">,
+  queued: OutboxOp[] | null | undefined,
+): R {
+  if (!queued) return row;
+  const key = targetKey(done.target);
+  let out = row;
+  for (const o of queued) {
+    if (o.id === done.id || o.action !== "patch" || !isReplayableOp(o)) continue;
+    if (targetKey(o.target) !== key) continue;
+    if (!o.patch || typeof o.patch !== "object") continue;
+    out = { ...out, ...o.patch };
+    if ("restored_from_version" in out) {
+      out = { ...out, restored_from_version: o.restoredFromVersion ?? null };
+    }
+  }
+  return out;
+}

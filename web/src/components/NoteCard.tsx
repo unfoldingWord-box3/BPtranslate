@@ -1069,8 +1069,10 @@ function NoteCardInner({
     } else if (hydrated) {
       // Only clear after the on-mount draft lookup has run — before that,
       // hasRowDiff is measured against an unhydrated baseline and would
-      // spuriously wipe a draft we haven't had the chance to restore.
-      void drafts.clear(draftKey);
+      // spuriously wipe a draft we haven't had the chance to restore. Kept
+      // while a live later op for the row holds it: the baseline can follow
+      // a confirmed row that carries that op's unlanded text (#620).
+      void drafts.clearRowUnlessHeld(draftKey);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
