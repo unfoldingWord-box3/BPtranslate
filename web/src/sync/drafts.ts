@@ -306,7 +306,7 @@ export const drafts = {
   // Delete a row draft only if a successful save settled it
   // (rowDraftSettledByOp). Read + conditional delete share one transaction so
   // an editor's re-write cannot slip between them.
-  async clearRowSettledBy(key: string, op: Pick<OutboxOp, "expectedVersion">): Promise<boolean> {
+  async clearRowSettledBy(key: string, op: Pick<OutboxOp, "patch" | "action">): Promise<boolean> {
     return clearRowIf(key, (rec) => rowDraftSettledByOp(rec, op));
   },
 
@@ -407,8 +407,9 @@ onOutboxResult((op, result) => {
       if (generation) void drafts.clearGeneration(key, generation);
     });
   } else if (op.target.kind === "row") {
-    // Version-fenced (#616): an editor that re-persisted typing against the
-    // confirmed version keeps that draft, whichever lands first.
+    // Content-fenced (#618): the draft is cleared only if it holds nothing but
+    // what this save sent; typing done after the Save survives, whether or not
+    // the editor is still mounted.
     void drafts.clearRowSettledBy(rowKey(op.target.rowKind, op.target.book, op.target.id), op);
   }
 });
