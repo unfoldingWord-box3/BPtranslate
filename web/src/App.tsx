@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Alert, Box, Button, Chip, CircularProgress, IconButton, Link, Snackbar, Stack, Tooltip, Typography } from "@mui/material";
 import RefreshIcon from "@mui/icons-material/Refresh";
@@ -477,9 +477,10 @@ export function App() {
     verse: 1,
   });
   const lastScripturePos = positionFromLoc(loc);
-  if (lastScripturePos) {
-    lastScriptureRef.current = lastScripturePos;
-  }
+  // Written after commit (no deps) on scripture routes only.
+  useLayoutEffect(() => {
+    if (lastScripturePos) lastScriptureRef.current = lastScripturePos;
+  });
   const backToScripture = () => {
     const { book, chapter, verse } = lastScriptureRef.current;
     navigate(book, chapter, verse);
@@ -791,6 +792,7 @@ export function App() {
           // switcher, export, verse-list toggle, lint counts) are simply not
           // passed, so each hides itself.
           <Stack sx={{ height: "100%", minHeight: 0 }}>
+            {/* eslint-disable react-hooks/refs -- deliberate render-time read: article routes never write lastScriptureRef, so this is the position the last committed scripture route left. It stays a ref so remembering a position never re-renders App. */}
             <TopBar
               showNavigation={false}
               book={lastScriptureRef.current.book}
@@ -800,6 +802,7 @@ export function App() {
               username={auth.kind === "ready" ? auth.me?.username ?? null : null}
               onLogout={handleSignOut}
             />
+            {/* eslint-enable react-hooks/refs */}
             <Box sx={{ flex: 1, minHeight: 0 }}>
               <ArticleWorkspace
                 resource={loc.resource}
