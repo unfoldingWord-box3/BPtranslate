@@ -99,38 +99,89 @@ assert.equal(
   "no draft (e.g. quarantined record hidden by drafts.get) means nothing to clear",
 );
 
-// Issue #616: a row save's 200 cleared the row draft unconditionally. An editor
-// that re-writes its draft against the confirmed version (typing done between
-// Save and the 200) lost that draft when the clear landed after the re-write.
-// A row draft is settled by the op only if it was written at or before the
-// version the op was sent against.
-const rowDraft = (expectedVersion) => ({
+// A row save's 200 settles the row draft by CONTENT (#616, #618). Every editor
+// stores only the fields it changed, so a draft whose every field was sent with
+// the same value holds nothing the server does not now have: clear it, however
+// often it was re-written and at whatever version. A draft holding a field the
+// save did not send, or a different value, is newer typing: keep it. A version
+// fence (#616) lost typing done after Save when the editor unmounted before the
+// 200 (#618); a per-write generation fence left stale drafts when an editor
+// re-wrote the same text while the save was pending (#618 review F1).
+const rowDraft = (patch, extra = {}) => ({
   key: "row:twl:ZEC:w2wo",
-  payload: { patch: { orig_words: "XY" } },
-  expectedVersion,
+  payload: { patch },
+  expectedVersion: 6,
   updatedAt: 1,
+  generation: "g1",
   meta: { kind: "row", rowKind: "twl", id: "w2wo", book: "ZEC", chapter: 1, verse: 1 },
+  ...extra,
 });
-const rowOp = { target: { kind: "row", rowKind: "twl", id: "w2wo", book: "ZEC" }, expectedVersion: 6 };
-assert.equal(rowDraftSettledByOp(rowDraft(6), rowOp), true, "draft at the op's version is settled by its 200");
-assert.equal(rowDraftSettledByOp(rowDraft(4), rowOp), true, "draft older than the op (re-based after a 409) is settled");
+const rowOp = (patch) => ({
+  target: { kind: "row", rowKind: "twl", id: "w2wo", book: "ZEC" },
+  expectedVersion: 6,
+  patch,
+});
+assert.equal(rowDraftSettledByOp(rowDraft({ orig_words: "X" }), rowOp({ orig_words: "X" })), true, "plain save settles its draft");
 assert.equal(
-  rowDraftSettledByOp(rowDraft(7), rowOp),
+  rowDraftSettledByOp(rowDraft({ orig_words: "XY" }), rowOp({ orig_words: "X" })),
   false,
-  "draft re-written against the confirmed version holds newer typing and survives",
+  "#618: typing after Save (same version, editor since unmounted) survives",
 );
-assert.equal(rowDraftSettledByOp(undefined, rowOp), false, "no draft means nothing to clear");
 assert.equal(
-  rowDraftSettledByOp({ ...rowDraft(6), expectedVersion: undefined }, rowOp),
+  rowDraftSettledByOp(rowDraft({ orig_words: "X" }, { expectedVersion: 7, generation: "g9" }), rowOp({ orig_words: "X" })),
   true,
-  "legacy/adopted draft without a numeric version keeps the old unconditional clear",
+  "F1: a re-write of the sent text at any version or generation is still settled",
+);
+assert.equal(
+  rowDraftSettledByOp(rowDraft({ orig_words: "XY" }, { expectedVersion: 7 }), rowOp({ orig_words: "X" })),
+  false,
+  "#616: typing re-persisted against the confirmed version survives",
+);
+assert.equal(
+  rowDraftSettledByOp(rowDraft({ note: "typing" }), rowOp({ sort_order: 3 })),
+  false,
+  "a save that did not send the draft's field (reorder) leaves the typing alone",
+);
+assert.equal(
+  rowDraftSettledByOp(rowDraft({ question: "q2", response: "r2" }), rowOp({ question: "q2" })),
+  false,
+  "a draft field the save did not send keeps the draft",
+);
+assert.equal(
+  rowDraftSettledByOp(rowDraft({ response: "r2" }), rowOp({ question: "q1", response: "r2" })),
+  true,
+  "grid save sends both fields; a one-field draft equal to what was sent is settled",
+);
+// NoteCard drafts hold display text (real newlines); its Save sends TSV (\\n).
+assert.equal(
+  rowDraftSettledByOp(rowDraft({ note: "a\nb", support_reference: null }), rowOp({ note: "a\\nb", support_reference: null })),
+  true,
+  "display-form draft equals the TSV-form patch it was saved as",
+);
+assert.equal(
+  rowDraftSettledByOp(rowDraft({ note: "a\nbc" }), rowOp({ note: "a\\nb" })),
+  false,
+  "newline-normalized compare still sees newer typing",
+);
+assert.equal(rowDraftSettledByOp(rowDraft({ occurrence: 2 }), rowOp({ occurrence: 2 })), true, "non-string values compare as-is");
+assert.equal(rowDraftSettledByOp(rowDraft({ occurrence: 2 }), rowOp({ occurrence: 3 })), false, "different number survives");
+assert.equal(rowDraftSettledByOp(undefined, rowOp({ note: "x" })), false, "no draft means nothing to clear");
+assert.equal(
+  rowDraftSettledByOp({ ...rowDraft({}), payload: { note: "legacy shape" } }, rowOp({ note: "x" })),
+  true,
+  "a draft with no readable patch keeps the old unconditional clear",
+);
+assert.equal(
+  rowDraftSettledByOp({ ...rowDraft({}), payload: { patch: "nonsense" } }, rowOp({ note: "x" })),
+  true,
+  "a non-object patch keeps the old unconditional clear",
 );
 
 // #616 review A1: the flows screens move their baseline only after the 200. A
 // draft re-written at v+1 before that (refetch during the save) holds exactly
 // the saved text, so it must be cleared once the baseline moves. A draft that
 // holds anything else is newer typing and stays.
-const tnDraft = (patch) => ({ ...rowDraft(7), payload: { patch, baseline: { note: "old" } } });
+const tnDraft = (patch) => ({ ...rowDraft({}, { expectedVersion: 7 }), payload: { patch, baseline: { note: "old" } } });
 assert.equal(rowDraftHoldsSaved(tnDraft({ note: "saved" }), { note: "saved" }), true, "draft equal to the saved text");
 assert.equal(rowDraftHoldsSaved(tnDraft({ note: "saved more" }), { note: "saved" }), false, "newer typing survives");
 // A field missing from the patch means "equal to the draft's baseline", not
@@ -159,4 +210,4 @@ assert.equal(
 assert.equal(rowDraftHoldsSaved(tnDraft({}), { note: "saved" }), false, "empty patch is not ours to clear");
 assert.equal(rowDraftHoldsSaved(undefined, { note: "saved" }), false, "no draft");
 
-console.log("draftSaveState: 31 passed");
+console.log("draftSaveState: 40 passed");
