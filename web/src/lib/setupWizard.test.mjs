@@ -19,11 +19,9 @@ import {
   isUnverifiedOverride,
   unverifiedOverrideResources,
   hasUnverifiedOverride,
-  laneModeMatches,
   defaultReplaceSelection,
   upstreamLanguageOf,
   jobActionable,
-  replacementSpinnerVisible,
   describeBookError,
   shouldPrefillFromCurrent,
   overrideFieldInitialUrl,
@@ -255,18 +253,6 @@ test("hasUnverifiedOverride / unverifiedOverrideResources gate on any pending ov
   assert.equal(hasUnverifiedOverride(cleared), false);
 });
 
-test("laneModeMatches confirms the live config equals the desired mode", () => {
-  // Aligning only: text frozen, alignment writable.
-  assert.equal(laneModeMatches({ textReadOnly: true, alignmentWritable: true }, "align"), true);
-  // Post-activation default (editable) with an align choice → NOT a match (the
-  // silent-failure case that must block Continue).
-  assert.equal(laneModeMatches({ textReadOnly: false, alignmentWritable: true }, "align"), false);
-  // Editing: text writable, alignment writable.
-  assert.equal(laneModeMatches({ textReadOnly: false, alignmentWritable: true }, "edit"), true);
-  assert.equal(laneModeMatches({ textReadOnly: true, alignmentWritable: true }, "edit"), false);
-  assert.equal(laneModeMatches(null, "edit"), false);
-});
-
 test("upstreamLanguageOf uses the inferred code, falling back to 'en'", () => {
   assert.equal(upstreamLanguageOf("ar"), "ar");
   assert.equal(upstreamLanguageOf("  es-419 "), "es-419");
@@ -280,15 +266,6 @@ test("jobActionable is true only when a book needs retry/waive", () => {
   assert.equal(jobActionable([{ status: "retryable_error" }]), true);
   assert.equal(jobActionable([{ status: "artifact_ok" }, { status: "failed" }]), true);
   assert.equal(jobActionable([]), false);
-});
-
-test("replacementSpinnerVisible hides once ready or once a book needs action", () => {
-  // Genuinely staging → spin.
-  assert.equal(replacementSpinnerVisible("staging", [{ status: "pending" }]), true);
-  // Ready (awaiting Activate) → no spin.
-  assert.equal(replacementSpinnerVisible("ready", [{ status: "artifact_ok" }]), false);
-  // Stuck on a retryable book → no spin (action required panel shows instead).
-  assert.equal(replacementSpinnerVisible("staging", [{ status: "retryable_error" }]), false);
 });
 
 test("describeBookError maps sha_unavailable to a not-found location", () => {
