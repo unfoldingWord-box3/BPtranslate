@@ -568,7 +568,16 @@ export const outbox = {
     }
     await tx.store.delete(opId);
     await tx.done;
-    if (op) for (const l of dropListeners) l(op);
+    // A throwing listener must not stop this drop's notify/drain.
+    if (op) {
+      for (const l of dropListeners) {
+        try {
+          l(op);
+        } catch (e) {
+          console.warn("outbox drop listener failed", e);
+        }
+      }
+    }
     void notify();
     void drain();
   },
