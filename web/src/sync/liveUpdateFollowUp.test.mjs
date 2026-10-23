@@ -155,5 +155,5 @@ test("#652: followUpLiveUpdate reads the outbox with the uncommitted ops merged 
   assert.match(body, /outbox\.listWithUncommitted\(\)/);
   assert.doesNotMatch(body, /outbox\.list\(\)/);
   const box = read("./outbox.ts");
-  assert.match(box, /async listWithUncommitted\(\)[^{]*\{\s*return withUncommittedOps\(await listAll\(\), uncommittedRowOps\.values\(\)\);/);
+  assert.match(box, /async listWithUncommitted\(\)[^{]*\{\s*return withUncommittedOps\(await listAll\(\), uncommittedRowOps\.values\(\)\)/);
 });

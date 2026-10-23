@@ -646,6 +646,15 @@ export const outbox = {
     return listAll();
   },
 
+  // list() plus this tab's row ops whose write has not committed yet, merged
+  // in the same microtask the read resolves in (no await between), as
+  // drainPass's post-200 read does. For readers that rebuild a row from the
+  // queue, so a Save made during the read is not dropped (#652). list() and
+  // subscribe stay plain: they feed the status counters.
+  async listWithUncommitted(): Promise<OutboxOp[]> {
+    return withUncommittedOps(await listAll(), uncommittedRowOps.values()) ?? [];
+  },
+
   // Quarantine every queued verse op for a bible_version whose lane just froze
   // for a replacement. The active generation is about to flip, so any still-
   // queued edit is against a generation the server will reject (or, worse,
