@@ -274,6 +274,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
   // row disappeared (e.g. a peer deleted it).
   useEffect(() => {
     if (rows.length === 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- the selection fix feeds selectedRow, which the draft-hydration effect below keys on; moving it into render would change when hydration first runs.
       setSelectedId(null);
       return;
     }
@@ -467,6 +468,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
       });
     }
     if (settled.length > 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- prunes settled grid entries in the same pass that writes and clears their drafts-store records (IndexedDB), which has to stay after commit.
       setGridEdits((prev) => {
         const next = { ...prev };
         for (const id of settled) delete next[id];
@@ -497,6 +499,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
     if (activeKind !== "tq" || !selectedRow) return;
     const id = selectedRow.id;
     const rowQuestion = (selectedRow as TqRow).question ?? "";
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- the mirror half of a handshake with the draft-writing effect above (that one skips the selected row, this one owns its entry); moving either into render would reorder them.
     setGridEdits((prev) => {
       const cur = prev[id];
       const entry: { question?: string; response?: string } = {};

@@ -467,6 +467,7 @@ function NoteCardInner({
   // A new find target (different occurrence / note) always returns to the read
   // view so the highlight shows; clicking sets editingBody back to true.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- find-target reset, kept post-commit beside the focus effect below that keys on editingBody; the find path is not covered by the classic-card live test, so it stays as it was.
     setEditingBody(false);
   }, [activeMatchOccurrence, row.id]);
   // When the user clicks the read view to edit, focus the now-shown textarea
@@ -506,10 +507,13 @@ function NoteCardInner({
   // Validated cards collapse (green, one-line preview). Local expand is
   // view-only — editing a re-expanded card auto-demotes it to 'edited'
   // server-side (rows.ts content PATCH). Re-collapses when it re-validates.
+  // Leaving the validated state resets it, adjusted during render.
   const [expanded, setExpanded] = useState(false);
-  useEffect(() => {
+  const [prevIsValidated, setPrevIsValidated] = useState(isValidated);
+  if (prevIsValidated !== isValidated) {
+    setPrevIsValidated(isValidated);
     if (!isValidated) setExpanded(false);
-  }, [isValidated]);
+  }
   const [historyOpen, setHistoryOpen] = useState(false);
   const [aiConfirmOpen, setAiConfirmOpen] = useState(false);
   // Guards the destructive note-level discard (Undo): reverting drops every
@@ -560,12 +564,12 @@ function NoteCardInner({
   // Clear the in-flight gate once the server-confirmed version moves past
   // the one we saved against. A conflict (409) keeps row.version stuck and
   // savePendingVersion stays set — that's intentional, the user has to
-  // resolve via the SyncStatusBar before sending another save.
-  useEffect(() => {
-    if (savePendingVersion !== null && row.version > savePendingVersion) {
-      setSavePendingVersion(null);
-    }
-  }, [row.version, savePendingVersion]);
+  // resolve via the SyncStatusBar before sending another save. Adjusted during
+  // render, in the same pass as the `saved` rebase above, so both react to the
+  // version bump together.
+  if (savePendingVersion !== null && row.version > savePendingVersion) {
+    setSavePendingVersion(null);
+  }
 
   // Session model: when this card becomes active, snapshot the current
   // committed values so undo can revert to "what it was when I started
@@ -899,6 +903,7 @@ function NoteCardInner({
     if (!aiRecentlyCompletedAt) return;
     const newQuote = tsvToDisplay(row.quote);
     const newNote = tsvToDisplay(row.note);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- consumes a one-shot AI-completion signal from Shell and also clears pendingRef and rebaselines sessionSnapshotRef, so it has to run after commit, not during render.
     setQuote(newQuote);
     setNote(newNote);
     pendingRef.current = {};
@@ -922,6 +927,7 @@ function NoteCardInner({
   useEffect(() => {
     if (quoteBuildAppliedAt == null) return;
     const newQuote = tsvToDisplay(row.quote);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- consumes a one-shot quote-builder commit signal from Shell and also clears pendingRef and rebaselines sessionSnapshotRef, so it has to run after commit, not during render.
     setQuote(newQuote);
     pendingRef.current = {};
     if (sessionSnapshotRef.current !== null) {
