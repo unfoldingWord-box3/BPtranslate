@@ -89,6 +89,7 @@ export function useSourceScripture(
     if (!key || !book || org === null || repo === null) return;
     const pending = fetchSourceBook(org, repo, book, bibleVersion);
     if (!pending) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- fetchSourceBook() returns null when no fetch can start; this records that outcome as the result for this key, exactly as the promise branch below does.
       setLoaded({ key, status: "error" });
       return;
     }

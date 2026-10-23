@@ -62,6 +62,7 @@ export function useAppVersion(): UseAppVersionReturn {
     // Dead code in a production build.
     if (import.meta.env.DEV) {
       try {
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- dev-only test seam, compiled out of production builds; it reads localStorage after mount like the production check it stands in for.
         if (localStorage.getItem("be:devUpdateAvailable") === "1") setUpdateAvailable(true);
       } catch {
         /* storage blocked: no prompt */

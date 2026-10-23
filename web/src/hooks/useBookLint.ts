@@ -44,6 +44,7 @@ export function useBookLint(book: string, enabled: boolean): UseBookLintReturn {
   // Refetch on book change (and reset when disabled) — lint is per-book.
   useEffect(() => {
     if (!enabled) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- lint is per-book: the report is cleared on a book change or when disabled, in the same effect that starts the fetch, so the previous book's flags never show against the new book.
       setReport(null);
       setStatus("idle");
       return;

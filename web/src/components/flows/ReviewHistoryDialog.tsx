@@ -69,6 +69,7 @@ export function ReviewHistoryDialog({
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- the history fetch starts when the dialog opens, and this clears the previous open's result and error so the dialog shows its loading state instead of another row's history while the request is in flight.
     setEntries(null);
     setError(null);
     api
