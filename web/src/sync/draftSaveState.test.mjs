@@ -11,6 +11,8 @@ import {
   generationForSuccessfulOp,
   rowDraftHoldsSaved,
   rowDraftAfterOp,
+  rowDraftAfterConfirm,
+  rowDraftAfterRelease,
   liveRowOpHoldsDraft,
   rowDraftSettledByOp,
   verseDraftHasActiveSave,
@@ -356,6 +358,74 @@ assert.equal(
   rowDraftAfterOp({ ...rowDraft({}), payload: { note: "legacy shape" } }, opA, [queuedOp()]),
   undefined,
   "#632.5: a draft with no readable patch is still held whole",
+);
+
+// #632 item 1: a deferred settle whose holding op never confirms. Save N1 (A),
+// save N2 (B); A's 200 defers to B. If B is then discarded after a conflict,
+// dropped as "locked", or fails fatally, nothing used to settle the draft: a
+// stale "unsaved" reminder against baseline N0 while the server holds N1, and
+// typing back to N0 cleared it with nothing sent. A's deferral now records
+// what it landed on the draft (`confirmed`), and the release re-settles from it.
+const rowTarget = rowOp({}).target;
+const heldN1 = rowDraftAfterConfirm(based({ note: "N1" }, { note: "N0" }), opA, [queuedOp()]);
+assert.deepEqual(
+  heldN1?.payload,
+  { patch: { note: "N1" }, baseline: { note: "N0" } },
+  "#632.1: a deferred settle still leaves patch and baseline to the later op",
+);
+assert.deepEqual(heldN1?.confirmed, { note: "N1" }, "#632.1: the deferred settle records what it landed");
+assert.equal(heldN1?.generation, "g1", "#632.1: recording keeps the draft's identity");
+assert.equal(rowDraftAfterRelease(heldN1, rowTarget, []), "clear", "#632.1: B discarded, the draft holding N1 settles");
+assert.equal(
+  rowDraftAfterRelease(heldN1, rowTarget, [queuedOp({ status: "failed", lastError: "http 422" })]),
+  "clear",
+  "#632.1: B failed fatally (never re-sends), the draft settles",
+);
+assert.equal(rowDraftAfterRelease(heldN1, rowTarget, [queuedOp({ status: "conflict" })]), undefined, "#632.1: B still conflicted holds it");
+assert.equal(rowDraftAfterRelease(heldN1, rowTarget, null), undefined, "#632.1: an unreadable outbox holds it");
+// The refused save's own text is never cleared or shrunk: only the baseline
+// moves to what A landed, so typing back to N0 later is a real change.
+const heldN2 = rowDraftAfterConfirm(based({ note: "N2" }, { note: "N0" }), opA, [queuedOp()]);
+const releasedN2 = rowDraftAfterRelease(heldN2, rowTarget, []);
+assert.deepEqual(
+  releasedN2?.payload,
+  { patch: { note: "N2" }, baseline: { note: "N1" } },
+  "#632.1: B's refused text N2 stays in the draft; the baseline follows the server (N1)",
+);
+assert.equal(releasedN2?.confirmed, undefined, "#632.1: a release that settles drops the record");
+// B confirms instead: B's values win over A's record, and the record goes.
+const afterB = rowDraftAfterConfirm(heldN1, queuedOp({ status: "in_flight" }), []);
+assert.deepEqual(
+  afterB?.payload,
+  { patch: { note: "N1" }, baseline: { note: "N2" } },
+  "#632.1: B's 200 keeps the typed-back N1 and rebases to N2, not A's N1",
+);
+assert.equal(afterB?.confirmed, undefined, "#632.1: B's settle drops A's record");
+// B itself deferred to C: the record now holds B's value.
+assert.deepEqual(
+  rowDraftAfterConfirm(heldN1, queuedOp({ status: "in_flight" }), [queuedOp({ id: "C", patch: { note: "N3" } })])?.confirmed,
+  { note: "N2" },
+  "#632.1: a later deferral overwrites the record with its own values",
+);
+// Only held fields are recorded; the rest settled at once (#632 item 5).
+assert.deepEqual(
+  rowDraftAfterConfirm(
+    tqDraft({ response: "R1", question: "Q1" }, { response: "R0", question: "Q0" }),
+    { ...rowOp({ response: "R1", question: "Q1" }), id: "1", status: "in_flight" },
+    [{ ...rowOp({ question: "Q2" }), id: "2", status: "pending" }],
+  ),
+  {
+    ...tqDraft({ question: "Q1" }, { response: "R1", question: "Q0" }),
+    confirmed: { question: "Q1" },
+  },
+  "#632.1: only the field the later op holds is recorded",
+);
+assert.equal(rowDraftAfterConfirm(n1Draft, opA, [opA]), "clear", "#632.1: no later op, a plain settle as before");
+assert.equal(rowDraftAfterRelease(n1Draft, rowTarget, []), undefined, "#632.1: no record, a release does nothing");
+assert.equal(
+  rowDraftAfterRelease({ ...rowDraft({}), payload: { note: "legacy shape" } }, rowTarget, []),
+  undefined,
+  "#632.1: no record, a release never clears an unreadable draft",
 );
 
 // #616 review A1: the flows screens move their baseline only after the 200. A
