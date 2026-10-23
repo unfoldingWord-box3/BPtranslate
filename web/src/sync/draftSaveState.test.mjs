@@ -11,6 +11,7 @@ import {
   generationForSuccessfulOp,
   rowDraftHoldsSaved,
   rowDraftAfterOp,
+  liveRowOpHoldsDraft,
   rowDraftSettledByOp,
   verseDraftHasActiveSave,
 } from "./draftSaveState.ts";
@@ -278,6 +279,19 @@ assert.equal(
   "clear",
   "R4: a non-overlapping op does not defer whatever its status",
 );
+// #618 review round 5 (Codex): the flows screens' own post-save clear
+// (drafts.clearRowIfSaved) must apply the same hold as the outbox settle. The
+// screen saved N1 and its op is already gone from the outbox; a later save B
+// (N2) for the row is still live and the draft was typed back to N1. Clearing
+// it would let B land N2 and lose N1.
+const rowK = "row:twl:ZEC:w2wo";
+assert.equal(liveRowOpHoldsDraft(n1Draft, rowK, [queuedOp()]), true, "R5: a live overlapping op holds a draft holding exactly the saved values");
+assert.equal(liveRowOpHoldsDraft(n1Draft, rowK, []), false, "R5: no live op: clear as before");
+assert.equal(liveRowOpHoldsDraft(n1Draft, rowK, null), true, "R5: an unreadable outbox keeps the draft");
+assert.equal(liveRowOpHoldsDraft(n1Draft, rowK, [queuedOp({ patch: { sort_order: 3 } })]), false, "R5: a non-overlapping op does not hold it");
+assert.equal(liveRowOpHoldsDraft(n1Draft, rowK, [queuedOp({ status: "failed", lastError: "http 403" })]), false, "R5: a fatal failed op does not hold it");
+assert.equal(liveRowOpHoldsDraft(n1Draft, "row:twl:ZEC:other", [queuedOp()]), false, "R5: an op for another row does not hold it");
+assert.equal(liveRowOpHoldsDraft(n1Draft, rowK, [queuedOp()], "B"), false, "R5: the excluded op (the one being settled) does not hold it");
 assert.equal(
   rowDraftAfterOp(based({ note: "N1 more" }, { note: "N0" }), opA, null),
   undefined,
