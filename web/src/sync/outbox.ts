@@ -568,6 +568,7 @@ export const outbox = {
     }
     await tx.store.delete(opId);
     await tx.done;
+    if (op) for (const l of dropListeners) l(op);
     void notify();
     void drain();
   },
@@ -697,6 +698,15 @@ const resultListeners = new Set<ResultListener>();
 export function onOutboxResult(fn: ResultListener): () => void {
   resultListeners.add(fn);
   return () => resultListeners.delete(fn);
+}
+
+// Called with each op outbox.drop() deleted (a user discarding a conflicted or
+// failed op). drafts.ts re-settles the row draft such an op held (#632 item 1).
+type DropListener = (op: OutboxOp) => void;
+const dropListeners = new Set<DropListener>();
+export function onOutboxDrop(fn: DropListener): () => void {
+  dropListeners.add(fn);
+  return () => dropListeners.delete(fn);
 }
 
 function unexpectedAlignmentLossReason(body: unknown): string | null {

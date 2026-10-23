@@ -11,8 +11,14 @@
 import { openDB, type IDBPDatabase } from "idb";
 import { isReadOnly, type RowKind } from "./api";
 import { isLaneFrozen } from "./laneFreeze";
-import { onOutboxResult, outbox, type OutboxOp } from "./outbox";
-import { generationForSuccessfulOp, liveRowOpHoldsDraft, rowDraftAfterOp, rowDraftHoldsSaved } from "./draftSaveState";
+import { onOutboxDrop, onOutboxResult, outbox, type OutboxOp } from "./outbox";
+import {
+  generationForSuccessfulOp,
+  liveRowOpHoldsDraft,
+  rowDraftAfterConfirm,
+  rowDraftAfterRelease,
+  rowDraftHoldsSaved,
+} from "./draftSaveState";
 import { legacyDbNames, workspaceDbName } from "./workspace";
 import { adoptFromLegacyDbs, type LegacySource } from "./legacyAdoption";
 
@@ -50,6 +56,12 @@ export interface DraftRecord {
   // kept for discard/export but must not restore into editors or count as
   // active unsaved typing — the generation is about to flip.
   quarantined?: string;
+  // Row drafts only (#632 item 1): fields a confirmed save landed while a later
+  // save for the row still held them (draftSaveState.rowDraftAfterConfirm). If
+  // that later save never confirms, the draft is re-settled from these values.
+  // set() rebuilds the record and drops it, which is fine: an editor that is
+  // still writing the draft is mounted and tracks the save itself.
+  confirmed?: Record<string, unknown>;
 }
 
 export type DraftMeta =
@@ -189,8 +201,13 @@ function onRowChain<T>(key: string, fn: () => Promise<T>, failed: T): Promise<T>
   return next;
 }
 
-// One row op's settle; see drafts.settleRowAfterOp.
-async function settleRowNow(key: string, op: OutboxOp): Promise<void> {
+// One row settle; see drafts.settleRowAfterOp. `decide` is rowDraftAfterConfirm
+// for a confirmed op, or rowDraftAfterRelease when an op that held the draft
+// left without confirming (resettleRow).
+async function settleRowNow(
+  key: string,
+  decide: (rec: DraftRecord, queued: OutboxOp[] | null) => "clear" | DraftRecord | undefined,
+): Promise<void> {
   let queued: OutboxOp[] | null;
   try {
     queued = await outbox.list();
@@ -200,7 +217,7 @@ async function settleRowNow(key: string, op: OutboxOp): Promise<void> {
   const idb = await db();
   const tx = idb.transaction(STORE, "readwrite");
   const rec = (await tx.store.get(key)) as DraftRecord | undefined;
-  const next = rec && !rec.quarantined ? rowDraftAfterOp(rec, op, queued) : undefined;
+  const next = rec && !rec.quarantined ? decide(rec, queued) : undefined;
   if (next === undefined) {
     await tx.done;
     return;
@@ -367,7 +384,7 @@ export const drafts = {
   // editor's draft holds what it is about to save, so the new op would send
   // the draft's text too, and the clear loses nothing.
   settleRowAfterOp(key: string, op: OutboxOp): Promise<void> {
-    return onRowChain(key, () => settleRowNow(key, op), undefined);
+    return onRowChain(key, () => settleRowNow(key, (rec, queued) => rowDraftAfterConfirm(rec, op, queued)), undefined);
   },
 
   // Delete a row draft only if it holds nothing but the saved values
@@ -497,6 +514,12 @@ export function draftDirtyBorderSx() {
 // wipe the recovery copy the freeze handler just preserved. drainPass
 // re-reads the op and forwards the quarantined flag on the listener op.
 onOutboxResult((op, result) => {
+  // A row op dropped as "locked" or ended fatally failed no longer holds its
+  // row draft; re-settle from what an earlier save confirmed (#632 item 1).
+  if ((result.kind === "locked" || result.kind === "fatal") && op.target.kind === "row") {
+    resettleRow(op);
+    return;
+  }
   if (result.kind !== "ok") return;
   if (op.quarantined) return;
   if (op.target.kind === "verse") {
@@ -518,3 +541,21 @@ onOutboxResult((op, result) => {
     void drafts.settleRowAfterOp(rowKey(op.target.rowKind, op.target.book, op.target.id), op);
   }
 });
+
+// A row op discarded from the outbox (a conflict or failed save the user threw
+// away) no longer holds its row draft either (#632 item 1).
+onOutboxDrop((op) => {
+  if (op.target.kind === "row") resettleRow(op);
+});
+
+// Re-settle a row draft from its `confirmed` record (rowDraftAfterRelease)
+// after `op`, which may have held it, left without confirming. Runs on the
+// row's settle chain after any settle already queued. Only this tab hears the
+// event; a draft another tab's discard released is settled by the row's next
+// confirmed save in any tab, which folds the record in.
+function resettleRow(op: OutboxOp) {
+  if (op.target.kind !== "row") return;
+  const target = op.target;
+  const key = rowKey(target.rowKind, target.book, target.id);
+  void onRowChain(key, () => settleRowNow(key, (rec, queued) => rowDraftAfterRelease(rec, target, queued)), undefined);
+}
