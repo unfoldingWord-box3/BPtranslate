@@ -26,6 +26,7 @@ import {
 } from "../sync/api";
 import { fetchWithRetry } from "../sync/fetchWithRetry";
 import { onOutboxResult } from "../sync/outbox";
+import { rowWithLivePatches } from "../sync/outboxTargeting";
 import { applyCacheOp, ChapterFetchTracker, type CacheOp } from "../lib/bookCache";
 
 export type ChapterState =
@@ -228,7 +229,7 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
   // duplicate updates are idempotent.
   useEffect(() => {
     if (!enabled) return;
-    return onOutboxResult((op, result) => {
+    return onOutboxResult((op, result, queued) => {
       if (result.kind !== "ok") return;
       if (op.target.kind === "verse") {
         const v = result.updated as VerseDto;
@@ -238,7 +239,8 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
       if (op.target.kind === "row") {
         const u = result.updated as TnRow | TqRow | TwlRow;
         if (!u || u.book !== book) return;
-        mutate(u.chapter, { t: "replace", kind: op.target.rowKind, row: u });
+        // Later saves still queued for the row stay on top (#620).
+        mutate(u.chapter, { t: "replace", kind: op.target.rowKind, row: rowWithLivePatches(u, op, queued) });
       }
     });
   }, [book, enabled, applyLocalVerse, mutate]);

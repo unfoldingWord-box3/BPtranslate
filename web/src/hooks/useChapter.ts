@@ -19,6 +19,7 @@ import {
 } from "../sync/api";
 import { fetchWithRetry } from "../sync/fetchWithRetry";
 import { onOutboxResult } from "../sync/outbox";
+import { rowWithLivePatches } from "../sync/outboxTargeting";
 
 type Status = "idle" | "loading" | "ready" | "error" | "retrying";
 
@@ -259,14 +260,15 @@ export function useChapter(book: string, chapter: number): UseChapterReturn {
     [],
   );
 
-  // Adopt server-confirmed values when an outbox op succeeds.
+  // Adopt server-confirmed values when an outbox op succeeds. For a row, the
+  // patches of later saves still queued for it stay on top (#620).
   useEffect(() => {
-    return onOutboxResult((op, result) => {
+    return onOutboxResult((op, result, queued) => {
       if (result.kind !== "ok") return;
       if (op.target.kind === "row") {
         const u = result.updated as TnRow | TqRow | TwlRow;
         if (u && u.book === book && u.chapter === chapter) {
-          applyLocalRowReplacement(op.target.rowKind, u);
+          applyLocalRowReplacement(op.target.rowKind, rowWithLivePatches(u, op, queued));
         }
         return;
       }

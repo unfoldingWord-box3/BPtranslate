@@ -16,7 +16,7 @@
 import type { DraftRecord } from "./drafts.ts";
 import type { OutboxOp } from "./outbox.ts";
 import { extractEditableText, normalizeEditable } from "../lib/usfm.ts";
-import { isMaxAttemptsBlocked, targetKey } from "./outboxTargeting.ts";
+import { isLiveOp, targetKey } from "./outboxTargeting.ts";
 
 function legacyOpCapturedDraft(draft: DraftRecord, op: OutboxOp): boolean {
   const draftPlain = (draft.payload as { plainText?: unknown }).plainText;
@@ -143,7 +143,7 @@ export function liveRowOpHoldsDraft(
     (o) =>
       o.id !== excludeOpId &&
       targetKey(o.target) === key &&
-      (o.status === "pending" || o.status === "in_flight" || o.status === "conflict" || isMaxAttemptsBlocked(o)) &&
+      isLiveOp(o) &&
       couldSettle(o),
   );
 }

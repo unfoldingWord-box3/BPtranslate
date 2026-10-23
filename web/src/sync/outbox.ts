@@ -696,7 +696,11 @@ type Result =
 
 export type { Result as OutboxResult };
 
-type ResultListener = (op: OutboxOp, result: Result) => void;
+// `queued` is the outbox as read after a confirmed ("ok") row op was settled,
+// before the drain dispatches anything else, so cache listeners can keep the
+// row's later live saves on screen (rowWithLivePatches, #620). Undefined for
+// every other result, and null when that read failed.
+type ResultListener = (op: OutboxOp, result: Result, queued?: OutboxOp[] | null) => void;
 const resultListeners = new Set<ResultListener>();
 export function onOutboxResult(fn: ResultListener): () => void {
   resultListeners.add(fn);
@@ -1177,7 +1181,15 @@ async function drainPass() {
     }
 
     if (shouldAnnounceResult(result.kind, persisted)) {
-      for (const l of resultListeners) l(next, result);
+      let queued: OutboxOp[] | null | undefined;
+      if (result.kind === "ok" && next.target.kind === "row") {
+        try {
+          queued = await listAll();
+        } catch {
+          queued = null;
+        }
+      }
+      for (const l of resultListeners) l(next, result, queued);
     }
     void notify();
   }
