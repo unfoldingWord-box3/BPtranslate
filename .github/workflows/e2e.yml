@@ -24,6 +24,8 @@ concurrency:
 jobs:
   smoke:
     runs-on: ubuntu-latest
+    # Normally ~2 min; the cap catches a webServer that never turns healthy.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
 
@@ -35,7 +37,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Normally 20-55 s. On some runners the apt half of --with-deps crawls
+      # (three runs on 2026-10-23 spent 10-13 min fetching packages from the
+      # Ubuntu mirror at ~40 kB/s; the browser download itself took ~5 s), so
+      # cap it: a slow runner fails here in 5 min and gets re-run, instead of
+      # running toward the 6-hour default. Caching ~/.cache/ms-playwright
+      # would not help, since the slow part is the system packages (#644).
       - name: Install Playwright Chromium
+        timeout-minutes: 5
         run: npx playwright install --with-deps chromium
 
       # `wrangler dev` reads api/.dev.vars for JWT_SIGNING_KEY (sign-in 500s
@@ -71,6 +80,9 @@ jobs:
 
   concurrency:
     runs-on: ubuntu-latest
+    # Normally 5-8 min of real work; 30 leaves room for a slow day plus the
+    # install step's own 5-minute cap.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
 
@@ -82,7 +94,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Same 5-minute cap as the smoke job's install step (#644).
       - name: Install Playwright Chromium
+        timeout-minutes: 5
         run: npx playwright install --with-deps chromium
 
       # Same JWT_SIGNING_KEY / SUPER_ADMINS requirement as the smoke job. `npm
