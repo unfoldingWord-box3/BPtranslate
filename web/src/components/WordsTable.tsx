@@ -13,7 +13,7 @@ import SaveIcon from "@mui/icons-material/Save";
 import SaveOutlinedIcon from "@mui/icons-material/SaveOutlined";
 import OpenInNewIcon from "@mui/icons-material/OpenInNew";
 import type { TwlRow } from "../sync/api";
-import { twlBaseline, twlDiff } from "../lib/twlRowFields";
+import { reconcileField, twlBaseline, twlDiff, type TwlFields } from "../lib/twlRowFields";
 import { useCatalogs } from "../hooks/useCatalogs";
 import { CatalogPicker } from "./CatalogPicker";
 import { TwArticleDialog } from "./TwArticleDialog";
@@ -430,9 +430,20 @@ const WordRow = memo(function WordRow({
   }, [twLink, catalogs.disambiguationIndex, catalogs.disambiguationGroups, suggestionAltIds]);
   const [disambigAnchor, setDisambigAnchor] = useState<HTMLElement | null>(null);
 
-  useEffect(() => setQuote(row.orig_words ?? ""), [row.id, row.version, row.orig_words]);
-  useEffect(() => setTwLink(row.tw_link), [row.id, row.version, row.tw_link]);
-  useEffect(() => setOccurrence(row.occurrence ?? 1), [row.id, row.version, row.occurrence]);
+  // When the row's field values change (an optimistic Save, the server's
+  // answer, a remote edit), a field adopts the new value only if the user
+  // hasn't edited it since the last baseline. This used to reset every field on
+  // each version bump, so the server's answer to a Save dropped text typed
+  // after the Save and cleared its draft (#616).
+  const baselineRef = useRef<TwlFields>(twlBaseline(row));
+  useEffect(() => {
+    const prev = baselineRef.current;
+    const next = twlBaseline({ orig_words: row.orig_words, tw_link: row.tw_link, occurrence: row.occurrence });
+    baselineRef.current = next;
+    setQuote((q) => reconcileField(prev.quote, next.quote, q));
+    setTwLink((l) => reconcileField(prev.twLink, next.twLink, l));
+    setOccurrence((o) => reconcileField(prev.occurrence, next.occurrence, o));
+  }, [row.orig_words, row.tw_link, row.occurrence]);
 
   const draftKey = useMemo(() => rowKey("twl", row.book, row.id), [row.book, row.id]);
 

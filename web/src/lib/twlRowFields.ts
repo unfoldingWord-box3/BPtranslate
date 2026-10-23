@@ -18,6 +18,23 @@ export function twlBaseline(row: Pick<TwlRow, "orig_words" | "tw_link" | "occurr
   return { quote: row.orig_words ?? "", twLink: row.tw_link, occurrence: row.occurrence ?? 1 };
 }
 
+// The fields to show after the row changes (a server ack, a remote edit): each
+// field adopts the new baseline only if the user hasn't edited it since the
+// previous one. The ack of a Save bumps the version, and resetting every field
+// then dropped text typed between Save and the ack (#616).
+export function twlReconcile(prev: TwlFields, next: TwlFields, local: TwlFields): TwlFields {
+  return {
+    quote: reconcileField(prev.quote, next.quote, local.quote),
+    twLink: reconcileField(prev.twLink, next.twLink, local.twLink),
+    occurrence: reconcileField(prev.occurrence, next.occurrence, local.occurrence),
+  };
+}
+
+// One field of twlReconcile, for per-field state updaters.
+export function reconcileField<T>(prev: T, next: T, local: T): T {
+  return local === prev ? next : local;
+}
+
 // The patch a Save sends: only the fields that differ from the row's baseline.
 export function twlDiff(
   row: Pick<TwlRow, "orig_words" | "tw_link" | "occurrence">,
