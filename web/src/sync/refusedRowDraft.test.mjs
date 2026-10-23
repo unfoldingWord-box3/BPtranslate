@@ -6,7 +6,14 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { rowDraftAfterRefusal } from "./refusedRowDraft.ts";
+import {
+  afterConfirmKeepingRefusal,
+  keepsRefusedText,
+  rowDraftAfterRefusal,
+  rowDraftAfterRefusedDiscard,
+  rowDraftOnNoDiff,
+  withCarriedRefusal,
+} from "./refusedRowDraft.ts";
 
 const target = { kind: "row", rowKind: "tq", id: "q-1", book: "ZEC" };
 const meta = { kind: "row", rowKind: "tq", id: "q-1", book: "ZEC", chapter: 9, verse: 2 };
@@ -58,6 +65,17 @@ test("newer typing wins: a field the draft already holds is left as typed", () =
   assert.equal(out, undefined);
 });
 
+test("A2: a draft still holding the refused value for a field gets it marked refused", () => {
+  // The refusal beat the editor's post-Save clear: the draft still holds what
+  // was sent. Marking it lets the following no-diff clear keep it.
+  const existing = draft({ patch: { question: "ABC" } });
+  const out = rowDraftAfterRefusal("row:tq:ZEC:q-1", existing, op({ question: "ABC" }), [], at);
+  assert.deepEqual(out.payload, { patch: { question: "ABC" } });
+  assert.deepEqual(out.refused, { question: "ABC" });
+  // Already marked with that value: nothing to write.
+  assert.equal(rowDraftAfterRefusal("row:tq:ZEC:q-1", out, op({ question: "ABC" }), [], at), undefined);
+});
+
 test("a field the draft does not hold is added; the draft's own fields stay", () => {
   const existing = draft({ patch: { response: "R2" } }, { confirmed: { response: "R1" }, confirmedVersion: 4 });
   const out = rowDraftAfterRefusal("row:tq:ZEC:q-1", existing, op({ question: "ABC", response: "R-old" }), [], at);
@@ -82,7 +100,7 @@ test("a draft with a baseline for the field (NoteCard, flows) already tracks it:
 });
 
 test("a later live save for the same field holds newer text: that field is not written back", () => {
-  const later = op({ question: "ABCD" }, { id: "op-2", status: "pending" });
+  const later = op({ question: "ABCD" }, { id: "op-2", status: "pending", queuedAt: 5 });
   assert.equal(rowDraftAfterRefusal("row:tq:ZEC:q-1", undefined, op({ question: "ABC" }), [later], at), undefined);
   const out = rowDraftAfterRefusal("row:tq:ZEC:q-1", undefined, op({ question: "ABC", response: "R" }), [later], at);
   assert.deepEqual(out.payload, { patch: { response: "R" } });
@@ -98,7 +116,7 @@ test("a refused later op that is no longer live (failed, or another row's) does 
 });
 
 test("a pending delete for the row, or an unreadable outbox, writes nothing", () => {
-  const del = op({}, { id: "op-2", status: "pending", action: "delete" });
+  const del = op({}, { id: "op-2", status: "pending", action: "delete", queuedAt: 5 });
   assert.equal(rowDraftAfterRefusal("row:tq:ZEC:q-1", undefined, op({ question: "ABC" }), [del], at), undefined);
   assert.equal(rowDraftAfterRefusal("row:tq:ZEC:q-1", undefined, op({ question: "ABC" }), null, at), undefined);
 });
@@ -147,4 +165,95 @@ test("a second refusal adds to the refused record", () => {
   const out = rowDraftAfterRefusal("row:tq:ZEC:q-1", first, op({ response: "R" }, { id: "op-2" }), [], { now: 200, generation: "g-3" });
   assert.deepEqual(out.payload.patch, { question: "ABC", response: "R" });
   assert.deepEqual(out.refused, { question: "ABC", response: "R" });
+});
+
+test("only a live save queued after the refused one holds a field; an unreadable patch is skipped", () => {
+  const earlier = op({ question: "OLD" }, { id: "op-0", status: "conflict", queuedAt: -5 });
+  const out = rowDraftAfterRefusal("row:tq:ZEC:q-1", undefined, op({ question: "ABC" }), [earlier], at);
+  assert.deepEqual(out.payload, { patch: { question: "ABC" } });
+  const sameMsLater = op({ question: "ABCD" }, { id: "op-2", status: "pending", queuedAt: 0, seq: 2 });
+  assert.equal(rowDraftAfterRefusal("row:tq:ZEC:q-1", undefined, op({ question: "ABC" }, { seq: 1 }), [sameMsLater], at), undefined);
+  const odd = op(null, { id: "op-3", status: "pending", queuedAt: 5 });
+  const out2 = rowDraftAfterRefusal("row:tq:ZEC:q-1", undefined, op({ question: "ABC" }), [odd], at);
+  assert.deepEqual(out2.payload, { patch: { question: "ABC" } });
+});
+
+test("A6: a fatal that means the row is gone keeps nothing; other refusals do", () => {
+  assert.equal(keepsRefusedText({ kind: "fatal", reason: "http 404" }), false);
+  assert.equal(keepsRefusedText({ kind: "fatal", reason: "http 422" }), true);
+  assert.equal(keepsRefusedText({ kind: "fatal", reason: "http 403" }), true);
+  assert.equal(keepsRefusedText({ kind: "locked", lockBody: { error: "chapter_locked", jobId: "j" } }), true);
+  assert.equal(keepsRefusedText({ kind: "ok", updated: {} }), false);
+  assert.equal(keepsRefusedText({ kind: "conflict", current: {} }), false);
+});
+
+const refusedDraft = (patch, refused, extra = {}) => draft({ patch }, { refused, ...extra });
+
+test("A1: a re-write keeps refused fields the new patch leaves out", () => {
+  // Refused question, then the user edits response: the editor's diff against
+  // the optimistic row is {response} only.
+  const prev = refusedDraft({ question: "ABC" }, { question: "ABC" });
+  const next = draft({ patch: { response: "R2" } }, { generation: "g-2", updatedAt: 9 });
+  const out = withCarriedRefusal(prev, next);
+  assert.deepEqual(out.payload, { patch: { response: "R2", question: "ABC" } });
+  assert.deepEqual(out.refused, { question: "ABC" });
+  assert.equal(out.generation, "g-2");
+});
+
+test("A1: a field the new patch holds wins, and stays refused so a later no-diff can restore it", () => {
+  const prev = refusedDraft({ question: "ABC" }, { question: "ABC" });
+  const next = draft({ patch: { question: "ABCX" } });
+  const out = withCarriedRefusal(prev, next);
+  assert.deepEqual(out.payload, { patch: { question: "ABCX" } });
+  assert.deepEqual(out.refused, { question: "ABC" });
+});
+
+test("A1: a draft with a baseline for the field (NoteCard) carries nothing; no refused record, no change", () => {
+  const prev = refusedDraft({ note: "N" }, { note: "N" });
+  const next = draft({ patch: {}, baseline: { note: "n0", quote: "q", support_reference: null } });
+  assert.equal(withCarriedRefusal(prev, next), next);
+  const plain = draft({ patch: { response: "R" } });
+  assert.equal(withCarriedRefusal(draft({ patch: {} }), plain), plain);
+  assert.equal(withCarriedRefusal(undefined, plain), plain);
+});
+
+test("A1: backspacing to no diff keeps exactly the refused text", () => {
+  // Typed ABCX over the refused ABC, then back to ABC: the editor sees no diff.
+  const rec = refusedDraft({ question: "ABCX", response: "R2" }, { question: "ABC" });
+  const out = rowDraftOnNoDiff(rec);
+  assert.deepEqual(out.payload, { patch: { question: "ABC" } });
+  assert.deepEqual(out.refused, { question: "ABC" });
+  assert.equal(rowDraftOnNoDiff(refusedDraft({ question: "ABC" }, { question: "ABC" })), undefined);
+  assert.equal(rowDraftOnNoDiff(draft({ patch: { question: "x" } })), "clear");
+  assert.equal(rowDraftOnNoDiff(refusedDraft({}, {}, { quarantined: "q" })), undefined);
+});
+
+test("A1: a confirmed save that did not send a refused field keeps it; one that sent it ends the record", () => {
+  const rec = refusedDraft({ question: "ABC", response: "R2" }, { question: "ABC" });
+  // rowDraftAfterConfirm left the draft (question unsent): kept as is.
+  assert.equal(afterConfirmKeepingRefusal(rec, undefined, op({ response: "R2" })), undefined);
+  const rebased = { ...rec, payload: { ...rec.payload, baseline: { response: "R2" } } };
+  assert.equal(afterConfirmKeepingRefusal(rec, rebased, op({ response: "R2" })), rebased);
+  assert.equal(afterConfirmKeepingRefusal(rec, "clear", op({ question: "ABC" })), "clear");
+  // A save that sent question (other text) confirms the server holds that,
+  // so the refused value is no longer what the row shows.
+  const typed = refusedDraft({ question: "ABCD" }, { question: "ABC" });
+  const out = afterConfirmKeepingRefusal(typed, undefined, op({ question: "XYZ" }));
+  assert.deepEqual(out.payload, { patch: { question: "ABCD" } });
+  assert.equal("refused" in out, false);
+});
+
+test("A5: discarding the failed op removes the text it wrote back", () => {
+  const failed = op({ question: "ABC", response: "R" });
+  assert.equal(rowDraftAfterRefusedDiscard(refusedDraft({ question: "ABC", response: "R" }, { question: "ABC", response: "R" }), failed), "clear");
+  // Other typing in the draft stays; so does newer text in a refused field.
+  const mixed = refusedDraft({ question: "ABCD", response: "R", ref_raw: "9:2" }, { question: "ABC", response: "R" });
+  const out = rowDraftAfterRefusedDiscard(mixed, failed);
+  assert.deepEqual(out.payload, { patch: { question: "ABCD", ref_raw: "9:2" } });
+  assert.equal("refused" in out, false);
+  // A record from another refusal (other value) is not this op's to drop.
+  const other = refusedDraft({ question: "Q2" }, { question: "Q2" });
+  assert.equal(rowDraftAfterRefusedDiscard(other, failed), undefined);
+  assert.equal(rowDraftAfterRefusedDiscard(draft({ patch: { question: "ABC" } }), failed), undefined);
+  assert.equal(rowDraftAfterRefusedDiscard(undefined, failed), undefined);
 });

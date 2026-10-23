@@ -85,12 +85,21 @@ function questionField(page: Page, id: string) {
   return page.locator(`[data-question-id="${id}"]`).locator('textarea:not([aria-hidden="true"])').first();
 }
 
+function responseField(page: Page, id: string) {
+  return page.locator(`[data-question-id="${id}"]`).locator('textarea:not([aria-hidden="true"])').nth(1);
+}
+
 // "N unsaved" sits in the top bar's status chip, unless a failed save (the
-// fatal case) takes the chip's label; then it is in the chip's popover.
-async function expectOneUnsaved(page: Page) {
-  const unsaved = page.getByText(/^1 unsaved$/);
-  if (!(await unsaved.first().isVisible())) await page.getByText(/^\d+ failed$/).first().click();
-  await expect(unsaved.first()).toBeVisible();
+// fatal case, `failedShown`) takes the chip's label; then it is in the chip's
+// popover. Waiting assertions only, so a late render cannot pick the wrong path.
+async function expectOneUnsaved(page: Page, failedShown: boolean) {
+  const unsaved = page.getByText(/^1 unsaved$/).first();
+  if (failedShown) {
+    const failed = page.getByText(/^1 failed$/).first();
+    await expect(failed).toBeVisible();
+    await failed.click();
+  }
+  await expect(unsaved).toBeVisible();
   await page.keyboard.press("Escape");
 }
 
@@ -139,7 +148,7 @@ for (const refusal of refusals) {
     await expect
       .poll(() => readDraftPatch(page, key), { message: "the refused text should be in the drafts store" })
       .toEqual(expect.objectContaining({ question: typed }));
-    await expectOneUnsaved(page);
+    await expectOneUnsaved(page, refusal.status === 422);
 
     // A remount without a reload (chapter away and back) must not clear it.
     await page.evaluate(() => {
@@ -157,7 +166,7 @@ for (const refusal of refusals) {
     await page.reload();
     await page.getByRole("button", { name: /^Questions/ }).click();
     await expect(questionField(page, tq.id)).toHaveValue(typed);
-    await expectOneUnsaved(page);
+    await expectOneUnsaved(page, refusal.status === 422);
 
     // A later successful save clears the restored draft.
     await context.unroute(`**/api/rows/tq/${tq.id}**`);
@@ -231,6 +240,55 @@ test("tN card: text refused with a fatal 422 survives a reload", async ({ browse
 
   await page.reload();
   await expect(noteTextarea(page, tn.id)).toHaveValue(typed);
+
+  await context.close();
+});
+
+test("tQ table: a refused question survives editing and saving the response", async ({ browser }) => {
+  // Review A1: the editor's diff against the optimistic row is {response}
+  // only, so its re-write and the response save's 200 must keep the question.
+  test.setTimeout(60_000);
+  const { tq } = await pickRows();
+  const key = `row:tq:ZEC:${tq.id}`;
+  const { context } = await newUserContext(browser, "refused-tq-other-field");
+  const page = await context.newPage();
+
+  // Refuse any PATCH that sends the question; let the rest reach the server.
+  let refused = 0;
+  let passed = 0;
+  await context.route(`**/api/rows/tq/${tq.id}**`, async (route, request) => {
+    if (request.method() !== "PATCH") return route.continue();
+    if ("question" in (request.postDataJSON() ?? {})) {
+      refused++;
+      return route.fulfill({ status: 422, contentType: "application/json", body: JSON.stringify({ error: "validation_failed" }) });
+    }
+    passed++;
+    return route.continue();
+  });
+
+  await openQuestions(page, tq.verse);
+  const typed = `REFUSED Q ${Date.now()}`;
+  await questionField(page, tq.id).fill(typed);
+  await saveQuestion(page, tq.id);
+  await expect.poll(() => refused).toBeGreaterThan(0);
+  await expect.poll(() => readDraftPatch(page, key)).toEqual(expect.objectContaining({ question: typed }));
+
+  const response = `RESPONSE ${Date.now()}`;
+  await responseField(page, tq.id).fill(response);
+  await expect
+    .poll(() => readDraftPatch(page, key), { message: "the re-write keeps the refused question" })
+    .toEqual({ question: typed, response });
+  await saveQuestion(page, tq.id);
+  await expect.poll(() => passed, { message: "the response save should reach the server" }).toBeGreaterThan(0);
+  await expect
+    .poll(() => readDraftPatch(page, key), { message: "the 200 keeps the refused question" })
+    .toEqual(expect.objectContaining({ question: typed }));
+
+  await page.reload();
+  await page.getByRole("button", { name: /^Questions/ }).click();
+  await expect(questionField(page, tq.id)).toHaveValue(typed);
+  await expect(responseField(page, tq.id)).toHaveValue(response);
+  expect(await readDraftPatch(page, key)).toEqual(expect.objectContaining({ question: typed }));
 
   await context.close();
 });
