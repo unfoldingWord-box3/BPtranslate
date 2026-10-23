@@ -2003,7 +2003,13 @@ export function Shell({
       const baseline: Record<string, unknown> = {};
       for (const field of Object.keys(patch)) baseline[field] = rowRecord[field];
       applyLocalRowPatch(kind, row.id, localPatch);
-      void outbox.enqueueRow(kind, row.id, row.version, patch as Record<string, unknown>, { ...opts, book: row.book, baseline });
+      // draftRef: lets a refused save file its text as the row's draft (#647).
+      void outbox.enqueueRow(kind, row.id, row.version, patch as Record<string, unknown>, {
+        ...opts,
+        book: row.book,
+        baseline,
+        draftRef: { chapter: row.chapter, verse: row.verse },
+      });
     },
     [applyLocalRowPatch],
   );

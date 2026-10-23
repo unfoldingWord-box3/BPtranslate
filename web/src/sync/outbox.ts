@@ -163,6 +163,10 @@ export interface OutboxOp {
   // IDB as failed recovery copies — a late 200 from an in-flight dispatch must
   // not delete them (see drainPass).
   quarantined?: string;
+  // Row patches from the classic editors only (#647): the row's verse, so a
+  // refused save can file its text as a row draft (drafts.ts,
+  // refusedRowDraft.ts) even when the editor had already cleared its draft.
+  draftRef?: { chapter: number; verse: number };
 }
 
 // Ops still awaiting a settled outcome — either queued or on the wire. Shared
@@ -301,7 +305,12 @@ export const outbox = {
     id: string,
     expectedVersion: number,
     patch: Record<string, unknown>,
-    opts: { restoredFromVersion?: number; book: string; baseline?: Record<string, unknown> },
+    opts: {
+      restoredFromVersion?: number;
+      book: string;
+      baseline?: Record<string, unknown>;
+      draftRef?: { chapter: number; verse: number };
+    },
   ): Promise<OutboxOp> {
     if (isReadOnly()) {
       return noopOp({ kind: "row", rowKind, id, book: opts.book }, "patch", patch);
@@ -320,6 +329,7 @@ export const outbox = {
         ? { restoredFromVersion: opts.restoredFromVersion }
         : {}),
       ...(opts.baseline !== undefined ? { baseline: opts.baseline } : {}),
+      ...(opts.draftRef !== undefined ? { draftRef: opts.draftRef } : {}),
     };
     await putRowOp(op);
     void notify();

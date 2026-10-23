@@ -20,6 +20,7 @@ import {
   withCarriedConfirm,
   rowDraftHoldsSaved,
 } from "./draftSaveState";
+import { rowDraftAfterRefusal } from "./refusedRowDraft";
 import { legacyDbNames, workspaceDbName } from "./workspace";
 import { adoptFromLegacyDbs, type LegacySource } from "./legacyAdoption";
 
@@ -65,6 +66,13 @@ export interface DraftRecord {
   // The row version `confirmed` landed at; only an op chained from it (its
   // expectedVersion) can vouch for the record.
   confirmedVersion?: number;
+  // Row drafts only (#647): fields a refused save sent (fatal 4xx, or dropped
+  // as "locked") that were written back here because nothing else held them
+  // (refusedRowDraft.ts). While set, an editor's "no diff" clear keeps the
+  // draft (drafts.clearUnlessRefused): its fields still equal the cached row,
+  // which carries the refused text. The next set() drops it, as typing makes
+  // the draft the editor's own again; a confirmed save or Discard clears it.
+  refused?: Record<string, unknown>;
 }
 
 export type DraftMeta =
@@ -456,6 +464,31 @@ export const drafts = {
     );
   },
 
+  // An editor's "no diff any more" clear that keeps a draft holding a refused
+  // save's text (DraftRecord.refused, #647). The classic tQ / tW-link editors
+  // diff against the cached row, which still carries that text after the
+  // refusal, so their plain clear would drop it on the next render or remount.
+  // Read and delete share one transaction so a write-back cannot slip between.
+  async clearUnlessRefused(key: string): Promise<boolean> {
+    const requested = latestGenerationByKey.get(key);
+    const idb = await db();
+    const tx = idb.transaction(STORE, "readwrite");
+    const rec = (await tx.store.get(key)) as DraftRecord | undefined;
+    if (rec?.refused && !rec.quarantined) {
+      await tx.done;
+      return false;
+    }
+    if (rec) await tx.store.delete(key);
+    await tx.done;
+    // Same marks as clear(), unless a newer set() started meanwhile.
+    if (latestGenerationByKey.get(key) === requested) {
+      pendingKeys.delete(key);
+      latestGenerationByKey.delete(key);
+    }
+    void notify();
+    return true;
+  },
+
   async list(): Promise<DraftRecord[]> {
     return listAll();
   },
@@ -536,6 +569,11 @@ onOutboxResult((op, result) => {
   // does not prove the row is still at the recorded version (#650). A "locked"
   // drop is not re-settled: an AI apply is about to overwrite the row, so the
   // record is no longer known to be the server's (rowDraftAfterRelease).
+  // A refused row save's text is written back to its draft first (#647), so
+  // it is not lost when the editor had already cleared the draft at Save.
+  if ((result.kind === "fatal" || result.kind === "locked") && op.target.kind === "row" && !op.quarantined) {
+    keepRefusedRow(op);
+  }
   if (result.kind === "fatal" && op.target.kind === "row") {
     resettleRow(op, "fatal");
     return;
@@ -583,4 +621,41 @@ function resettleRow(op: OutboxOp, reason: "fatal" | "drop") {
   if (op.target.kind !== "row") return;
   const key = rowKey(op.target.rowKind, op.target.book, op.target.id);
   void onRowChain(key, () => settleRowNow(key, (rec, queued) => rowDraftAfterRelease(rec, op, reason, queued)), undefined);
+}
+
+// Write a refused row save's text back to the row's draft (rowDraftAfterRefusal,
+// #647). Runs on the row's settle chain; the outbox is read first so a later
+// live save for the row keeps its newer text, then the draft is read, decided
+// on and written in one drafts transaction, so an editor's re-write cannot slip
+// between. Only this tab hears the result.
+function keepRefusedRow(op: OutboxOp) {
+  if (op.target.kind !== "row" || op.action === "delete") return;
+  const key = rowKey(op.target.rowKind, op.target.book, op.target.id);
+  void onRowChain(
+    key,
+    async () => {
+      let queued: OutboxOp[] | null;
+      try {
+        queued = await outbox.list();
+      } catch {
+        queued = null;
+      }
+      const generation = nextGeneration();
+      const idb = await db();
+      const tx = idb.transaction(STORE, "readwrite");
+      const rec = (await tx.store.get(key)) as DraftRecord | undefined;
+      const next = rowDraftAfterRefusal(key, rec, op, queued, { now: Date.now(), generation });
+      if (!next) {
+        await tx.done;
+        return;
+      }
+      // Marked dirty like set() so the unload guard sees it.
+      pendingKeys.add(key);
+      latestGenerationByKey.set(key, generation);
+      await tx.store.put(next);
+      await tx.done;
+      void notify();
+    },
+    undefined,
+  );
 }

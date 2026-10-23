@@ -485,7 +485,9 @@ const WordRow = memo(function WordRow({
         verse: row.verse,
       });
     } else {
-      void drafts.clear(draftKey);
+      // Keeps a refused save's text (#647): these fields equal the cached
+      // row, which still carries it.
+      void drafts.clearUnlessRefused(draftKey);
     }
   }, [draftKey, isDirty, diff, row.version, row.id, row.book, row.chapter, row.verse]);
 
