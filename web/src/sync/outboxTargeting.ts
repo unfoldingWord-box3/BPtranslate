@@ -30,6 +30,7 @@
 // section of outboxTargeting.test.mjs.
 
 import type { OpTarget, OutboxOp, OutboxResult } from "./outbox.ts";
+import { classifyRowPatchConflict } from "./rowConflict.ts";
 
 /** `lastError` stamped on an op that ran out of retries (see outbox.ts's
  * MAX_ATTEMPTS). Single-sourced here so drainPass, reviveMaxAttemptsFailed,
@@ -156,12 +157,14 @@ export function rowWithLivePatches<R extends object>(
 
 // rowWithLivePatches without a settled op: re-apply the row's pending or
 // in-flight saves on top of a server row that arrived some other way (a live
-// update from another user, #637 item 5). `excludeId` skips one op by id.
+// update from another user, #637 item 5). `excludeId` skips one op by id;
+// `keep`, when given, must also accept an op for it to be re-applied.
 export function rowWithQueuedPatches<R extends object>(
   row: R,
   target: OpTarget,
   queued: OutboxOp[] | null | undefined,
   excludeId?: string,
+  keep?: (o: OutboxOp) => boolean,
 ): R {
   if (!queued) return row;
   const key = targetKey(target);
@@ -170,6 +173,7 @@ export function rowWithQueuedPatches<R extends object>(
     if (o.id === excludeId || o.action !== "patch" || !isReplayableOp(o)) continue;
     if (targetKey(o.target) !== key) continue;
     if (!o.patch || typeof o.patch !== "object") continue;
+    if (keep && !keep(o)) continue;
     out = { ...out, ...o.patch };
     if ("restored_from_version" in out) {
       out = { ...out, restored_from_version: o.restoredFromVersion ?? null };
@@ -192,24 +196,34 @@ export function hasQueuedDelete(target: OpTarget, queued: OutboxOp[] | null | un
 // That row drops this user's saves still waiting in the outbox, so their
 // fields are patched back on top (item 5, the same rule rowWithLivePatches
 // uses after a 200), and a row a waiting delete had removed is taken back out
-// (item 4). Null when the outbox could not be read or nothing waits for the
-// row. The caller applies the result only if the cached row is still at the
+// (item 4). Only ops that will land on top of this server row count: a
+// patch sent at its version, or one the outbox's own 409 rule would auto-heal
+// (classifyRowPatchConflict); a delete only when sent at its version (deletes
+// never auto-heal). An op about to hit a genuine conflict is left off, so the
+// cache shows the other user's value rather than ours stamped with their
+// version (a later save from there would overwrite theirs with no 409). Null
+// when the outbox could not be read or nothing waits for the row. The caller applies the result only if the cached row is still at the
 // broadcast row's version (rowAtVersion in lib/bookCache.ts, checked inside
 // the state updater): the read is async, and if something newer landed
 // meanwhile the queued values may be older than its fields (review F4).
 export type LiveUpdateFollowUp = { t: "delete" } | { t: "patch"; patch: Record<string, unknown> };
 export function liveUpdateFollowUp(
-  server: object,
+  server: { version: number },
   target: OpTarget,
   queued: OutboxOp[] | null | undefined,
 ): LiveUpdateFollowUp | null {
   if (!queued) return null;
-  if (hasQueuedDelete(target, queued)) return { t: "delete" };
+  const atVersion = (o: OutboxOp) => o.expectedVersion === server.version;
+  if (hasQueuedDelete(target, queued.filter(atVersion))) return { t: "delete" };
+  const landsOnTop = (o: OutboxOp) =>
+    atVersion(o) ||
+    classifyRowPatchConflict(o.patch as Record<string, unknown>, o.baseline, server as unknown as Record<string, unknown>) ===
+      "auto_heal";
   // Carry restored_from_version only for rows that have the field, so
   // rowWithQueuedPatches sets it per replayed op as it does on a full row.
   const base: Record<string, unknown> =
     "restored_from_version" in server ? { restored_from_version: (server as { restored_from_version?: unknown }).restored_from_version } : {};
-  const patch = rowWithQueuedPatches(base, target, queued);
+  const patch = rowWithQueuedPatches(base, target, queued, undefined, landsOnTop);
   // No waiting save, or only ones with an empty patch: nothing to put back.
   return Object.keys(patch).some((k) => !(k in base)) ? { t: "patch", patch } : null;
 }
