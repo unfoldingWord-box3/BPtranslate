@@ -13,6 +13,7 @@ import SaveIcon from "@mui/icons-material/Save";
 import SaveOutlinedIcon from "@mui/icons-material/SaveOutlined";
 import OpenInNewIcon from "@mui/icons-material/OpenInNew";
 import type { TwlRow } from "../sync/api";
+import { twlBaseline, twlDiff } from "../lib/twlRowFields";
 import { useCatalogs } from "../hooks/useCatalogs";
 import { CatalogPicker } from "./CatalogPicker";
 import { TwArticleDialog } from "./TwArticleDialog";
@@ -396,7 +397,6 @@ const WordRow = memo(function WordRow({
   const [occurrence, setOccurrence] = useState(row.occurrence ?? 1);
   const [translateError, setTranslateError] = useState(false);
   const rowRef = useRef<HTMLDivElement | null>(null);
-  const savedRef = useRef({ quote: row.orig_words ?? "", twLink: row.tw_link, occurrence: row.occurrence ?? 1 });
   const catalogs = useCatalogs();
 
   // Alternative articles for the current link, from two sources unioned by link:
@@ -433,10 +433,6 @@ const WordRow = memo(function WordRow({
   useEffect(() => setQuote(row.orig_words ?? ""), [row.id, row.version, row.orig_words]);
   useEffect(() => setTwLink(row.tw_link), [row.id, row.version, row.tw_link]);
   useEffect(() => setOccurrence(row.occurrence ?? 1), [row.id, row.version, row.occurrence]);
-  useEffect(() => {
-    savedRef.current = { quote: row.orig_words ?? "", twLink: row.tw_link, occurrence: row.occurrence ?? 1 };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- today's Undo baseline is re-read only when the row id or version changes. Following the fields too would change what Undo restores after an optimistic save (#592 follow-up).
-  }, [row.id, row.version]);
 
   const draftKey = useMemo(() => rowKey("twl", row.book, row.id), [row.book, row.id]);
 
@@ -455,15 +451,16 @@ const WordRow = memo(function WordRow({
       if (typeof patch.occurrence === "number") setOccurrence(patch.occurrence);
     });
   }, [draftKey]);
-  const diff = useMemo<Partial<TwlRow>>(() => {
-    const out: Partial<TwlRow> = {};
-    if (quote !== (row.orig_words ?? "")) out.orig_words = quote;
-    if (twLink !== row.tw_link) out.tw_link = twLink;
-    // null/0 stored occurrence is equivalent to 1 for an OL quote (see export
-    // coercion), so only a real numeric change counts as dirty.
-    if (occurrence !== (row.occurrence ?? 1)) out.occurrence = occurrence;
-    return out;
-  }, [quote, twLink, occurrence, row.orig_words, row.tw_link, row.occurrence]);
+  // null/0 stored occurrence is equivalent to 1 for an OL quote (see export
+  // coercion), so only a real numeric change counts as dirty.
+  const diff = useMemo<Partial<TwlRow>>(
+    () =>
+      twlDiff(
+        { orig_words: row.orig_words, tw_link: row.tw_link, occurrence: row.occurrence },
+        { quote, twLink, occurrence },
+      ),
+    [quote, twLink, occurrence, row.orig_words, row.tw_link, row.occurrence],
+  );
   const isDirty = Object.keys(diff).length > 0;
 
   useEffect(() => {
@@ -500,10 +497,14 @@ const WordRow = memo(function WordRow({
     }
   };
 
+  // Undo discards unsaved edits: it resets to the current row, the same
+  // baseline `diff` uses. The row already carries an optimistic save before
+  // the server acknowledges it, so Undo never restores a pre-save value (#613).
   const handleUndo = () => {
-    setQuote(savedRef.current.quote);
-    setTwLink(savedRef.current.twLink);
-    setOccurrence(savedRef.current.occurrence);
+    const base = twlBaseline(row);
+    setQuote(base.quote);
+    setTwLink(base.twLink);
+    setOccurrence(base.occurrence);
   };
 
   const handleSave = () => {
