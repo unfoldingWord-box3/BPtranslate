@@ -385,19 +385,42 @@ assert.equal(
   undefined,
   "#632.1: no landed version, nothing recorded",
 );
-const failedB = opB({ status: "failed", lastError: "http 422" });
-assert.equal(rowDraftAfterRelease(heldN1, failedB, "fatal", [failedB]), "clear", "#632.1: B failed fatally (never re-sends), the draft settles");
-assert.equal(rowDraftAfterRelease(heldN1, opB({ status: "failed", lastError: "max_attempts_exceeded" }), "drop", []), "clear", "#632.1: B discarded after failing, the draft settles");
+const failedB = opB({ status: "failed", lastError: "http 403" });
+// #650: a fatal release or a discarded failed op proves nothing about the
+// server row, so the draft is left as it is, record included (it waits for a
+// later confirm that chains from it). Only a discarded 409 settles (below).
+assert.equal(rowDraftAfterRelease(heldN1, failedB, "fatal", [failedB]), undefined, "#650: B failed fatally, the draft is left as it is");
 assert.equal(
   rowDraftAfterRelease(heldN1, failedB, "fatal", [opB({ id: "C", status: "conflict" })]),
   undefined,
   "#632.1: another conflicted op still holds it",
 );
 assert.equal(rowDraftAfterRelease(heldN1, failedB, "fatal", null), undefined, "#632.1: an unreadable outbox holds it");
+// #650: a refusal does not prove the row is still at the recorded version. The
+// row PATCH handler (api/src/rows.ts) returns its 400/403/404/428 refusals
+// before it compares versions (its only fatal after the check is a 404 for a
+// row deleted meanwhile), so another user may have written X at v8 before B
+// was refused. A draft equal to
+// the record (N1) must be kept, not cleared. Same for a discarded max-attempts
+// op, whose last 5xx may have committed.
+for (const lastError of ["http 403", "http 404", "http 400", "http 428"]) {
+  const refused = rowDraftAfterRelease(heldN1, opB({ status: "failed", lastError }), "fatal", []);
+  assert.equal(refused, undefined, `#650: a fatal ${lastError} release leaves the draft (patch, baseline, record) as it is`);
+}
+const droppedFailed = rowDraftAfterRelease(heldN1, opB({ status: "failed", lastError: "max_attempts_exceeded" }), "drop", []);
+assert.equal(droppedFailed, undefined, "#650: discarding a max-attempts op leaves the draft (patch, baseline, record) as it is");
+// The kept record still settles the draft once a later save that chained from
+// it (C, another field at v7) gets a 200, which proves the row was at v7.
+assert.equal(
+  rowDraftAfterConfirm(heldN1, opB({ id: "C", status: "in_flight", patch: { quote: "Q2" } }), [], 8),
+  "clear",
+  "#650: a later chained confirm still settles against the kept record",
+);
 // The refused save's own text is never cleared or shrunk: only the baseline
-// moves to what A landed, so typing back to N0 later is a real change.
+// moves to what A landed (here proven by a discarded 409 whose row holds N1),
+// so typing back to N0 later is a real change.
 const heldN2 = rowDraftAfterConfirm(based({ note: "N2" }, { note: "N0" }), opA, [opB()], 7);
-const releasedN2 = rowDraftAfterRelease(heldN2, failedB, "fatal", []);
+const releasedN2 = rowDraftAfterRelease(heldN2, opB({ status: "conflict", conflictCurrent: { note: "N1", version: 8 } }), "drop", []);
 assert.deepEqual(
   releasedN2?.payload,
   { patch: { note: "N2" }, baseline: { note: "N1" } },
@@ -419,19 +442,15 @@ assert.equal(
 );
 assert.equal(rowDraftAfterRelease(heldN1, conflictedB(undefined), "drop", []), undefined, "F1: a conflict with no server row proves nothing");
 assert.equal(rowDraftAfterRelease(heldN1, opB(), "locked", []), undefined, "F1: locked (an AI apply will overwrite the row): leave the draft");
-// F5: a record is trusted only by an op that chained from it.
+// F5: a fatal op that did not chain from the record does not settle against it
+// either (#650: no fatal release does).
 assert.equal(
-  rowDraftAfterRelease(heldN1, opB({ status: "failed", lastError: "http 422", expectedVersion: 12 }), "fatal", [])?.confirmed,
+  rowDraftAfterRelease(heldN1, opB({ status: "failed", lastError: "http 403", expectedVersion: 12 }), "fatal", []),
   undefined,
-  "F5: an op that did not chain from the record drops it",
-);
-assert.notEqual(
-  rowDraftAfterRelease(heldN1, opB({ status: "failed", lastError: "http 422", expectedVersion: 12 }), "fatal", []),
-  "clear",
-  "F5: ...without settling against it",
+  "F5: an op that did not chain from the record leaves the draft as it is",
 );
 assert.equal(
-  rowDraftAfterRelease(heldN1, opB({ status: "failed", lastError: "http 422", patch: { sort_order: 3 } }), "fatal", []),
+  rowDraftAfterRelease(heldN1, opB({ status: "failed", lastError: "http 403", patch: { sort_order: 3 } }), "fatal", []),
   undefined,
   "#632.1: a released op that could not hold the draft (a reorder) changes nothing",
 );
