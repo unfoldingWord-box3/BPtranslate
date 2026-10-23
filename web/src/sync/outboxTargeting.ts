@@ -30,7 +30,7 @@
 // section of outboxTargeting.test.mjs.
 
 import type { OpTarget, OutboxOp, OutboxResult } from "./outbox.ts";
-import { classifyRowPatchConflict } from "./rowConflict.ts";
+import { wouldAutoHeal } from "./rowConflict.ts";
 
 /** `lastError` stamped on an op that ran out of retries (see outbox.ts's
  * MAX_ATTEMPTS). Single-sourced here so drainPass, reviveMaxAttemptsFailed,
@@ -158,13 +158,14 @@ export function rowWithLivePatches<R extends object>(
 // rowWithLivePatches without a settled op: re-apply the row's pending or
 // in-flight saves on top of a server row that arrived some other way (a live
 // update from another user, #637 item 5). `excludeId` skips one op by id;
-// `keep`, when given, must also accept an op for it to be re-applied.
+// `keep`, when given, must also accept an op (judged against the row built so
+// far) for it to be re-applied.
 export function rowWithQueuedPatches<R extends object>(
   row: R,
   target: OpTarget,
   queued: OutboxOp[] | null | undefined,
   excludeId?: string,
-  keep?: (o: OutboxOp) => boolean,
+  keep?: (o: OutboxOp, soFar: R) => boolean,
 ): R {
   if (!queued) return row;
   const key = targetKey(target);
@@ -173,7 +174,7 @@ export function rowWithQueuedPatches<R extends object>(
     if (o.id === excludeId || o.action !== "patch" || !isReplayableOp(o)) continue;
     if (targetKey(o.target) !== key) continue;
     if (!o.patch || typeof o.patch !== "object") continue;
-    if (keep && !keep(o)) continue;
+    if (keep && !keep(o, out)) continue;
     out = { ...out, ...o.patch };
     if ("restored_from_version" in out) {
       out = { ...out, restored_from_version: o.restoredFromVersion ?? null };
@@ -198,11 +199,14 @@ export function hasQueuedDelete(target: OpTarget, queued: OutboxOp[] | null | un
 // uses after a 200), and a row a waiting delete had removed is taken back out
 // (item 4). Only ops that will land on top of this server row count: a
 // patch sent at its version, or one the outbox's own 409 rule would auto-heal
-// (classifyRowPatchConflict); a delete only when sent at its version (deletes
-// never auto-heal). An op about to hit a genuine conflict is left off, so the
-// cache shows the other user's value rather than ours stamped with their
-// version (a later save from there would overwrite theirs with no 409). Null
-// when the outbox could not be read or nothing waits for the row. The caller applies the result only if the cached row is still at the
+// (wouldAutoHeal), each judged against the server row plus the waiting saves
+// kept before it (a chained AB→ABC, ABC→ABCD lands whole once the first
+// threads its version to the second); a delete only when sent at its version
+// (deletes never auto-heal). An op about to hit a genuine conflict is left
+// off, so the cache shows the other user's value rather than ours stamped
+// with their version (a later save from there would overwrite theirs with no
+// 409). Null when the outbox could not be read or nothing waits for the row.
+// The caller applies the result only if the cached row is still at the
 // broadcast row's version (rowAtVersion in lib/bookCache.ts, checked inside
 // the state updater): the read is async, and if something newer landed
 // meanwhile the queued values may be older than its fields (review F4).
@@ -215,15 +219,22 @@ export function liveUpdateFollowUp(
   if (!queued) return null;
   const atVersion = (o: OutboxOp) => o.expectedVersion === server.version;
   if (hasQueuedDelete(target, queued.filter(atVersion))) return { t: "delete" };
-  const landsOnTop = (o: OutboxOp) =>
-    atVersion(o) ||
-    classifyRowPatchConflict(o.patch as Record<string, unknown>, o.baseline, server as unknown as Record<string, unknown>) ===
-      "auto_heal";
-  // Carry restored_from_version only for rows that have the field, so
-  // rowWithQueuedPatches sets it per replayed op as it does on a full row.
-  const base: Record<string, unknown> =
-    "restored_from_version" in server ? { restored_from_version: (server as { restored_from_version?: unknown }).restored_from_version } : {};
-  const patch = rowWithQueuedPatches(base, target, queued, undefined, landsOnTop);
+  // Rebuilt on the full server row so each op is judged against what is
+  // there once the saves kept before it have landed; only the kept saves'
+  // fields go in the patch.
+  const full = server as Record<string, unknown>;
+  const keys = new Set<string>();
+  const row = rowWithQueuedPatches(full, target, queued, undefined, (o, soFar) => {
+    const lands = atVersion(o) || wouldAutoHeal(o, soFar);
+    if (lands) for (const k of Object.keys(o.patch ?? {})) keys.add(k);
+    return lands;
+  });
   // No waiting save, or only ones with an empty patch: nothing to put back.
-  return Object.keys(patch).some((k) => !(k in base)) ? { t: "patch", patch } : null;
+  if (keys.size === 0) return null;
+  const patch: Record<string, unknown> = {};
+  for (const k of keys) patch[k] = row[k];
+  // rowWithQueuedPatches sets restored_from_version per replayed op on rows
+  // that carry the field.
+  if ("restored_from_version" in row) patch.restored_from_version = row.restored_from_version;
+  return { t: "patch", patch };
 }
