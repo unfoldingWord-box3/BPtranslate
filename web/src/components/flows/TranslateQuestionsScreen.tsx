@@ -110,6 +110,7 @@ import {
 import { realChapters } from "../../lib/bookSummary";
 import { resolveFlowChipStatus, flowChipKind, type FlowChipStatus } from "../../lib/flowStatusChip";
 import { drafts, rowKey } from "../../sync/drafts";
+import { withPendingReverts } from "../../sync/draftSaveState";
 import { onOutboxResult, outbox } from "../../sync/outbox";
 import { api, ApiError, type ChapterLockedBody, type TqRow } from "../../sync/api";
 import { SCRIPTURE_FONT_STACK } from "../../theme";
@@ -609,6 +610,11 @@ export default function TranslateQuestionsScreen({
   // One value + one baseline per field; one drafts record for the pair.
   const [values, setValues] = useState<Record<Field, string>>({ question: "", response: "" });
   const baselineRef = useRef<Record<Field, string>>({ question: "", response: "" });
+  // The patch of this screen's save still pending for row `id` at `version`.
+  // Until that row moves past the version, the draft keeps a field typed back
+  // to the baseline but differing from what was sent (withPendingReverts,
+  // #632 item 2).
+  const sentRef = useRef<{ id: string; version: number; patch: Record<string, string> } | null>(null);
   // "Hydration for this key has started" — set synchronously, guards against
   // re-entering the hydrate branch and against a stale async lookup landing
   // after a newer row change.
@@ -750,12 +756,19 @@ export default function TranslateQuestionsScreen({
     const key = rowKey("tq", book, row.id);
     const nonceKey = `${key}#${reloadNonce}`;
     if (settledKey !== nonceKey) return;
-    const patch: Record<string, string> = {};
+    const diff: Record<string, string> = {};
+    for (const f of FIELDS) {
+      if (values[f] !== baselineRef.current[f]) diff[f] = values[f];
+    }
+    const sent = sentRef.current;
+    const patch = withPendingReverts(
+      diff,
+      values,
+      sent && sent.id === row.id && sent.version === row.version ? sent.patch : undefined,
+    );
     const baseline: Record<string, string> = {};
     for (const f of FIELDS) {
-      if (values[f] === baselineRef.current[f]) continue;
-      patch[f] = values[f];
-      baseline[f] = baselineRef.current[f];
+      if (f in patch) baseline[f] = baselineRef.current[f];
     }
     if (Object.keys(patch).length > 0) {
       void drafts.set(key, { patch, baseline }, row.version, {
@@ -873,8 +886,12 @@ export default function TranslateQuestionsScreen({
     }
     if (Object.keys(patch).length === 0) return true;
     applyLocalRowPatch("tq", target.id, patch);
+    sentRef.current = { id: target.id, version: target.version, patch: { ...patch } as Record<string, string> };
     const op = await outbox.enqueueRow("tq", target.id, target.version, patch, { book, baseline });
     const result = await waitForOp(op.id);
+    // The save has an answer. On ok the baseline moves below in this same
+    // tick, so no draft write sees the cleared ref with the old baseline.
+    if (result !== null && sentRef.current?.id === target.id) sentRef.current = null;
     if (result === null) {
       say(t("flowQuestions.editQueued"));
       return false;

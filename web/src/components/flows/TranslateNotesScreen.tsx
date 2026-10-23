@@ -146,6 +146,7 @@ import { flowLaneSegmentsAcross, type FlowSegment } from "../../lib/flowHighligh
 import { isHebrewBook } from "../../lib/sourceSearch";
 import { realChapters } from "../../lib/bookSummary";
 import { drafts, rowKey } from "../../sync/drafts";
+import { withPendingReverts } from "../../sync/draftSaveState";
 import { onOutboxResult, outbox } from "../../sync/outbox";
 import { pipelineStore, getSessionKey, type PipelineJob } from "../../sync/pipelineStore";
 import { jobLocksChapterNotes, jobLocksNote, lockJobReleased } from "../../lib/chapterLock";
@@ -539,6 +540,11 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   // ── editor state ─────────────────────────────────────────────────────────
   const [draftValue, setDraftValue] = useState("");
   const baselineRef = useRef("");
+  // The note of this screen's save still pending for row `id` at `version`.
+  // Until that row moves past the version, a note typed back to the baseline
+  // but differing from what was sent stays a draft (withPendingReverts, #632
+  // item 2).
+  const sentRef = useRef<{ id: string; version: number; patch: { note: string } } | null>(null);
   // "Hydration for this key has started" — set synchronously, guards against
   // re-entering the hydrate branch and against a stale async lookup landing
   // after a newer row change.
@@ -717,7 +723,13 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
     const key = rowKey("tn", book, row.id);
     const nonceKey = `${key}#${reloadNonce}`;
     if (settledKey !== nonceKey) return;
-    if (draftValue !== baselineRef.current) {
+    const sent = sentRef.current;
+    const patch = withPendingReverts(
+      draftValue !== baselineRef.current ? { note: draftValue } : {},
+      { note: draftValue },
+      sent && sent.id === row.id && sent.version === row.version ? sent.patch : undefined,
+    );
+    if ("note" in patch) {
       void drafts.set(
         key,
         { patch: { note: draftValue }, baseline: { note: baselineRef.current } },
@@ -1032,8 +1044,12 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
     const patch = { note: draftValue };
     const baseline = { note: baselineRef.current };
     applyLocalRowPatch("tn", target.id, patch as Partial<TnRow & TqRow>);
+    sentRef.current = { id: target.id, version: target.version, patch };
     const op = await outbox.enqueueRow("tn", target.id, target.version, patch, { book, baseline });
     const result = await waitForOp(op.id);
+    // The save has an answer. On ok the baseline moves below in this same
+    // tick, so no draft write sees the cleared ref with the old baseline.
+    if (result !== null && sentRef.current?.id === target.id) sentRef.current = null;
     if (result === null) {
       say(t("flowTranslate.queuedNotConfirmed"));
       return false;

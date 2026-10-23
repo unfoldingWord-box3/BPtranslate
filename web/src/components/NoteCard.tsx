@@ -55,6 +55,7 @@ import { getLockUnapprovedDrafts } from "../lib/editorPrefs";
 import { formatEpochSecondsDateTime } from "../lib/formatDate";
 import { QUICK_DRAFTS_NEED_ORG_KEY } from "../lib/aiProviderErrors";
 import { drafts, rowKey, draftDirtyBorderSx } from "../sync/drafts";
+import { withPendingReverts } from "../sync/draftSaveState";
 import { isAquiferDraftRow } from "./flows/translateShared";
 import { noteLockedReadOnly } from "../lib/chapterLock";
 
@@ -589,6 +590,11 @@ function NoteCardInner({
     sessionSnapshotRef.current = next;
   };
   const pendingRef = useRef<Partial<TnRow>>({});
+  // The patch of this card's save still pending against `version` (the saved
+  // baseline it was sent from). Until the row moves past that version, the
+  // draft keeps a field typed back to the baseline but differing from what was
+  // sent (withPendingReverts, #632 item 2).
+  const sentRef = useRef<{ version: number; patch: Partial<TnRow> } | null>(null);
 
   // The quote field drives the scripture highlight (Shell reads the active
   // note's quote out of chapter state). Propagate quote edits to the parent
@@ -755,6 +761,7 @@ function NoteCardInner({
     // double-clicking Save before the server responds enqueues two PATCHes
     // with the same If-Match, the second of which lands as a phantom 409.
     setSavePendingVersion(savedRef.current.version);
+    sentRef.current = { version: savedRef.current.version, patch };
     onSave(patch);
     // Rebase the snapshot so the chip stops showing "*" after a manual
     // save and a follow-up Undo reverts to the just-saved state.
@@ -879,6 +886,7 @@ function NoteCardInner({
     if (rawSr !== savedRef.current.support_reference) patch.support_reference = rawSr;
     if (Object.keys(patch).length === 0) return;
     onChange(patch);
+    sentRef.current = { version: savedRef.current.version, patch };
     onSave(patch, { restoredFromVersion: fromVersion });
   };
 
@@ -1054,11 +1062,17 @@ function NoteCardInner({
   const draftKey = rowKey("tn", row.book, row.id);
   useEffect(() => {
     if (readOnly) return;
-    if (hasRowDiff) {
+    const sent = sentRef.current;
+    const draftPatch = withPendingReverts(
+      rowDiff,
+      { quote, note, support_reference: supportRef },
+      sent && sent.version === row.version ? sent.patch : undefined,
+    );
+    if (Object.keys(draftPatch).length > 0) {
       void drafts.set(
         draftKey,
         {
-          patch: rowDiff,
+          patch: draftPatch,
           // Persist the server baseline (savedRef stays version-pinned, immune
           // to the optimistic same-version row mutations) so a remount restores
           // an honest baseline instead of inheriting a polluted row. See the
