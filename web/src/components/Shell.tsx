@@ -271,6 +271,13 @@ function isNoteTranslateLocked(e: unknown): boolean {
   return e instanceof ApiError && isChapterLockedBody(e.body);
 }
 
+// Id source for pipeline toasts; ids are only compared for equality (the
+// auto-dismiss timer clears its own toast, not a newer one). Module-level
+// rather than a useRef: a ref read inside pushPipelineToast made the React
+// Compiler treat every callback that calls it, and every memo holding such a
+// callback (the aligner props), as a ref, flagging each render read (#594).
+let pipelineToastSeq = 0;
+
 export function Shell({
   book,
   chapter,
@@ -847,11 +854,10 @@ export function Shell({
   const [pipelineToast, setPipelineToast] = useState<
     { id: number; text: string; kind: "success" | "error" | "info"; action?: { label: string; onClick: () => void } } | null
   >(null);
-  const pipelineToastIdRef = useRef(0);
   const pushPipelineToast = useCallback(
     (text: string, kind: "success" | "error" | "info" = "info", action?: { label: string; onClick: () => void }) => {
-      pipelineToastIdRef.current += 1;
-      setPipelineToast({ id: pipelineToastIdRef.current, text, kind, action });
+      pipelineToastSeq += 1;
+      setPipelineToast({ id: pipelineToastSeq, text, kind, action });
     },
     [],
   );
@@ -2772,8 +2778,6 @@ export function Shell({
         setPanelMode("resources");
       },
       onDirtyChange: setAlignmentDirty,
-      panelRef: alignmentPanelRef,
-      onOpenDual: () => openDualAligner(alignerTarget.chapter, alignerTarget.verse),
       onRestoreVersion: targetVerse
         ? (content, plainText) =>
             restoreVerse(
@@ -2787,7 +2791,15 @@ export function Shell({
         : undefined,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `restoreVerse` is a plain function declared below the early return, so it is new every render; it reads only book, chapter, bookHook, applyLocalVerse and enqueueVerseSafely, which are all listed.
-  }, [alignerTarget, data, chapter, bookHook, book, openDualAligner, applyLocalVerse, enqueueVerseSafely]);
+  }, [alignerTarget, data, chapter, bookHook, book, applyLocalVerse, enqueueVerseSafely]);
+
+  // The panel's "Side-by-side" action, kept out of alignmentTabProps:
+  // openDualAligner reaches the dirty-gate refs, so a closure over it inside
+  // that memo made the React Compiler flag every render read of the memo (#594).
+  // Defined whenever alignerTarget is, which alignmentTabProps requires.
+  const openDualFromAlignmentPanel = useCallback(() => {
+    if (alignerTarget) openDualAligner(alignerTarget.chapter, alignerTarget.verse);
+  }, [alignerTarget, openDualAligner]);
 
   // Props for the side-by-side popup: ULT + UST slices against one shared
   // source. Undefined (popup closed) unless a dualTarget is set and at least
@@ -2868,9 +2880,7 @@ export function Shell({
       onSave: enqueue("ULT", ult.targetVerse),
       onConfirmUnalign: confirmUnalign("ULT", ult.targetVerse),
       onDirtyChange: setDualLeftDirty,
-      panelRef: dualLeftRef,
       onReadingDirtyChange: setDualLeftReadingDirty,
-      readingRef: dualLeftReadingRef,
     };
     const right: PanelSlot = {
       bibleVersion: "UST",
@@ -2881,9 +2891,7 @@ export function Shell({
       onSave: enqueue("UST", ust.targetVerse),
       onConfirmUnalign: confirmUnalign("UST", ust.targetVerse),
       onDirtyChange: setDualRightDirty,
-      panelRef: dualRightRef,
       onReadingDirtyChange: setDualRightReadingDirty,
-      readingRef: dualRightReadingRef,
     };
     return {
       book,
@@ -3669,6 +3677,8 @@ export function Shell({
     panelMode,
     onSetPanelMode: handleSetPanelMode,
     alignmentProps: alignmentTabProps,
+    alignmentPanelRef,
+    onOpenDualAligner: openDualFromAlignmentPanel,
     alignmentBadge,
   };
 
@@ -4406,6 +4416,10 @@ export function Shell({
           lexiconMap={lexiconMap}
           left={dualAlignerProps.left}
           right={dualAlignerProps.right}
+          leftPanelRef={dualLeftRef}
+          rightPanelRef={dualRightRef}
+          leftReadingRef={dualLeftReadingRef}
+          rightReadingRef={dualRightReadingRef}
           onPrevVerse={dualNav.prev != null ? () => dualNavTo(dualNav.prev!) : undefined}
           onNextVerse={dualNav.next != null ? () => dualNavTo(dualNav.next!) : undefined}
           onSaveReading={(bv, plain, base) =>

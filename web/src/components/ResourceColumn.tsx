@@ -55,8 +55,6 @@ export interface AlignmentTabProps {
   // Confirm-before-save when the edit would unalign a previously aligned word
   // (forwarded to AlignmentPanel; see its onConfirmUnalign prop).
   onConfirmUnalign?: (lostWords: string[], commit: () => void) => void;
-  panelRef?: Ref<AlignmentPanelHandle>;
-  onOpenDual?: () => void;
   // Restore a previously-saved verse version from the panel's history button.
   onRestoreVersion?: (content: unknown, plainText: string | null) => void;
 }
@@ -225,6 +223,12 @@ interface Props {
   panelMode?: PanelMode;
   onSetPanelMode?: (mode: PanelMode) => void;
   alignmentProps?: AlignmentTabProps;
+  // The alignment panel's imperative handle and its "Side-by-side" action, kept
+  // out of `alignmentProps`: a ref (or a callback that reaches refs) inside that
+  // memoized object made the React Compiler flag every field read of it during
+  // render (#594).
+  alignmentPanelRef?: Ref<AlignmentPanelHandle>;
+  onOpenDualAligner?: () => void;
   alignmentBadge?: string;
   // Per-resource checkoff for the active verse (in-context "done" + bulk).
   checkoff?: ResourceCheckoff;
@@ -348,6 +352,8 @@ export function ResourceColumn({
   panelMode = "resources",
   onSetPanelMode,
   alignmentProps,
+  alignmentPanelRef,
+  onOpenDualAligner,
   alignmentBadge,
   checkoff,
   visibleTabs,
@@ -355,11 +361,6 @@ export function ResourceColumn({
   requestTab,
 }: Props) {
   const { t } = useTranslation();
-  // Hand the panel ref to `ref=` under its own name. Reading it straight off
-  // `alignmentProps` made the React Compiler treat the whole props object as a
-  // ref, so every other field read in render tripped react-hooks/refs. Same
-  // ref object as before; nothing reads `.current` during render.
-  const alignmentPanelRef = alignmentProps?.panelRef;
   // Translation mode: only gateway-language projects (translationSource != null)
   // show state-based cards, the source pane, and Approve/Translate affordances.
   // The English root project sees the unchanged card.
@@ -862,7 +863,7 @@ export function ResourceColumn({
             onConfirmUnalign={alignmentProps.onConfirmUnalign}
             onCancel={alignmentProps.onCancel}
             onDirtyChange={alignmentProps.onDirtyChange}
-            onOpenDual={alignmentProps.onOpenDual}
+            onOpenDual={onOpenDualAligner}
             onRestoreVersion={alignmentProps.onRestoreVersion}
           />
         ) : (

@@ -62,12 +62,12 @@ export interface PanelSlot {
   // Confirm-before-save when this side's edit would unalign a previously aligned
   // word (forwarded to AlignmentPanel; see its onConfirmUnalign prop).
   onConfirmUnalign?: (lostWords: string[], commit: () => void) => void;
-  panelRef: Ref<AlignmentPanelHandle>;
-  // Reading-line dirty mirror + imperative save/discard, so the close/verse-nav
-  // gate can prompt before silently dropping an unsaved reading-text edit
-  // (parallels onDirtyChange/panelRef for the alignment panel below).
+  // Reading-line dirty mirror, so the close/verse-nav gate can prompt before
+  // silently dropping an unsaved reading-text edit (parallels onDirtyChange
+  // for the alignment panel). The imperative handles for both live outside
+  // the slot, as the aligner's left/right *Ref props: a ref inside this
+  // object made the React Compiler flag every field read of the slot (#594).
   onReadingDirtyChange: (dirty: boolean) => void;
-  readingRef: Ref<ReadingLineHandle>;
 }
 
 // Imperative surface the gate uses to flush or revert a reading line.
@@ -89,6 +89,12 @@ interface Props {
   lexiconMap: Map<string, LexiconEntry | null>;
   left: PanelSlot;
   right: PanelSlot;
+  // Imperative handles for each side's alignment panel and reading line,
+  // used by the caller's close/verse-nav gate to save or discard.
+  leftPanelRef: Ref<AlignmentPanelHandle>;
+  rightPanelRef: Ref<AlignmentPanelHandle>;
+  leftReadingRef: Ref<ReadingLineHandle>;
+  rightReadingRef: Ref<ReadingLineHandle>;
   // Commit a reading-text edit (smart-edit + enqueue). Fired only by the
   // explicit Save button — the reading line no longer autosaves on blur.
   // Keyed by bibleVersion so the same callback serves both sides.
@@ -115,6 +121,10 @@ export function SideBySideAligner({
   lexiconMap,
   left,
   right,
+  leftPanelRef,
+  rightPanelRef,
+  leftReadingRef,
+  rightReadingRef,
   onSaveReading,
   onPrevVerse,
   onNextVerse,
@@ -148,7 +158,11 @@ export function SideBySideAligner({
       return next;
     });
 
-  const renderPanel = (slot: PanelSlot, setLocalDirty: (dirty: boolean) => void) => (
+  const renderPanel = (
+    slot: PanelSlot,
+    panelRef: Ref<AlignmentPanelHandle>,
+    setLocalDirty: (dirty: boolean) => void,
+  ) => (
     <AlignmentPanel
       // Remount on verse change so the panel's internal state is seeded fresh
       // (useState(computedInitial)) instead of carrying the previous verse's
@@ -156,7 +170,7 @@ export function SideBySideAligner({
       // same stale-state race the single-panel aligner had. bibleVersion is
       // fixed per side (ULT left / UST right), so verseNum alone keys it.
       key={`${slot.bibleVersion}:${verseNum}`}
-      ref={slot.panelRef}
+      ref={panelRef}
       book={book}
       chapter={chapter}
       verseNum={verseNum}
@@ -292,14 +306,14 @@ export function SideBySideAligner({
           }}
         >
           <ReadingLine
-            ref={left.readingRef}
+            ref={leftReadingRef}
             slot={left}
             onSave={onSaveReading}
             onDirtyChange={left.onReadingDirtyChange}
             locked={leftDirty}
           />
           <ReadingLine
-            ref={right.readingRef}
+            ref={rightReadingRef}
             slot={right}
             onSave={onSaveReading}
             onDirtyChange={right.onReadingDirtyChange}
@@ -333,7 +347,7 @@ export function SideBySideAligner({
               overflow: "hidden",
             }}
           >
-            {renderPanel(left, setLeftDirty)}
+            {renderPanel(left, leftPanelRef, setLeftDirty)}
           </Box>
           <Box
             sx={{
@@ -344,7 +358,7 @@ export function SideBySideAligner({
               overflow: "hidden",
             }}
           >
-            {renderPanel(right, setRightDirty)}
+            {renderPanel(right, rightPanelRef, setRightDirty)}
           </Box>
         </Box>
       </Box>

@@ -607,9 +607,7 @@ export default function TranslateAlignScreen({
       onSave: saveFor(LANE_LEFT, litSlice.targetVerse),
       onConfirmUnalign: confirmUnalignFor(litSlice.targetVerse, LANE_LEFT),
       onDirtyChange: setDualLeftDirty,
-      panelRef: dualLeftRef,
       onReadingDirtyChange: setDualLeftReadingDirty,
-      readingRef: dualLeftReadingRef,
     };
     const right: PanelSlot = {
       bibleVersion: LANE_RIGHT,
@@ -620,9 +618,7 @@ export default function TranslateAlignScreen({
       onSave: saveFor(LANE_RIGHT, simSlice.targetVerse),
       onConfirmUnalign: confirmUnalignFor(simSlice.targetVerse, LANE_RIGHT),
       onDirtyChange: setDualRightDirty,
-      panelRef: dualRightRef,
       onReadingDirtyChange: setDualRightReadingDirty,
-      readingRef: dualRightReadingRef,
     };
     const labelVerse = litSlice.targetVerse ?? simSlice.targetVerse;
     return {
@@ -1417,6 +1413,10 @@ export default function TranslateAlignScreen({
           lexiconMap={lexiconMap}
           left={dualProps.left}
           right={dualProps.right}
+          leftPanelRef={dualLeftRef}
+          rightPanelRef={dualRightRef}
+          leftReadingRef={dualLeftReadingRef}
+          rightReadingRef={dualRightReadingRef}
           onSaveReading={handleSaveReading}
           onPrevVerse={prevVerse != null ? () => dualNavTo(prevVerse) : undefined}
           onNextVerse={nextVerse != null ? () => dualNavTo(nextVerse) : undefined}
