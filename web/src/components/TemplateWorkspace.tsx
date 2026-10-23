@@ -542,6 +542,7 @@ function TemplateEditor({ templateId, direction, onServerChange }: EditorProps) 
 
   useEffect(() => {
     if (aiDraftError) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- consumes a one-shot AI-draft error from useTemplateAiDraft and clears it in the hook; the AI result path is kept on its post-commit timing rather than reworked into render.
       setErrorMsg(aiDraftError);
       clearAiDraftError();
     }
@@ -552,6 +553,7 @@ function TemplateEditor({ templateId, direction, onServerChange }: EditorProps) 
     // validated out from under us) — apply the fresh row so a retry uses the
     // current version instead of resubmitting the stale one and 409ing again.
     if (aiConflictUnit) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- applies a one-shot AI 409 rebase: applyServerUnit reads/clears the drafts store and onServerChange refetches the parent rail, so this has to run after commit.
       applyServerUnit(aiConflictUnit);
       clearAiConflict();
       onServerChange();

@@ -327,6 +327,7 @@ export const AlignmentPanel = forwardRef<AlignmentPanelHandle, Props>(
     // `initial` stays computedInitial so the restored state reads as dirty
     // (state !== initial) and can be saved or reset.
     useEffect(() => {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- the synchronous reset must land before the async crash-draft restore below so the restore wins (see the comment above); a render-time reset would change that ordering.
       setInitial(computedInitial);
       setState(computedInitial);
       setSelectedUnaligned(new Set());

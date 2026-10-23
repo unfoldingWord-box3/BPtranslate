@@ -520,6 +520,7 @@ function ArticleEditor({
   // what makes leaving and coming back non-destructive.
   useEffect(() => {
     if (!articleId || paths.length === 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- draft-hydration load: re-runs on reloadKey (translate complete, refetch) without a remount, so the loading/staleDraft resets below do real work, and they stay paired with the async draft-store restore in the same effect.
       setParts(null);
       return;
     }
