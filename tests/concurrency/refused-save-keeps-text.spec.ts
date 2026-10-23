@@ -11,8 +11,11 @@ const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
 // Save (its fields then equal the optimistically patched row), so a refused
 // save left the text only in React state.
 //
-// The PATCH is answered by page.route, never by the server, so the server row
-// stays as seeded. ZEC 9 is used because no other spec writes to it.
+// Refused PATCHes are answered by page.route and never reach the server. The
+// saves meant to succeed (the final save in the refusal cases, the response
+// save, the superseding save) do write to a ZEC 9 tQ row on the local server;
+// globalSetup re-imports ZEC each run. ZEC 9 is used because no other spec
+// writes to it.
 const CHAPTER = 9;
 
 interface TqRow {
@@ -292,3 +295,62 @@ test("tQ table: a refused question survives editing and saving the response", as
 
   await context.close();
 });
+
+for (const secondRefused of [false, true]) {
+  test(`tQ table: newer text saved over a refused one ${secondRefused ? "and refused too is the text kept" : "wins after a reload"}`, async ({
+    browser,
+  }) => {
+    // Round-2 review B1: refused ABC, then XYZ typed and saved. The refused
+    // ABC must not come back over XYZ; if XYZ is refused too, XYZ is kept.
+    test.setTimeout(60_000);
+    const { tq } = await pickRows();
+    const key = `row:tq:ZEC:${tq.id}`;
+    const { context } = await newUserContext(browser, `refused-tq-superseded-${secondRefused}`);
+    const page = await context.newPage();
+
+    let seen = 0;
+    let passed = 0;
+    await context.route(`**/api/rows/tq/${tq.id}**`, async (route, request) => {
+      if (request.method() !== "PATCH") return route.continue();
+      seen++;
+      if (seen === 1 || secondRefused) {
+        return route.fulfill({ status: 422, contentType: "application/json", body: JSON.stringify({ error: "validation_failed" }) });
+      }
+      passed++;
+      return route.continue();
+    });
+
+    await openQuestions(page, tq.verse);
+    const first = `ABC ${Date.now()}`;
+    await questionField(page, tq.id).fill(first);
+    await saveQuestion(page, tq.id);
+    await expect.poll(() => readDraftPatch(page, key)).toEqual(expect.objectContaining({ question: first }));
+
+    const newer = `XYZ ${Date.now()}`;
+    await questionField(page, tq.id).fill(newer);
+    await saveQuestion(page, tq.id);
+    await expect.poll(() => seen, { message: "the second save should reach the route" }).toBe(2);
+
+    if (secondRefused) {
+      await expect
+        .poll(() => readDraftPatch(page, key), { message: "the second refusal's text is kept" })
+        .toEqual(expect.objectContaining({ question: newer }));
+    } else {
+      expect(passed).toBe(1);
+      await expect
+        .poll(() => readDraftPatch(page, key), { message: "no stale refused draft after the 200" })
+        .toBeNull();
+    }
+
+    await page.reload();
+    await page.getByRole("button", { name: /^Questions/ }).click();
+    await expect(questionField(page, tq.id)).toHaveValue(newer);
+    if (secondRefused) {
+      expect(await readDraftPatch(page, key)).toEqual(expect.objectContaining({ question: newer }));
+    } else {
+      expect(await readDraftPatch(page, key)).toBeNull();
+    }
+
+    await context.close();
+  });
+}

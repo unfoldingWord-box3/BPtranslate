@@ -220,12 +220,50 @@ test("A1: a draft with a baseline for the field (NoteCard) carries nothing; no r
 test("A1: backspacing to no diff keeps exactly the refused text", () => {
   // Typed ABCX over the refused ABC, then back to ABC: the editor sees no diff.
   const rec = refusedDraft({ question: "ABCX", response: "R2" }, { question: "ABC" });
-  const out = rowDraftOnNoDiff(rec);
+  const out = rowDraftOnNoDiff(rec, { question: "ABC", response: "R2" }, []);
   assert.deepEqual(out.payload, { patch: { question: "ABC" } });
   assert.deepEqual(out.refused, { question: "ABC" });
-  assert.equal(rowDraftOnNoDiff(refusedDraft({ question: "ABC" }, { question: "ABC" })), undefined);
-  assert.equal(rowDraftOnNoDiff(draft({ patch: { question: "x" } })), "clear");
-  assert.equal(rowDraftOnNoDiff(refusedDraft({}, {}, { quarantined: "q" })), undefined);
+  assert.equal(rowDraftOnNoDiff(refusedDraft({ question: "ABC" }, { question: "ABC" }), { question: "ABC" }, []), undefined);
+  assert.equal(rowDraftOnNoDiff(draft({ patch: { question: "x" } }), {}, []), "clear");
+  assert.equal(rowDraftOnNoDiff(refusedDraft({}, {}, { quarantined: "q" }), {}, []), undefined);
+});
+
+test("B1: no diff because the user saved newer text for the refused field: the refused text is superseded", () => {
+  // Refused ABC, then typed XYZ and saved: the row shows XYZ and a live save sends it.
+  const rec = refusedDraft({ question: "XYZ" }, { question: "ABC" });
+  const op2 = op({ question: "XYZ" }, { id: "op-2", status: "pending", queuedAt: 5 });
+  assert.equal(rowDraftOnNoDiff(rec, { question: "XYZ" }, [op2]), "clear");
+  // Another refused field still showing stays.
+  const two = refusedDraft({ question: "XYZ", response: "R" }, { question: "ABC", response: "R" });
+  const out = rowDraftOnNoDiff(two, { question: "XYZ", response: "R" }, [op2]);
+  assert.deepEqual(out.payload, { patch: { response: "R" } });
+  assert.deepEqual(out.refused, { response: "R" });
+});
+
+test("B1: no diff with other text on screen but no live save sending it (row reverted to the server copy): kept", () => {
+  const rec = refusedDraft({ question: "ABC" }, { question: "ABC" });
+  assert.equal(rowDraftOnNoDiff(rec, { question: "SERVER" }, []), undefined);
+  // A failed save is not live; an unreadable outbox keeps it too.
+  const failed = op({ question: "SERVER" }, { id: "op-2", status: "failed", lastError: "http 422" });
+  assert.equal(rowDraftOnNoDiff(rec, { question: "SERVER" }, [failed]), undefined);
+  assert.equal(rowDraftOnNoDiff(rec, { question: "SERVER" }, null), undefined);
+});
+
+test("B1(a): the superseding save's 200 drops the stale refused text from the patch too", () => {
+  // The no-diff shrink ran before the live save was visible: draft holds ABC.
+  const rec = refusedDraft({ question: "ABC" }, { question: "ABC" });
+  assert.equal(afterConfirmKeepingRefusal(rec, undefined, op({ question: "XYZ" })), "clear");
+  const withOther = refusedDraft({ question: "ABC", ref_raw: "9:3" }, { question: "ABC" });
+  const out = afterConfirmKeepingRefusal(withOther, undefined, op({ question: "XYZ" }));
+  assert.deepEqual(out.payload, { patch: { ref_raw: "9:3" } });
+  assert.equal("refused" in out, false);
+});
+
+test("B1(b): a later refusal replaces text that is only the earlier refused value", () => {
+  const rec = refusedDraft({ question: "ABC" }, { question: "ABC" });
+  const out = rowDraftAfterRefusal("row:tq:ZEC:q-1", rec, op({ question: "XYZ" }, { id: "op-2" }), [], at);
+  assert.deepEqual(out.payload, { patch: { question: "XYZ" } });
+  assert.deepEqual(out.refused, { question: "XYZ" });
 });
 
 test("A1: a confirmed save that did not send a refused field keeps it; one that sent it ends the record", () => {
