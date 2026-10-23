@@ -286,9 +286,13 @@ export default function TranslateAlignScreen({
 
   // ── interaction mode (form-factor policy; AlignScreen.tsx:193-199) ───────
   const [interactionChoice, setInteractionChoice] = useState<"drag" | "tap" | null>(null);
-  useEffect(() => {
-    setInteractionChoice(null); // band change resets to the band's default
-  }, [isDesktop, isTabletUp]);
+  // A band change resets to the band's default (adjusted during render).
+  const band = `${isDesktop}|${isTabletUp}`;
+  const [prevBand, setPrevBand] = useState(band);
+  if (band !== prevBand) {
+    setPrevBand(band);
+    setInteractionChoice(null);
+  }
   const interaction: "drag" | "tap" = !isTabletUp
     ? "tap"
     : (interactionChoice ?? (isDesktop ? "drag" : "tap"));
@@ -403,9 +407,11 @@ export default function TranslateAlignScreen({
   );
   const streamWords = useMemo(() => streamWordsOf(tapState), [tapState]);
   const [dismissedGhosts, setDismissedGhosts] = useState<Set<string>>(new Set());
-  useEffect(() => {
+  const [prevGhostVerse, setPrevGhostVerse] = useState(verse);
+  if (verse !== prevGhostVerse) {
+    setPrevGhostVerse(verse);
     setDismissedGhosts(new Set());
-  }, [verse]);
+  }
   const ghosts = useMemo(
     () => computeGhosts(displayCards, streamWords, suggestions, dismissedGhosts),
     [displayCards, streamWords, suggestions, dismissedGhosts],

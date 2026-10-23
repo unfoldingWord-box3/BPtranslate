@@ -120,6 +120,7 @@ export function ImportFromDoor43Dialog({
   // over currentChapter so the default re-pull refreshes everything.
   useEffect(() => {
     if (open) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- loadOpts() reads localStorage (an external store another tab can change) on each open; that read belongs after commit, not in render.
       setOpts(loadOpts());
       setRefInput(initialRef ?? String(currentChapter));
     }

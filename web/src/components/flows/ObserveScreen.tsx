@@ -776,13 +776,17 @@ function PoolActionDialog({
   const [org, setOrg] = useState("");
   const [label, setLabel] = useState("");
 
-  useEffect(() => {
+  // Clear the fields when the dialog closes (adjusted during render on the
+  // open → closed transition).
+  const [prevKind, setPrevKind] = useState(kind);
+  if (kind !== prevKind) {
+    setPrevKind(kind);
     if (kind === null) {
       setBinding("");
       setOrg("");
       setLabel("");
     }
-  }, [kind]);
+  }
 
   if (kind === null) return null;
 

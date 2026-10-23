@@ -147,9 +147,12 @@ export function SideBySideAligner({
   const [rightDirty, setRightDirty] = useState(false);
   // Hover positions are verse-specific — a stale ring would attach to whatever
   // token happens to hold the same position after a verse nav.
-  useEffect(() => {
+  const verseKey = `${chapter}:${verseNum}`;
+  const [prevVerseKey, setPrevVerseKey] = useState(verseKey);
+  if (verseKey !== prevVerseKey) {
+    setPrevVerseKey(verseKey);
     setHover(null);
-  }, [verseNum, chapter]);
+  }
   const toggleHoverLink = () =>
     setHoverLink((cur) => {
       const next = !cur;

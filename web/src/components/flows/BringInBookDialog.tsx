@@ -116,6 +116,7 @@ export function BringInBookDialog({ open, onClose, book, onSuccess }: BringInBoo
 
   useEffect(() => {
     if (!open) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- the reset is paired with the getBookSources fetch this same effect starts on open (setExisting(null) must precede that fetch's result); keeping them in one effect keeps them in step.
     setIntent("translate");
     setRows(defaultSheetRows());
     setRowIssues(new Map());
