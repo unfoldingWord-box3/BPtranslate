@@ -146,8 +146,8 @@ import { flowLaneSegmentsAcross, type FlowSegment } from "../../lib/flowHighligh
 import { isHebrewBook } from "../../lib/sourceSearch";
 import { realChapters } from "../../lib/bookSummary";
 import { drafts, rowKey } from "../../sync/drafts";
-import { withPendingReverts } from "../../sync/draftSaveState";
-import { onOutboxResult, outbox } from "../../sync/outbox";
+import { isPendingRowSave, rowSaveEnded, withPendingReverts } from "../../sync/draftSaveState";
+import { onOutboxDrop, onOutboxResult, outbox, type OutboxOp } from "../../sync/outbox";
 import { pipelineStore, getSessionKey, type PipelineJob } from "../../sync/pipelineStore";
 import { jobLocksChapterNotes, jobLocksNote, lockJobReleased } from "../../lib/chapterLock";
 import {
@@ -540,11 +540,14 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   // ── editor state ─────────────────────────────────────────────────────────
   const [draftValue, setDraftValue] = useState("");
   const baselineRef = useRef("");
-  // The note of this screen's save still pending for row `id` at `version`.
-  // Until that row moves past the version, a note typed back to the baseline
-  // but differing from what was sent stays a draft (withPendingReverts, #632
-  // item 2).
-  const sentRef = useRef<{ id: string; version: number; patch: { note: string } } | null>(null);
+  // The note of this screen's save for row `id` while it can still land. Until
+  // then a note typed back to the baseline but differing from what was sent
+  // stays a draft (withPendingReverts, #632 item 2). Cleared by that save's
+  // outcome (the listener below the persist effect), never by a version check:
+  // the row can reach a new version before the save lands (review A2).
+  const sentRef = useRef<{ id: string; patch: { note: string } } | null>(null);
+  // Re-runs the persist effect when the protection ends.
+  const [sentTick, setSentTick] = useState(0);
   // "Hydration for this key has started" — set synchronously, guards against
   // re-entering the hydrate branch and against a stale async lookup landing
   // after a newer row change.
@@ -727,7 +730,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
     const patch = withPendingReverts(
       draftValue !== baselineRef.current ? { note: draftValue } : {},
       { note: draftValue },
-      sent && sent.id === row.id && sent.version === row.version ? sent.patch : undefined,
+      sent && sent.id === row.id ? sent.patch : undefined,
     );
     if ("note" in patch) {
       void drafts.set(
@@ -740,7 +743,33 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
       void drafts.clear(key);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [draftValue, row?.id, row?.version, book, reloadNonce, settledKey]);
+  }, [draftValue, row?.id, row?.version, book, reloadNonce, settledKey, sentTick]);
+
+  // End the type-back protection when this screen's pending save can no
+  // longer land: confirmed, refused, dropped as "locked", or discarded. A 409
+  // that waits for keep-mine, or a save still queued after waitForOp gave up,
+  // keeps it. On a 200 the baseline takes the sent values in the same tick
+  // (also after a keep-mine, where saveDraft no longer moves it), and the
+  // persist effect re-runs against it, so a kept revert stays a draft.
+  useEffect(() => {
+    const end = (op: OutboxOp, ok: boolean) => {
+      const sent = sentRef.current;
+      if (!sent || !isPendingRowSave(sent.patch, op, { rowKind: "tn", id: sent.id, book })) return;
+      sentRef.current = null;
+      if (ok && hydratedKeyRef.current?.startsWith(`${rowKey("tn", book, sent.id)}#`)) {
+        baselineRef.current = sent.patch.note;
+      }
+      setSentTick((n) => n + 1);
+    };
+    const offResult = onOutboxResult((op, result) => {
+      if (rowSaveEnded(result)) end(op, result.kind === "ok");
+    });
+    const offDrop = onOutboxDrop((op) => end(op, false));
+    return () => {
+      offResult();
+      offDrop();
+    };
+  }, [book]);
 
   useUnsavedGuard(hasDiff);
 
@@ -1044,12 +1073,9 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
     const patch = { note: draftValue };
     const baseline = { note: baselineRef.current };
     applyLocalRowPatch("tn", target.id, patch as Partial<TnRow & TqRow>);
-    sentRef.current = { id: target.id, version: target.version, patch };
+    sentRef.current = { id: target.id, patch };
     const op = await outbox.enqueueRow("tn", target.id, target.version, patch, { book, baseline });
     const result = await waitForOp(op.id);
-    // The save has an answer. On ok the baseline moves below in this same
-    // tick, so no draft write sees the cleared ref with the old baseline.
-    if (result !== null && sentRef.current?.id === target.id) sentRef.current = null;
     if (result === null) {
       say(t("flowTranslate.queuedNotConfirmed"));
       return false;

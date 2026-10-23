@@ -55,7 +55,8 @@ import { getLockUnapprovedDrafts } from "../lib/editorPrefs";
 import { formatEpochSecondsDateTime } from "../lib/formatDate";
 import { QUICK_DRAFTS_NEED_ORG_KEY } from "../lib/aiProviderErrors";
 import { drafts, rowKey, draftDirtyBorderSx } from "../sync/drafts";
-import { withPendingReverts } from "../sync/draftSaveState";
+import { isPendingRowSave, rowSaveEnded, withPendingReverts } from "../sync/draftSaveState";
+import { onOutboxDrop, onOutboxResult, type OutboxOp } from "../sync/outbox";
 import { isAquiferDraftRow } from "./flows/translateShared";
 import { noteLockedReadOnly } from "../lib/chapterLock";
 
@@ -590,11 +591,15 @@ function NoteCardInner({
     sessionSnapshotRef.current = next;
   };
   const pendingRef = useRef<Partial<TnRow>>({});
-  // The patch of this card's save still pending against `version` (the saved
-  // baseline it was sent from). Until the row moves past that version, the
+  // The patch of this card's save while it can still land. Until then the
   // draft keeps a field typed back to the baseline but differing from what was
-  // sent (withPendingReverts, #632 item 2).
-  const sentRef = useRef<{ version: number; patch: Partial<TnRow> } | null>(null);
+  // sent (withPendingReverts, #632 item 2). Cleared by that save's outcome
+  // (the listener below), never by a version check: the row can reach a new
+  // version (a refetch) before the save lands (review A2).
+  const sentRef = useRef<{ patch: Partial<TnRow> } | null>(null);
+  // Re-runs the draft write when a refused or discarded save ends the
+  // protection, so a type-back equal to the server copy leaves the draft.
+  const [sentTick, setSentTick] = useState(0);
 
   // The quote field drives the scripture highlight (Shell reads the active
   // note's quote out of chapter state). Propagate quote edits to the parent
@@ -761,7 +766,7 @@ function NoteCardInner({
     // double-clicking Save before the server responds enqueues two PATCHes
     // with the same If-Match, the second of which lands as a phantom 409.
     setSavePendingVersion(savedRef.current.version);
-    sentRef.current = { version: savedRef.current.version, patch };
+    sentRef.current = { patch };
     onSave(patch);
     // Rebase the snapshot so the chip stops showing "*" after a manual
     // save and a follow-up Undo reverts to the just-saved state.
@@ -886,7 +891,7 @@ function NoteCardInner({
     if (rawSr !== savedRef.current.support_reference) patch.support_reference = rawSr;
     if (Object.keys(patch).length === 0) return;
     onChange(patch);
-    sentRef.current = { version: savedRef.current.version, patch };
+    sentRef.current = { patch };
     onSave(patch, { restoredFromVersion: fromVersion });
   };
 
@@ -1060,13 +1065,33 @@ function NoteCardInner({
             ? { label: t("translation.stateUntranslated"), color: "text.secondary" }
             : null;
   const draftKey = rowKey("tn", row.book, row.id);
+  // End the type-back protection when this card's pending save can no longer
+  // land: confirmed, refused, dropped as "locked", or discarded. A 409 that
+  // waits for keep-mine keeps it. On a 200 no re-run is forced: the row's new
+  // version re-runs the draft write against the moved baseline.
+  useEffect(() => {
+    const target = { rowKind: "tn", id: row.id, book: row.book };
+    const end = (op: OutboxOp, rerun: boolean) => {
+      const sent = sentRef.current;
+      if (!sent || !isPendingRowSave(sent.patch as Record<string, unknown>, op, target)) return;
+      sentRef.current = null;
+      if (rerun) setSentTick((n) => n + 1);
+    };
+    const offResult = onOutboxResult((op, result) => {
+      if (rowSaveEnded(result)) end(op, result.kind !== "ok");
+    });
+    const offDrop = onOutboxDrop((op) => end(op, true));
+    return () => {
+      offResult();
+      offDrop();
+    };
+  }, [row.id, row.book]);
   useEffect(() => {
     if (readOnly) return;
-    const sent = sentRef.current;
     const draftPatch = withPendingReverts(
       rowDiff,
       { quote, note, support_reference: supportRef },
-      sent && sent.version === row.version ? sent.patch : undefined,
+      sentRef.current?.patch,
     );
     if (Object.keys(draftPatch).length > 0) {
       void drafts.set(
@@ -1104,6 +1129,7 @@ function NoteCardInner({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     draftKey,
+    sentTick,
     hasRowDiff,
     hydrated,
     quote,

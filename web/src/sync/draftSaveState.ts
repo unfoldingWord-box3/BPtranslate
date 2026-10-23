@@ -105,6 +105,33 @@ export function withPendingReverts<T extends Record<string, unknown>>(
   return out;
 }
 
+// Whether `op` is an editor's pending save, sent with `patch` for the row
+// `target` (#632 item 2 review A1). Matched by row and exact patch, not op id
+// or version: NoteCard's save goes through Shell and never sees its op, and a
+// healed 409 re-sends the same op at a newer version. An editor allows one
+// pending save at a time, so the patch identifies it.
+export function isPendingRowSave(
+  patch: Record<string, unknown>,
+  op: Pick<OutboxOp, "target" | "patch"> & Partial<Pick<OutboxOp, "action">>,
+  target: { rowKind: string; id: string; book: string },
+): boolean {
+  const t = op.target;
+  if (t.kind !== "row" || t.rowKind !== target.rowKind || t.id !== target.id || t.book !== target.book) return false;
+  if (op.action === "delete") return false;
+  const sent = op.patch as unknown;
+  if (!sent || typeof sent !== "object") return false;
+  return sameFields(sent as Record<string, unknown>, patch);
+}
+
+// Whether an outbox result ends a pending save's chance to land, and so the
+// editor's type-back protection (withPendingReverts): it landed (ok), was
+// refused (fatal), or was dropped (locked). A 409 waiting for keep-mine and a
+// retry can still land, so they keep it. A user discard (outbox.drop) ends it
+// too; editors hear that through onOutboxDrop.
+export function rowSaveEnded(result: { kind: string }): boolean {
+  return result.kind === "ok" || result.kind === "fatal" || result.kind === "locked";
+}
+
 // Whether a row save's 200 settles the row draft, judged by content alone.
 // True when every field in the draft's patch was sent by this op with an equal
 // value. Every row editor stores only the fields it changed (NoteCard,
