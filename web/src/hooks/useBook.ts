@@ -25,8 +25,8 @@ import {
   type VerseDto,
 } from "../sync/api";
 import { fetchWithRetry } from "../sync/fetchWithRetry";
-import { onOutboxResult } from "../sync/outbox";
-import { rowWithLivePatches } from "../sync/outboxTargeting";
+import { onOutboxResult, onOutboxRowDropped, type OutboxOp, type RowTarget } from "../sync/outbox";
+import { rowWithLivePatches, rowWithQueuedPatches, unappliedResult } from "../sync/outboxTargeting";
 import { applyCacheOp, ChapterFetchTracker, type CacheOp } from "../lib/bookCache";
 
 export type ChapterState =
@@ -67,6 +67,10 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
   // reset effect runs.
   const trackerRef = useRef<ChapterFetchTracker | null>(null);
   const getTracker = useCallback(() => (trackerRef.current ??= new ChapterFetchTracker()), []);
+  // The last copy of each row the server sent, keyed `${kind}:${id}`, as in
+  // useChapter: a save that never landed is taken back off it (#637).
+  // Cleared with the cache when the book changes.
+  const confirmedRef = useRef(new Map<string, TnRow | TqRow | TwlRow>());
 
   // Reset everything when the book changes or the hook is disabled — the
   // cache is per-book, not global.
@@ -81,6 +85,7 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
     setSummary(null);
     setSummaryStatus("loading");
     setChapters(new Map());
+    confirmedRef.current = new Map();
     const ctrl = new AbortController();
     fetchWithRetry(
       (signal) => api.getBookSummary(book, signal),
@@ -135,6 +140,9 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
         .then((data) => {
           release();
           if (ctrl.signal.aborted) return;
+          for (const kind of ["tn", "tq", "twl"] as const) {
+            for (const r of data[kind] as Array<TnRow | TqRow | TwlRow>) confirmedRef.current.set(`${kind}:${r.id}`, r);
+          }
           const merged = tracker.land(ch, token, data);
           if (!merged) return;
           setChapters((prev) => new Map(prev).set(ch, { kind: "ready", data: merged }));
@@ -209,9 +217,27 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
     [mutate],
   );
 
+  // Every caller passes a row the server sent; it is recorded as confirmed.
   const applyLocalRowReplacement = useCallback<UseBookReturn["applyLocalRowReplacement"]>(
-    (kind, row) => mutate(row.chapter, { t: "replace", kind, row }),
+    (kind, row) => {
+      confirmedRef.current.set(`${kind}:${row.id}`, row);
+      mutate(row.chapter, { t: "replace", kind, row });
+    },
     [mutate],
+  );
+
+  // A row save ended without landing, or was discarded: back to the confirmed
+  // row plus the row's saves still waiting (#637). The replace is skipped when
+  // the cached copy is newer; nothing happens when no confirmed row is known
+  // or the outbox could not be read.
+  const rebuildRow = useCallback(
+    (target: RowTarget, queued: OutboxOp[] | null | undefined) => {
+      if (target.book !== book || !queued) return;
+      const confirmed = confirmedRef.current.get(`${target.rowKind}:${target.id}`);
+      if (!confirmed) return;
+      mutate(confirmed.chapter, { t: "replace", kind: target.rowKind, row: rowWithQueuedPatches(confirmed, target, queued) });
+    },
+    [book, mutate],
   );
 
   const applyLocalRowInsert = useCallback<UseBookReturn["applyLocalRowInsert"]>(
@@ -229,7 +255,17 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
   // duplicate updates are idempotent.
   useEffect(() => {
     if (!enabled) return;
+    return onOutboxRowDropped((op, queued) => {
+      if (op.target.kind === "row") rebuildRow(op.target, queued);
+    });
+  }, [enabled, rebuildRow]);
+  useEffect(() => {
+    if (!enabled) return;
     return onOutboxResult((op, result, queued) => {
+      if (op.target.kind === "row" && unappliedResult(result.kind)) {
+        rebuildRow(op.target, queued);
+        return;
+      }
       if (result.kind !== "ok") return;
       if (op.target.kind === "verse") {
         const v = result.updated as VerseDto;
@@ -240,10 +276,11 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
         const u = result.updated as TnRow | TqRow | TwlRow;
         if (!u || u.book !== book) return;
         // Later saves still queued for the row stay on top (#620).
+        confirmedRef.current.set(`${op.target.rowKind}:${u.id}`, u);
         mutate(u.chapter, { t: "replace", kind: op.target.rowKind, row: rowWithLivePatches(u, op, queued) });
       }
     });
-  }, [book, enabled, applyLocalVerse, mutate]);
+  }, [book, enabled, applyLocalVerse, mutate, rebuildRow]);
 
   return {
     summary,

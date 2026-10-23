@@ -18,8 +18,8 @@ import {
   type LaneCheckState,
 } from "../sync/api";
 import { fetchWithRetry } from "../sync/fetchWithRetry";
-import { onOutboxResult } from "../sync/outbox";
-import { rowWithLivePatches } from "../sync/outboxTargeting";
+import { onOutboxResult, onOutboxRowDropped, type OutboxOp, type RowTarget } from "../sync/outbox";
+import { rowAfterUnappliedOp, rowWithLivePatches, unappliedResult } from "../sync/outboxTargeting";
 
 type Status = "idle" | "loading" | "ready" | "error" | "retrying";
 
@@ -55,6 +55,11 @@ export function useChapter(book: string, chapter: number): UseChapterReturn {
   const [retryAttempts, setRetryAttempts] = useState(0);
   const mounted = useRef(true);
   const fetchCtrl = useRef<AbortController | null>(null);
+  // The last copy of each row the server sent (chapter fetch, a save's 200, or
+  // any full-row replacement, all of which carry server rows), keyed
+  // `${kind}:${id}`. Local patches never touch it. Used to take a save that
+  // never landed back off the cached row (#637).
+  const confirmedRef = useRef(new Map<string, TnRow | TqRow | TwlRow>());
 
   const refetch = useCallback(async () => {
     // Abort any in-flight retry loop from a previous (book, chapter) before
@@ -80,6 +85,11 @@ export function useChapter(book: string, chapter: number): UseChapterReturn {
         },
       );
       if (!mounted.current || fetchCtrl.current !== ctrl) return;
+      const confirmed = new Map<string, TnRow | TqRow | TwlRow>();
+      for (const kind of ["tn", "tq", "twl"] as const) {
+        for (const r of payload[kind] as Array<TnRow | TqRow | TwlRow>) confirmed.set(`${kind}:${r.id}`, r);
+      }
+      confirmedRef.current = confirmed;
       setData(payload);
       setStatus("ready");
       setRetryAttempts(0);
@@ -113,16 +123,44 @@ export function useChapter(book: string, chapter: number): UseChapterReturn {
     [],
   );
 
+  const replaceRow = useCallback((kind: "tn" | "tq" | "twl", row: TnRow | TqRow | TwlRow) => {
+    setData((prev) => {
+      if (!prev) return prev;
+      const list = prev[kind] as Array<TnRow | TqRow | TwlRow>;
+      const next = list.map((r) => (r.id === row.id ? row : r));
+      return { ...prev, [kind]: next } as ChapterPayload;
+    });
+  }, []);
+
+  // Every caller passes a row the server sent, so it is also recorded as the
+  // row's confirmed copy.
   const applyLocalRowReplacement = useCallback<UseChapterReturn["applyLocalRowReplacement"]>(
     (kind, row) => {
+      confirmedRef.current.set(`${kind}:${row.id}`, row);
+      replaceRow(kind, row);
+    },
+    [replaceRow],
+  );
+
+  // A row save ended without the server applying it (fatal, locked) or was
+  // discarded: put the cached row back to its confirmed copy plus the row's
+  // saves still waiting (#637). Leaves the row alone when it cannot tell what
+  // the server holds (see rowAfterUnappliedOp).
+  const rebuildRow = useCallback(
+    (target: RowTarget, queued: OutboxOp[] | null | undefined) => {
+      if (target.book !== book) return;
+      const kind = target.rowKind;
+      const confirmed = confirmedRef.current.get(`${kind}:${target.id}`);
       setData((prev) => {
         if (!prev) return prev;
         const list = prev[kind] as Array<TnRow | TqRow | TwlRow>;
-        const next = list.map((r) => (r.id === row.id ? row : r));
-        return { ...prev, [kind]: next } as ChapterPayload;
+        const cached = list.find((r) => r.id === target.id);
+        const row = rowAfterUnappliedOp(cached, confirmed, target, queued);
+        if (!row || row === cached) return prev;
+        return { ...prev, [kind]: list.map((r) => (r.id === target.id ? row : r)) } as ChapterPayload;
       });
     },
-    [],
+    [book],
   );
 
   const applyLocalRowDelete = useCallback<UseChapterReturn["applyLocalRowDelete"]>(
@@ -261,14 +299,23 @@ export function useChapter(book: string, chapter: number): UseChapterReturn {
   );
 
   // Adopt server-confirmed values when an outbox op succeeds. For a row, the
-  // patches of later saves still queued for it stay on top (#620).
+  // patches of later saves still queued for it stay on top (#620). A row save
+  // that ends without landing, or is discarded, is taken back off (#637).
+  useEffect(() => onOutboxRowDropped((op, queued) => {
+    if (op.target.kind === "row") rebuildRow(op.target, queued);
+  }), [rebuildRow]);
   useEffect(() => {
     return onOutboxResult((op, result, queued) => {
+      if (op.target.kind === "row" && unappliedResult(result.kind)) {
+        rebuildRow(op.target, queued);
+        return;
+      }
       if (result.kind !== "ok") return;
       if (op.target.kind === "row") {
         const u = result.updated as TnRow | TqRow | TwlRow;
         if (u && u.book === book && u.chapter === chapter) {
-          applyLocalRowReplacement(op.target.rowKind, rowWithLivePatches(u, op, queued));
+          confirmedRef.current.set(`${op.target.rowKind}:${u.id}`, u);
+          replaceRow(op.target.rowKind, rowWithLivePatches(u, op, queued));
         }
         return;
       }
@@ -293,7 +340,7 @@ export function useChapter(book: string, chapter: number): UseChapterReturn {
         }
       }
     });
-  }, [book, chapter, applyLocalRowReplacement, applyLocalVerse, applyLocalVerseStatus, applyLaneCheckers]);
+  }, [book, chapter, replaceRow, rebuildRow, applyLocalVerse, applyLocalVerseStatus, applyLaneCheckers]);
 
   return {
     status,

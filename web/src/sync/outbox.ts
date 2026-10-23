@@ -27,6 +27,7 @@ import {
   isMaxAttemptsBlocked,
   shouldAnnounceResult,
   targetKey,
+  unappliedResult,
 } from "./outboxTargeting.ts";
 import { legacyDbNames, workspaceDbName } from "./workspace";
 import { adoptFromLegacyDbs, type LegacySource } from "./legacyAdoption";
@@ -576,6 +577,18 @@ export const outbox = {
     }
     await tx.store.delete(opId);
     await tx.done;
+    // A discarded row save never reaches the server, so the cache hooks take
+    // its patch back off the cached row (#637). Read the queue after the
+    // delete so they can keep the row's other waiting saves on screen.
+    if (op && op.target.kind === "row" && dropListeners.size > 0) {
+      let queued: OutboxOp[] | null;
+      try {
+        queued = await listAll();
+      } catch {
+        queued = null;
+      }
+      for (const l of dropListeners) l(op, queued);
+    }
     void notify();
     void drain();
   },
@@ -696,15 +709,26 @@ type Result =
 
 export type { Result as OutboxResult };
 
-// `queued` is the outbox as read after a confirmed ("ok") row op was settled,
-// before the drain dispatches anything else, so cache listeners can keep the
-// row's later live saves on screen (rowWithLivePatches, #620). Undefined for
-// every other result, and null when that read failed.
+// `queued` is the outbox as read after a row op was settled as "ok", "fatal"
+// or "locked", before the drain dispatches anything else, so cache listeners
+// can keep the row's later live saves on screen (rowWithLivePatches, #620;
+// rowAfterUnappliedOp, #637). Undefined for every other result, and null when
+// that read failed.
 type ResultListener = (op: OutboxOp, result: Result, queued?: OutboxOp[] | null) => void;
 const resultListeners = new Set<ResultListener>();
 export function onOutboxResult(fn: ResultListener): () => void {
   resultListeners.add(fn);
   return () => resultListeners.delete(fn);
+}
+
+// A row op the user removed with drop() (Discard, keep theirs), with the
+// outbox as read after the delete (null when that read failed). Only row ops
+// are announced (#637).
+type DropListener = (op: OutboxOp, queued: OutboxOp[] | null) => void;
+const dropListeners = new Set<DropListener>();
+export function onOutboxRowDropped(fn: DropListener): () => void {
+  dropListeners.add(fn);
+  return () => dropListeners.delete(fn);
 }
 
 function unexpectedAlignmentLossReason(body: unknown): string | null {
@@ -1182,7 +1206,7 @@ async function drainPass() {
 
     if (shouldAnnounceResult(result.kind, persisted)) {
       let queued: OutboxOp[] | null | undefined;
-      if (result.kind === "ok" && next.target.kind === "row") {
+      if ((result.kind === "ok" || unappliedResult(result.kind)) && next.target.kind === "row") {
         try {
           queued = await listAll();
         } catch {
