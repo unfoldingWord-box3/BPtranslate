@@ -324,9 +324,9 @@ export function Shell({
   // than on `bookHook`, which is a fresh object on every App render.
   const bookChapters = bookHook?.chapters;
   const applyLocalRowPatch = useCallback<typeof applyChapterRowPatch>(
-    (kind, id, patch) => {
-      applyChapterRowPatch(kind, id, patch);
-      if (kind === "tn") bookPatchRow?.("tn", 0, id, patch);
+    (kind, id, patch, onlyAtVersion) => {
+      applyChapterRowPatch(kind, id, patch, onlyAtVersion);
+      if (kind === "tn") bookPatchRow?.("tn", 0, id, patch, onlyAtVersion);
     },
     [applyChapterRowPatch, bookPatchRow],
   );
@@ -349,9 +349,9 @@ export function Shell({
     [applyChapterRowInsert, bookInsertRow, chapter],
   );
   const applyLocalRowDelete = useCallback<typeof applyChapterRowDelete>(
-    (kind, id) => {
-      applyChapterRowDelete(kind, id);
-      if (kind === "tn") bookDeleteRow?.("tn", 0, id);
+    (kind, id, onlyAtVersion) => {
+      applyChapterRowDelete(kind, id, onlyAtVersion);
+      if (kind === "tn") bookDeleteRow?.("tn", 0, id, onlyAtVersion);
     },
     [applyChapterRowDelete, bookDeleteRow],
   );
@@ -388,16 +388,16 @@ export function Shell({
       // waiting in the outbox (this tab's own save is broadcast back to it
       // too, often before its 200). Put them back on top, and take back out a
       // row a waiting delete had removed (#637 items 4 and 5). The outbox read
-      // is async, so the server row shows for a few milliseconds, and nothing
-      // is done if the cached row changed meanwhile (liveUpdateFollowUp).
+      // is async, so the server row shows for a few milliseconds. The follow-up
+      // passes the broadcast row's version, so it is skipped, inside the state
+      // updater, if the cached row changed meanwhile (rowAtVersion).
       if (action === "insert" || action === "replace") {
         const target = { kind: "row", rowKind: kind, id: row.id, book: row.book } as const;
         void outbox.list().then(
           (queued) => {
-            const now = (dataRef.current?.[kind] as Array<TnRow | TqRow | TwlRow> | undefined)?.find((r) => r.id === row.id);
-            const next = liveUpdateFollowUp(row, now, target, queued);
-            if (next?.t === "delete") applyLocalRowDelete(kind, row.id);
-            else if (next?.t === "patch") applyLocalRowPatch(kind, row.id, next.patch);
+            const next = liveUpdateFollowUp(row, target, queued);
+            if (next?.t === "delete") applyLocalRowDelete(kind, row.id, row.version);
+            else if (next?.t === "patch") applyLocalRowPatch(kind, row.id, next.patch, row.version);
           },
           () => {
             /* outbox unreadable: the server row stays, as before */

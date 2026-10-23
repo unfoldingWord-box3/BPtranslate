@@ -49,12 +49,13 @@ export interface UseBookReturn {
     chapter: number,
     id: string,
     patch: Partial<TnRow & TqRow & TwlRow>,
+    onlyAtVersion?: number,
   ) => void;
   /** Swap in a full server row; skipped when the cached copy is newer. */
   applyLocalRowReplacement: (kind: "tn" | "tq" | "twl", row: TnRow | TqRow | TwlRow) => void;
   /** Add a row to its chapter's cache (after `afterId` when given). No-op if present. */
   applyLocalRowInsert: (kind: "tn" | "tq" | "twl", row: TnRow | TqRow | TwlRow, position?: { afterId?: string }) => void;
-  applyLocalRowDelete: (kind: "tn" | "tq" | "twl", chapter: number, id: string) => void;
+  applyLocalRowDelete: (kind: "tn" | "tq" | "twl", chapter: number, id: string, onlyAtVersion?: number) => void;
 }
 
 export function useBook(book: string, enabled: boolean): UseBookReturn {
@@ -205,7 +206,7 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
   // Shell patches the chapter-0 cache on every tn edit; applyCacheOp returns
   // the same payload when the row isn't one of that chapter's, so no churn.
   const applyLocalRowPatch = useCallback<UseBookReturn["applyLocalRowPatch"]>(
-    (kind, chapter, id, patch) => mutate(chapter, { t: "patch", kind, id, patch }),
+    (kind, chapter, id, patch, onlyAtVersion) => mutate(chapter, { t: "patch", kind, id, patch, onlyAtVersion }),
     [mutate],
   );
 
@@ -220,7 +221,7 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
   );
 
   const applyLocalRowDelete = useCallback<UseBookReturn["applyLocalRowDelete"]>(
-    (kind, chapter, id) => mutate(chapter, { t: "delete", kind, id }),
+    (kind, chapter, id, onlyAtVersion) => mutate(chapter, { t: "delete", kind, id, onlyAtVersion }),
     [mutate],
   );
 

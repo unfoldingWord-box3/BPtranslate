@@ -11,6 +11,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { MAX_ATTEMPTS_SENTINEL, hasQueuedDelete, liveUpdateFollowUp, rowWithQueuedPatches } from "./outboxTargeting.ts";
+import { applyCacheOp, rowAtVersion } from "../lib/bookCache.ts";
 
 const target = { kind: "row", rowKind: "tq", id: "q-1", book: "ZEC" };
 const otherRow = { kind: "row", rowKind: "tq", id: "q-2", book: "ZEC" };
@@ -22,7 +23,7 @@ function op(id, patch, extra = {}) {
 const theirs = { id: "q-1", book: "ZEC", chapter: 1, verse: 1, question: "Q2", response: "AB", version: 3 };
 
 test("item 5: this user's waiting save goes back on top of another user's live update", () => {
-  const out = liveUpdateFollowUp(theirs, theirs, target, [
+  const out = liveUpdateFollowUp(theirs, target, [
     op("op-2", { response: "ABC" }, { status: "in_flight" }),
     op("op-3", { response: "ABCD" }),
     { ...op("op-x", { response: "other" }), target: otherRow },
@@ -32,31 +33,46 @@ test("item 5: this user's waiting save goes back on top of another user's live u
 
 test("item 5: restored_from_version follows the replayed op on rows that carry it", () => {
   const tn = { ...theirs, restored_from_version: 1 };
-  const out = liveUpdateFollowUp(tn, tn, target, [op("op-2", { response: "X" }, { restoredFromVersion: 2 })]);
+  const out = liveUpdateFollowUp(tn, target, [op("op-2", { response: "X" }, { restoredFromVersion: 2 })]);
   assert.deepEqual(out, { t: "patch", patch: { response: "X", restored_from_version: 2 } });
-  const plain = liveUpdateFollowUp(tn, tn, target, [op("op-2", { response: "X" })]);
+  const plain = liveUpdateFollowUp(tn, target, [op("op-2", { response: "X" })]);
   assert.deepEqual(plain, { t: "patch", patch: { response: "X", restored_from_version: null } });
 });
 
 test("nothing to do when no save waits for the row, or only conflicted / blocked ones", () => {
-  assert.equal(liveUpdateFollowUp(theirs, theirs, target, []), null);
+  assert.equal(liveUpdateFollowUp(theirs, target, []), null);
   for (const extra of [{ status: "conflict" }, { status: "failed", lastError: MAX_ATTEMPTS_SENTINEL }, { status: "failed", lastError: "http 422" }]) {
-    assert.equal(liveUpdateFollowUp(theirs, theirs, target, [op("op-2", { response: "X" }, extra)]), null);
+    assert.equal(liveUpdateFollowUp(theirs, target, [op("op-2", { response: "X" }, extra)]), null);
   }
 });
 
-test("F4: the cached row changed during the outbox read, so older queued values are not written over it", () => {
-  const queued = [op("op-2", { response: "ABC" }, { status: "in_flight" })];
-  const newer = { ...theirs, response: "XYZ", version: 4 };
-  assert.equal(liveUpdateFollowUp(theirs, newer, target, queued), null, "newer row landed");
-  assert.equal(liveUpdateFollowUp(theirs, undefined, target, queued), null, "row gone from the cache");
-  assert.equal(liveUpdateFollowUp(theirs, theirs, target, null), null, "outbox unreadable");
+test("nothing to do when the outbox could not be read, or a waiting save has an empty patch", () => {
+  assert.equal(liveUpdateFollowUp(theirs, target, null), null);
+  assert.equal(liveUpdateFollowUp(theirs, target, [op("op-2", {})]), null);
+  assert.equal(liveUpdateFollowUp({ ...theirs, restored_from_version: 1 }, target, [op("op-2", {})]), null);
+});
+
+test("F4: the follow-up applies only while the cached row is still at the broadcast version", () => {
+  const patch = { t: "patch", kind: "tn", id: "q-1", patch: { response: "ABC" }, onlyAtVersion: 3 };
+  const data = (row) => ({ tn: row ? [row] : [], tq: [], twl: [], verses: {} });
+  assert.equal(applyCacheOp(data(theirs), patch).tn[0].response, "ABC", "same version applies");
+  const newer = data({ ...theirs, response: "XYZ", version: 4 });
+  assert.equal(applyCacheOp(newer, patch), newer, "newer row landed: untouched");
+  const gone = data(null);
+  assert.equal(applyCacheOp(gone, patch), gone, "row gone: untouched");
+  const del = { t: "delete", kind: "tn", id: "q-1", onlyAtVersion: 3 };
+  assert.equal(applyCacheOp(data(theirs), del).tn.length, 0, "delete at same version");
+  assert.equal(applyCacheOp(newer, del), newer, "delete skipped on newer row");
+  assert.equal(rowAtVersion(undefined, undefined), true, "no version: unguarded");
+  assert.equal(rowAtVersion(theirs, 3), true);
+  assert.equal(rowAtVersion({ ...theirs, version: 4 }, 3), false);
+  assert.equal(rowAtVersion(undefined, 3), false);
 });
 
 test("item 4: a live update does not bring back a row this user has a waiting delete for", () => {
   const del = { ...op("op-d", undefined), action: "delete" };
-  assert.deepEqual(liveUpdateFollowUp(theirs, theirs, target, [del]), { t: "delete" });
-  assert.equal(liveUpdateFollowUp(theirs, theirs, otherRow, [del]), null, "another row's delete");
+  assert.deepEqual(liveUpdateFollowUp(theirs, target, [del]), { t: "delete" });
+  assert.equal(liveUpdateFollowUp(theirs, otherRow, [del]), null, "another row's delete");
   assert.equal(hasQueuedDelete(target, [{ ...del, status: "failed", lastError: "http 422" }]), false, "refused delete");
 });
 

@@ -9,10 +9,22 @@ type AnyRow = TnRow | TqRow | TwlRow;
 /** One local change to a cached chapter. */
 export type CacheOp =
   | { t: "verse"; verse: VerseDto }
-  | { t: "patch"; kind: RowKind; id: string; patch: Partial<TnRow & TqRow & TwlRow> }
+  | { t: "patch"; kind: RowKind; id: string; patch: Partial<TnRow & TqRow & TwlRow>; onlyAtVersion?: number }
   | { t: "replace"; kind: RowKind; row: AnyRow }
   | { t: "insert"; kind: RowKind; row: AnyRow; afterId?: string }
-  | { t: "delete"; kind: RowKind; id: string };
+  | { t: "delete"; kind: RowKind; id: string; onlyAtVersion?: number };
+
+/**
+ * Whether a patch or delete given `onlyAtVersion` may touch `row`: always when
+ * no version is given; otherwise only when the row is cached at exactly that
+ * version. Checked inside the state updater, so it sees the cache as it is
+ * after every earlier queued update (#637: a live update's follow-up must not
+ * write over a row that changed while the outbox was being read).
+ */
+export function rowAtVersion(row: { version: number } | undefined, onlyAtVersion: number | undefined): boolean {
+  if (onlyAtVersion === undefined) return true;
+  return !!row && row.version === onlyAtVersion;
+}
 
 /** Apply one op; returns the same object when nothing changed. */
 export function applyCacheOp(data: ChapterPayload, op: CacheOp): ChapterPayload {
@@ -27,7 +39,8 @@ export function applyCacheOp(data: ChapterPayload, op: CacheOp): ChapterPayload 
   const list = data[op.kind] as AnyRow[];
   let next: AnyRow[];
   if (op.t === "patch") {
-    if (!list.some((r) => r.id === op.id)) return data;
+    const cur = list.find((r) => r.id === op.id);
+    if (!cur || !rowAtVersion(cur, op.onlyAtVersion)) return data;
     next = list.map((r) => (r.id === op.id ? ({ ...r, ...op.patch } as AnyRow) : r));
   } else if (op.t === "replace") {
     const cur = list.find((r) => r.id === op.row.id);
@@ -46,7 +59,8 @@ export function applyCacheOp(data: ChapterPayload, op: CacheOp): ChapterPayload 
     const idx = op.afterId ? list.findIndex((r) => r.id === op.afterId) : -1;
     next = idx >= 0 ? [...list.slice(0, idx + 1), op.row, ...list.slice(idx + 1)] : [...list, op.row];
   } else {
-    if (!list.some((r) => r.id === op.id)) return data;
+    const cur = list.find((r) => r.id === op.id);
+    if (!cur || !rowAtVersion(cur, op.onlyAtVersion)) return data;
     next = list.filter((r) => r.id !== op.id);
   }
   return { ...data, [op.kind]: next } as ChapterPayload;

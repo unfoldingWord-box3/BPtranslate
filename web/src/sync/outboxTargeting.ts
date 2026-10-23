@@ -192,25 +192,24 @@ export function hasQueuedDelete(target: OpTarget, queued: OutboxOp[] | null | un
 // That row drops this user's saves still waiting in the outbox, so their
 // fields are patched back on top (item 5, the same rule rowWithLivePatches
 // uses after a 200), and a row a waiting delete had removed is taken back out
-// (item 4). `server` is the broadcast row, `cachedNow` the row the cache holds
-// once the read has finished. The read is async, so when the cached row is
-// gone or carries another version, something newer landed meanwhile (this
-// user's own confirmation, or another update) and the queued values may be
-// older than its fields: nothing is done. Also nothing when the outbox could
-// not be read or nothing waits for the row.
+// (item 4). Null when the outbox could not be read or nothing waits for the
+// row. The caller applies the result only if the cached row is still at the
+// broadcast row's version (rowAtVersion in lib/bookCache.ts, checked inside
+// the state updater): the read is async, and if something newer landed
+// meanwhile the queued values may be older than its fields (review F4).
 export type LiveUpdateFollowUp = { t: "delete" } | { t: "patch"; patch: Record<string, unknown> };
 export function liveUpdateFollowUp(
-  server: { version?: unknown },
-  cachedNow: { version?: unknown } | undefined,
+  server: object,
   target: OpTarget,
   queued: OutboxOp[] | null | undefined,
 ): LiveUpdateFollowUp | null {
-  if (!queued || !cachedNow || cachedNow.version !== server.version) return null;
+  if (!queued) return null;
   if (hasQueuedDelete(target, queued)) return { t: "delete" };
   // Carry restored_from_version only for rows that have the field, so
   // rowWithQueuedPatches sets it per replayed op as it does on a full row.
   const base: Record<string, unknown> =
     "restored_from_version" in server ? { restored_from_version: (server as { restored_from_version?: unknown }).restored_from_version } : {};
   const patch = rowWithQueuedPatches(base, target, queued);
-  return patch === base ? null : { t: "patch", patch };
+  // No waiting save, or only ones with an empty patch: nothing to put back.
+  return Object.keys(patch).some((k) => !(k in base)) ? { t: "patch", patch } : null;
 }
