@@ -379,7 +379,8 @@ export function Shell({
   // save is broadcast back to it too, often before its 200). Put them back on
   // top, and take back out a row a waiting delete had removed (#637 items 4
   // and 5). The outbox read is async, so the server row shows for a few
-  // milliseconds. The follow-up passes the broadcast row's version, so it is
+  // milliseconds; it includes saves whose outbox write is still in progress
+  // (#652). The follow-up passes the broadcast row's version, so it is
   // skipped, inside the state updater, if the cached row changed meanwhile
   // (rowAtVersion). Used by the open chapter's room and the book-intro room.
   const followUpLiveUpdate = (
@@ -389,7 +390,7 @@ export function Shell({
     deleteRow: (onlyAtVersion: number) => void,
   ) => {
     const target = { kind: "row", rowKind: kind, id: row.id, book: row.book } as const;
-    void outbox.list().then(
+    void outbox.listWithUncommitted().then(
       (queued) => {
         if (row.book !== bookRef.current) return;
         const next = liveUpdateFollowUp(row, target, queued);
