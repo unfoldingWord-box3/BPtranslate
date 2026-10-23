@@ -303,7 +303,8 @@ export function rowDraftAfterConfirm(
 //   * fatal, or a discarded failed op: nothing is known, so the draft is left
 //     as it is, record included (#650). The row PATCH handler
 //     (api/src/rows.ts) returns its fatal refusals (400, 403, 404, 428) before
-//     it compares versions, so a refusal does not prove the row is still at
+//     it compares versions (the only fatal after the check is a 404 for a row
+//     deleted meanwhile), so a refusal does not prove the row is still at
 //     the recorded version: another user may have written since. A
 //     max-attempts op's last 5xx may have committed. A stale "unsaved"
 //     reminder is safe; clearing text the server does not hold is not. The

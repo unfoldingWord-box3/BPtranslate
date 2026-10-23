@@ -398,18 +398,17 @@ assert.equal(
 assert.equal(rowDraftAfterRelease(heldN1, failedB, "fatal", null), undefined, "#632.1: an unreadable outbox holds it");
 // #650: a refusal does not prove the row is still at the recorded version. The
 // row PATCH handler (api/src/rows.ts) returns its 400/403/404/428 refusals
-// before it compares versions, and returns no other fatal status after it, so
-// another user may have written X at v8 before B was refused. A draft equal to
+// before it compares versions (its only fatal after the check is a 404 for a
+// row deleted meanwhile), so another user may have written X at v8 before B
+// was refused. A draft equal to
 // the record (N1) must be kept, not cleared. Same for a discarded max-attempts
 // op, whose last 5xx may have committed.
 for (const lastError of ["http 403", "http 404", "http 400", "http 428"]) {
   const refused = rowDraftAfterRelease(heldN1, opB({ status: "failed", lastError }), "fatal", []);
-  assert.notEqual(refused, "clear", `#650: a fatal ${lastError} release never clears the draft`);
-  assert.deepEqual((refused ?? heldN1).payload, heldN1.payload, `#650: ...and leaves its patch and baseline (${lastError})`);
+  assert.equal(refused, undefined, `#650: a fatal ${lastError} release leaves the draft (patch, baseline, record) as it is`);
 }
 const droppedFailed = rowDraftAfterRelease(heldN1, opB({ status: "failed", lastError: "max_attempts_exceeded" }), "drop", []);
-assert.notEqual(droppedFailed, "clear", "#650: discarding a max-attempts op never clears the draft");
-assert.deepEqual((droppedFailed ?? heldN1).payload, heldN1.payload, "#650: ...and leaves its patch and baseline");
+assert.equal(droppedFailed, undefined, "#650: discarding a max-attempts op leaves the draft (patch, baseline, record) as it is");
 // The kept record still settles the draft once a later save that chained from
 // it (C, another field at v7) gets a 200, which proves the row was at v7.
 assert.equal(
