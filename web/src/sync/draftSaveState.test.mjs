@@ -244,6 +244,40 @@ assert.equal(
   undefined,
   "F2: a settle that saw a later op queued writes nothing, so it cannot undo the later op's rebase",
 );
+// #618 review round 4, Claude F1: only a later op that could settle the draft
+// holds it. A reorder ({sort_order}) queued behind the note save can never
+// settle a {note} draft, so deferring to it would strand the draft (phantom
+// "unsaved"; typing back to N0 would then clear it with nothing sent).
+assert.equal(
+  rowDraftAfterOp(n1Draft, opA, [opA, queuedOp({ patch: { sort_order: 3 } })]),
+  "clear",
+  "R4: a later op that sends none of the draft's fields does not defer the clear",
+);
+assert.equal(
+  rowDraftAfterOp(n1Draft, opA, [queuedOp({ patch: { note: "N2", support_reference: null } })]),
+  undefined,
+  "R4: a later op that shares a field with the draft still defers",
+);
+assert.equal(
+  rowDraftAfterOp(n1Draft, opA, [queuedOp({ action: "delete", patch: {} })]),
+  undefined,
+  "R4: a later delete still defers (it settles any draft)",
+);
+assert.equal(
+  rowDraftAfterOp(n1Draft, opA, [queuedOp({ patch: undefined })]),
+  undefined,
+  "R4: a later op with an unreadable patch still defers",
+);
+assert.equal(
+  rowDraftAfterOp({ ...rowDraft({}), payload: { note: "legacy shape" } }, opA, [queuedOp({ patch: { sort_order: 3 } })]),
+  undefined,
+  "R4: a draft with no readable patch keeps deferring to any later op",
+);
+assert.equal(
+  rowDraftAfterOp(n1Draft, opA, [queuedOp({ patch: { sort_order: 3 }, status: "conflict" })]),
+  "clear",
+  "R4: a non-overlapping op does not defer whatever its status",
+);
 assert.equal(
   rowDraftAfterOp(based({ note: "N1 more" }, { note: "N0" }), opA, null),
   undefined,
