@@ -492,13 +492,36 @@ export const drafts = {
     return onRowChain(
       key,
       async () => {
+        const idb = await db();
+        // Common path first, as cheap as main's clear(): every non-dirty row
+        // runs this on mount, and almost none has a refused record. With no
+        // record or no `refused`, delete in one transaction without reading
+        // the outbox, and notify only when a record was deleted (round-3 C1).
+        const first = idb.transaction(STORE, "readwrite");
+        const found = (await first.store.get(key)) as DraftRecord | undefined;
+        if (latestGenerationByKey.get(key) !== requested) {
+          await first.done;
+          return false;
+        }
+        if (!found?.refused) {
+          if (found) await first.store.delete(key);
+          await first.done;
+          if (latestGenerationByKey.get(key) === requested) {
+            pendingKeys.delete(key);
+            latestGenerationByKey.delete(key);
+          }
+          if (found) void notify();
+          return true;
+        }
+        await first.done;
+        // A refused record: read the outbox, then decide in a fresh
+        // transaction (the record may have changed meanwhile).
         let queued: OutboxOp[] | null;
         try {
           queued = await outbox.listWithUncommitted();
         } catch {
           queued = null;
         }
-        const idb = await db();
         const tx = idb.transaction(STORE, "readwrite");
         const rec = (await tx.store.get(key)) as DraftRecord | undefined;
         if (latestGenerationByKey.get(key) !== requested) {
@@ -518,7 +541,7 @@ export const drafts = {
           pendingKeys.delete(key);
           latestGenerationByKey.delete(key);
         }
-        void notify();
+        if (rec) void notify();
         return true;
       },
       false,
@@ -671,8 +694,9 @@ function resettleRow(op: OutboxOp, reason: "fatal" | "drop") {
 }
 
 // Write a refused row save's text back to the row's draft (rowDraftAfterRefusal,
-// #647). Runs on the row's settle chain; the outbox is read first so a later
-// live save for the row keeps its newer text, then the draft is read, decided
+// #647). Runs on the row's settle chain; the outbox is read first (with this
+// tab's uncommitted saves, as clearUnlessRefused reads it, so a save made in
+// the same tick counts) so a later live save for the row keeps its newer text, then the draft is read, decided
 // on and written in one drafts transaction, so an editor's re-write cannot slip
 // between. Only this tab hears the result.
 function keepRefusedRow(op: OutboxOp) {
@@ -683,7 +707,7 @@ function keepRefusedRow(op: OutboxOp) {
     async () => {
       let queued: OutboxOp[] | null;
       try {
-        queued = await outbox.list();
+        queued = await outbox.listWithUncommitted();
       } catch {
         queued = null;
       }
