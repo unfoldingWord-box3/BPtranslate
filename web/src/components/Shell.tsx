@@ -523,6 +523,7 @@ export function Shell({
   // that commit so a later remount (e.g. a layout switch) opens as usual.
   const [openOnWords, setOpenOnWords] = useState(initialWordId !== null);
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot cleared after the commit in which ResourceColumn first mounts and reads initialTab; clearing it during render would mount the column with the flag already off.
     if (data && openOnWords) setOpenOnWords(false);
   }, [data, openOnWords]);
   // The same request for a column that is already mounted (#535): bumped by the
@@ -1822,17 +1823,16 @@ export function Shell({
   const [quoteBuildAppliedTo, setQuoteBuildAppliedTo] = useState<
     { noteId: string; nonce: number } | null
   >(null);
-  useEffect(() => {
-    if (!quoteBuildTarget) return;
-    const stillActive =
-      quoteBuildTarget.kind === "tn"
-        ? activeNoteId === quoteBuildTarget.id
-        : activeWordId === quoteBuildTarget.id;
-    if (!stillActive) {
-      setQuoteBuildTarget(null);
-      setQuoteBuildSelectedKeys(new Set());
-    }
-  }, [activeNoteId, activeWordId, quoteBuildTarget]);
+  // Switching selection away from the target row cancels the session, adjusted
+  // during render (React's "adjust state when a prop changes" pattern); once the
+  // target is cleared the condition no longer holds, so this settles in one pass.
+  if (
+    quoteBuildTarget &&
+    (quoteBuildTarget.kind === "tn" ? activeNoteId : activeWordId) !== quoteBuildTarget.id
+  ) {
+    setQuoteBuildTarget(null);
+    setQuoteBuildSelectedKeys(new Set());
+  }
   const toggleQuoteBuildWord = useCallback(
     (key: HighlightKey) => {
       setQuoteBuildSelectedKeys((prev) => {
@@ -1889,6 +1889,7 @@ export function Shell({
   const [quoteBuildAnchor, setQuoteBuildAnchor] = useState<HTMLElement | null>(null);
   useEffect(() => {
     if (!quoteBuildTarget) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- the anchor is a DOM element looked up after commit (document.querySelector below), so it syncs with the DOM, not with props.
       setQuoteBuildAnchor(null);
       return;
     }
@@ -2394,6 +2395,7 @@ export function Shell({
     setActiveVerse(initialVerse);
     setActiveNoteId(null);
     setActiveWordId(initialWordId);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- the per-chapter reset fans out to the dirty flags, pending nav and aligner state, and the effects below (alignment follow, note-jump) rely on running in the same flush after it; moving it into render changes that ordering.
     if (initialWordId !== null) setWordsTabRequest((r) => ({ tab: "words", nonce: (r?.nonce ?? 0) + 1 }));
     setAlignerTarget(null);
     setDualTarget(null);
@@ -2412,15 +2414,19 @@ export function Shell({
   // exist there, so the intro note stayed hidden until the user clicked "i" on
   // the rail. Once this chapter's tiles are known, snap to verse 0 so the intro
   // note — the only thing in the chapter — shows on arrival.
-  useEffect(() => {
-    // Gate on data.chapter === chapter: useChapter keeps the *prior* chapter's
-    // payload visible while the new one loads, so acting on stale tiles would
-    // wrongly snap to 0 when navigating from an intro chapter into a real one.
-    if (!data || data.chapter !== chapter || activeVerse === 0) return;
-    if (verseNumbers.length > 0 && verseNumbers.every((v) => v === 0)) {
-      setActiveVerse(0);
-    }
-  }, [data, chapter, verseNumbers, activeVerse]);
+  // Adjusted during render; setting activeVerse to 0 ends the condition.
+  // Gate on data.chapter === chapter: useChapter keeps the *prior* chapter's
+  // payload visible while the new one loads, so acting on stale tiles would
+  // wrongly snap to 0 when navigating from an intro chapter into a real one.
+  if (
+    data &&
+    data.chapter === chapter &&
+    activeVerse !== 0 &&
+    verseNumbers.length > 0 &&
+    verseNumbers.every((v) => v === 0)
+  ) {
+    setActiveVerse(0);
+  }
 
   // Consume a cross-chapter TN-find jump stashed before navigation. Waits for
   // this chapter's payload (and the target note row) to load, then activates +
@@ -2433,6 +2439,7 @@ export function Shell({
     if (!data) return;
     if (!data.tn.some((r) => r.id === jump.noteId)) return;
     pendingNoteJump = null;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- consumes the module-level pendingNoteJump stash; doing that during render is a side effect a StrictMode double render would lose.
     setActiveWordId(null);
     setActiveNoteId(jump.noteId);
     setScrollNonce((n) => n + 1);
@@ -2446,6 +2453,7 @@ export function Shell({
     if (panelMode !== "alignment") return;
     if (!alignerTarget) return;
     if (alignerTarget.verse === activeVerse && alignerTarget.chapter === chapter) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- runs in the same flush as the chapter-reset effect above, after it, so on a chapter change in alignment mode its write is the one that lands; a render-time version would run before the reset and change the result.
     setAlignerTarget({ ...alignerTarget, chapter, verse: activeVerse });
   }, [activeVerse, chapter, panelMode, alignerTarget]);
 

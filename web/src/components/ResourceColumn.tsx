@@ -454,6 +454,7 @@ export function ResourceColumn({
     if (!requestTab || requestTab.nonce === seenTabRequest.current) return;
     seenTabRequest.current = requestTab.nonce;
     if (tabs.includes(requestTab.tab)) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- the switch lands one commit after Shell's active-row change, so the scroll effect runs once against the old tab and again (via tabRequestScroll) against the new one; moving it into render collapses those runs into one and can change where the list ends up.
       setResourceTab(requestTab.tab);
       setTabRequestScroll((n) => n + 1);
     }
@@ -463,10 +464,9 @@ export function ResourceColumn({
   // Lazily mount the Search iframe on first visit, then keep it alive (the body
   // toggles its visibility rather than unmounting). Avoids loading the external
   // tool on every page load for users who never open the tab.
+  // Latched during render (React's "adjust state when a prop changes" pattern).
   const [searchVisited, setSearchVisited] = useState(false);
-  useEffect(() => {
-    if (panelMode === "search") setSearchVisited(true);
-  }, [panelMode]);
+  if (panelMode === "search" && !searchVisited) setSearchVisited(true);
 
   const [rangeStart, rangeEnd] = displayVerseRange;
   // When a UST verse bridge widens the range to span multiple verses (e.g. ISA
