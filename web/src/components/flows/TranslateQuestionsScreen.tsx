@@ -894,7 +894,7 @@ export default function TranslateQuestionsScreen({
     // A draft re-written at a newer version before this 200 (refetch during the
     // save) holds only the saved text and the persist effect won't re-run for
     // the moved baseline, so drop it; newer typing stays (#616 review).
-    void drafts.clearRowIfSaved(rowKey("tq", book, target.id), { ...values });
+    void drafts.clearRowIfSaved(rowKey("tq", book, target.id), patch);
     setEditedIds((prev) => new Set(prev).add(target.id));
     // Mirror the server's demotion locally so the row object stays consistent
     // with what a refetch will report: a content edit demotes an AI draft or a
