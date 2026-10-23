@@ -138,16 +138,36 @@ export function isReplayableOp(o: TargetingOp): boolean {
 // read after `done` was removed (it is excluded by id anyway); null or
 // undefined (unread or unreadable) falls back to the server row, as before
 // this fix. Returns `row` itself when nothing applies.
+//
+// Known gaps (#637 items 2 and 3, left as they are): `queued` is read once,
+// before the listeners run, so a save whose outbox write commits after that
+// read is missing from it until its own result arrives (a window of a few
+// milliseconds). And the outbox is shared by every tab of the workspace, so a
+// save waiting in another tab is re-applied here too; it is about to land
+// from that tab's drain anyway, so this is the same optimistic display, just
+// for a save typed elsewhere.
 export function rowWithLivePatches<R extends object>(
   row: R,
   done: Pick<OutboxOp, "id" | "target">,
   queued: OutboxOp[] | null | undefined,
 ): R {
+  return rowWithQueuedPatches(row, done.target, queued, done.id);
+}
+
+// rowWithLivePatches without a settled op: re-apply the row's pending or
+// in-flight saves on top of a server row that arrived some other way (a live
+// update from another user, #637 item 5). `excludeId` skips one op by id.
+export function rowWithQueuedPatches<R extends object>(
+  row: R,
+  target: OpTarget,
+  queued: OutboxOp[] | null | undefined,
+  excludeId?: string,
+): R {
   if (!queued) return row;
-  const key = targetKey(done.target);
+  const key = targetKey(target);
   let out = row;
   for (const o of queued) {
-    if (o.id === done.id || o.action !== "patch" || !isReplayableOp(o)) continue;
+    if (o.id === excludeId || o.action !== "patch" || !isReplayableOp(o)) continue;
     if (targetKey(o.target) !== key) continue;
     if (!o.patch || typeof o.patch !== "object") continue;
     out = { ...out, ...o.patch };
@@ -156,4 +176,41 @@ export function rowWithLivePatches<R extends object>(
     }
   }
   return out;
+}
+
+// Whether the outbox holds a delete for this row that is about to land
+// (#637 item 4). A row removed from the cache by a waiting delete must not be
+// put back by a live update for it.
+export function hasQueuedDelete(target: OpTarget, queued: OutboxOp[] | null | undefined): boolean {
+  if (!queued) return false;
+  const key = targetKey(target);
+  return queued.some((o) => o.action === "delete" && isReplayableOp(o) && targetKey(o.target) === key);
+}
+
+// What to do once the outbox has been read after another user's live update
+// (WebSocket "insert" or "replace") put the server's row in the cache (#637).
+// That row drops this user's saves still waiting in the outbox, so their
+// fields are patched back on top (item 5, the same rule rowWithLivePatches
+// uses after a 200), and a row a waiting delete had removed is taken back out
+// (item 4). `server` is the broadcast row, `cachedNow` the row the cache holds
+// once the read has finished. The read is async, so when the cached row is
+// gone or carries another version, something newer landed meanwhile (this
+// user's own confirmation, or another update) and the queued values may be
+// older than its fields: nothing is done. Also nothing when the outbox could
+// not be read or nothing waits for the row.
+export type LiveUpdateFollowUp = { t: "delete" } | { t: "patch"; patch: Record<string, unknown> };
+export function liveUpdateFollowUp(
+  server: { version?: unknown },
+  cachedNow: { version?: unknown } | undefined,
+  target: OpTarget,
+  queued: OutboxOp[] | null | undefined,
+): LiveUpdateFollowUp | null {
+  if (!queued || !cachedNow || cachedNow.version !== server.version) return null;
+  if (hasQueuedDelete(target, queued)) return { t: "delete" };
+  // Carry restored_from_version only for rows that have the field, so
+  // rowWithQueuedPatches sets it per replayed op as it does on a full row.
+  const base: Record<string, unknown> =
+    "restored_from_version" in server ? { restored_from_version: (server as { restored_from_version?: unknown }).restored_from_version } : {};
+  const patch = rowWithQueuedPatches(base, target, queued);
+  return patch === base ? null : { t: "patch", patch };
 }

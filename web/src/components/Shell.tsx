@@ -119,6 +119,7 @@ import { ExportUsfmButton, type ExportUsfmButtonHandle } from "./ExportUsfmButto
 import { PipelineMenu } from "./PipelineMenu";
 import { pipelineStore, getSessionKey, type PipelineJob } from "../sync/pipelineStore";
 import { onOutboxResult } from "../sync/outbox";
+import { liveUpdateFollowUp } from "../sync/outboxTargeting";
 import { AiCompletionToasts } from "./AiCompletionToasts";
 import { UnsavedToasts } from "./UnsavedToasts";
 import { QuoteBuilderPopper } from "./QuoteBuilderPopper";
@@ -383,6 +384,26 @@ export function Shell({
       const action = broadcastUpsertAction(kind, list?.find((r) => r.id === row.id), row);
       if (action === "insert") applyLocalRowInsert(kind, row);
       else if (action === "replace") applyLocalRowReplacement(kind, row);
+      // The broadcast row is the server's, so it drops this user's saves still
+      // waiting in the outbox (this tab's own save is broadcast back to it
+      // too, often before its 200). Put them back on top, and take back out a
+      // row a waiting delete had removed (#637 items 4 and 5). The outbox read
+      // is async, so the server row shows for a few milliseconds, and nothing
+      // is done if the cached row changed meanwhile (liveUpdateFollowUp).
+      if (action === "insert" || action === "replace") {
+        const target = { kind: "row", rowKind: kind, id: row.id, book: row.book } as const;
+        void outbox.list().then(
+          (queued) => {
+            const now = (dataRef.current?.[kind] as Array<TnRow | TqRow | TwlRow> | undefined)?.find((r) => r.id === row.id);
+            const next = liveUpdateFollowUp(row, now, target, queued);
+            if (next?.t === "delete") applyLocalRowDelete(kind, row.id);
+            else if (next?.t === "patch") applyLocalRowPatch(kind, row.id, next.patch);
+          },
+          () => {
+            /* outbox unreadable: the server row stays, as before */
+          },
+        );
+      }
       // This room is scoped to the open {book, chapter}, so any row.upserted
       // here is for this book. The server may have flipped lint-relevant state
       // without moving row content or version — e.g. a no-op review-flag clear
