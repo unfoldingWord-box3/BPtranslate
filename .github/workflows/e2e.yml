@@ -25,8 +25,8 @@ jobs:
   smoke:
     runs-on: ubuntu-latest
     # Normally ~2 min; the cap catches a webServer that never turns healthy.
-    # 20 rather than 15 so a worst-case install (two capped attempts, ~10.5
-    # min) still leaves the suite room to run (#655).
+    # 20 rather than 15 so a worst-case install (two capped attempts plus the
+    # dpkg repair, ~13 min) still leaves the suite room to run (#655).
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
@@ -49,17 +49,22 @@ jobs:
       # A capped attempt is retried once here, because a manual re-run has
       # always passed (#655). Each attempt carries its own `timeout`: with a
       # bare `cmd || cmd`, a stalled first try would hang until the step's
-      # timeout-minutes killed the whole step, retry included. GNU timeout
-      # signals its whole process group (sudo relays the TERM to apt-get), then
-      # SIGKILLs after 15 s. `dpkg --configure -a` repairs dpkg if that kill
-      # landed mid-unpack; it does nothing when dpkg is clean. The step cap of
-      # 11 min covers both attempts (2 x 5 min 15 s) and is only a backstop.
+      # timeout-minutes killed the whole step, retry included. `timeout` runs
+      # as the runner user, so its TERM/KILL stops npx and sudo but cannot reach
+      # the root apt-get that Playwright starts under `sudo sh -c`; a stalled
+      # apt-get can survive and keep holding the dpkg lock. Before the retry we
+      # therefore stop any leftover apt-get as root, then let dpkg repair a
+      # half-finished unpack (capped at 2 min). Neither may fail the step: the
+      # retry itself decides the result. The step cap of 13 min covers both
+      # attempts (2 x 5 min 15 s) plus the repair and is only a backstop.
       - name: Install Playwright Chromium
-        timeout-minutes: 11
+        timeout-minutes: 13
         run: |
           timeout -k 15 5m npx playwright install --with-deps chromium || {
             echo "::warning::Playwright install failed or hit its 5-minute cap; retrying once (#655)"
-            sudo dpkg --configure -a
+            sudo pkill -x apt-get || true
+            sleep 2
+            sudo timeout -k 10 2m dpkg --configure -a || true
             timeout -k 15 5m npx playwright install --with-deps chromium
           }
 
@@ -97,7 +102,7 @@ jobs:
   concurrency:
     runs-on: ubuntu-latest
     # Normally 5-8 min of real work; 30 leaves room for a slow day plus the
-    # install step's worst case (two capped attempts, ~10.5 min; #655).
+    # install step's worst case (two capped attempts plus repair, ~13 min; #655).
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
@@ -113,11 +118,13 @@ jobs:
       # Same 5-minute cap per attempt and single retry as the smoke job's
       # install step; the comment there explains why (#644, #655).
       - name: Install Playwright Chromium
-        timeout-minutes: 11
+        timeout-minutes: 13
         run: |
           timeout -k 15 5m npx playwright install --with-deps chromium || {
             echo "::warning::Playwright install failed or hit its 5-minute cap; retrying once (#655)"
-            sudo dpkg --configure -a
+            sudo pkill -x apt-get || true
+            sleep 2
+            sudo timeout -k 10 2m dpkg --configure -a || true
             timeout -k 15 5m npx playwright install --with-deps chromium
           }
 
