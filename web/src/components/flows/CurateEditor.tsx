@@ -166,9 +166,13 @@ export function CurateEditor({
   const isDraftState = state === "ai_draft" || state === "edited";
   const collapsedValidated = isValidated && !expanded && !dirty;
 
-  useEffect(() => {
+  // Collapse again once the unit leaves the validated state (adjusted during
+  // render; the expander only exists while validated).
+  const [prevValidated, setPrevValidated] = useState(isValidated);
+  if (isValidated !== prevValidated) {
+    setPrevValidated(isValidated);
     if (!isValidated) setExpanded(false);
-  }, [isValidated]);
+  }
 
   const {
     drafting: aiDrafting,
