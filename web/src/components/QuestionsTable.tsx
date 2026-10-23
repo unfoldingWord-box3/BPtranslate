@@ -174,10 +174,11 @@ const Row = memo(function Row({
       });
     } else {
       // Keeps a refused save's text (#647): these fields equal the cached
-      // row, which still carries it.
-      void drafts.clearUnlessRefused(draftKey);
+      // row, which still carries it. The shown values tell a refused field
+      // still pending from one since saved over.
+      void drafts.clearUnlessRefused(draftKey, { ref_raw: refRaw, question, response });
     }
-  }, [draftKey, isDirty, diff, row.version, row.id, row.book, row.chapter, row.verse, locked]);
+  }, [draftKey, isDirty, diff, row.version, row.id, row.book, row.chapter, row.verse, locked, refRaw, question, response]);
 
   const handleSave = () => {
     if (!isDirty) return;

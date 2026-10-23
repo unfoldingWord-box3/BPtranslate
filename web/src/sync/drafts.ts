@@ -479,33 +479,50 @@ export const drafts = {
   // An editor's "no diff any more" clear that keeps a refused save's text
   // (DraftRecord.refused, #647). The classic tQ / tW-link editors diff against
   // the cached row, which still carries that text after the refusal, so their
-  // plain clear would drop it on the next render or remount. A draft with a
-  // refused record is reduced to that record instead (rowDraftOnNoDiff). Read
-  // and write share one transaction so a write-back cannot slip between.
-  // A set() started after this request (the map moved off `requested`) is
-  // newer typing: its draft is not deleted (review A4).
-  async clearUnlessRefused(key: string): Promise<boolean> {
+  // plain clear would drop it on the next render or remount. `current` is what
+  // the editor shows, in the form its Save sends; with the outbox it tells a
+  // refused field still pending from one the user has since saved over
+  // (rowDraftOnNoDiff). Runs on the row's settle chain; the outbox is read
+  // first, then the draft is read and written in one transaction. A set()
+  // started after this request (the map moved off `requested`) is newer
+  // typing: its draft and its dirty mark are left alone, checked both inside
+  // the transaction and again after it commits (round-2 review B2).
+  clearUnlessRefused(key: string, current: Record<string, unknown>): Promise<boolean> {
     const requested = latestGenerationByKey.get(key);
-    const idb = await db();
-    const tx = idb.transaction(STORE, "readwrite");
-    const rec = (await tx.store.get(key)) as DraftRecord | undefined;
-    if (latestGenerationByKey.get(key) !== requested) {
-      await tx.done;
-      return false;
-    }
-    const next = rec ? rowDraftOnNoDiff(rec) : "clear";
-    if (next !== "clear") {
-      if (next) await tx.store.put(next);
-      await tx.done;
-      if (next) void notify();
-      return false;
-    }
-    if (rec) await tx.store.delete(key);
-    await tx.done;
-    pendingKeys.delete(key);
-    latestGenerationByKey.delete(key);
-    void notify();
-    return true;
+    return onRowChain(
+      key,
+      async () => {
+        let queued: OutboxOp[] | null;
+        try {
+          queued = await outbox.listWithUncommitted();
+        } catch {
+          queued = null;
+        }
+        const idb = await db();
+        const tx = idb.transaction(STORE, "readwrite");
+        const rec = (await tx.store.get(key)) as DraftRecord | undefined;
+        if (latestGenerationByKey.get(key) !== requested) {
+          await tx.done;
+          return false;
+        }
+        const next = rec ? rowDraftOnNoDiff(rec, current, queued) : "clear";
+        if (next !== "clear") {
+          if (next) await tx.store.put(next);
+          await tx.done;
+          if (next) void notify();
+          return false;
+        }
+        if (rec) await tx.store.delete(key);
+        await tx.done;
+        if (latestGenerationByKey.get(key) === requested) {
+          pendingKeys.delete(key);
+          latestGenerationByKey.delete(key);
+        }
+        void notify();
+        return true;
+      },
+      false,
+    );
   },
 
   async list(): Promise<DraftRecord[]> {

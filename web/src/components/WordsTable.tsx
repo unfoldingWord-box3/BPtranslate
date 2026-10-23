@@ -486,10 +486,11 @@ const WordRow = memo(function WordRow({
       });
     } else {
       // Keeps a refused save's text (#647): these fields equal the cached
-      // row, which still carries it.
-      void drafts.clearUnlessRefused(draftKey);
+      // row, which still carries it. The shown values tell a refused field
+      // still pending from one since saved over.
+      void drafts.clearUnlessRefused(draftKey, { orig_words: quote, tw_link: twLink, occurrence });
     }
-  }, [draftKey, isDirty, diff, row.version, row.id, row.book, row.chapter, row.verse]);
+  }, [draftKey, isDirty, diff, row.version, row.id, row.book, row.chapter, row.verse, quote, twLink, occurrence]);
 
   const positionFromEvent = (e: React.DragEvent): WordDropPosition => {
     const rect = rowRef.current?.getBoundingClientRect();

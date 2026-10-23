@@ -114,12 +114,20 @@ export function rowDraftAfterRefusal(
   const baselineIn = asFields(payload.baseline) ?? {};
   const refusedIn = existing?.refused ?? {};
 
+  // `added` fields go into the patch (and the record); `marked` ones are
+  // already in the patch with the sent value and only join the record.
   const added: Fields = {};
   const marked: Fields = {};
   for (const [k, v] of Object.entries(sent)) {
     if (!editorFields.includes(k) || k in baselineIn || heldByLater.has(k)) continue;
     if (!(k in patchIn)) added[k] = v;
-    else if (same(patchIn[k], v) && !(k in refusedIn && same(refusedIn[k], v))) marked[k] = v;
+    else if (same(patchIn[k], v)) {
+      if (!(k in refusedIn && same(refusedIn[k], v))) marked[k] = v;
+    } else if (k in refusedIn && same(patchIn[k], refusedIn[k])) {
+      // The draft holds only an earlier refused value, not newer typing: this
+      // later refusal's text replaces it (round-2 review B1(b)).
+      added[k] = v;
+    }
   }
   if (!nonEmpty(added) && !nonEmpty(marked)) return undefined;
   const refused = { ...refusedIn, ...marked, ...added };
@@ -177,29 +185,59 @@ export function withCarriedRefusal(prev: DraftRecord | undefined, next: DraftRec
   return { ...next, payload: { ...next.payload, patch: { ...patch, ...carried } }, refused };
 }
 
-// An editor's "no diff" clear (drafts.clearUnlessRefused). No diff against the
-// cached row means the editor shows the row's values, which for refused fields
-// are the refused text, and for the rest are on the row already. So a draft
-// with a refused record becomes exactly that record ("clear" when there is
-// none; undefined to leave it as it is).
-export function rowDraftOnNoDiff(rec: DraftRecord): "clear" | DraftRecord | undefined {
+// An editor's "no diff" clear (drafts.clearUnlessRefused). `current` is what
+// the editor shows (its field values, in the form its Save sends); `queued` is
+// the outbox (null when unreadable). No diff against the cached row means every
+// field the editor shows is on the row already, either confirmed or in a save
+// on its way, so the draft keeps only refused text that is still pending:
+//   * a refused field the editor shows unchanged stays;
+//   * a refused field showing other text that a live save for the row sends is
+//     superseded: the user saved newer text over it (round-2 review B1). It
+//     leaves the draft, or a remount would restore the refused text over it.
+//     If that save is refused too, its own refusal writes its text back;
+//   * a refused field showing other text that no live save sends stays: the
+//     cached row went back to the server copy (a later 200 for another field,
+//     or another user's live update), and the refused text was never saved.
+// So a draft with a refused record becomes exactly the refused text still
+// pending ("clear" when none is; undefined to leave it as it is).
+export function rowDraftOnNoDiff(
+  rec: DraftRecord,
+  current: Fields,
+  queued: OutboxOp[] | null,
+): "clear" | DraftRecord | undefined {
   if (rec.quarantined) return undefined;
   if (!nonEmpty(rec.refused)) return "clear";
   const patch = asFields((rec.payload as { patch?: unknown }).patch) ?? {};
-  const refused = rec.refused;
+  const savedLive = (k: string, v: unknown) =>
+    queued !== null &&
+    queued.some((o) => {
+      if (targetKey(o.target) !== rec.key || !isLiveOp(o)) return false;
+      const p = asFields(o.patch);
+      return !!p && k in p && same(p[k], v);
+    });
+  const refused: Fields = {};
+  for (const [k, v] of Object.entries(rec.refused)) {
+    if (k in current && !same(current[k], v) && savedLive(k, current[k])) continue;
+    refused[k] = v;
+  }
+  if (!nonEmpty(refused)) return "clear";
   const keys = Object.keys(patch);
-  if (keys.length === Object.keys(refused).length && keys.every((k) => k in refused && patch[k] === refused[k])) {
+  const sameRecord =
+    Object.keys(refused).length === Object.keys(rec.refused).length;
+  if (sameRecord && keys.length === Object.keys(refused).length && keys.every((k) => k in refused && patch[k] === refused[k])) {
     return undefined;
   }
-  return { ...rec, payload: { ...rec.payload, patch: { ...refused } } };
+  return withRefused({ ...rec, payload: { ...rec.payload, patch: { ...refused } } }, refused);
 }
 
 // Wraps the outbox settle (rowDraftAfterConfirm's result `next` for draft
 // `rec`) after `op` was confirmed. That settle already keeps a draft holding a
 // field the op did not send, so a refused field the op left out survives. A
 // refused field the op did send is now on the server with the op's value, so
-// the refused value is no longer what the row shows: it leaves the record
-// (the draft's text for it is left to the settle).
+// the refused value is no longer what the row shows: it leaves the record, and
+// leaves the patch too where the patch still holds just that refused value
+// (round-2 review B1(a)), so stale refused text cannot be restored over the
+// saved text. Other text in the patch for the field is newer typing: kept.
 export function afterConfirmKeepingRefusal(
   rec: DraftRecord,
   next: "clear" | DraftRecord | undefined,
@@ -210,14 +248,18 @@ export function afterConfirmKeepingRefusal(
   const sent = asFields(op.patch);
   if (!nonEmpty(base.refused) || !sent) return next;
   const refused = { ...base.refused };
+  const patchIn = asFields((base.payload as { patch?: unknown }).patch);
+  const patch = patchIn ? { ...patchIn } : undefined;
   let stripped = false;
   for (const k of Object.keys(sent)) {
-    if (k in refused) {
-      delete refused[k];
-      stripped = true;
-    }
+    if (!(k in refused)) continue;
+    if (patch && k in patch && same(patch[k], refused[k])) delete patch[k];
+    delete refused[k];
+    stripped = true;
   }
-  return stripped ? withRefused(base, refused) : next;
+  if (!stripped) return next;
+  if (patch && Object.keys(patch).length === 0) return "clear";
+  return withRefused(patch ? { ...base, payload: { ...base.payload, patch } } : base, refused);
 }
 
 // The user discarded `op`, a failed (refused) save (review A5). What its
