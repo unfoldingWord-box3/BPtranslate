@@ -123,9 +123,12 @@ function QuestionCardInner({
         verse: row.verse,
       });
     } else {
-      void drafts.clear(draftKey);
+      // Keeps a refused save's text (#647): these fields equal the cached
+      // row, which still carries it. The shown values tell a refused field
+      // still pending from one since saved over.
+      void drafts.clearUnlessRefused(draftKey, { question, response });
     }
-  }, [draftKey, isDirty, diff, row.version, row.id, row.book, row.chapter, row.verse, locked]);
+  }, [draftKey, isDirty, diff, row.version, row.id, row.book, row.chapter, row.verse, locked, question, response]);
 
   // ── Derived translation state (mirrors NoteCard) ──
   const translationState = row.translation_state ?? null;

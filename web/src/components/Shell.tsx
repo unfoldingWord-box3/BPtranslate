@@ -2003,7 +2003,17 @@ export function Shell({
       const baseline: Record<string, unknown> = {};
       for (const field of Object.keys(patch)) baseline[field] = rowRecord[field];
       applyLocalRowPatch(kind, row.id, localPatch);
-      void outbox.enqueueRow(kind, row.id, row.version, patch as Record<string, unknown>, { ...opts, book: row.book, baseline });
+      // draftRef: lets a refused save file its text as the row's draft (#647).
+      // Not for tN: NoteCard keeps its own draft until the save confirms, and
+      // its no-diff clear (clearRowUnlessHeld) would drop a written-back draft
+      // from a save it never held (find/replace, quote builder), leaving a
+      // brief phantom "unsaved" (#647 review A8).
+      void outbox.enqueueRow(kind, row.id, row.version, patch as Record<string, unknown>, {
+        ...opts,
+        book: row.book,
+        baseline,
+        ...(kind !== "tn" ? { draftRef: { chapter: row.chapter, verse: row.verse } } : {}),
+      });
     },
     [applyLocalRowPatch],
   );
