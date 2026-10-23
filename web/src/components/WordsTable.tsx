@@ -153,6 +153,7 @@ function WordsTableInner({ rows, activeId, onSave, onDelete, onFocus, onReorder,
   const pendingFocusRef = useRef<{ id: string; dir: "up" | "down" } | null>(null);
   const [recentMove, setRecentMove] = useState<{ id: string; dir: "up" | "down" } | null>(null);
   const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- runs after every commit on purpose: it consumes the focus request the arrow handlers leave in pendingFocusRef and clears it on first read, so the setState fires once per move, never in a loop.
   useLayoutEffect(() => {
     const pending = pendingFocusRef.current;
     if (!pending) return;
@@ -434,6 +435,7 @@ const WordRow = memo(function WordRow({
   useEffect(() => setOccurrence(row.occurrence ?? 1), [row.id, row.version, row.occurrence]);
   useEffect(() => {
     savedRef.current = { quote: row.orig_words ?? "", twLink: row.tw_link, occurrence: row.occurrence ?? 1 };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- today's Undo baseline is re-read only when the row id or version changes. Following the fields too would change what Undo restores after an optimistic save (#592 follow-up).
   }, [row.id, row.version]);
 
   const draftKey = useMemo(() => rowKey("twl", row.book, row.id), [row.book, row.id]);

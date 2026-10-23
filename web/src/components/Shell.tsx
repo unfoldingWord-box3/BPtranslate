@@ -312,6 +312,9 @@ export function Shell({
   const bookReplaceRow = bookHook?.applyLocalRowReplacement;
   const bookInsertRow = bookHook?.applyLocalRowInsert;
   const bookDeleteRow = bookHook?.applyLocalRowDelete;
+  // The book cache's chapter Map on its own, so memos can depend on it rather
+  // than on `bookHook`, which is a fresh object on every App render.
+  const bookChapters = bookHook?.chapters;
   const applyLocalRowPatch = useCallback<typeof applyChapterRowPatch>(
     (kind, id, patch) => {
       applyChapterRowPatch(kind, id, patch);
@@ -787,6 +790,7 @@ export function Shell({
   // and the loaded render disagree on hook count and crashed the Shell.
   const layoutOverride = useMemo(
     () => loadLayoutStore().overrides[activeLayout.id],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `layoutRev` is the deliberate re-read signal (see above); the body reads localStorage, which the linter cannot track.
     [activeLayout.id, layoutRev],
   );
 
@@ -1115,7 +1119,7 @@ export function Shell({
         pushPipelineToast(t("shell.couldntUpdatePreserve", { message: msg }), "error");
       }
     },
-    [applyLocalRowPatch, pushPipelineToast, t],
+    [applyLocalRowPatch, pushPipelineToast, t, book],
   );
 
   const handleSetNoteHint = useCallback(
@@ -1134,7 +1138,7 @@ export function Shell({
         pushPipelineToast(t("shell.couldntUpdateHint", { message: msg }), "error");
       }
     },
-    [applyLocalRowPatch, pushPipelineToast, t],
+    [applyLocalRowPatch, pushPipelineToast, t, book],
   );
 
   // ── Translation mode: Approve (validate) + single-note Translate ──
@@ -1585,14 +1589,14 @@ export function Shell({
     // note sorts first). Without the union, availableVersions is [] →
     // displayedVersions is [] → BookView renders no columns and every chapter's
     // verseNums is empty: a blank book view that looks like the app crashed.
-    if (mode === "book" && bookHook) {
-      for (const cs of bookHook.chapters.values()) {
+    if (mode === "book" && bookChapters) {
+      for (const cs of bookChapters.values()) {
         if (cs.kind !== "ready") continue;
         for (const v of Object.keys(cs.data.verses)) set.add(v);
       }
     }
     return [...set];
-  }, [versesForTiles, mode, bookHook?.chapters]);
+  }, [versesForTiles, mode, bookChapters]);
 
   // Range-aware lookup: ChapterPayload.verses is keyed by verse_start, so a
   // row anchored mid-bridge (e.g. verse 9 of a `\v 8-9` row) misses a direct
@@ -1669,7 +1673,7 @@ export function Shell({
         // front matter block.
         ? (bookHook.summary?.chapters ?? []).map((c) => c.chapter)
         : undefined,
-    [bookHook, mode, bookHook?.summary],
+    [bookHook, mode],
   );
 
   // Pre-load lexicon entries for every UHB Strong's in the loaded chapter
@@ -1686,14 +1690,14 @@ export function Shell({
       }
     };
     collect(data?.verses?.UHB);
-    if (bookHook) {
-      for (const cs of bookHook.chapters.values()) {
+    if (bookChapters) {
+      for (const cs of bookChapters.values()) {
         if (cs.kind !== "ready") continue;
         collect(cs.data.verses?.UHB);
       }
     }
     return [...set];
-  }, [data?.verses, bookHook?.chapters]);
+  }, [data?.verses, bookChapters]);
   const lexiconMapRaw = useLexicon(uhbStrongs);
   // useLexicon hands back a fresh Map every render; stabilize its identity so
   // ScriptureColumn's memo can compare it. The map's CONTENT only changes when
@@ -2081,7 +2085,7 @@ export function Shell({
         );
       }
     },
-    [data, activeVerse, verseIndexByVersion, book, chapter],
+    [data, activeVerse, verseIndexByVersion, book, chapter, applyLocalRowInsert],
   );
 
   // Whether a per-verse suggestion is already covered on the active verse. Done
@@ -2782,6 +2786,7 @@ export function Shell({
             )
         : undefined,
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `restoreVerse` is a plain function declared below the early return, so it is new every render; it reads only book, chapter, bookHook, applyLocalVerse and enqueueVerseSafely, which are all listed.
   }, [alignerTarget, data, chapter, bookHook, book, openDualAligner, applyLocalVerse, enqueueVerseSafely]);
 
   // Props for the side-by-side popup: ULT + UST slices against one shared
