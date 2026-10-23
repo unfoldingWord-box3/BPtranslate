@@ -359,6 +359,7 @@ export default function AdminTeamScreen({ role, me }: AdminTeamScreenProps) {
 
   useEffect(() => {
     if (!isAdmin) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- mount-time loaders; the same loadAllowlist/loadRoster back the Retry and Refresh buttons and run after each role change, so they clear the error or set refreshing at start.
     void loadAllowlist();
     void loadRoster();
   }, [isAdmin, loadAllowlist, loadRoster]);
