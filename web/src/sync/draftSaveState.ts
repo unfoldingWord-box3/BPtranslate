@@ -67,6 +67,18 @@ export function generationForSuccessfulOp(
   return legacyOpCapturedDraft(draft, op) ? generation : undefined;
 }
 
+// Row drafts carry no generation, so a row save's 200 is fenced by version: it
+// settles the draft only if the draft was written at or before the version the
+// save was sent against. A draft written against a later version holds typing
+// the editor re-persisted after the save was confirmed, and must survive
+// (#616). Older drafts (the save was re-based after a 409) are still settled.
+export function rowDraftSettledByOp(
+  draft: DraftRecord | undefined,
+  op: Pick<OutboxOp, "expectedVersion">,
+): boolean {
+  return !!draft && draft.expectedVersion <= op.expectedVersion;
+}
+
 // Associate a save only with the draft whose payload it actually captured.
 // If typing raced ahead after the click, the payload differs and the older save
 // must not clear that newer generation when it succeeds.

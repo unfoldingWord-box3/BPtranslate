@@ -11,8 +11,8 @@
 import { openDB, type IDBPDatabase } from "idb";
 import { isReadOnly, type RowKind } from "./api";
 import { isLaneFrozen } from "./laneFreeze";
-import { onOutboxResult } from "./outbox";
-import { generationForSuccessfulOp } from "./draftSaveState";
+import { onOutboxResult, type OutboxOp } from "./outbox";
+import { generationForSuccessfulOp, rowDraftSettledByOp } from "./draftSaveState";
 import { legacyDbNames, workspaceDbName } from "./workspace";
 import { adoptFromLegacyDbs, type LegacySource } from "./legacyAdoption";
 
@@ -280,6 +280,28 @@ export const drafts = {
     return true;
   },
 
+  // Delete a row draft only if a successful save settled it
+  // (rowDraftSettledByOp). Read + conditional delete share one transaction so
+  // an editor's re-write cannot slip between them.
+  async clearRowSettledBy(key: string, op: Pick<OutboxOp, "expectedVersion">): Promise<boolean> {
+    const idb = await db();
+    const tx = idb.transaction(STORE, "readwrite");
+    const rec = (await tx.store.get(key)) as DraftRecord | undefined;
+    if (!rec || rec.quarantined || !rowDraftSettledByOp(rec, op)) {
+      await tx.done;
+      return false;
+    }
+    await tx.store.delete(key);
+    await tx.done;
+    // A newer set() may have started but not committed; keep its dirty mark.
+    if (latestGenerationByKey.get(key) === rec.generation) {
+      latestGenerationByKey.delete(key);
+      pendingKeys.delete(key);
+    }
+    void notify();
+    return true;
+  },
+
   async list(): Promise<DraftRecord[]> {
     return listAll();
   },
@@ -370,6 +392,8 @@ onOutboxResult((op, result) => {
       if (generation) void drafts.clearGeneration(key, generation);
     });
   } else if (op.target.kind === "row") {
-    void drafts.clear(rowKey(op.target.rowKind, op.target.book, op.target.id));
+    // Version-fenced (#616): an editor that re-persisted typing against the
+    // confirmed version keeps that draft, whichever lands first.
+    void drafts.clearRowSettledBy(rowKey(op.target.rowKind, op.target.book, op.target.id), op);
   }
 });
