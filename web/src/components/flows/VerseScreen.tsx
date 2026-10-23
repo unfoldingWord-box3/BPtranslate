@@ -155,11 +155,16 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
   const [article, setArticle] = useState<VerseArticle | null>(null);
 
   // A selection names words of THIS verse; stepping verses invalidates it, and
-  // the article opened from it.
-  useEffect(() => {
+  // the article opened from it. Reset during render (the React "adjust state
+  // when a prop changes" pattern) so the new verse never paints with the old
+  // verse's selection.
+  const verseKey = `${book}|${chapter}|${verse}`;
+  const [prevVerseKey, setPrevVerseKey] = useState(verseKey);
+  if (verseKey !== prevVerseKey) {
+    setPrevVerseKey(verseKey);
     setSelection(null);
     setArticle(null);
-  }, [book, chapter, verse]);
+  }
 
   // The article belongs to the selection it was opened from: picking any other
   // word or resource closes it, so a stale article never sits beside a new
@@ -169,9 +174,11 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
     : selection.kind === "word"
       ? `w:${selection.positions.join(",")}`
       : `r:${selection.key}`;
-  useEffect(() => {
+  const [prevSelectionKey, setPrevSelectionKey] = useState(selectionKey);
+  if (selectionKey !== prevSelectionKey) {
+    setPrevSelectionKey(selectionKey);
     setArticle(null);
-  }, [selectionKey]);
+  }
 
   // Closing the article (Back or Escape) hands focus back to the control that
   // opened it, or to the selected resource row if that control is gone, instead
