@@ -185,8 +185,8 @@ function laterLiveRowFields(
 // "unsaved", and typing back to the pre-save text would then clear it with
 // nothing sent while the server keeps this op's text (#618 review round 4). A
 // draft whose own patch is unreadable defers to any later op, as before.
-// Residual gap: a deferring op that is later discarded after a conflict, or
-// ends fatally failed, can still strand the draft until the row is reopened.
+// A deferring op whose holding op is later discarded, dropped or fatally
+// failed is handled by rowDraftAfterConfirm / rowDraftAfterRelease (#632 item 1).
 //
 // In a deferred draft, every field a later live op sends is left exactly as it
 // is, baseline included: the later op will settle it. Rebasing it to this op's
@@ -232,6 +232,158 @@ export function rowDraftAfterOp(
     }
   }
   return changed ? { ...draft, payload: { ...draft.payload, baseline: next } } : undefined;
+}
+
+
+// rowDraftAfterOp plus the `confirmed` record (#632 item 1). The outbox settle
+// (drafts.settleRowAfterOp) calls this, not rowDraftAfterOp. `landedVersion`
+// is the row version this op's 200 returned.
+//
+// When a later live op holds the draft, this op's 200 leaves the held fields
+// for that op to settle. If that op then never confirms (discarded, dropped as
+// "locked", or fatally failed), nothing else knows what this op landed, so the
+// draft would keep a stale baseline and a phantom "unsaved" reminder. So the
+// held fields this op sent are recorded on the draft (DraftRecord.confirmed),
+// with the version they landed at (confirmedVersion), and rowDraftAfterRelease
+// re-settles from them once the holding op leaves. With no landed version
+// nothing is recorded.
+//
+// The record is folded into a later confirm only when that op chained from it
+// (its expectedVersion is the recorded version, as version threading makes
+// it): it then treats the recorded fields as sent too, its own values winning.
+// A confirm that did not chain from it (the record was left behind, e.g. the
+// holding op was discarded in another tab) cannot vouch for it, so the record
+// is dropped unused. Either way a confirm that settles drops the record, and
+// one that defers again records its own values. The draft's patch is judged
+// against the record by rowDraftAfterOp's rules, so typing the server never got
+// (a refused save's text included) is never cleared or shrunk, only rebased.
+export function rowDraftAfterConfirm(
+  draft: DraftRecord | undefined,
+  op: Pick<OutboxOp, "id" | "target" | "patch"> & Partial<Pick<OutboxOp, "action" | "expectedVersion">>,
+  queued: OutboxOp[] | null,
+  landedVersion: number | undefined,
+): "clear" | DraftRecord | undefined {
+  if (!draft) return undefined;
+  if (op.action === "delete") return "clear";
+  const chained =
+    typeof draft.confirmedVersion === "number" && op.expectedVersion === draft.confirmedVersion;
+  const confirmed = chained ? draft.confirmed : undefined;
+  const sent = op.patch as unknown;
+  const sentObject = !!sent && typeof sent === "object";
+  const effective = sentObject && confirmed ? { ...op, patch: { ...confirmed, ...(sent as Record<string, unknown>) } } : op;
+  const next = rowDraftAfterOp(draft, effective, queued);
+  if (next === "clear") return "clear";
+  let nextConfirmed: Record<string, unknown> | undefined;
+  let nextVersion: number | undefined;
+  if (!sentObject) {
+    // An unreadable patch proves nothing about the server: keep any record.
+    nextConfirmed = draft.confirmed;
+    nextVersion = draft.confirmedVersion;
+  } else if (typeof landedVersion === "number") {
+    nextConfirmed = heldConfirmedFields(draft, effective, queued);
+    nextVersion = nextConfirmed ? landedVersion : undefined;
+  }
+  if (sameFields(nextConfirmed, draft.confirmed) && nextVersion === draft.confirmedVersion) return next;
+  const base = withoutRecord(next ?? draft);
+  return nextConfirmed ? { ...base, confirmed: nextConfirmed, confirmedVersion: nextVersion } : base;
+}
+
+// Re-settle a row draft from its `confirmed` record after `released`, an op
+// that may have held it, left without confirming (#632 item 1): dropped as
+// "locked", ended "fatal", or discarded by the user ("drop"). `queued` is the
+// outbox read after it left. Only record fields still known to be the server's
+// are settled; text whose value is not on the server now is never cleared:
+//   * locked: an AI apply is about to overwrite the row, so nothing is known.
+//     The draft is left as it is.
+//   * a discarded conflicted op: its 409 carried the server row
+//     (conflictCurrent). Only fields where that row still equals the record
+//     are settled; the others are proven stale and leave the record. No server
+//     row: nothing is known, the draft is left.
+//   * fatal, or a discarded pending/failed op: the refused op did not move the
+//     server, so the record holds, if the op chained from it (its
+//     expectedVersion is the recorded version). Otherwise the record cannot be
+//     vouched for and is dropped unused.
+// A draft with no record, or whose patch cannot be read, is left alone, as is
+// one the released op could not have held (it sent none of the recorded
+// fields).
+export function rowDraftAfterRelease(
+  draft: DraftRecord | undefined,
+  released: Pick<OutboxOp, "target" | "patch" | "status" | "expectedVersion"> &
+    Partial<Pick<OutboxOp, "action" | "conflictCurrent">>,
+  reason: "locked" | "fatal" | "drop",
+  queued: OutboxOp[] | null,
+): "clear" | DraftRecord | undefined {
+  const confirmed = draft?.confirmed;
+  if (!draft || !confirmed || reason === "locked") return undefined;
+  const patch = (draft.payload as { patch?: unknown }).patch;
+  if (!patch || typeof patch !== "object") return undefined;
+  const rp = released.patch as unknown;
+  const couldHold =
+    released.action === "delete" ||
+    !rp ||
+    typeof rp !== "object" ||
+    Object.keys(confirmed).some((k) => k in (rp as Record<string, unknown>));
+  if (!couldHold) return undefined;
+  let trusted: Record<string, unknown> = {};
+  if (released.status === "conflict") {
+    const current = released.conflictCurrent as unknown;
+    if (!current || typeof current !== "object") return undefined;
+    const cur = current as Record<string, unknown>;
+    for (const [k, v] of Object.entries(confirmed)) {
+      if (k in cur && rowValueKey(cur[k]) === rowValueKey(v)) trusted[k] = v;
+    }
+  } else if (released.expectedVersion === draft.confirmedVersion) {
+    trusted = { ...confirmed };
+  }
+  if (Object.keys(trusted).length === 0) return withoutRecord(draft);
+  const next = rowDraftAfterConfirm(
+    { ...draft, confirmed: trusted },
+    { id: "", target: released.target, action: "patch", patch: {}, expectedVersion: draft.confirmedVersion },
+    queued,
+    draft.confirmedVersion,
+  );
+  // Still held by another op: keep only the fields still known to be right.
+  if (next === undefined && !sameFields(trusted, confirmed)) return { ...draft, confirmed: trusted };
+  return next;
+}
+
+// drafts.set() rebuilds the record on every keystroke. The `confirmed` record
+// says what the server holds, which typing does not change, so a re-write
+// keeps it (review round 1: an editor still open after the earlier save's 200
+// would otherwise erase it, and the later save's failure would find nothing).
+export function withCarriedConfirm(prev: DraftRecord | undefined, next: DraftRecord): DraftRecord {
+  if (!prev?.confirmed || next.confirmed) return next;
+  return { ...next, confirmed: prev.confirmed, confirmedVersion: prev.confirmedVersion };
+}
+
+function withoutRecord(draft: DraftRecord): DraftRecord {
+  const { confirmed: _c, confirmedVersion: _v, ...base } = draft;
+  return base;
+}
+
+
+// The fields of `op` a later live op still holds: every sent field when the
+// hold covers any field (laterLiveRowFields null), else the shared ones.
+// Undefined when nothing holds the draft or no sent field is held.
+function heldConfirmedFields(
+  draft: DraftRecord,
+  op: Pick<OutboxOp, "id" | "target" | "patch">,
+  queued: OutboxOp[] | null,
+): Record<string, unknown> | undefined {
+  const key = targetKey(op.target);
+  if (!liveRowOpHoldsDraft(draft, key, queued, op.id)) return undefined;
+  const held = laterLiveRowFields(key, queued, op.id);
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(op.patch as Record<string, unknown>)) {
+    if (held === null || held.has(k)) out[k] = v;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function sameFields(a: Record<string, unknown> | undefined, b: Record<string, unknown> | undefined): boolean {
+  if (!a || !b) return a === b;
+  const ak = Object.keys(a);
+  return ak.length === Object.keys(b).length && ak.every((k) => k in b && a[k] === b[k]);
 }
 
 // rowDraftAfterOp's partial settle while a later live op holds the draft
