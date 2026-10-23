@@ -17,6 +17,7 @@ import {
   liveRowOpHoldsDraft,
   rowDraftSettledByOp,
   verseDraftHasActiveSave,
+  withPendingReverts,
 } from "./draftSaveState.ts";
 
 const draft = {
@@ -551,4 +552,52 @@ assert.equal(
 assert.equal(rowDraftHoldsSaved(tnDraft({}), { note: "saved" }), false, "empty patch is not ours to clear");
 assert.equal(rowDraftHoldsSaved(undefined, { note: "saved" }), false, "no draft");
 
-console.log("draftSaveState: 67 passed");
+// #632 item 2: type-back of one field plus an edit of another while a save is
+// pending. Baseline {quote: Q0, note: N0}; Save {note: N1}; while it is
+// pending, type the note back to N0 and edit the quote to Q1, then leave. The
+// editor's diff against its pre-save baseline leaves `note` out (N0 equals the
+// baseline), so the draft was {quote: Q1}; the 200 then rebased baseline.note
+// to N1 and the reopened row showed the server's N1 as clean, the revert lost.
+// Editors now keep a field in the draft patch while its value differs from
+// what their pending save sent (withPendingReverts).
+const pendingSent = { note: "N1" };
+assert.deepEqual(
+  withPendingReverts({ quote: "Q1" }, { quote: "Q1", note: "N0", support_reference: null }, pendingSent),
+  { quote: "Q1", note: "N0" },
+  "#632.2: a field typed back to its baseline while a save sends other text stays in the draft patch",
+);
+const typedBack = based({ quote: "Q1", note: "N0" }, { quote: "Q0", note: "N0", support_reference: null });
+const typedBackAfter = rowDraftAfterOp(typedBack, opA, [opA]);
+assert.deepEqual(
+  typedBackAfter?.payload,
+  { patch: { quote: "Q1", note: "N0" }, baseline: { quote: "Q0", note: "N1", support_reference: null } },
+  "#632.2: on the 200 the draft keeps note N0 against the rebased baseline N1, so a reopen shows it unsaved",
+);
+assert.deepEqual(
+  withPendingReverts({}, { note: "N0" }, pendingSent),
+  { note: "N0" },
+  "#632.2: all fields typed back while the save is pending: the revert is kept too",
+);
+assert.deepEqual(
+  rowDraftAfterOp(based({ note: "N0" }, { note: "N0" }), opA, [opA])?.payload,
+  { patch: { note: "N0" }, baseline: { note: "N1" } },
+  "#632.2: a kept revert is not settled by the save it reverts, only rebased",
+);
+// The normal type-back is unchanged: nothing pending, or the pending save
+// sends the very value typed, leaves the field out and an empty diff clears.
+assert.deepEqual(withPendingReverts({}, { note: "N0" }, undefined), {}, "#632.2: no pending save: a type-back still clears");
+assert.deepEqual(withPendingReverts({}, { note: "N1" }, pendingSent), {}, "#632.2: text equal to the pending save is not a revert");
+assert.deepEqual(
+  withPendingReverts({}, { note: "a\nb" }, { note: "a\\nb" }),
+  {},
+  "#632.2: display text equal to the TSV text sent is not a revert",
+);
+const ownPatch = { note: "N2" };
+assert.equal(withPendingReverts(ownPatch, { note: "N2" }, pendingSent), ownPatch, "#632.2: a field already in the patch keeps its value");
+assert.deepEqual(
+  withPendingReverts({}, { note: "N0" }, { sort_order: 3 }),
+  {},
+  "#632.2: a sent field the editor does not show is ignored",
+);
+
+console.log("draftSaveState: 76 passed");
