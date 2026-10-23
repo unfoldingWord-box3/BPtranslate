@@ -83,18 +83,21 @@ export function rowDraftSettledByOp(
   return draft.expectedVersion <= op.expectedVersion;
 }
 
-// True when a row draft's patch holds nothing but the given saved values. An
-// editor that moves its baseline only after the save's 200 calls this to drop
-// a draft it wrote with the already-saved text (#616 review); any other
-// content is newer typing and must survive.
+// True when a row draft's patch is exactly the given saved values: every saved
+// field present with an equal value, and no other field. An editor that moves
+// its baseline only after the save's 200 calls this to drop a draft it wrote
+// with the already-saved text (#616 review). When in doubt it keeps the draft:
+// a field missing from the patch means "equal to the draft's baseline", which
+// may be newer typing (e.g. a response typed back to its old value).
 export function rowDraftHoldsSaved(
   draft: DraftRecord | undefined,
   saved: Record<string, unknown>,
 ): boolean {
   const patch = (draft?.payload as { patch?: Record<string, unknown> } | undefined)?.patch;
   if (!patch || typeof patch !== "object") return false;
-  const keys = Object.keys(patch);
-  return keys.length > 0 && keys.every((k) => k in saved && patch[k] === saved[k]);
+  const savedKeys = Object.keys(saved);
+  if (savedKeys.length === 0 || Object.keys(patch).length !== savedKeys.length) return false;
+  return savedKeys.every((k) => k in patch && patch[k] === saved[k]);
 }
 
 // Associate a save only with the draft whose payload it actually captured.
