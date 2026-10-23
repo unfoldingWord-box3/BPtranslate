@@ -1741,9 +1741,13 @@ export function Shell({
 
   // Drop a lingering hover preview if the row could unmount without a
   // mouse-leave (keyboard nav / verse change), so the highlight never sticks.
-  useEffect(() => {
+  // Adjusted during render when the verse location changes.
+  const hoverLocKey = `${book}|${chapter}|${activeVerse}`;
+  const [prevHoverLocKey, setPrevHoverLocKey] = useState(hoverLocKey);
+  if (hoverLocKey !== prevHoverLocKey) {
+    setPrevHoverLocKey(hoverLocKey);
     setHoveredWordId(null);
-  }, [activeVerse, chapter, book]);
+  }
 
   // Reorder "stoplight": while a note is dragged (or for ~3s after an arrow
   // move) ResourceColumn reports the moved note's candidate neighbours; we
