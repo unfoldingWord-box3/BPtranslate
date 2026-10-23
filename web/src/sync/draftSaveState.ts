@@ -16,6 +16,7 @@
 import type { DraftRecord } from "./drafts.ts";
 import type { OutboxOp } from "./outbox.ts";
 import { extractEditableText, normalizeEditable } from "../lib/usfm.ts";
+import { isMaxAttemptsBlocked, targetKey } from "./outboxTargeting.ts";
 
 function legacyOpCapturedDraft(draft: DraftRecord, op: OutboxOp): boolean {
   const draftPlain = (draft.payload as { plainText?: unknown }).plainText;
@@ -67,20 +68,142 @@ export function generationForSuccessfulOp(
   return legacyOpCapturedDraft(draft, op) ? generation : undefined;
 }
 
-// Row drafts carry no generation, so a row save's 200 is fenced by version: it
-// settles the draft only if the draft was written at or before the version the
-// save was sent against. A draft written against a later version holds typing
-// the editor re-persisted after the save was confirmed, and must survive
-// (#616). Older drafts (the save was re-based after a 409) are still settled,
-// and so is a legacy/adopted record with no numeric version (the old
-// unconditional clear), so it can't leave a permanent stale reminder.
+// Row editors keep display text in their drafts (NoteCard: real newlines) but
+// NoteCard's Save sends TSV text (a literal backslash-n). Compare both in
+// display form, the same conversion tsvToDisplay does.
+function rowValueKey(v: unknown): unknown {
+  return typeof v === "string" ? v.replace(/\\n/g, "\n") : v;
+}
+
+// Whether a row save's 200 settles the row draft, judged by content alone.
+// True when every field in the draft's patch was sent by this op with an equal
+// value. Every row editor stores only the fields it changed (NoteCard,
+// QuestionCard/QuestionsTable, WordsTable, ReviewQueue card and grid, flows
+// Translate Notes/Questions), so such a draft holds nothing this save did not
+// put on the server, however often it was re-written and at whatever version.
+// A draft holding a field this op did not send, or a different value, is kept:
+// usually typing done after the Save, which must survive even when the editor
+// unmounted before the 200 and never re-wrote it (#618).
+//
+// Known gaps, both shared with the old version rule on main:
+//   * A field typed back to its pre-save value while the save is pending drops
+//     out of the editor's patch (it equals the editor's baseline). If the
+//     editor then unmounts before the 200, the remaining fields can match and
+//     the draft clears; the server keeps the saved value, and the revert is lost.
+//   * A draft also survives a 200 from an op that did not send its fields
+//     (reorder, find/replace, AI apply, a history restore with other text).
+//     That is unsaved typing, so it stays as an "unsaved" reminder.
+//
+// A confirmed delete settles any draft (the row is gone). A draft with no
+// readable patch (an older or adopted shape) keeps the old unconditional clear,
+// so it can't leave a permanent stale reminder. An op whose patch is not an
+// object cannot prove anything was sent, so the draft is kept.
 export function rowDraftSettledByOp(
   draft: DraftRecord | undefined,
-  op: Pick<OutboxOp, "expectedVersion">,
+  op: Pick<OutboxOp, "patch"> & Partial<Pick<OutboxOp, "action">>,
 ): boolean {
   if (!draft) return false;
-  if (typeof draft.expectedVersion !== "number") return true;
-  return draft.expectedVersion <= op.expectedVersion;
+  if (op.action === "delete") return true;
+  const patch = (draft.payload as { patch?: unknown }).patch;
+  if (!patch || typeof patch !== "object") return true;
+  const sent = op.patch as unknown;
+  if (!sent || typeof sent !== "object") return false;
+  const sentFields = sent as Record<string, unknown>;
+  return Object.entries(patch as Record<string, unknown>).every(
+    ([k, v]) => k in sentFields && rowValueKey(v) === rowValueKey(sentFields[k]),
+  );
+}
+
+// Whether a live op for the row `key` (other than `excludeOpId`) holds this
+// draft, so nothing else may clear or rebase it: that op's own 200 settles it.
+// Live means pending, in flight, conflicted, or failed but due to re-send on
+// its own (a fatal failed op never re-sends). It holds the draft only if it
+// could settle it: a delete, an op whose patch is unreadable, or one sending at
+// least one of the draft's fields; a draft with no readable patch is held by
+// any live op. An unreadable outbox (null) holds it. Shared by the outbox
+// settle (rowDraftAfterOp) and the flows screens' post-save clear
+// (drafts.clearRowIfSaved) so the two cannot drift (#618 review).
+export function liveRowOpHoldsDraft(
+  draft: DraftRecord,
+  key: string,
+  queued: OutboxOp[] | null,
+  excludeOpId?: string,
+): boolean {
+  if (queued === null) return true;
+  const draftPatch = (draft.payload as { patch?: unknown }).patch;
+  const draftFields =
+    draftPatch && typeof draftPatch === "object" ? Object.keys(draftPatch as Record<string, unknown>) : null;
+  const couldSettle = (o: OutboxOp) => {
+    if (o.action === "delete" || draftFields === null) return true;
+    const p = o.patch as unknown;
+    if (!p || typeof p !== "object") return true;
+    return draftFields.some((k) => k in (p as Record<string, unknown>));
+  };
+  return queued.some(
+    (o) =>
+      o.id !== excludeOpId &&
+      targetKey(o.target) === key &&
+      (o.status === "pending" || o.status === "in_flight" || o.status === "conflict" || isMaxAttemptsBlocked(o)) &&
+      couldSettle(o),
+  );
+}
+
+// What a row op's 200 does to the row draft: "clear" it, replace it with the
+// returned record, or leave it (undefined).
+//
+// `queued` is the outbox as read just before the decision (null when it could
+// not be read). While another op for the same row is still live (pending,
+// in flight, conflicted, or failed but due to re-send on its own) the draft is
+// left for that op's 200 to settle: an earlier save's 200 must not clear a
+// draft whose text a later save will overwrite (save N1, save N2, type back to
+// N1, unmount: clearing on N1's 200 would leave N2 on the server and lose N1).
+// A fatal failed op never re-sends, so it does not hold the draft.
+//
+// Only a later op that could settle the draft holds it: a delete, an op whose
+// patch is unreadable, or one sending at least one of the draft's fields. A
+// reorder ({sort_order}), another field's save or an AI apply never settles a
+// {note} draft, so deferring to it would strand the draft as a phantom
+// "unsaved", and typing back to the pre-save text would then clear it with
+// nothing sent while the server keeps this op's text (#618 review round 4). A
+// draft whose own patch is unreadable defers to any later op, as before.
+// Residual gap: a deferring op that is later discarded after a conflict, or
+// ends fatally failed, can still strand the draft until the row is reopened.
+//
+// A deferred draft is left exactly as it is, baseline included: the later op
+// will settle it. Rebasing it to this op's values would let a reopened editor
+// see the draft (N1) equal to its baseline (N1) and drop it before the later
+// op lands N2, which is the loss above; and a settle working from a stale
+// outbox read could write its baseline over the later op's (#618 review).
+//
+// When this op is the last live one and the draft survives, its baseline is
+// rebased: each field this op sent and the baseline holds takes the sent
+// value, which the server now holds. Otherwise a remounted editor restores the
+// pre-save baseline, typing back to it reads as "no change" and silently drops
+// the draft, and the next Save carries the wrong baseline into 409
+// classification.
+export function rowDraftAfterOp(
+  draft: DraftRecord | undefined,
+  op: Pick<OutboxOp, "id" | "target" | "patch"> & Partial<Pick<OutboxOp, "action">>,
+  queued: OutboxOp[] | null,
+): "clear" | DraftRecord | undefined {
+  if (!draft) return undefined;
+  if (op.action === "delete") return "clear";
+  if (liveRowOpHoldsDraft(draft, targetKey(op.target), queued, op.id)) return undefined;
+  if (rowDraftSettledByOp(draft, op)) return "clear";
+  const payload = draft.payload as { baseline?: unknown };
+  const baseline = payload.baseline;
+  const sent = op.patch as unknown;
+  if (!baseline || typeof baseline !== "object" || !sent || typeof sent !== "object") return undefined;
+  const sentFields = sent as Record<string, unknown>;
+  const next = { ...(baseline as Record<string, unknown>) };
+  let changed = false;
+  for (const k of Object.keys(sentFields)) {
+    if (k in next && next[k] !== sentFields[k]) {
+      next[k] = sentFields[k];
+      changed = true;
+    }
+  }
+  return changed ? { ...draft, payload: { ...draft.payload, baseline: next } } : undefined;
 }
 
 // True when a row draft's patch is exactly the given saved values: every saved

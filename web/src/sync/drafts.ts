@@ -11,8 +11,8 @@
 import { openDB, type IDBPDatabase } from "idb";
 import { isReadOnly, type RowKind } from "./api";
 import { isLaneFrozen } from "./laneFreeze";
-import { onOutboxResult, type OutboxOp } from "./outbox";
-import { generationForSuccessfulOp, rowDraftHoldsSaved, rowDraftSettledByOp } from "./draftSaveState";
+import { onOutboxResult, outbox, type OutboxOp } from "./outbox";
+import { generationForSuccessfulOp, liveRowOpHoldsDraft, rowDraftAfterOp, rowDraftHoldsSaved } from "./draftSaveState";
 import { legacyDbNames, workspaceDbName } from "./workspace";
 import { adoptFromLegacyDbs, type LegacySource } from "./legacyAdoption";
 
@@ -154,15 +154,67 @@ async function clearRowIf(key: string, settled: (rec: DraftRecord) => boolean): 
   }
   await tx.store.delete(key);
   await tx.done;
-  // Drop the dirty mark unless a newer set() has started but not committed
-  // (set() always tracks its generation). A key marked pending with no
-  // tracked generation (legacy-key migration in get()) is released too.
-  if (!latestGenerationByKey.has(key) || latestGenerationByKey.get(key) === rec.generation) {
+  releasePendingMark(key, rec.generation);
+  void notify();
+  return true;
+}
+
+// Drop the dirty mark for a deleted draft unless a newer set() has started but
+// not committed (set() always tracks its generation). A key marked pending
+// with no tracked generation (legacy-key migration in get()) is released too.
+function releasePendingMark(key: string, generation: string | undefined) {
+  if (!latestGenerationByKey.has(key) || latestGenerationByKey.get(key) === generation) {
     latestGenerationByKey.delete(key);
     pendingKeys.delete(key);
   }
+}
+
+// Per-row-key chains that run drafts.settleRowAfterOp and
+// drafts.clearRowIfSaved one at a time for a row, so one cannot run between
+// another's outbox read and its draft write. A failed step leaves the draft as
+// it was (kept, the safe side), resolves to `failed`, and does not stall the
+// row's later steps.
+const settleChains = new Map<string, Promise<unknown>>();
+function onRowChain<T>(key: string, fn: () => Promise<T>, failed: T): Promise<T> {
+  const run = () =>
+    fn().catch((e) => {
+      console.warn("row draft settle failed", key, e);
+      return failed;
+    });
+  const next = (settleChains.get(key) ?? Promise.resolve()).then(run);
+  settleChains.set(key, next);
+  void next.then(() => {
+    if (settleChains.get(key) === next) settleChains.delete(key);
+  });
+  return next;
+}
+
+// One row op's settle; see drafts.settleRowAfterOp.
+async function settleRowNow(key: string, op: OutboxOp): Promise<void> {
+  let queued: OutboxOp[] | null;
+  try {
+    queued = await outbox.list();
+  } catch {
+    queued = null;
+  }
+  const idb = await db();
+  const tx = idb.transaction(STORE, "readwrite");
+  const rec = (await tx.store.get(key)) as DraftRecord | undefined;
+  const next = rec && !rec.quarantined ? rowDraftAfterOp(rec, op, queued) : undefined;
+  if (next === undefined) {
+    await tx.done;
+    return;
+  }
+  if (next !== "clear") {
+    await tx.store.put(next);
+    await tx.done;
+    void notify();
+    return;
+  }
+  await tx.store.delete(key);
+  await tx.done;
+  releasePendingMark(key, rec?.generation);
   void notify();
-  return true;
 }
 
 export function verseKey(
@@ -303,18 +355,42 @@ export const drafts = {
     return true;
   },
 
-  // Delete a row draft only if a successful save settled it
-  // (rowDraftSettledByOp). Read + conditional delete share one transaction so
-  // an editor's re-write cannot slip between them.
-  async clearRowSettledBy(key: string, op: Pick<OutboxOp, "expectedVersion">): Promise<boolean> {
-    return clearRowIf(key, (rec) => rowDraftSettledByOp(rec, op));
+  // Apply a successful row op to its draft (rowDraftAfterOp): clear it if the
+  // op settled it, else rebase its baseline. The outbox is read first, then
+  // the draft is read, decided on and written in one drafts transaction, so an
+  // editor's re-write cannot slip between them. The outbox read cannot share
+  // that transaction (separate database), so settles for one row run one at a
+  // time (settleChains): a later op's settle cannot start between an earlier
+  // one's outbox read and its write. Remaining race: an op enqueued in the gap
+  // between the two reads is not seen. That only matters if the draft still
+  // holds exactly what this op sent while the new op sends something else; an
+  // editor's draft holds what it is about to save, so the new op would send
+  // the draft's text too, and the clear loses nothing.
+  settleRowAfterOp(key: string, op: OutboxOp): Promise<void> {
+    return onRowChain(key, () => settleRowNow(key, op), undefined);
   },
 
   // Delete a row draft only if it holds nothing but the saved values
   // (rowDraftHoldsSaved), in one transaction. For editors whose baseline moves
-  // after the save's 200 (#616 review).
-  async clearRowIfSaved(key: string, saved: Record<string, unknown>): Promise<boolean> {
-    return clearRowIf(key, (rec) => rowDraftHoldsSaved(rec, saved));
+  // after the save's 200 (#616 review). Like the outbox settle, it keeps the
+  // draft while a live later op for the row holds it (liveRowOpHoldsDraft):
+  // the screen saved N1, a later save of N2 is still queued and the draft was
+  // typed back to N1, so clearing it here would lose N1 when N2 lands (#618
+  // review). It runs on the same per-row chain as settleRowAfterOp.
+  clearRowIfSaved(key: string, saved: Record<string, unknown>): Promise<boolean> {
+    return onRowChain(
+      key,
+      async () => {
+        let queued: OutboxOp[] | null;
+        try {
+          queued = await outbox.list();
+        } catch {
+          queued = null;
+        }
+        return clearRowIf(key, (rec) => rowDraftHoldsSaved(rec, saved) && !liveRowOpHoldsDraft(rec, key, queued));
+      },
+      false,
+    );
   },
 
   async list(): Promise<DraftRecord[]> {
@@ -407,8 +483,9 @@ onOutboxResult((op, result) => {
       if (generation) void drafts.clearGeneration(key, generation);
     });
   } else if (op.target.kind === "row") {
-    // Version-fenced (#616): an editor that re-persisted typing against the
-    // confirmed version keeps that draft, whichever lands first.
-    void drafts.clearRowSettledBy(rowKey(op.target.rowKind, op.target.book, op.target.id), op);
+    // Content-fenced (#618): the draft is cleared only if it holds nothing but
+    // what this save sent and no later save for the row is queued; typing done
+    // after the Save survives, whether or not the editor is still mounted.
+    void drafts.settleRowAfterOp(rowKey(op.target.rowKind, op.target.book, op.target.id), op);
   }
 });
