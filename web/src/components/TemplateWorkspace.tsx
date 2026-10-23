@@ -418,7 +418,10 @@ interface EditorProps {
 function TemplateEditor({ templateId, direction, onServerChange }: EditorProps) {
   const { t } = useTranslation();
   const [unit, setUnit] = useState<TemplateUnit | null>(null);
-  const [loading, setLoading] = useState(false);
+  // Starts true: this editor is always mounted keyed by its template (see the
+  // callers), so the load effect below runs once per mount and needs no
+  // synchronous loading/staleDraft reset of its own.
+  const [loading, setLoading] = useState(true);
   const [draft, setDraft] = useState("");
   const [preview, setPreview] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -435,8 +438,6 @@ function TemplateEditor({ templateId, direction, onServerChange }: EditorProps) 
   // can't race — is what makes leaving and coming back non-destructive.
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    setStaleDraft(false);
     api
       .getTemplate(templateId)
       .then(async (u) => {

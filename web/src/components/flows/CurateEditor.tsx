@@ -85,7 +85,10 @@ export function CurateEditor({
   const { t } = useTranslation();
   const theme = useTheme();
   const [unit, setUnit] = useState<TemplateUnit | null>(null);
-  const [loading, setLoading] = useState(false);
+  // Starts true: this editor is always mounted keyed by its template (see the
+  // callers), so the load effect below runs once per mount and needs no
+  // synchronous loading/staleDraft reset of its own.
+  const [loading, setLoading] = useState(true);
   const [draft, setDraft] = useState("");
   const [preview, setPreview] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -100,8 +103,6 @@ export function CurateEditor({
   // navigating away and back (or reloading) before Save.
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    setStaleDraft(false);
     api
       .getTemplate(templateId)
       .then(async (u) => {
