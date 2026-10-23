@@ -20,6 +20,8 @@ import { useTranslation } from "react-i18next";
 import type { TqRow } from "../sync/api";
 import type { SourceQuestion } from "../hooks/useSourceQuestions";
 import { drafts, rowKey, draftDirtyBorderSx } from "../sync/drafts";
+import { tqCardBaseline, tsvToDisplay } from "../lib/tqRowFields";
+import { reconcileField } from "../lib/twlRowFields";
 
 // Translation-review card for translationQuestions — the tQ analogue of
 // NoteCard's translation mode. Only rendered in a gateway-language project
@@ -34,10 +36,6 @@ const RTL_CHAR = /[֐-׿؀-ۿ]/; // Hebrew + Arabic ranges (target drafts are Ar
 
 function isRtl(text: string): boolean {
   return RTL_CHAR.test(text);
-}
-
-function tsvToDisplay(s: string | null): string {
-  return (s ?? "").replace(/\\n/g, "\n");
 }
 
 interface Props {
@@ -76,8 +74,18 @@ function QuestionCardInner({
   const [question, setQuestion] = useState(tsvToDisplay(row.question));
   const [response, setResponse] = useState(tsvToDisplay(row.response));
 
-  useEffect(() => setQuestion(tsvToDisplay(row.question)), [row.id, row.version, row.question]);
-  useEffect(() => setResponse(tsvToDisplay(row.response)), [row.id, row.version, row.response]);
+  // When the row's values change (an optimistic Save, the server's answer, a
+  // remote edit), a field adopts the new value only if the user hasn't edited
+  // it since the last baseline. Resetting on every version bump dropped text
+  // typed between Save and the server's answer, and cleared its draft (#617).
+  const baselineRef = useRef(tqCardBaseline(row));
+  useEffect(() => {
+    const prev = baselineRef.current;
+    const next = tqCardBaseline({ question: row.question, response: row.response });
+    baselineRef.current = next;
+    setQuestion((q) => reconcileField(prev.question, next.question, q));
+    setResponse((r) => reconcileField(prev.response, next.response, r));
+  }, [row.question, row.response]);
 
   const draftKey = useMemo(() => rowKey("tq", row.book, row.id), [row.book, row.id]);
 

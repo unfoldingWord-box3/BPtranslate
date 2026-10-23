@@ -6,6 +6,8 @@ import SaveIcon from "@mui/icons-material/Save";
 import SaveOutlinedIcon from "@mui/icons-material/SaveOutlined";
 import type { TqRow } from "../sync/api";
 import { drafts, rowKey, draftDirtyBorderSx } from "../sync/drafts";
+import { tqTableBaseline } from "../lib/tqRowFields";
+import { reconcileField } from "../lib/twlRowFields";
 import { useTranslation } from "react-i18next";
 
 interface Props {
@@ -116,15 +118,25 @@ const Row = memo(function Row({
   const [question, setQuestion] = useState(row.question ?? "");
   const [response, setResponse] = useState(row.response ?? "");
 
-  useEffect(() => setRefRaw(row.ref_raw ?? ""), [row.id, row.version, row.ref_raw]);
-  useEffect(() => setQuestion(row.question ?? ""), [row.id, row.version, row.question]);
-  useEffect(() => setResponse(row.response ?? ""), [row.id, row.version, row.response]);
+  // When the row's values change (an optimistic Save, the server's answer, a
+  // remote edit), a field adopts the new value only if the user hasn't edited
+  // it since the last baseline. Resetting on every version bump dropped text
+  // typed between Save and the server's answer, and cleared its draft (#617).
+  const baselineRef = useRef(tqTableBaseline(row));
+  useEffect(() => {
+    const prev = baselineRef.current;
+    const next = tqTableBaseline({ ref_raw: row.ref_raw, question: row.question, response: row.response });
+    baselineRef.current = next;
+    setRefRaw((v) => reconcileField(prev.refRaw, next.refRaw, v));
+    setQuestion((q) => reconcileField(prev.question, next.question, q));
+    setResponse((r) => reconcileField(prev.response, next.response, r));
+  }, [row.ref_raw, row.question, row.response]);
 
   const draftKey = useMemo(() => rowKey("tq", row.book, row.id), [row.book, row.id]);
 
   // Hydrate from any persisted draft on first mount so unsaved typing
-  // survives navigation. Subsequent server pushes are caught by the
-  // useEffects above (which only run when row.version changes).
+  // survives navigation. Later server pushes are reconciled by the effect
+  // above.
   const hydratedFromDraftRef = useRef(false);
   useEffect(() => {
     if (hydratedFromDraftRef.current) return;
