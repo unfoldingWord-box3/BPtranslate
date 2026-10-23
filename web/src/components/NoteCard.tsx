@@ -465,10 +465,14 @@ function NoteCardInner({
   const noteTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const [editingBody, setEditingBody] = useState(false);
   // A new find target (different occurrence / note) always returns to the read
-  // view so the highlight shows; clicking sets editingBody back to true.
+  // view so the highlight shows; clicking sets editingBody back to true. A find
+  // target also opens an approved (collapsed) card, or the highlighted match
+  // would sit hidden behind the one-line preview (#641).
+  const [expanded, setExpanded] = useState(false);
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- find-target reset, kept post-commit beside the focus effect below that keys on editingBody; the find path is not covered by the classic-card live test, so it stays as it was.
     setEditingBody(false);
+    if (activeMatchOccurrence != null) setExpanded(true);
   }, [activeMatchOccurrence, row.id]);
   // When the user clicks the read view to edit, focus the now-shown textarea
   // and put the caret at the end.
@@ -507,8 +511,8 @@ function NoteCardInner({
   // Validated cards collapse (green, one-line preview). Local expand is
   // view-only — editing a re-expanded card auto-demotes it to 'edited'
   // server-side (rows.ts content PATCH). Re-collapses when it re-validates.
-  // Leaving the validated state resets it, adjusted during render.
-  const [expanded, setExpanded] = useState(false);
+  // Leaving the validated state resets it, adjusted during render. (`expanded`
+  // itself is declared above, beside the find-target effect that sets it.)
   const [prevIsValidated, setPrevIsValidated] = useState(isValidated);
   if (prevIsValidated !== isValidated) {
     setPrevIsValidated(isValidated);
