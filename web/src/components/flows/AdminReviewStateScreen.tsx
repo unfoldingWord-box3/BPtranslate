@@ -162,6 +162,7 @@ export default function AdminReviewStateScreen({ role, me }: FlowScreenContext) 
   useEffect(() => {
     if (!book) return;
     const ctrl = new AbortController();
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- on book change, blank the summary and reset the chapter pickers and last result before fetching; without it the pickers and result keep showing the previous book until the new summary lands.
     setSummary(null);
     setFrom(null);
     setTo(null);

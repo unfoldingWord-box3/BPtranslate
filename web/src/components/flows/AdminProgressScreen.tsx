@@ -349,6 +349,7 @@ export default function AdminProgressScreen({ role }: AdminProgressScreenProps) 
   useEffect(() => {
     if (!isAdmin) return;
     let cancelled = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- clear the previous load error when the book-list fetch starts; without it an earlier failure message stays up beside the fresh list until the request settles.
     setBooksError(null);
     api
       .getBooks()

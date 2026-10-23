@@ -115,6 +115,7 @@ function TwlSuggestionsInner({ book, chapter, verse, refreshKey, onAdd, isExclud
     // Skip the scan entirely while paused (and not peeking) — the whole point
     // is to stop proposing once the editor has signed off on words here.
     if (verse === 0 || (paused && !peeked)) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- empty the list while paused or with no verse; without it the previous verse's suggestions stay on screen when there is nothing to scan.
       setSuggestions([]);
       return;
     }

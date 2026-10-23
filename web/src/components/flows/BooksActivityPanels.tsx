@@ -166,6 +166,7 @@ export function BooksActivityPanel({ book }: { book: string }) {
   }, []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- mount-time load; the same `load` backs the Retry buttons, and it sets status to loading at start so the spinner shows instead of the old job list.
     void load();
   }, [load]);
 

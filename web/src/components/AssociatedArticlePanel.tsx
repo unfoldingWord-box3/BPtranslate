@@ -58,6 +58,7 @@ export function AssociatedArticlePanel({ resource, articleRef, selected }: Props
   useEffect(() => {
     if (!articleRef || noSource) return;
     let cancelled = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- blank the previous article before fetching the new ref; without it the old article's title and body stay on screen under the new ref until the fetch lands.
     setMarkdown(null);
     setTitle(null);
     setError(false);

@@ -9,7 +9,8 @@
 // GET /api/project-config laneState — never fabricated. Lifecycle text is
 // derived from the job's own `status` field.
 //
-// NOT LaneReplacementDriver: that component is bound to the Setup wizard's
+// NOT LaneReplacementDriver (never rendered; deleted in #593): that component
+// was bound to the Setup wizard's
 // per-lane edit/align choice — it patches the lane's textReadOnly /
 // alignmentWritable after Activate and withholds completion until that patch is
 // confirmed. This screen has no such choice to express, so embedding it would
@@ -199,6 +200,7 @@ export function BooksLanePanel() {
   useEffect(() => {
     let cancelled = false;
     if (!jobId) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- clear the job when jobId goes away; without it the finished job's staging status stays on screen after the config stops pointing at it.
       setJob(null);
       return;
     }
@@ -313,7 +315,7 @@ export function BooksLanePanel() {
     setBusy("activate");
     setError(null);
     try {
-      // A fresh fencing UUID per activation, matching LaneReplacementDriver —
+      // A fresh fencing UUID per activation, matching the since-deleted LaneReplacementDriver —
       // the mockup prompted for one only because its preview had no way to mint it.
       await api.laneActivate(LANE, jobId, crypto.randomUUID());
       await refreshProjectConfig().catch(() => {});

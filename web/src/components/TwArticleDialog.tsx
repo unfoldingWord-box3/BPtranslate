@@ -56,6 +56,7 @@ export function TwArticleDialog({ articleId, onClose }: Props) {
   useEffect(() => {
     if (!articleId || noSource) return;
     let cancelled = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- blank the previous article before fetching the new one; without it the dialog shows the old tW article under the new heading until the fetch lands.
     setMarkdown(null);
     setError(false);
     fetchTwArticle(articleId, source)

@@ -269,6 +269,7 @@ function LintBadge({ book }: { book: string }) {
 
   useEffect(() => {
     let cancelled = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- blank the badge before fetching the new book's lint report; without it the badge shows the previous book's report until the fetch lands.
     setReport(null);
     setFailed(false);
     api
@@ -393,6 +394,7 @@ function BookDetailPanel({
   }, [book]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch the summary on mount and on book change; loadSummary also runs after an import, and it sets state only after the await.
     void loadSummary();
   }, [loadSummary]);
 
@@ -588,6 +590,7 @@ export default function BooksScreen({ role, lastPosition, book: routeBook }: Boo
   }, [setStatus]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- mount-time load; refetchBooks also backs Retry and runs after imports. It shows loading only before the first successful load, so a background refresh keeps the current grid.
     void refetchBooks();
   }, [refetchBooks]);
 

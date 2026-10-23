@@ -440,6 +440,7 @@ export function TopBar({
   }, []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- clear the previous book's summary when the book changes; without it the navigation cluster shows the old book's chapters for one fetch.
     setSummary(null);
     // Only the (hidden) navigation cluster reads `summary` — skip the fetch on
     // routes that don't show it rather than firing a request per mount.
