@@ -68,6 +68,16 @@ For the full corpus, see the memory index at
 `C:\Users\benja\.claude\projects\C--Users-benja-Documents-GitHub-bible-editor\memory\MEMORY.md`.
 Highlights that bite repeatedly:
 
+- **Local alignment testing needs the `mltest` workspace, not the default.** `POST /api/auth/dev`
+  with no `be_ws` cookie lands on `bsoj` (the first entry in `WORKSPACES`). Its `ar-bsoj` preset
+  quarantines the ULT/UST lanes as soon as verses exist (`ensureLaneState` in
+  `api/src/scriptureLane.ts`), so the aligner says "Alignment is locked" and a local UPDATE to
+  `scripture_lane_state` is rewritten on the next config read. Instead, apply migrations and seed
+  `bptranslate_mltest_dev --local`, then send the cookie `be_ws=mltest` (Playwright:
+  `ctx.addCookies` before the dev-auth POST). That lane comes up with `alignmentWritable: true`.
+  Playwright's `locator.dragTo` drives the aligner's HTML5 drag and drop; cards are
+  `[data-group-id]` and chips are `[draggable="true"]` (#594 part 2).
+
 - **A Workflows step error reaches `run()`'s catch as `${name}: ${message}`, not as the object you
   threw.** The engine runs a step across an isolate boundary and rebuilds its error on the far side,
   so `new NonRetryableError("[merge_failed] …")` arrives with message
