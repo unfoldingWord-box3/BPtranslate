@@ -1324,6 +1324,7 @@ function ActiveLine({
   const hydratedFromDraftRef = useRef(false);
   useEffect(() => {
     if (!draftKey) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- clears hasDraft when the row has no draft key and skips the drafts-store subscription; drafts.subscribe has no getSnapshot, and its callback also hydrates the DOM once, so useSyncExternalStore would not be equivalent.
       setHasDraft(false);
       return;
     }

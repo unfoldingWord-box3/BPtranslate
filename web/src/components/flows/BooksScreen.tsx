@@ -594,10 +594,14 @@ export default function BooksScreen({ role, lastPosition, book: routeBook }: Boo
     void refetchBooks();
   }, [refetchBooks]);
 
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- follows a new #/books/:book route; selected is also written by the click handler and the first-load seed, so it can't be derived from routeBook.
+  // Follow a new #/books/:book route, adjusted during render on a routeBook
+  // change. selected is also written by the click handler and the first-load
+  // seed, so it can't be derived from routeBook.
+  const [prevRouteBook, setPrevRouteBook] = useState(routeBook);
+  if (prevRouteBook !== routeBook) {
+    setPrevRouteBook(routeBook);
     if (routeBook) setSelected(routeBook);
-  }, [routeBook]);
+  }
 
   // Keep the URL truthful once the user picks a different book, so a reload or
   // a shared link reopens the pane they were looking at rather than the book

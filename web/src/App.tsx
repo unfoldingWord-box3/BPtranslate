@@ -498,20 +498,24 @@ export function App() {
   // lastScriptureRef above (a ref, so it can't trigger a re-render), this is
   // state — BooksScreen needs to actually re-render when it changes.
   const [livePosition, setLivePosition] = useState<{ book: string; chapter: number; verse: number } | null>(null);
-  useEffect(() => {
-    // Track the same routes the server-side push does (classic chapter + the
-    // redesign scripture routes), so the card updates in-session no matter which
-    // UI the translator works in (#200). The prev-comparison keeps this a no-op
-    // when the position is unchanged.
+  // Track the same routes the server-side push does (classic chapter + the
+  // redesign scripture routes), so the card updates in-session no matter which
+  // UI the translator works in (#200). Adjusted during render on a loc change
+  // (React's "adjust state when a prop changes" pattern); non-scripture routes
+  // keep the previous value. The prev-comparison keeps this a no-op when the
+  // position is unchanged.
+  const [livePositionLoc, setLivePositionLoc] = useState<Location | null>(null);
+  if (livePositionLoc !== loc) {
+    setLivePositionLoc(loc);
     const pos = positionFromLoc(loc);
-    if (!pos) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- latches the last scripture position: non-scripture routes keep the previous value, so it can't be derived from loc alone.
-    setLivePosition((prev) =>
-      prev && prev.book === pos.book && prev.chapter === pos.chapter && prev.verse === pos.verse
-        ? prev
-        : pos,
-    );
-  }, [loc]);
+    if (pos) {
+      setLivePosition((prev) =>
+        prev && prev.book === pos.book && prev.chapter === pos.chapter && prev.verse === pos.verse
+          ? prev
+          : pos,
+      );
+    }
+  }
 
   // Workspace reconciliation. The server's be_ws cookie is the source of
   // truth for which org's D1 database we're talking to; localStorage is just
