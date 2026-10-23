@@ -13,6 +13,7 @@ import {
   rowDraftAfterOp,
   rowDraftAfterConfirm,
   rowDraftAfterRelease,
+  withCarriedConfirm,
   liveRowOpHoldsDraft,
   rowDraftSettledByOp,
   verseDraftHasActiveSave,
@@ -365,36 +366,83 @@ assert.equal(
 // dropped as "locked", or fails fatally, nothing used to settle the draft: a
 // stale "unsaved" reminder against baseline N0 while the server holds N1, and
 // typing back to N0 cleared it with nothing sent. A's deferral now records
-// what it landed on the draft (`confirmed`), and the release re-settles from it.
+// what it landed on the draft (`confirmed`, at the version A landed), and the
+// release re-settles from it, only where that value is still the server's.
+// A sent at v6 and landed at v7; B was threaded to v7 (threadVersionToSiblings).
 const rowTarget = rowOp({}).target;
-const heldN1 = rowDraftAfterConfirm(based({ note: "N1" }, { note: "N0" }), opA, [queuedOp()]);
+const opB = (over = {}) => queuedOp({ expectedVersion: 7, ...over });
+const heldN1 = rowDraftAfterConfirm(based({ note: "N1" }, { note: "N0" }), opA, [opB()], 7);
 assert.deepEqual(
   heldN1?.payload,
   { patch: { note: "N1" }, baseline: { note: "N0" } },
   "#632.1: a deferred settle still leaves patch and baseline to the later op",
 );
 assert.deepEqual(heldN1?.confirmed, { note: "N1" }, "#632.1: the deferred settle records what it landed");
+assert.equal(heldN1?.confirmedVersion, 7, "#632.1: ...and the version it landed at");
 assert.equal(heldN1?.generation, "g1", "#632.1: recording keeps the draft's identity");
-assert.equal(rowDraftAfterRelease(heldN1, rowTarget, []), "clear", "#632.1: B discarded, the draft holding N1 settles");
 assert.equal(
-  rowDraftAfterRelease(heldN1, rowTarget, [queuedOp({ status: "failed", lastError: "http 422" })]),
-  "clear",
-  "#632.1: B failed fatally (never re-sends), the draft settles",
+  rowDraftAfterConfirm(based({ note: "N1" }, { note: "N0" }), opA, [opB()], undefined)?.confirmed,
+  undefined,
+  "#632.1: no landed version, nothing recorded",
 );
-assert.equal(rowDraftAfterRelease(heldN1, rowTarget, [queuedOp({ status: "conflict" })]), undefined, "#632.1: B still conflicted holds it");
-assert.equal(rowDraftAfterRelease(heldN1, rowTarget, null), undefined, "#632.1: an unreadable outbox holds it");
+const failedB = opB({ status: "failed", lastError: "http 422" });
+assert.equal(rowDraftAfterRelease(heldN1, failedB, "fatal", [failedB]), "clear", "#632.1: B failed fatally (never re-sends), the draft settles");
+assert.equal(rowDraftAfterRelease(heldN1, opB({ status: "failed", lastError: "max_attempts_exceeded" }), "drop", []), "clear", "#632.1: B discarded after failing, the draft settles");
+assert.equal(
+  rowDraftAfterRelease(heldN1, failedB, "fatal", [opB({ id: "C", status: "conflict" })]),
+  undefined,
+  "#632.1: another conflicted op still holds it",
+);
+assert.equal(rowDraftAfterRelease(heldN1, failedB, "fatal", null), undefined, "#632.1: an unreadable outbox holds it");
 // The refused save's own text is never cleared or shrunk: only the baseline
 // moves to what A landed, so typing back to N0 later is a real change.
-const heldN2 = rowDraftAfterConfirm(based({ note: "N2" }, { note: "N0" }), opA, [queuedOp()]);
-const releasedN2 = rowDraftAfterRelease(heldN2, rowTarget, []);
+const heldN2 = rowDraftAfterConfirm(based({ note: "N2" }, { note: "N0" }), opA, [opB()], 7);
+const releasedN2 = rowDraftAfterRelease(heldN2, failedB, "fatal", []);
 assert.deepEqual(
   releasedN2?.payload,
   { patch: { note: "N2" }, baseline: { note: "N1" } },
   "#632.1: B's refused text N2 stays in the draft; the baseline follows the server (N1)",
 );
 assert.equal(releasedN2?.confirmed, undefined, "#632.1: a release that settles drops the record");
+// Review round 1, F1: a 409 proves the server moved on. Another user wrote X
+// after A landed; B 409s and is discarded. The draft (typed back to N1) is
+// not on the server, so it must be kept.
+const conflictedB = (current) => opB({ status: "conflict", conflictCurrent: current });
+const movedOn = rowDraftAfterRelease(heldN1, conflictedB({ note: "X", version: 8 }), "drop", []);
+assert.notEqual(movedOn, "clear", "F1: a discard after a 409 never clears text the server no longer holds");
+assert.deepEqual(movedOn?.payload, heldN1.payload, "F1: the draft's patch and baseline are kept as they were");
+assert.equal(movedOn?.confirmed, undefined, "F1: the disproved record is dropped");
+assert.equal(
+  rowDraftAfterRelease(heldN1, conflictedB({ note: "N1", quote: "Q9", version: 8 }), "drop", []),
+  "clear",
+  "F1: the 409's row still holds N1 (another field moved): the draft settles",
+);
+assert.equal(rowDraftAfterRelease(heldN1, conflictedB(undefined), "drop", []), undefined, "F1: a conflict with no server row proves nothing");
+assert.equal(rowDraftAfterRelease(heldN1, opB(), "locked", []), undefined, "F1: locked (an AI apply will overwrite the row): leave the draft");
+// F5: a record is trusted only by an op that chained from it.
+assert.equal(
+  rowDraftAfterRelease(heldN1, opB({ status: "failed", lastError: "http 422", expectedVersion: 12 }), "fatal", [])?.confirmed,
+  undefined,
+  "F5: an op that did not chain from the record drops it",
+);
+assert.notEqual(
+  rowDraftAfterRelease(heldN1, opB({ status: "failed", lastError: "http 422", expectedVersion: 12 }), "fatal", []),
+  "clear",
+  "F5: ...without settling against it",
+);
+assert.equal(
+  rowDraftAfterRelease(heldN1, opB({ status: "failed", lastError: "http 422", patch: { sort_order: 3 } }), "fatal", []),
+  undefined,
+  "#632.1: a released op that could not hold the draft (a reorder) changes nothing",
+);
+// F3: a draft whose patch cannot be read is never cleared by a release.
+assert.equal(
+  rowDraftAfterRelease({ ...rowDraft({}), payload: { note: "legacy shape" }, confirmed: { note: "N1" }, confirmedVersion: 7 }, failedB, "fatal", []),
+  undefined,
+  "F3: a release never clears an unreadable draft, record or not",
+);
 // B confirms instead: B's values win over A's record, and the record goes.
-const afterB = rowDraftAfterConfirm(heldN1, queuedOp({ status: "in_flight" }), []);
+const afterB = rowDraftAfterConfirm(heldN1, opB({ status: "in_flight" }), [], 8);
 assert.deepEqual(
   afterB?.payload,
   { patch: { note: "N1" }, baseline: { note: "N2" } },
@@ -402,10 +450,25 @@ assert.deepEqual(
 );
 assert.equal(afterB?.confirmed, undefined, "#632.1: B's settle drops A's record");
 // B itself deferred to C: the record now holds B's value.
+const bDeferred = rowDraftAfterConfirm(heldN1, opB({ status: "in_flight" }), [opB({ id: "C", patch: { note: "N3" }, expectedVersion: 8 })], 8);
+assert.deepEqual(bDeferred?.confirmed, { note: "N2" }, "#632.1: a later deferral overwrites the record with its own values");
+assert.equal(bDeferred?.confirmedVersion, 8, "#632.1: ...at its own landed version");
+// F5: a record left behind (B discarded in another tab) is folded only into a
+// confirm that chained from it. Record {quote: Q1} at v7; a much later save of
+// the note alone at v12 must not settle the quote against the stale record.
+const staleRecord = { ...tqDraft({ quote: "Q1", note: "N5" }, { quote: "Q0", note: "N0" }), confirmed: { quote: "Q1" }, confirmedVersion: 7 };
+const lateC = { ...rowOp({ note: "N5" }), id: "C", status: "in_flight", expectedVersion: 12 };
+const afterLateC = rowDraftAfterConfirm(staleRecord, lateC, [], 13);
 assert.deepEqual(
-  rowDraftAfterConfirm(heldN1, queuedOp({ status: "in_flight" }), [queuedOp({ id: "C", patch: { note: "N3" } })])?.confirmed,
-  { note: "N2" },
-  "#632.1: a later deferral overwrites the record with its own values",
+  afterLateC?.payload,
+  { patch: { quote: "Q1", note: "N5" }, baseline: { quote: "Q0", note: "N5" } },
+  "F5: an unchained confirm ignores the stale record (the quote stays unsaved)",
+);
+assert.equal(afterLateC?.confirmed, undefined, "F5: ...and drops it");
+assert.equal(
+  rowDraftAfterConfirm(staleRecord, { ...lateC, expectedVersion: 7 }, [], 8),
+  "clear",
+  "F5: a confirm that chained from the record folds it in",
 );
 // Only held fields are recorded; the rest settled at once (#632 item 5).
 assert.deepEqual(
@@ -413,20 +476,28 @@ assert.deepEqual(
     tqDraft({ response: "R1", question: "Q1" }, { response: "R0", question: "Q0" }),
     { ...rowOp({ response: "R1", question: "Q1" }), id: "1", status: "in_flight" },
     [{ ...rowOp({ question: "Q2" }), id: "2", status: "pending" }],
+    7,
   ),
   {
     ...tqDraft({ question: "Q1" }, { response: "R1", question: "Q0" }),
     confirmed: { question: "Q1" },
+    confirmedVersion: 7,
   },
   "#632.1: only the field the later op holds is recorded",
 );
-assert.equal(rowDraftAfterConfirm(n1Draft, opA, [opA]), "clear", "#632.1: no later op, a plain settle as before");
-assert.equal(rowDraftAfterRelease(n1Draft, rowTarget, []), undefined, "#632.1: no record, a release does nothing");
-assert.equal(
-  rowDraftAfterRelease({ ...rowDraft({}), payload: { note: "legacy shape" } }, rowTarget, []),
-  undefined,
-  "#632.1: no record, a release never clears an unreadable draft",
+assert.equal(rowDraftAfterConfirm(n1Draft, opA, [opA], 7), "clear", "#632.1: no later op, a plain settle as before");
+assert.equal(rowDraftAfterRelease(n1Draft, failedB, "fatal", []), undefined, "#632.1: no record, a release does nothing");
+// F2 (Codex) / F4: set() rebuilds the record on every keystroke; an editor
+// still open after A's 200 must not erase the record, or B's failure finds
+// nothing to settle against.
+const typed = { ...rowDraft({ note: "N1 more" }), generation: "g2" };
+assert.deepEqual(
+  withCarriedConfirm(heldN1, typed),
+  { ...typed, confirmed: { note: "N1" }, confirmedVersion: 7 },
+  "F4: a re-write keeps the record",
 );
+assert.equal(withCarriedConfirm(n1Draft, typed), typed, "F4: nothing to carry");
+assert.equal(withCarriedConfirm(undefined, typed), typed, "F4: no previous record");
 
 // #616 review A1: the flows screens move their baseline only after the 200. A
 // draft re-written at v+1 before that (refetch during the save) holds exactly
