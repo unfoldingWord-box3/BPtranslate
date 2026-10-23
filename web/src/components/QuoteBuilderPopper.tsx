@@ -14,7 +14,7 @@
 // ancestor chain (outer-to-inner zaln milestones), so a click on "first"
 // inside zaln(בַחֹדֶשׁ) > zaln(הָרִאשׁוֹן) toggles both Hebrew words at once.
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Popper,
@@ -106,9 +106,12 @@ export function QuoteBuilderPopper({
   // picker re-targets a different verse so a stale index can't span the wrong
   // token list.
   const [anchor, setAnchor] = useState<{ row: Row; index: number } | null>(null);
-  useEffect(() => {
+  const verseKey = `${book}|${chapter}|${verse}`;
+  const [prevVerseKey, setPrevVerseKey] = useState(verseKey);
+  if (verseKey !== prevVerseKey) {
+    setPrevVerseKey(verseKey);
     setAnchor(null);
-  }, [book, chapter, verse]);
+  }
 
   // UHB/UGNT source row: plain click toggles one word; shift-click adds the
   // inclusive range from the anchor to the clicked chip.
