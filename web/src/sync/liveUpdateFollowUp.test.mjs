@@ -17,7 +17,8 @@ const target = { kind: "row", rowKind: "tq", id: "q-1", book: "ZEC" };
 const otherRow = { kind: "row", rowKind: "tq", id: "q-2", book: "ZEC" };
 
 function op(id, patch, extra = {}) {
-  return { id, target, action: "patch", patch, expectedVersion: 2, queuedAt: 0, attempts: 0, status: "pending", ...extra };
+  // Sent at v2 with the row's response then "AB"; the live update (theirs) is v3.
+  return { id, target, action: "patch", patch, baseline: { response: "AB" }, expectedVersion: 2, queuedAt: 0, attempts: 0, status: "pending", ...extra };
 }
 
 const theirs = { id: "q-1", book: "ZEC", chapter: 1, verse: 1, question: "Q2", response: "AB", version: 3 };
@@ -69,8 +70,28 @@ test("F4: the follow-up applies only while the cached row is still at the broadc
   assert.equal(rowAtVersion(undefined, 3), false);
 });
 
-test("item 4: a live update does not bring back a row this user has a waiting delete for", () => {
-  const del = { ...op("op-d", undefined), action: "delete" };
+test("only a waiting save that will land on top is re-applied (Claude F2)", () => {
+  // Another user changed the question only: our response save auto-heals.
+  assert.deepEqual(liveUpdateFollowUp(theirs, target, [op("op-2", { response: "ABC" })]), { t: "patch", patch: { response: "ABC" } });
+  // Another user changed the response itself to "XYZ": our save will hit a
+  // genuine 409, so their value stays in the cache.
+  const xyz = { ...theirs, response: "XYZ" };
+  assert.equal(liveUpdateFollowUp(xyz, target, [op("op-2", { response: "ABC" })]), null);
+  // Without a baseline only a save sent at the broadcast's version counts.
+  assert.equal(liveUpdateFollowUp(xyz, target, [op("op-2", { response: "ABC" }, { baseline: undefined })]), null);
+  assert.deepEqual(liveUpdateFollowUp(xyz, target, [op("op-2", { response: "ABC" }, { baseline: undefined, expectedVersion: 3 })]), {
+    t: "patch",
+    patch: { response: "ABC" },
+  });
+  // Mixed: the conflicting one is left off, the healable one kept.
+  const out = liveUpdateFollowUp(xyz, target, [op("op-2", { response: "ABC" }), op("op-3", { question: "Q3" }, { baseline: { question: "Q2" } })]);
+  assert.deepEqual(out, { t: "patch", patch: { question: "Q3" } });
+});
+
+test("item 4: a waiting delete takes the row back out only when sent at the broadcast's version (Claude F1)", () => {
+  const stale = { ...op("op-d", undefined), action: "delete" };
+  assert.equal(liveUpdateFollowUp(theirs, target, [stale]), null, "sent at v2: it will 409, so the other user's edit stays");
+  const del = { ...stale, expectedVersion: 3 };
   assert.deepEqual(liveUpdateFollowUp(theirs, target, [del]), { t: "delete" });
   assert.equal(liveUpdateFollowUp(theirs, otherRow, [del]), null, "another row's delete");
   assert.equal(hasQueuedDelete(target, [{ ...del, status: "failed", lastError: "http 422" }]), false, "refused delete");
