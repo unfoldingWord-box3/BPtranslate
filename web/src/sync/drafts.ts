@@ -12,7 +12,7 @@ import { openDB, type IDBPDatabase } from "idb";
 import { isReadOnly, type RowKind } from "./api";
 import { isLaneFrozen } from "./laneFreeze";
 import { onOutboxResult, outbox, type OutboxOp } from "./outbox";
-import { generationForSuccessfulOp, rowDraftAfterOp, rowDraftHoldsSaved } from "./draftSaveState";
+import { generationForSuccessfulOp, liveRowOpHoldsDraft, rowDraftAfterOp, rowDraftHoldsSaved } from "./draftSaveState";
 import { legacyDbNames, workspaceDbName } from "./workspace";
 import { adoptFromLegacyDbs, type LegacySource } from "./legacyAdoption";
 
@@ -169,8 +169,25 @@ function releasePendingMark(key: string, generation: string | undefined) {
   }
 }
 
-// Per-row-key chains that run drafts.settleRowAfterOp one at a time.
-const settleChains = new Map<string, Promise<void>>();
+// Per-row-key chains that run drafts.settleRowAfterOp and
+// drafts.clearRowIfSaved one at a time for a row, so one cannot run between
+// another's outbox read and its draft write. A failed step leaves the draft as
+// it was (kept, the safe side), resolves to `failed`, and does not stall the
+// row's later steps.
+const settleChains = new Map<string, Promise<unknown>>();
+function onRowChain<T>(key: string, fn: () => Promise<T>, failed: T): Promise<T> {
+  const run = () =>
+    fn().catch((e) => {
+      console.warn("row draft settle failed", key, e);
+      return failed;
+    });
+  const next = (settleChains.get(key) ?? Promise.resolve()).then(run);
+  settleChains.set(key, next);
+  void next.then(() => {
+    if (settleChains.get(key) === next) settleChains.delete(key);
+  });
+  return next;
+}
 
 // One row op's settle; see drafts.settleRowAfterOp.
 async function settleRowNow(key: string, op: OutboxOp): Promise<void> {
@@ -350,22 +367,30 @@ export const drafts = {
   // editor's draft holds what it is about to save, so the new op would send
   // the draft's text too, and the clear loses nothing.
   settleRowAfterOp(key: string, op: OutboxOp): Promise<void> {
-    // A failed settle leaves the draft as it was (kept, the safe side) and must
-    // not stall the row's later settles.
-    const run = () => settleRowNow(key, op).catch((e) => console.warn("row draft settle failed", key, e));
-    const next = (settleChains.get(key) ?? Promise.resolve()).then(run);
-    settleChains.set(key, next);
-    void next.then(() => {
-      if (settleChains.get(key) === next) settleChains.delete(key);
-    });
-    return next;
+    return onRowChain(key, () => settleRowNow(key, op), undefined);
   },
 
   // Delete a row draft only if it holds nothing but the saved values
   // (rowDraftHoldsSaved), in one transaction. For editors whose baseline moves
-  // after the save's 200 (#616 review).
-  async clearRowIfSaved(key: string, saved: Record<string, unknown>): Promise<boolean> {
-    return clearRowIf(key, (rec) => rowDraftHoldsSaved(rec, saved));
+  // after the save's 200 (#616 review). Like the outbox settle, it keeps the
+  // draft while a live later op for the row holds it (liveRowOpHoldsDraft):
+  // the screen saved N1, a later save of N2 is still queued and the draft was
+  // typed back to N1, so clearing it here would lose N1 when N2 lands (#618
+  // review). It runs on the same per-row chain as settleRowAfterOp.
+  clearRowIfSaved(key: string, saved: Record<string, unknown>): Promise<boolean> {
+    return onRowChain(
+      key,
+      async () => {
+        let queued: OutboxOp[] | null;
+        try {
+          queued = await outbox.list();
+        } catch {
+          queued = null;
+        }
+        return clearRowIf(key, (rec) => rowDraftHoldsSaved(rec, saved) && !liveRowOpHoldsDraft(rec, key, queued));
+      },
+      false,
+    );
   },
 
   async list(): Promise<DraftRecord[]> {

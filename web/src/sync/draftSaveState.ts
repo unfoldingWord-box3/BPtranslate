@@ -114,6 +114,40 @@ export function rowDraftSettledByOp(
   );
 }
 
+// Whether a live op for the row `key` (other than `excludeOpId`) holds this
+// draft, so nothing else may clear or rebase it: that op's own 200 settles it.
+// Live means pending, in flight, conflicted, or failed but due to re-send on
+// its own (a fatal failed op never re-sends). It holds the draft only if it
+// could settle it: a delete, an op whose patch is unreadable, or one sending at
+// least one of the draft's fields; a draft with no readable patch is held by
+// any live op. An unreadable outbox (null) holds it. Shared by the outbox
+// settle (rowDraftAfterOp) and the flows screens' post-save clear
+// (drafts.clearRowIfSaved) so the two cannot drift (#618 review).
+export function liveRowOpHoldsDraft(
+  draft: DraftRecord,
+  key: string,
+  queued: OutboxOp[] | null,
+  excludeOpId?: string,
+): boolean {
+  if (queued === null) return true;
+  const draftPatch = (draft.payload as { patch?: unknown }).patch;
+  const draftFields =
+    draftPatch && typeof draftPatch === "object" ? Object.keys(draftPatch as Record<string, unknown>) : null;
+  const couldSettle = (o: OutboxOp) => {
+    if (o.action === "delete" || draftFields === null) return true;
+    const p = o.patch as unknown;
+    if (!p || typeof p !== "object") return true;
+    return draftFields.some((k) => k in (p as Record<string, unknown>));
+  };
+  return queued.some(
+    (o) =>
+      o.id !== excludeOpId &&
+      targetKey(o.target) === key &&
+      (o.status === "pending" || o.status === "in_flight" || o.status === "conflict" || isMaxAttemptsBlocked(o)) &&
+      couldSettle(o),
+  );
+}
+
 // What a row op's 200 does to the row draft: "clear" it, replace it with the
 // returned record, or leave it (undefined).
 //
@@ -154,26 +188,7 @@ export function rowDraftAfterOp(
 ): "clear" | DraftRecord | undefined {
   if (!draft) return undefined;
   if (op.action === "delete") return "clear";
-  const key = targetKey(op.target);
-  const draftPatch = (draft.payload as { patch?: unknown }).patch;
-  const draftFields =
-    draftPatch && typeof draftPatch === "object" ? Object.keys(draftPatch as Record<string, unknown>) : null;
-  const couldSettle = (o: OutboxOp) => {
-    if (o.action === "delete" || draftFields === null) return true;
-    const p = o.patch as unknown;
-    if (!p || typeof p !== "object") return true;
-    return draftFields.some((k) => k in (p as Record<string, unknown>));
-  };
-  const laterQueued =
-    queued === null ||
-    queued.some(
-      (o) =>
-        o.id !== op.id &&
-        targetKey(o.target) === key &&
-        (o.status === "pending" || o.status === "in_flight" || o.status === "conflict" || isMaxAttemptsBlocked(o)) &&
-        couldSettle(o),
-    );
-  if (laterQueued) return undefined;
+  if (liveRowOpHoldsDraft(draft, targetKey(op.target), queued, op.id)) return undefined;
   if (rowDraftSettledByOp(draft, op)) return "clear";
   const payload = draft.payload as { baseline?: unknown };
   const baseline = payload.baseline;
