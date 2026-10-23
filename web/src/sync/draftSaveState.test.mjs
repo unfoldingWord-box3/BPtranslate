@@ -304,6 +304,60 @@ assert.equal(
 );
 assert.equal(rowDraftAfterOp(rowDraft({ note: "N1 more" }), opA, [opA]), undefined, "a draft with no baseline is left alone");
 
+// #632 item 5: partial-overlap stranding. ReviewQueue's card draft holds
+// {response, question} but its Save sends only the field. Op1 {response: R1},
+// op2 {question: Q1}, unmount before both 200s. Op1 defers (op2 shares
+// `question`), op2 keeps the draft (it did not send `response`): a phantom
+// unsaved response R1 against baseline R0 while the server holds R1. Op1 now
+// settles the fields no later live op sends, and leaves the rest to op2.
+const tqDraft = (patch, baseline) => ({ ...rowDraft(patch), payload: { patch, baseline } });
+const op1 = { ...rowOp({ response: "R1" }), id: "1", status: "in_flight" };
+const op2 = { ...rowOp({ question: "Q1" }), id: "2", status: "pending" };
+const afterOp1 = rowDraftAfterOp(
+  tqDraft({ response: "R1", question: "Q1" }, { response: "R0", question: "Q0" }),
+  op1,
+  [op1, op2],
+);
+assert.deepEqual(
+  afterOp1?.payload,
+  { patch: { question: "Q1" }, baseline: { response: "R1", question: "Q0" } },
+  "#632.5: op1 settles the field no later op sends; the shared field is left to op2",
+);
+assert.equal(afterOp1?.generation, "g1", "#632.5: the partial settle keeps the draft's identity");
+assert.equal(rowDraftAfterOp(afterOp1, op2, [op2]), "clear", "#632.5: op2's 200 then settles the rest");
+// A field op1 sent that a later op also sends stays exactly as it was, patch
+// and baseline (round 3 F1: N1 survives a queued N2).
+assert.deepEqual(
+  rowDraftAfterOp(
+    tqDraft({ note: "N1", support_reference: "X" }, { note: "N0", support_reference: "X0" }),
+    { ...rowOp({ note: "N1", support_reference: "X" }), id: "A", status: "in_flight" },
+    [queuedOp({ patch: { note: "N2" } })],
+  )?.payload,
+  { patch: { note: "N1" }, baseline: { note: "N0", support_reference: "X" } },
+  "#632.5: the held field keeps its value and baseline; only the unshared field settles",
+);
+// Typing after op1 on a field no later op sends stays unsaved, but its baseline
+// follows the server (R1), so typing back to R1 later is not a silent drop.
+assert.deepEqual(
+  rowDraftAfterOp(tqDraft({ response: "R2", question: "Q1" }, { response: "R0", question: "Q0" }), op1, [op2])?.payload,
+  { patch: { response: "R2", question: "Q1" }, baseline: { response: "R1", question: "Q0" } },
+  "#632.5: newer typing on an unshared field is kept, with its baseline rebased",
+);
+const t5Draft = tqDraft({ response: "R1", question: "Q1" }, { response: "R0", question: "Q0" });
+assert.equal(rowDraftAfterOp(t5Draft, op1, [op2, queuedOp({ id: "D", action: "delete", patch: {} })]), undefined, "#632.5: a later delete holds everything");
+assert.equal(rowDraftAfterOp(t5Draft, op1, [op2, queuedOp({ id: "U", patch: undefined })]), undefined, "#632.5: a later unreadable patch holds everything");
+assert.equal(rowDraftAfterOp(t5Draft, op1, null), undefined, "#632.5: an unreadable outbox holds everything");
+assert.equal(
+  rowDraftAfterOp(t5Draft, op1, [op2, queuedOp({ id: "R", patch: { response: "R9" } })]),
+  undefined,
+  "#632.5: a later op sending the field too defers it, so nothing settles",
+);
+assert.equal(
+  rowDraftAfterOp({ ...rowDraft({}), payload: { note: "legacy shape" } }, opA, [queuedOp()]),
+  undefined,
+  "#632.5: a draft with no readable patch is still held whole",
+);
+
 // #616 review A1: the flows screens move their baseline only after the 200. A
 // draft re-written at v+1 before that (refetch during the save) holds exactly
 // the saved text, so it must be cleared once the baseline moves. A draft that
@@ -337,4 +391,4 @@ assert.equal(
 assert.equal(rowDraftHoldsSaved(tnDraft({}), { note: "saved" }), false, "empty patch is not ours to clear");
 assert.equal(rowDraftHoldsSaved(undefined, { note: "saved" }), false, "no draft");
 
-console.log("draftSaveState: 57 passed");
+console.log("draftSaveState: 67 passed");

@@ -115,7 +115,9 @@ export function rowDraftSettledByOp(
 }
 
 // Whether a live op for the row `key` (other than `excludeOpId`) holds this
-// draft, so nothing else may clear or rebase it: that op's own 200 settles it.
+// draft, so nothing else may clear it: that op's own 200 settles it. (The
+// outbox settle may still settle the fields no live op sends; see
+// settleUnheldFields.)
 // Live means pending, in flight, conflicted, or failed but due to re-send on
 // its own (a fatal failed op never re-sends). It holds the draft only if it
 // could settle it: a delete, an op whose patch is unreadable, or one sending at
@@ -139,13 +141,30 @@ export function liveRowOpHoldsDraft(
     if (!p || typeof p !== "object") return true;
     return draftFields.some((k) => k in (p as Record<string, unknown>));
   };
-  return queued.some(
-    (o) =>
-      o.id !== excludeOpId &&
-      targetKey(o.target) === key &&
-      isLiveOp(o) &&
-      couldSettle(o),
-  );
+  return queued.some((o) => isLaterLiveRowOp(o, key, excludeOpId) && couldSettle(o));
+}
+
+function isLaterLiveRowOp(o: OutboxOp, key: string, excludeOpId: string | undefined): boolean {
+  return o.id !== excludeOpId && targetKey(o.target) === key && isLiveOp(o);
+}
+
+// The fields live ops for the row `key` (other than `excludeOpId`) will send,
+// or null when one of them could touch any field (a delete, an unreadable
+// patch) or the outbox could not be read.
+function laterLiveRowFields(
+  key: string,
+  queued: OutboxOp[] | null,
+  excludeOpId: string,
+): Set<string> | null {
+  if (queued === null) return null;
+  const fields = new Set<string>();
+  for (const o of queued) {
+    if (!isLaterLiveRowOp(o, key, excludeOpId)) continue;
+    const p = o.patch as unknown;
+    if (o.action === "delete" || !p || typeof p !== "object") return null;
+    for (const k of Object.keys(p as Record<string, unknown>)) fields.add(k);
+  }
+  return fields;
 }
 
 // What a row op's 200 does to the row draft: "clear" it, replace it with the
@@ -169,11 +188,17 @@ export function liveRowOpHoldsDraft(
 // Residual gap: a deferring op that is later discarded after a conflict, or
 // ends fatally failed, can still strand the draft until the row is reopened.
 //
-// A deferred draft is left exactly as it is, baseline included: the later op
-// will settle it. Rebasing it to this op's values would let a reopened editor
-// see the draft (N1) equal to its baseline (N1) and drop it before the later
-// op lands N2, which is the loss above; and a settle working from a stale
-// outbox read could write its baseline over the later op's (#618 review).
+// In a deferred draft, every field a later live op sends is left exactly as it
+// is, baseline included: the later op will settle it. Rebasing it to this op's
+// values would let a reopened editor see the draft (N1) equal to its baseline
+// (N1) and drop it before the later op lands N2, which is the loss above; and
+// a settle working from a stale outbox read could write its baseline over the
+// later op's (#618 review). The fields this op sent that NO later live op
+// sends are settled now (settleUnheldFields): no later op would ever settle
+// them, so a ReviewQueue draft {response, question} saved as {response} then
+// {question} would otherwise keep a phantom unsaved response (#632 item 5). A
+// later delete or unreadable patch, or an unreadable outbox, holds the whole
+// draft as before.
 //
 // When this op is the last live one and the draft survives, its baseline is
 // rebased: each field this op sent and the baseline holds takes the sent
@@ -188,7 +213,10 @@ export function rowDraftAfterOp(
 ): "clear" | DraftRecord | undefined {
   if (!draft) return undefined;
   if (op.action === "delete") return "clear";
-  if (liveRowOpHoldsDraft(draft, targetKey(op.target), queued, op.id)) return undefined;
+  const key = targetKey(op.target);
+  if (liveRowOpHoldsDraft(draft, key, queued, op.id)) {
+    return settleUnheldFields(draft, op, laterLiveRowFields(key, queued, op.id));
+  }
   if (rowDraftSettledByOp(draft, op)) return "clear";
   const payload = draft.payload as { baseline?: unknown };
   const baseline = payload.baseline;
@@ -204,6 +232,42 @@ export function rowDraftAfterOp(
     }
   }
   return changed ? { ...draft, payload: { ...draft.payload, baseline: next } } : undefined;
+}
+
+// rowDraftAfterOp's partial settle while a later live op holds the draft
+// (#632 item 5). `held` is every field a later live op will send (null: hold
+// the whole draft). For each field this op sent that no later op sends, the
+// server now keeps this op's value: drop it from the draft's patch when the
+// draft holds that same value, and rebase its baseline. Held fields are left
+// exactly as they are, patch and baseline, for the later op to settle.
+function settleUnheldFields(
+  draft: DraftRecord,
+  op: Pick<OutboxOp, "patch">,
+  held: Set<string> | null,
+): "clear" | DraftRecord | undefined {
+  if (held === null) return undefined;
+  const payload = draft.payload as { patch?: unknown; baseline?: unknown };
+  const sent = op.patch as unknown;
+  if (!payload.patch || typeof payload.patch !== "object" || !sent || typeof sent !== "object") return undefined;
+  const sentFields = sent as Record<string, unknown>;
+  const patch = { ...(payload.patch as Record<string, unknown>) };
+  const hasBaseline = !!payload.baseline && typeof payload.baseline === "object";
+  const baseline = hasBaseline ? { ...(payload.baseline as Record<string, unknown>) } : undefined;
+  let changed = false;
+  for (const k of Object.keys(sentFields)) {
+    if (held.has(k)) continue;
+    if (k in patch && rowValueKey(patch[k]) === rowValueKey(sentFields[k])) {
+      delete patch[k];
+      changed = true;
+    }
+    if (baseline && k in baseline && baseline[k] !== sentFields[k]) {
+      baseline[k] = sentFields[k];
+      changed = true;
+    }
+  }
+  if (!changed) return undefined;
+  if (Object.keys(patch).length === 0) return "clear";
+  return { ...draft, payload: { ...draft.payload, patch, ...(baseline ? { baseline } : {}) } };
 }
 
 // True when a row draft's patch is exactly the given saved values: every saved
