@@ -255,6 +255,7 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
   // Drafts-ready banner for the currently-picked scope.
   useEffect(() => {
     if (!pickedBook || role === "viewer") {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- zero the drafts-ready count when no book is picked or the role is viewer; without it the banner keeps the previous scope's count after the scope is cleared.
       setPendingCount(0);
       return;
     }

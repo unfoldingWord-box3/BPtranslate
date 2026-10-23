@@ -200,6 +200,7 @@ export function BooksLanePanel() {
   useEffect(() => {
     let cancelled = false;
     if (!jobId) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- clear the job when jobId goes away; without it the finished job's staging status stays on screen after the config stops pointing at it.
       setJob(null);
       return;
     }
