@@ -10,6 +10,7 @@ import {
   generationForSavedPlain,
   generationForSuccessfulOp,
   rowDraftHoldsSaved,
+  rowDraftAfterOp,
   rowDraftSettledByOp,
   verseDraftHasActiveSave,
 } from "./draftSaveState.ts";
@@ -181,6 +182,60 @@ assert.equal(
   true,
   "a non-object patch keeps the old unconditional clear",
 );
+// #618 review A3: an op whose patch is not an object cannot prove the draft was sent.
+assert.equal(rowDraftSettledByOp(rowDraft({ note: "x" }), { ...rowOp({}), patch: undefined }), false, "non-object op.patch keeps the draft");
+assert.equal(rowDraftSettledByOp(rowDraft({ note: "x" }), { ...rowOp({}), patch: "x" }), false, "string op.patch keeps the draft");
+
+// #618 review A1: an earlier op's 200 must not settle the draft while a later
+// op for the same row is still queued. Save N1 (A), save N2 (B), type back to
+// N1, unmount: A's 200 would clear the N1 draft and B's 200 leaves N2 on the
+// server, losing N1. The last op's 200 settles it instead.
+// #618 review A2: a draft that survives keeps its baseline in step with what
+// the server now holds, for the fields this op sent.
+const opA = { ...rowOp({ note: "N1" }), id: "A", status: "in_flight" };
+const queuedOp = (over = {}) => ({ ...rowOp({ note: "N2" }), id: "B", status: "pending", ...over });
+const n1Draft = rowDraft({ note: "N1" });
+assert.equal(rowDraftAfterOp(n1Draft, opA, [opA]), "clear", "no later op: the matching draft is settled");
+assert.notEqual(rowDraftAfterOp(n1Draft, opA, [opA, queuedOp()]), "clear", "A1: a later queued op for the row defers the clear");
+assert.notEqual(rowDraftAfterOp(n1Draft, opA, [queuedOp({ status: "conflict" })]), "clear", "a conflicted later op still defers");
+assert.notEqual(
+  rowDraftAfterOp(n1Draft, opA, [queuedOp({ status: "failed", lastError: "max_attempts_exceeded" })]),
+  "clear",
+  "a failed op that will re-send on its own still defers",
+);
+assert.equal(
+  rowDraftAfterOp(n1Draft, opA, [queuedOp({ status: "failed", lastError: "http 403" })]),
+  "clear",
+  "a fatal failed op never re-sends, so it does not defer",
+);
+assert.equal(
+  rowDraftAfterOp(n1Draft, opA, [queuedOp({ target: { ...rowOp({}).target, id: "other" } })]),
+  "clear",
+  "an op for another row does not defer",
+);
+assert.notEqual(rowDraftAfterOp(n1Draft, opA, null), "clear", "an unreadable outbox cannot prove nothing is queued: keep");
+assert.equal(rowDraftAfterOp(undefined, opA, [opA]), undefined, "no draft, nothing to do");
+assert.equal(
+  rowDraftAfterOp(rowDraft({ note: "typing" }), { ...rowOp({}), id: "D", action: "delete" }, [queuedOp()]),
+  "clear",
+  "a confirmed delete clears the draft",
+);
+const based = (patch, baseline) => ({ ...rowDraft(patch), payload: { patch, baseline } });
+const rebased = rowDraftAfterOp(based({ note: "N1 more" }, { note: "N0", quote: "q0", support_reference: null }), opA, [opA]);
+assert.deepEqual(
+  rebased?.payload,
+  { patch: { note: "N1 more" }, baseline: { note: "N1", quote: "q0", support_reference: null } },
+  "A2: a surviving draft's baseline takes the values this op sent, other fields untouched",
+);
+assert.equal(rebased?.generation, "g1", "the rebase keeps the draft's identity");
+const deferred = rowDraftAfterOp(based({ note: "N1" }, { note: "N0" }), opA, [queuedOp()]);
+assert.deepEqual(deferred?.payload?.baseline, { note: "N1" }, "a deferred draft is rebased to what the server now holds");
+assert.equal(
+  rowDraftAfterOp(based({ note: "N1 more" }, { question: "q0" }), opA, [opA]),
+  undefined,
+  "a baseline without the sent field is left alone",
+);
+assert.equal(rowDraftAfterOp(rowDraft({ note: "N1 more" }), opA, [opA]), undefined, "a draft with no baseline is left alone");
 
 // #616 review A1: the flows screens move their baseline only after the 200. A
 // draft re-written at v+1 before that (refetch during the save) holds exactly
@@ -215,4 +270,4 @@ assert.equal(
 assert.equal(rowDraftHoldsSaved(tnDraft({}), { note: "saved" }), false, "empty patch is not ours to clear");
 assert.equal(rowDraftHoldsSaved(undefined, { note: "saved" }), false, "no draft");
 
-console.log("draftSaveState: 41 passed");
+console.log("draftSaveState: 57 passed");
