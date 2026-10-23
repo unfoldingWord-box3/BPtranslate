@@ -505,6 +505,7 @@ export function App() {
     // when the position is unchanged.
     const pos = positionFromLoc(loc);
     if (!pos) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- latches the last scripture position: non-scripture routes keep the previous value, so it can't be derived from loc alone.
     setLivePosition((prev) =>
       prev && prev.book === pos.book && prev.chapter === pos.chapter && prev.verse === pos.verse
         ? prev
