@@ -2778,8 +2778,6 @@ export function Shell({
         setPanelMode("resources");
       },
       onDirtyChange: setAlignmentDirty,
-      panelRef: alignmentPanelRef,
-      onOpenDual: () => openDualAligner(alignerTarget.chapter, alignerTarget.verse),
       onRestoreVersion: targetVerse
         ? (content, plainText) =>
             restoreVerse(
@@ -2793,7 +2791,15 @@ export function Shell({
         : undefined,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `restoreVerse` is a plain function declared below the early return, so it is new every render; it reads only book, chapter, bookHook, applyLocalVerse and enqueueVerseSafely, which are all listed.
-  }, [alignerTarget, data, chapter, bookHook, book, openDualAligner, applyLocalVerse, enqueueVerseSafely]);
+  }, [alignerTarget, data, chapter, bookHook, book, applyLocalVerse, enqueueVerseSafely]);
+
+  // The panel's "Side-by-side" action, kept out of alignmentTabProps:
+  // openDualAligner reaches the dirty-gate refs, so a closure over it inside
+  // that memo made the React Compiler flag every render read of the memo (#594).
+  // Defined whenever alignerTarget is, which alignmentTabProps requires.
+  const openDualFromAlignmentPanel = useCallback(() => {
+    if (alignerTarget) openDualAligner(alignerTarget.chapter, alignerTarget.verse);
+  }, [alignerTarget, openDualAligner]);
 
   // Props for the side-by-side popup: ULT + UST slices against one shared
   // source. Undefined (popup closed) unless a dualTarget is set and at least
@@ -3671,6 +3677,8 @@ export function Shell({
     panelMode,
     onSetPanelMode: handleSetPanelMode,
     alignmentProps: alignmentTabProps,
+    alignmentPanelRef,
+    onOpenDualAligner: openDualFromAlignmentPanel,
     alignmentBadge,
   };
 
