@@ -7,11 +7,22 @@
 // the returned record, so the text shows as "N unsaved" and the editor
 // restores it when it mounts.
 //
+// The written fields are recorded on the draft as `refused`: the values the
+// server refused, which the cached row still shows. The other helpers here keep
+// that record honest for the life of the draft:
+//   * withCarriedRefusal: an editor re-write keeps refused fields its diff
+//     leaves out (its diff is against the cached row, so they look unchanged);
+//   * rowDraftOnNoDiff: an editor's "no diff" clear keeps the refused text;
+//   * afterConfirmKeepingRefusal: a confirmed save ends the record only for the
+//     fields it sent;
+//   * rowDraftAfterRefusedDiscard: discarding the failed op takes back what its
+//     refusal wrote.
+//
 // Kept free of IndexedDB / api.ts imports so it can be unit-tested from a
 // plain Node script (refusedRowDraft.test.mjs), like draftSaveState.ts.
 
 import type { DraftRecord } from "./drafts.ts";
-import type { OutboxOp } from "./outbox.ts";
+import type { OutboxOp, OutboxResult } from "./outbox.ts";
 import { isLiveOp, targetKey } from "./outboxTargeting.ts";
 
 // The fields each classic editor restores from a row draft. Other fields a row
@@ -24,65 +35,102 @@ const EDITOR_FIELDS: Record<string, readonly string[]> = {
   twl: ["orig_words", "tw_link", "occurrence"],
 };
 
+type Fields = Record<string, unknown>;
+
+// NoteCard keeps display text (real newlines) and sends TSV text (a literal
+// backslash-n); compare in display form, as draftSaveState.ts does.
+function same(a: unknown, b: unknown): boolean {
+  const key = (v: unknown) => (typeof v === "string" ? v.replace(/\\n/g, "\n") : v);
+  return key(a) === key(b);
+}
+
+function asFields(v: unknown): Fields | undefined {
+  return v && typeof v === "object" ? (v as Fields) : undefined;
+}
+
+function nonEmpty(f: Fields | undefined): f is Fields {
+  return !!f && Object.keys(f).length > 0;
+}
+
+function withRefused(draft: DraftRecord, refused: Fields): DraftRecord {
+  const { refused: _r, ...base } = draft;
+  return Object.keys(refused).length > 0 ? { ...base, refused } : base;
+}
+
+// Whether a result is a refusal whose text should be kept. A fatal 404 means
+// the row is gone (deleted meanwhile): there is nothing to save the text to,
+// and a draft for it would be a permanent phantom "unsaved".
+export function keepsRefusedText(result: OutboxResult): boolean {
+  if (result.kind === "locked") return true;
+  return result.kind === "fatal" && result.reason !== "http 404";
+}
+
 // The draft record to write for `key` after `op` was refused, or undefined to
 // leave the store as it is. `queued` is the outbox read after the refusal.
 //
-// Newer text always wins, field by field. A field is written back only when
-// nothing newer holds it:
-//   * the draft already holds it (in its patch, or in its baseline, which
-//     NoteCard and the flows screens pin to the server copy, so a field absent
-//     from their patch was typed back to the server value on purpose);
-//   * a later live save for the row sends it (that save carries newer text;
-//     if it is refused too, its own refusal writes it back).
-// Nothing is written while a delete for the row is queued, or when the outbox
-// could not be read. The record keeps the draft's other fields and records the
-// written fields as `refused`, which stops an editor's "no diff" clear from
-// dropping it (drafts.clearUnlessRefused). A new draft needs a place to file
-// it: the op's draftRef (set by the classic editors' save) gives the verse.
+// Newer text always wins, field by field. A sent field is written back only
+// when nothing newer holds it:
+//   * the draft's baseline has it (NoteCard and the flows screens pin their
+//     baseline to the server copy, so they already track that field);
+//   * the draft's patch holds other text for it (typing after the Save);
+//   * a live save for the row queued after this one sends it (newer text; if
+//     it is refused too, its own refusal writes it back).
+// A draft patch already holding the sent value (the refusal beat the editor's
+// post-Save clear) only gets the field marked refused, so that clear keeps it.
+// Nothing is written while a later delete for the row is queued, or when the
+// outbox could not be read: an unreadable outbox cannot show there is no newer
+// save, and writing could put older text over it. A new draft needs a place
+// to file it: the op's draftRef (set by the classic tQ / tW-link saves).
 export function rowDraftAfterRefusal(
   key: string,
   existing: DraftRecord | undefined,
-  op: Pick<OutboxOp, "id" | "target" | "action" | "patch" | "expectedVersion"> & Partial<Pick<OutboxOp, "draftRef">>,
+  op: Pick<OutboxOp, "id" | "target" | "action" | "patch" | "expectedVersion" | "queuedAt"> &
+    Partial<Pick<OutboxOp, "draftRef" | "seq">>,
   queued: OutboxOp[] | null,
   at: { now: number; generation: string },
 ): DraftRecord | undefined {
   if (op.target.kind !== "row" || op.action === "delete") return undefined;
   if (queued === null || existing?.quarantined) return undefined;
-  const sent = op.patch as unknown;
-  if (!sent || typeof sent !== "object") return undefined;
+  const sent = asFields(op.patch);
+  if (!sent) return undefined;
   const editorFields = EDITOR_FIELDS[op.target.rowKind] ?? [];
 
   const rowKey = targetKey(op.target);
+  const isLater = (o: OutboxOp) =>
+    o.queuedAt > op.queuedAt || (o.queuedAt === op.queuedAt && (o.seq ?? 0) > (op.seq ?? 0));
   const heldByLater = new Set<string>();
   for (const o of queued) {
-    if (o.id === op.id || targetKey(o.target) !== rowKey || !isLiveOp(o)) continue;
+    if (o.id === op.id || targetKey(o.target) !== rowKey || !isLiveOp(o) || !isLater(o)) continue;
     if (o.action === "delete") return undefined;
-    const p = o.patch as unknown;
-    if (!p || typeof p !== "object") return undefined;
-    for (const k of Object.keys(p as Record<string, unknown>)) heldByLater.add(k);
+    const p = asFields(o.patch);
+    if (!p) continue;
+    for (const k of Object.keys(p)) heldByLater.add(k);
   }
 
   const payload = (existing?.payload ?? {}) as { patch?: unknown; baseline?: unknown };
-  const draftPatch = payload.patch && typeof payload.patch === "object" ? (payload.patch as Record<string, unknown>) : {};
-  const draftBaseline =
-    payload.baseline && typeof payload.baseline === "object" ? (payload.baseline as Record<string, unknown>) : {};
-  if (existing && !(payload.patch && typeof payload.patch === "object")) return undefined;
+  const draftPatch = asFields(payload.patch);
+  if (existing && !draftPatch) return undefined;
+  const patchIn = draftPatch ?? {};
+  const baselineIn = asFields(payload.baseline) ?? {};
+  const refusedIn = existing?.refused ?? {};
 
-  const added: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(sent as Record<string, unknown>)) {
-    if (!editorFields.includes(k)) continue;
-    if (k in draftPatch || k in draftBaseline || heldByLater.has(k)) continue;
-    added[k] = v;
+  const added: Fields = {};
+  const marked: Fields = {};
+  for (const [k, v] of Object.entries(sent)) {
+    if (!editorFields.includes(k) || k in baselineIn || heldByLater.has(k)) continue;
+    if (!(k in patchIn)) added[k] = v;
+    else if (same(patchIn[k], v) && !(k in refusedIn && same(refusedIn[k], v))) marked[k] = v;
   }
-  if (Object.keys(added).length === 0) return undefined;
+  if (!nonEmpty(added) && !nonEmpty(marked)) return undefined;
+  const refused = { ...refusedIn, ...marked, ...added };
 
   if (existing) {
     return {
       ...existing,
-      payload: { ...existing.payload, patch: { ...draftPatch, ...added } },
+      payload: { ...existing.payload, patch: { ...patchIn, ...added } },
       updatedAt: at.now,
       generation: at.generation,
-      refused: { ...(existing.refused ?? {}), ...added },
+      refused,
     };
   }
   if (!op.draftRef) return undefined;
@@ -100,6 +148,101 @@ export function rowDraftAfterRefusal(
       chapter: op.draftRef.chapter,
       verse: op.draftRef.verse,
     },
-    refused: added,
+    refused,
   };
+}
+
+// drafts.set() for a row: keep `prev`'s refused fields in the rewritten draft.
+// The classic editors diff against the cached row, which still shows the
+// refused text, so their new patch leaves those fields out; without this,
+// editing another field would drop the refused text from the store (review
+// A1). A refused field the new patch holds keeps the user's newer text, and
+// stays in the record so typing back to the refused text (no diff again) can
+// restore it (rowDraftOnNoDiff). A field the new draft's baseline holds is the
+// editor's own to track (NoteCard): neither carried nor recorded.
+export function withCarriedRefusal(prev: DraftRecord | undefined, next: DraftRecord): DraftRecord {
+  if (!nonEmpty(prev?.refused) || next.quarantined) return next;
+  const payload = next.payload as { patch?: unknown; baseline?: unknown };
+  const patch = asFields(payload.patch);
+  if (!patch) return next;
+  const baseline = asFields(payload.baseline) ?? {};
+  const refused: Fields = {};
+  const carried: Fields = {};
+  for (const [k, v] of Object.entries(prev.refused)) {
+    if (k in baseline) continue;
+    refused[k] = v;
+    if (!(k in patch)) carried[k] = v;
+  }
+  if (!nonEmpty(refused)) return next;
+  return { ...next, payload: { ...next.payload, patch: { ...patch, ...carried } }, refused };
+}
+
+// An editor's "no diff" clear (drafts.clearUnlessRefused). No diff against the
+// cached row means the editor shows the row's values, which for refused fields
+// are the refused text, and for the rest are on the row already. So a draft
+// with a refused record becomes exactly that record ("clear" when there is
+// none; undefined to leave it as it is).
+export function rowDraftOnNoDiff(rec: DraftRecord): "clear" | DraftRecord | undefined {
+  if (rec.quarantined) return undefined;
+  if (!nonEmpty(rec.refused)) return "clear";
+  const patch = asFields((rec.payload as { patch?: unknown }).patch) ?? {};
+  const refused = rec.refused;
+  const keys = Object.keys(patch);
+  if (keys.length === Object.keys(refused).length && keys.every((k) => k in refused && patch[k] === refused[k])) {
+    return undefined;
+  }
+  return { ...rec, payload: { ...rec.payload, patch: { ...refused } } };
+}
+
+// Wraps the outbox settle (rowDraftAfterConfirm's result `next` for draft
+// `rec`) after `op` was confirmed. That settle already keeps a draft holding a
+// field the op did not send, so a refused field the op left out survives. A
+// refused field the op did send is now on the server with the op's value, so
+// the refused value is no longer what the row shows: it leaves the record
+// (the draft's text for it is left to the settle).
+export function afterConfirmKeepingRefusal(
+  rec: DraftRecord,
+  next: "clear" | DraftRecord | undefined,
+  op: Pick<OutboxOp, "patch">,
+): "clear" | DraftRecord | undefined {
+  if (next === "clear") return next;
+  const base = next ?? rec;
+  const sent = asFields(op.patch);
+  if (!nonEmpty(base.refused) || !sent) return next;
+  const refused = { ...base.refused };
+  let stripped = false;
+  for (const k of Object.keys(sent)) {
+    if (k in refused) {
+      delete refused[k];
+      stripped = true;
+    }
+  }
+  return stripped ? withRefused(base, refused) : next;
+}
+
+// The user discarded `op`, a failed (refused) save (review A5). What its
+// refusal wrote back goes too, so Discard drops the text as it did before
+// #647: each refused field holding this op's value leaves the record, and
+// leaves the patch where the patch still holds that value (newer typing
+// stays). "clear" when nothing is left; undefined to leave the draft alone.
+export function rowDraftAfterRefusedDiscard(
+  rec: DraftRecord | undefined,
+  op: Pick<OutboxOp, "patch">,
+): "clear" | DraftRecord | undefined {
+  if (!rec || rec.quarantined || !nonEmpty(rec.refused)) return undefined;
+  const sent = asFields(op.patch);
+  const patchIn = asFields((rec.payload as { patch?: unknown }).patch);
+  if (!sent || !patchIn) return undefined;
+  const refused = { ...rec.refused };
+  const patch = { ...patchIn };
+  let changed = false;
+  for (const [k, v] of Object.entries(sent)) {
+    if (!(k in refused) || !same(refused[k], v)) continue;
+    delete refused[k];
+    if (k in patch && same(patch[k], v)) delete patch[k];
+    changed = true;
+  }
+  if (!changed) return undefined;
+  if (Object.keys(patch).length === 0) return "clear";
+  return withRefused({ ...rec, payload: { ...rec.payload, patch } }, refused);
 }
