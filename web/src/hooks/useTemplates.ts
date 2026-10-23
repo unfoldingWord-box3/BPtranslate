@@ -20,6 +20,7 @@ export function useTemplates(enabled: boolean): {
 
   useEffect(() => {
     if (!enabled) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- reset to idle when the hook is disabled. Deriving the empty value in render instead would show the old result for a render when it is re-enabled, before the refetch marks it loading.
       setUnits([]);
       setError(null);
       setLoading(false);

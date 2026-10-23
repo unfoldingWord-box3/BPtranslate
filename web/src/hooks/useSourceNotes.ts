@@ -89,6 +89,7 @@ export function useSourceNotes(
   const repo = source?.repo ?? null;
   useEffect(() => {
     if (!book || org === null || repo === null) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- clear the map when the book or source goes away. Deriving EMPTY in render instead would let the previous book's notes reappear when a source comes back, until its fetch lands.
       setMap(EMPTY);
       return;
     }

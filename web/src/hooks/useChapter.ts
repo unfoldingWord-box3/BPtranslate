@@ -92,6 +92,7 @@ export function useChapter(book: string, chapter: number): UseChapterReturn {
 
   useEffect(() => {
     mounted.current = true;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- refetch() marks the chapter loading as it starts the request (the same function backs Retry); the data itself is set after the await.
     void refetch();
     return () => {
       mounted.current = false;

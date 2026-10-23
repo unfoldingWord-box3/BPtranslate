@@ -66,6 +66,7 @@ export function useTwlFilters(book: string): TwlFilters {
 
   useEffect(() => {
     let mounted = true;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- seed from the module-level cache on a book change before subscribing to it, so the previous book's filters never apply to the new book while load() resolves.
     setSets(cache.get(book) ?? EMPTY);
     setSettled(cache.has(book));
     load(book)

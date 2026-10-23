@@ -71,6 +71,7 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
   // cache is per-book, not global.
   useEffect(() => {
     if (!enabled) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- the per-book cache is reset here when the book changes or the hook is disabled, in the same effect that starts the summary fetch. Deriving it in render would show the previous book's chapters for a render after a book change.
       setSummary(null);
       setSummaryStatus("idle");
       setChapters(new Map());
