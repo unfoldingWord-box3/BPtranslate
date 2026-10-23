@@ -85,7 +85,10 @@ export function CurateEditor({
   const { t } = useTranslation();
   const theme = useTheme();
   const [unit, setUnit] = useState<TemplateUnit | null>(null);
-  const [loading, setLoading] = useState(false);
+  // Starts true: this editor is always mounted keyed by its template (see the
+  // callers), so the load effect below runs once per mount and needs no
+  // synchronous loading/staleDraft reset of its own.
+  const [loading, setLoading] = useState(true);
   const [draft, setDraft] = useState("");
   const [preview, setPreview] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -100,8 +103,6 @@ export function CurateEditor({
   // navigating away and back (or reloading) before Save.
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    setStaleDraft(false);
     api
       .getTemplate(templateId)
       .then(async (u) => {
@@ -186,6 +187,7 @@ export function CurateEditor({
 
   useEffect(() => {
     if (!aiDraftError) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- consumes a one-shot AI-draft error and may call onAiDisabled, a parent state setter, which cannot run during this component's render.
     setErrorMsg(aiDraftError);
     // The 503 body classifies as this code (useTemplateAiDraft's
     // classifyTemplateDraftError) — detect it once and disable AI drafting for
@@ -199,6 +201,7 @@ export function CurateEditor({
 
   useEffect(() => {
     if (!aiConflictUnit) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- applies a one-shot AI 409 rebase: applyServerUnit reads/clears the drafts store and onServerChange refetches the parent rail, so this has to run after commit.
     applyServerUnit(aiConflictUnit);
     clearAiConflict();
     onServerChange();

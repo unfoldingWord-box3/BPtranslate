@@ -418,7 +418,10 @@ interface EditorProps {
 function TemplateEditor({ templateId, direction, onServerChange }: EditorProps) {
   const { t } = useTranslation();
   const [unit, setUnit] = useState<TemplateUnit | null>(null);
-  const [loading, setLoading] = useState(false);
+  // Starts true: this editor is always mounted keyed by its template (see the
+  // callers), so the load effect below runs once per mount and needs no
+  // synchronous loading/staleDraft reset of its own.
+  const [loading, setLoading] = useState(true);
   const [draft, setDraft] = useState("");
   const [preview, setPreview] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -435,8 +438,6 @@ function TemplateEditor({ templateId, direction, onServerChange }: EditorProps) 
   // can't race — is what makes leaving and coming back non-destructive.
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    setStaleDraft(false);
     api
       .getTemplate(templateId)
       .then(async (u) => {
@@ -541,6 +542,7 @@ function TemplateEditor({ templateId, direction, onServerChange }: EditorProps) 
 
   useEffect(() => {
     if (aiDraftError) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- consumes a one-shot AI-draft error from useTemplateAiDraft and clears it in the hook; the AI result path is kept on its post-commit timing rather than reworked into render.
       setErrorMsg(aiDraftError);
       clearAiDraftError();
     }
@@ -551,6 +553,7 @@ function TemplateEditor({ templateId, direction, onServerChange }: EditorProps) 
     // validated out from under us) — apply the fresh row so a retry uses the
     // current version instead of resubmitting the stale one and 409ing again.
     if (aiConflictUnit) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- applies a one-shot AI 409 rebase: applyServerUnit reads/clears the drafts store and onServerChange refetches the parent rail, so this has to run after commit.
       applyServerUnit(aiConflictUnit);
       clearAiConflict();
       onServerChange();

@@ -323,6 +323,7 @@ export default function TranslateAlignScreen({
   // the same three guards the drag canvas uses (AlignScreen.tsx:220-248).
   useEffect(() => {
     tapEditKeyRef.current = null;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- the reset is paired with tapEditKeyRef and the async crash-draft restore, and the persist effect below relies on it committing after the verse-nav cleanup flush (see the tapEditKeyRef comment); a render-time reset would change that ordering.
     setTapState(computedInitial);
     if (!computedInitial || !targetVerse) return;
     const baseVersion = targetVerse.version;

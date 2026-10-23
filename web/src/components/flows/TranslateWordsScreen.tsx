@@ -1162,6 +1162,7 @@ function ArticleDetail({
   // browser) win over the server's target — mirrors ArticlesScreen:513-560.
   useEffect(() => {
     let cancelled = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- draft-hydration load: re-runs on reloadKey without a remount, its resets stay paired with the async draft-store restore below, and the editingPath reset feeds the focus/scroll effect above, so moving it into render would reorder the two.
     setParts(null);
     setLoadError(null);
     setStaleDraft(false);
