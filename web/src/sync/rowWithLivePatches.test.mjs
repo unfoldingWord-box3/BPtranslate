@@ -9,7 +9,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MAX_ATTEMPTS_SENTINEL, rowWithLivePatches } from "./outboxTargeting.ts";
+import { MAX_ATTEMPTS_SENTINEL, isReplayableOp, rowWithLivePatches } from "./outboxTargeting.ts";
 
 const target = { kind: "row", rowKind: "tq", id: "q-1", book: "ZEC" };
 const otherRow = { kind: "row", rowKind: "tq", id: "q-2", book: "ZEC" };
@@ -28,15 +28,39 @@ test("a later pending save for the row is re-applied on top of the confirmed row
   assert.equal(out.question, "Q");
 });
 
-test("an in-flight, conflicted or max-attempts-blocked later op is live too", () => {
+test("an in-flight later op is re-applied too", () => {
+  const out = rowWithLivePatches(server, done, [op("op-2", { response: "ABC" }, { status: "in_flight" })]);
+  assert.equal(out.response, "ABC");
+});
+
+test("a conflicted or max-attempts-blocked later op is not about to land and is not re-applied", () => {
   for (const extra of [
-    { status: "in_flight" },
     { status: "conflict" },
     { status: "failed", lastError: MAX_ATTEMPTS_SENTINEL },
   ]) {
-    const out = rowWithLivePatches(server, done, [op("op-2", { response: "ABC" }, extra)]);
-    assert.equal(out.response, "ABC", JSON.stringify(extra));
+    assert.equal(rowWithLivePatches(server, done, [op("op-2", { response: "ABC" }, extra)]), server, JSON.stringify(extra));
   }
+});
+
+test("isReplayableOp: pending and in_flight only", () => {
+  assert.equal(isReplayableOp({ status: "pending" }), true);
+  assert.equal(isReplayableOp({ status: "in_flight" }), true);
+  assert.equal(isReplayableOp({ status: "conflict" }), false);
+  assert.equal(isReplayableOp({ status: "failed", lastError: MAX_ATTEMPTS_SENTINEL }), false);
+  assert.equal(isReplayableOp({ status: "failed", lastError: "http 400" }), false);
+});
+
+test("the restore marker follows the replayed op, as Shell's local apply does", () => {
+  const restored = { ...server, restored_from_version: 4 };
+  const normal = rowWithLivePatches(restored, done, [op("op-2", { response: "ABC" })]);
+  assert.equal(normal.restored_from_version, null, "a normal edit clears the marker");
+  const revert = rowWithLivePatches(server, done, [op("op-2", { response: "old" }, { restoredFromVersion: 1 })]);
+  assert.equal(revert.restored_from_version, 1, "a revert sets it to the restored version");
+});
+
+test("a row without a restore marker field does not gain one", () => {
+  const out = rowWithLivePatches(server, done, [op("op-2", { response: "ABC" })]);
+  assert.equal("restored_from_version" in out, false);
 });
 
 test("a fatally failed op is not live and is not re-applied", () => {
