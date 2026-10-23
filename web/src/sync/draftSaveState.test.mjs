@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import {
   generationForSavedPlain,
   generationForSuccessfulOp,
+  rowDraftSettledByOp,
   verseDraftHasActiveSave,
 } from "./draftSaveState.ts";
 
@@ -97,4 +98,26 @@ assert.equal(
   "no draft (e.g. quarantined record hidden by drafts.get) means nothing to clear",
 );
 
-console.log("draftSaveState: 18 passed");
+// Issue #616: a row save's 200 cleared the row draft unconditionally. An editor
+// that re-writes its draft against the confirmed version (typing done between
+// Save and the 200) lost that draft when the clear landed after the re-write.
+// A row draft is settled by the op only if it was written at or before the
+// version the op was sent against.
+const rowDraft = (expectedVersion) => ({
+  key: "row:twl:ZEC:w2wo",
+  payload: { patch: { orig_words: "XY" } },
+  expectedVersion,
+  updatedAt: 1,
+  meta: { kind: "row", rowKind: "twl", id: "w2wo", book: "ZEC", chapter: 1, verse: 1 },
+});
+const rowOp = { target: { kind: "row", rowKind: "twl", id: "w2wo", book: "ZEC" }, expectedVersion: 6 };
+assert.equal(rowDraftSettledByOp(rowDraft(6), rowOp), true, "draft at the op's version is settled by its 200");
+assert.equal(rowDraftSettledByOp(rowDraft(4), rowOp), true, "draft older than the op (re-based after a 409) is settled");
+assert.equal(
+  rowDraftSettledByOp(rowDraft(7), rowOp),
+  false,
+  "draft re-written against the confirmed version holds newer typing and survives",
+);
+assert.equal(rowDraftSettledByOp(undefined, rowOp), false, "no draft means nothing to clear");
+
+console.log("draftSaveState: 22 passed");
