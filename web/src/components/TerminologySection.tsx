@@ -547,11 +547,9 @@ function TermRow({
   // sibling a fresh `Term`; without the guard that silently wipes a
   // half-finished edit next door. Paths that *should* replace the draft
   // (cancel, successful save, version_mismatch) all leave edit mode first, so
-  // the resync still fires for them.
-  useEffect(() => {
-    if (editing) return;
-    setDraft(term);
-  }, [term, editing]);
+  // the resync still fires for them. Adjusted during render: outside edit mode
+  // nothing else edits the draft, so this converges once it equals `term`.
+  if (!editing && draft !== term) setDraft(term);
 
   const saveEdit = async () => {
     setBusy(true);
@@ -578,7 +576,7 @@ function TermRow({
         // leaving a stale, silently un-saved edit in place.
       } else if (e instanceof ApiError && e.status === 409) {
         onError(t("preferences.conflict"));
-        // Leave edit mode so the resync effect is allowed to replace the draft
+        // Leave edit mode so the resync is allowed to replace the draft
         // with whatever the refetch brings back — otherwise the guard would
         // keep the stale, unsaved edit on screen.
         setEditing(false);
