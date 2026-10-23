@@ -310,6 +310,7 @@ export default function TranslateScriptureScreen({
       if (s.done === 1 && verseNums.includes(s.verse)) seed[s.verse] = "approved";
     }
     const firstOpen = verseNums.findIndex((v) => !seed[v]);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- builds and seeds the frozen per-chapter queue (cursor, statuses, view) once the chapter payload lands; queue progression is kept on its proven post-commit timing.
     setQueue({ key: chapterKey, verses: verseNums });
     setStatuses(seed);
     if (verse != null) {
@@ -442,6 +443,7 @@ export default function TranslateScriptureScreen({
   useEffect(() => {
     if (view === "done") {
       clearLaneBlurTimeout();
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- paired with clearing the pending blur timer (an external side effect) in the same step; deriving focus mode from view instead would re-arm it when view flips back without a focus event.
       setLaneFocused(false);
     }
   }, [view, clearLaneBlurTimeout]);

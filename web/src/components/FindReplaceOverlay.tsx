@@ -409,6 +409,7 @@ export function FindReplaceOverlay({
   // typing) clamp silently.
   useEffect(() => {
     if (results.length === 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- the clamp is paired with the navTo/onScrollToMatch side effects below, which must run after commit; splitting it would change when the scroll fires relative to the clamp.
       setActiveIdx(0);
       if (wantsScrollRef.current) {
         wantsScrollRef.current = false;

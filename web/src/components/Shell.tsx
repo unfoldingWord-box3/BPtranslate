@@ -523,6 +523,7 @@ export function Shell({
   // that commit so a later remount (e.g. a layout switch) opens as usual.
   const [openOnWords, setOpenOnWords] = useState(initialWordId !== null);
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot cleared after the commit in which ResourceColumn first mounts and reads initialTab; clearing it during render would mount the column with the flag already off.
     if (data && openOnWords) setOpenOnWords(false);
   }, [data, openOnWords]);
   // The same request for a column that is already mounted (#535): bumped by the
@@ -1889,6 +1890,7 @@ export function Shell({
   const [quoteBuildAnchor, setQuoteBuildAnchor] = useState<HTMLElement | null>(null);
   useEffect(() => {
     if (!quoteBuildTarget) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- the anchor is a DOM element looked up after commit (document.querySelector below), so it syncs with the DOM, not with props.
       setQuoteBuildAnchor(null);
       return;
     }
@@ -2394,6 +2396,7 @@ export function Shell({
     setActiveVerse(initialVerse);
     setActiveNoteId(null);
     setActiveWordId(initialWordId);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- the per-chapter reset fans out to the dirty flags, pending nav and aligner state, and the effects below (alignment follow, note-jump) rely on running in the same flush after it; moving it into render changes that ordering.
     if (initialWordId !== null) setWordsTabRequest((r) => ({ tab: "words", nonce: (r?.nonce ?? 0) + 1 }));
     setAlignerTarget(null);
     setDualTarget(null);
@@ -2433,6 +2436,7 @@ export function Shell({
     if (!data) return;
     if (!data.tn.some((r) => r.id === jump.noteId)) return;
     pendingNoteJump = null;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- consumes the module-level pendingNoteJump stash; doing that during render is a side effect a StrictMode double render would lose.
     setActiveWordId(null);
     setActiveNoteId(jump.noteId);
     setScrollNonce((n) => n + 1);
@@ -2446,6 +2450,7 @@ export function Shell({
     if (panelMode !== "alignment") return;
     if (!alignerTarget) return;
     if (alignerTarget.verse === activeVerse && alignerTarget.chapter === chapter) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- runs in the same flush as the chapter-reset effect above, after it, so on a chapter change in alignment mode its write is the one that lands; a render-time version would run before the reset and change the result.
     setAlignerTarget({ ...alignerTarget, chapter, verse: activeVerse });
   }, [activeVerse, chapter, panelMode, alignerTarget]);
 

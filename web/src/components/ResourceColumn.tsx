@@ -454,6 +454,7 @@ export function ResourceColumn({
     if (!requestTab || requestTab.nonce === seenTabRequest.current) return;
     seenTabRequest.current = requestTab.nonce;
     if (tabs.includes(requestTab.tab)) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- the switch lands one commit after Shell's active-row change, so the scroll effect runs once against the old tab and again (via tabRequestScroll) against the new one; moving it into render collapses those runs into one and can change where the list ends up.
       setResourceTab(requestTab.tab);
       setTabRequestScroll((n) => n + 1);
     }
