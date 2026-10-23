@@ -133,10 +133,23 @@ assert.equal(
 const tnDraft = (patch) => ({ ...rowDraft(7), payload: { patch, baseline: { note: "old" } } });
 assert.equal(rowDraftHoldsSaved(tnDraft({ note: "saved" }), { note: "saved" }), true, "draft equal to the saved text");
 assert.equal(rowDraftHoldsSaved(tnDraft({ note: "saved more" }), { note: "saved" }), false, "newer typing survives");
+// A field missing from the patch means "equal to the draft's baseline", not
+// "don't care": saved {q2, r2}, refetch to v+1 mid-save, user types the
+// response back to r1 -> draft {question: q2}. Clearing it would lose r1.
 assert.equal(
-  rowDraftHoldsSaved(tnDraft({ question: "q2" }), { question: "q2", response: "r" }),
+  rowDraftHoldsSaved(tnDraft({ question: "q2" }), { question: "q2", response: "r2" }),
+  false,
+  "partial patch: a saved field missing from the patch keeps the draft",
+);
+assert.equal(
+  rowDraftHoldsSaved(tnDraft({ question: "q2", response: "r2" }), { question: "q2", response: "r2" }),
   true,
-  "partial patch matching the saved fields",
+  "patch covering every saved field with equal values",
+);
+assert.equal(
+  rowDraftHoldsSaved(tnDraft({ question: "q2", response: "r2", ref_raw: "1:2" }), { question: "q2", response: "r2" }),
+  false,
+  "extra field beyond the saved ones keeps the draft",
 );
 assert.equal(
   rowDraftHoldsSaved(tnDraft({ question: "q2", response: "r2" }), { question: "q2", response: "r" }),
@@ -146,4 +159,4 @@ assert.equal(
 assert.equal(rowDraftHoldsSaved(tnDraft({}), { note: "saved" }), false, "empty patch is not ours to clear");
 assert.equal(rowDraftHoldsSaved(undefined, { note: "saved" }), false, "no draft");
 
-console.log("draftSaveState: 29 passed");
+console.log("draftSaveState: 31 passed");
