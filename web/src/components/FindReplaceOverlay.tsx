@@ -467,6 +467,7 @@ export function FindReplaceOverlay({
       };
   const [replaceSummary, setReplaceSummary] = useState<ReplaceSummary | null>(null);
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- clearing noteOverrides re-derives `results`, which the clamp/auto-scroll effect above consumes once per reshape; moving this into render would change which result list that effect navigates on after a query change.
     setReplaceSummary(null);
     setNoteOverrides(new Map());
   }, [find, regex, caseSensitive, scope.bible, scope.tn]);
