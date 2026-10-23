@@ -10,7 +10,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MAX_ATTEMPTS_SENTINEL, hasQueuedDelete, liveUpdateFollowUp, rowWithQueuedPatches } from "./outboxTargeting.ts";
+import { readFileSync } from "node:fs";
+import { MAX_ATTEMPTS_SENTINEL, hasQueuedDelete, liveUpdateFollowUp, rowWithQueuedPatches, withUncommittedOps } from "./outboxTargeting.ts";
 import { applyCacheOp, rowAtVersion } from "../lib/bookCache.ts";
 
 const target = { kind: "row", rowKind: "tq", id: "q-1", book: "ZEC" };
@@ -132,4 +133,27 @@ test("rowWithQueuedPatches keeps the server's version and other fields", () => {
   assert.equal(out.question, "Q2");
   assert.equal(out.version, 3);
   assert.equal(rowWithQueuedPatches(theirs, target, null), theirs);
+});
+
+// #652: a Save made while the follow-up reads the outbox patches the cached
+// row at once, but its IndexedDB write may not have committed yet, so a plain
+// read leaves it out and the follow-up writes the older queued value over it.
+test("#652: a save whose outbox write has not committed is re-applied too", () => {
+  const listed = [op("op-2", { response: "ABC" }, { status: "in_flight", queuedAt: 1 })];
+  const uncommitted = [op("op-3", { response: "ABCD" }, { baseline: { response: "ABC" }, queuedAt: 2 })];
+  assert.deepEqual(liveUpdateFollowUp(theirs, target, listed), { t: "patch", patch: { response: "ABC" } }, "plain read: the older value");
+  assert.deepEqual(liveUpdateFollowUp(theirs, target, withUncommittedOps(listed, uncommitted)), {
+    t: "patch",
+    patch: { response: "ABCD" },
+  });
+});
+
+test("#652: followUpLiveUpdate reads the outbox with the uncommitted ops merged in", () => {
+  const read = (rel) => readFileSync(new URL(rel, import.meta.url), "utf8");
+  const shell = read("../components/Shell.tsx");
+  const body = shell.slice(shell.indexOf("const followUpLiveUpdate = ("), shell.indexOf("const promptRefreshRef"));
+  assert.match(body, /outbox\.listWithUncommitted\(\)/);
+  assert.doesNotMatch(body, /outbox\.list\(\)/);
+  const box = read("./outbox.ts");
+  assert.match(box, /async listWithUncommitted\(\)[^{]*\{\s*return withUncommittedOps\(await listAll\(\), uncommittedRowOps\.values\(\)\);/);
 });
