@@ -228,8 +228,27 @@ assert.deepEqual(
   "A2: a surviving draft's baseline takes the values this op sent, other fields untouched",
 );
 assert.equal(rebased?.generation, "g1", "the rebase keeps the draft's identity");
-const deferred = rowDraftAfterOp(based({ note: "N1" }, { note: "N0" }), opA, [queuedOp()]);
-assert.deepEqual(deferred?.payload?.baseline, { note: "N1" }, "a deferred draft is rebased to what the server now holds");
+// #618 review round 3, Claude F1: a deferred draft keeps its baseline. Save N1
+// (A), save N2 (B), type back to N1, leave. If A's 200 rebased the baseline to
+// N1, reopening the row before B lands would see draft == baseline, drop the
+// draft, and B would leave N2 on the server: N1 lost. Only the last op rebases.
+assert.equal(
+  rowDraftAfterOp(based({ note: "N1" }, { note: "N0" }), opA, [queuedOp()]),
+  undefined,
+  "F1: a deferred draft is left untouched (no baseline rebase while a later op is queued)",
+);
+// Codex F2: A's settle read the outbox while B was live, then B settled and
+// rebased the baseline to N2. A must not write its N1 over that.
+assert.equal(
+  rowDraftAfterOp(based({ note: "N1" }, { note: "N2" }), opA, [opA, queuedOp()]),
+  undefined,
+  "F2: a settle that saw a later op queued writes nothing, so it cannot undo the later op's rebase",
+);
+assert.equal(
+  rowDraftAfterOp(based({ note: "N1 more" }, { note: "N0" }), opA, null),
+  undefined,
+  "an unreadable outbox neither clears nor rebases",
+);
 assert.equal(
   rowDraftAfterOp(based({ note: "N1 more" }, { question: "q0" }), opA, [opA]),
   undefined,
