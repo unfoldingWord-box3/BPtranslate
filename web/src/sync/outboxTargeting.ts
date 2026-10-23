@@ -30,6 +30,7 @@
 // section of outboxTargeting.test.mjs.
 
 import type { OpTarget, OutboxOp, OutboxResult } from "./outbox.ts";
+import { wouldAutoHeal } from "./rowConflict.ts";
 
 /** `lastError` stamped on an op that ran out of retries (see outbox.ts's
  * MAX_ATTEMPTS). Single-sourced here so drainPass, reviveMaxAttemptsFailed,
@@ -138,22 +139,102 @@ export function isReplayableOp(o: TargetingOp): boolean {
 // read after `done` was removed (it is excluded by id anyway); null or
 // undefined (unread or unreadable) falls back to the server row, as before
 // this fix. Returns `row` itself when nothing applies.
+//
+// Known gaps (#637 items 2 and 3, left as they are): `queued` is read once,
+// before the listeners run, so a save whose outbox write commits after that
+// read is missing from it until its own result arrives (a window of a few
+// milliseconds). And the outbox is shared by every tab of the workspace, so a
+// save waiting in another tab is re-applied here too; it is about to land
+// from that tab's drain anyway, so this is the same optimistic display, just
+// for a save typed elsewhere.
 export function rowWithLivePatches<R extends object>(
   row: R,
   done: Pick<OutboxOp, "id" | "target">,
   queued: OutboxOp[] | null | undefined,
 ): R {
+  return rowWithQueuedPatches(row, done.target, queued, done.id);
+}
+
+// rowWithLivePatches without a settled op: re-apply the row's pending or
+// in-flight saves on top of a server row that arrived some other way (a live
+// update from another user, #637 item 5). `excludeId` skips one op by id;
+// `keep`, when given, must also accept an op (judged against the row built so
+// far) for it to be re-applied.
+export function rowWithQueuedPatches<R extends object>(
+  row: R,
+  target: OpTarget,
+  queued: OutboxOp[] | null | undefined,
+  excludeId?: string,
+  keep?: (o: OutboxOp, soFar: R) => boolean,
+): R {
   if (!queued) return row;
-  const key = targetKey(done.target);
+  const key = targetKey(target);
   let out = row;
   for (const o of queued) {
-    if (o.id === done.id || o.action !== "patch" || !isReplayableOp(o)) continue;
+    if (o.id === excludeId || o.action !== "patch" || !isReplayableOp(o)) continue;
     if (targetKey(o.target) !== key) continue;
     if (!o.patch || typeof o.patch !== "object") continue;
+    if (keep && !keep(o, out)) continue;
     out = { ...out, ...o.patch };
     if ("restored_from_version" in out) {
       out = { ...out, restored_from_version: o.restoredFromVersion ?? null };
     }
   }
   return out;
+}
+
+// Whether the outbox holds a delete for this row that is about to land
+// (#637 item 4). A row removed from the cache by a waiting delete must not be
+// put back by a live update for it.
+export function hasQueuedDelete(target: OpTarget, queued: OutboxOp[] | null | undefined): boolean {
+  if (!queued) return false;
+  const key = targetKey(target);
+  return queued.some((o) => o.action === "delete" && isReplayableOp(o) && targetKey(o.target) === key);
+}
+
+// What to do once the outbox has been read after another user's live update
+// (WebSocket "insert" or "replace") put the server's row in the cache (#637).
+// That row drops this user's saves still waiting in the outbox, so their
+// fields are patched back on top (item 5, the same rule rowWithLivePatches
+// uses after a 200), and a row a waiting delete had removed is taken back out
+// (item 4). Only ops that will land on top of this server row count: a
+// patch sent at its version, or one the outbox's own 409 rule would auto-heal
+// (wouldAutoHeal), each judged against the server row plus the waiting saves
+// kept before it (a chained AB→ABC, ABC→ABCD lands whole once the first
+// threads its version to the second); a delete only when sent at its version
+// (deletes never auto-heal). An op about to hit a genuine conflict is left
+// off, so the cache shows the other user's value rather than ours stamped
+// with their version (a later save from there would overwrite theirs with no
+// 409). Null when the outbox could not be read or nothing waits for the row.
+// The caller applies the result only if the cached row is still at the
+// broadcast row's version (rowAtVersion in lib/bookCache.ts, checked inside
+// the state updater): the read is async, and if something newer landed
+// meanwhile the queued values may be older than its fields (review F4).
+export type LiveUpdateFollowUp = { t: "delete" } | { t: "patch"; patch: Record<string, unknown> };
+export function liveUpdateFollowUp(
+  server: { version: number },
+  target: OpTarget,
+  queued: OutboxOp[] | null | undefined,
+): LiveUpdateFollowUp | null {
+  if (!queued) return null;
+  const atVersion = (o: OutboxOp) => o.expectedVersion === server.version;
+  if (hasQueuedDelete(target, queued.filter(atVersion))) return { t: "delete" };
+  // Rebuilt on the full server row so each op is judged against what is
+  // there once the saves kept before it have landed; only the kept saves'
+  // fields go in the patch.
+  const full = server as Record<string, unknown>;
+  const keys = new Set<string>();
+  const row = rowWithQueuedPatches(full, target, queued, undefined, (o, soFar) => {
+    const lands = atVersion(o) || wouldAutoHeal(o, soFar);
+    if (lands) for (const k of Object.keys(o.patch ?? {})) keys.add(k);
+    return lands;
+  });
+  // No waiting save, or only ones with an empty patch: nothing to put back.
+  if (keys.size === 0) return null;
+  const patch: Record<string, unknown> = {};
+  for (const k of keys) patch[k] = row[k];
+  // rowWithQueuedPatches sets restored_from_version per replayed op on rows
+  // that carry the field.
+  if ("restored_from_version" in row) patch.restored_from_version = row.restored_from_version;
+  return { t: "patch", patch };
 }

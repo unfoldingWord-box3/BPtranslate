@@ -19,7 +19,7 @@ import {
   type CheckLane,
 } from "./api";
 import { backoffMs } from "./backoff";
-import { classifyRowPatchConflict } from "./rowConflict";
+import { isSortOrderOnlyPatch, wouldAutoHeal } from "./rowConflict";
 import { isLaneFrozen, laneFreezeReason } from "./laneFreeze";
 import {
   MAX_ATTEMPTS_SENTINEL,
@@ -74,14 +74,6 @@ const STORE = "ops";
 // connection or session comes back (see reviveMaxAttemptsFailed).
 const MAX_ATTEMPTS = 20;
 
-// Cap on silent re-arm-and-retry after a 409 that we judged spurious — either a
-// reorder-only patch (sort_order is transient last-write-wins, see api/src/rows.ts
-// "transient fields like sort_order") or a content patch that doesn't genuinely
-// conflict with the server's current row (see classifyRowPatchConflict). Neither
-// should surface a conflict prompt. This cap stops a pathological loop if another
-// writer is bumping the same row faster than we can land — beyond it, fall through
-// to the normal conflict flow.
-const MAX_CONFLICT_AUTOHEAL = 5;
 
 // recoverInFlight only re-arms in_flight ops at least this stale. A live
 // request can't outlast its api.ts timeout, so 2× that means "the tab that
@@ -925,14 +917,6 @@ async function threadVersionToSiblings(done: OutboxOp, updated: unknown) {
   await tx.done;
 }
 
-// A reorder enqueues a patch whose only field is sort_order. Such patches are
-// last-write-wins and must never raise a user-facing conflict — they auto-heal
-// against the server's current version instead.
-function isSortOrderOnlyPatch(patch: Record<string, unknown>): boolean {
-  const keys = Object.keys(patch);
-  return keys.length === 1 && keys[0] === "sort_order";
-}
-
 async function drainPass() {
   const youngInFlightEligibleAt = await recoverInFlight();
   // Targets this pass has itself just parked as conflict/retry-backoff
@@ -1095,20 +1079,8 @@ async function drainPass() {
             stored.target.kind === "row" &&
             stored.action === "patch" &&
             isSortOrderOnlyPatch(stored.patch);
-          const nonConflictingContent =
-            stored.target.kind === "row" &&
-            stored.action === "patch" &&
-            !sortOrderOnly &&
-            classifyRowPatchConflict(
-              stored.patch,
-              stored.baseline,
-              result.current as Record<string, unknown>,
-            ) === "auto_heal";
-          if (
-            (sortOrderOnly || nonConflictingContent) &&
-            typeof serverVersion === "number" &&
-            (stored.conflictRetries ?? 0) < MAX_CONFLICT_AUTOHEAL
-          ) {
+          // wouldAutoHeal also checks that serverVersion is a number.
+          if (wouldAutoHeal(stored, result.current) && typeof serverVersion === "number") {
             stored.status = "pending";
             stored.expectedVersion = serverVersion;
             stored.conflictRetries = (stored.conflictRetries ?? 0) + 1;

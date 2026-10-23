@@ -18,6 +18,7 @@ import {
   type LaneCheckState,
 } from "../sync/api";
 import { fetchWithRetry } from "../sync/fetchWithRetry";
+import { rowAtVersion } from "../lib/bookCache";
 import { onOutboxResult } from "../sync/outbox";
 import { rowWithLivePatches } from "../sync/outboxTargeting";
 
@@ -30,9 +31,16 @@ export interface UseChapterReturn {
   /** Incremented every failed attempt during the current retry loop. Useful for showing "reconnecting…". */
   retryAttempts: number;
   refetch: () => Promise<void>;
-  applyLocalRowPatch: (kind: "tn" | "tq" | "twl", id: string, patch: Partial<TnRow & TqRow & TwlRow>) => void;
+  /** With `onlyAtVersion`, applied only if the cached row is at that version (rowAtVersion). */
+  applyLocalRowPatch: (
+    kind: "tn" | "tq" | "twl",
+    id: string,
+    patch: Partial<TnRow & TqRow & TwlRow>,
+    onlyAtVersion?: number,
+  ) => void;
   applyLocalRowReplacement: (kind: "tn" | "tq" | "twl", row: TnRow | TqRow | TwlRow) => void;
-  applyLocalRowDelete: (kind: "tn" | "tq" | "twl", id: string) => void;
+  /** With `onlyAtVersion`, applied only if the cached row is at that version (rowAtVersion). */
+  applyLocalRowDelete: (kind: "tn" | "tq" | "twl", id: string, onlyAtVersion?: number) => void;
   applyLocalRowInsert: (
     kind: "tn" | "tq" | "twl",
     row: TnRow | TqRow | TwlRow,
@@ -102,10 +110,11 @@ export function useChapter(book: string, chapter: number): UseChapterReturn {
   }, [refetch]);
 
   const applyLocalRowPatch = useCallback<UseChapterReturn["applyLocalRowPatch"]>(
-    (kind, id, patch) => {
+    (kind, id, patch, onlyAtVersion) => {
       setData((prev) => {
         if (!prev) return prev;
         const list = prev[kind] as Array<TnRow | TqRow | TwlRow>;
+        if (!rowAtVersion(list.find((r) => r.id === id), onlyAtVersion)) return prev;
         const next = list.map((r) => (r.id === id ? { ...r, ...patch } : r));
         return { ...prev, [kind]: next } as ChapterPayload;
       });
@@ -126,10 +135,11 @@ export function useChapter(book: string, chapter: number): UseChapterReturn {
   );
 
   const applyLocalRowDelete = useCallback<UseChapterReturn["applyLocalRowDelete"]>(
-    (kind, id) => {
+    (kind, id, onlyAtVersion) => {
       setData((prev) => {
         if (!prev) return prev;
         const list = prev[kind] as Array<TnRow | TqRow | TwlRow>;
+        if (!rowAtVersion(list.find((r) => r.id === id), onlyAtVersion)) return prev;
         const next = list.filter((r) => r.id !== id);
         return { ...prev, [kind]: next } as ChapterPayload;
       });

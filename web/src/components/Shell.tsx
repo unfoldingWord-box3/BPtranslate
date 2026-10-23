@@ -119,6 +119,7 @@ import { ExportUsfmButton, type ExportUsfmButtonHandle } from "./ExportUsfmButto
 import { PipelineMenu } from "./PipelineMenu";
 import { pipelineStore, getSessionKey, type PipelineJob } from "../sync/pipelineStore";
 import { onOutboxResult } from "../sync/outbox";
+import { liveUpdateFollowUp } from "../sync/outboxTargeting";
 import { AiCompletionToasts } from "./AiCompletionToasts";
 import { UnsavedToasts } from "./UnsavedToasts";
 import { QuoteBuilderPopper } from "./QuoteBuilderPopper";
@@ -323,9 +324,9 @@ export function Shell({
   // than on `bookHook`, which is a fresh object on every App render.
   const bookChapters = bookHook?.chapters;
   const applyLocalRowPatch = useCallback<typeof applyChapterRowPatch>(
-    (kind, id, patch) => {
-      applyChapterRowPatch(kind, id, patch);
-      if (kind === "tn") bookPatchRow?.("tn", 0, id, patch);
+    (kind, id, patch, onlyAtVersion) => {
+      applyChapterRowPatch(kind, id, patch, onlyAtVersion);
+      if (kind === "tn") bookPatchRow?.("tn", 0, id, patch, onlyAtVersion);
     },
     [applyChapterRowPatch, bookPatchRow],
   );
@@ -348,9 +349,9 @@ export function Shell({
     [applyChapterRowInsert, bookInsertRow, chapter],
   );
   const applyLocalRowDelete = useCallback<typeof applyChapterRowDelete>(
-    (kind, id) => {
-      applyChapterRowDelete(kind, id);
-      if (kind === "tn") bookDeleteRow?.("tn", 0, id);
+    (kind, id, onlyAtVersion) => {
+      applyChapterRowDelete(kind, id, onlyAtVersion);
+      if (kind === "tn") bookDeleteRow?.("tn", 0, id, onlyAtVersion);
     },
     [applyChapterRowDelete, bookDeleteRow],
   );
@@ -365,6 +366,41 @@ export function Shell({
   useEffect(() => {
     dataRef.current = data;
   }, [data]);
+  // The open book, for the live-update follow-up below: its outbox read is
+  // async, and row ids are only unique within a book, so a follow-up that
+  // resolves after the user switched books must not touch the new book's
+  // rows. Set in a layout effect so it matches the committed screen.
+  const bookRef = useRef(book);
+  useLayoutEffect(() => {
+    bookRef.current = book;
+  }, [book]);
+  // After a live insert or replace put the server's row in a cache, that row
+  // has dropped this user's saves still waiting in the outbox (this tab's own
+  // save is broadcast back to it too, often before its 200). Put them back on
+  // top, and take back out a row a waiting delete had removed (#637 items 4
+  // and 5). The outbox read is async, so the server row shows for a few
+  // milliseconds. The follow-up passes the broadcast row's version, so it is
+  // skipped, inside the state updater, if the cached row changed meanwhile
+  // (rowAtVersion). Used by the open chapter's room and the book-intro room.
+  const followUpLiveUpdate = (
+    kind: "tn" | "tq" | "twl",
+    row: TnRow | TqRow | TwlRow,
+    patchRow: (patch: Record<string, unknown>, onlyAtVersion: number) => void,
+    deleteRow: (onlyAtVersion: number) => void,
+  ) => {
+    const target = { kind: "row", rowKind: kind, id: row.id, book: row.book } as const;
+    void outbox.list().then(
+      (queued) => {
+        if (row.book !== bookRef.current) return;
+        const next = liveUpdateFollowUp(row, target, queued);
+        if (next?.t === "delete") deleteRow(row.version);
+        else if (next?.t === "patch") patchRow(next.patch, row.version);
+      },
+      () => {
+        /* outbox unreadable: the server row stays, as before */
+      },
+    );
+  };
   // The "save & refresh" prompt helper is defined further down (it depends on
   // toast state declared after this hook), so the WS handler reaches it through
   // a ref, mirroring dataRef above.
@@ -383,6 +419,14 @@ export function Shell({
       const action = broadcastUpsertAction(kind, list?.find((r) => r.id === row.id), row);
       if (action === "insert") applyLocalRowInsert(kind, row);
       else if (action === "replace") applyLocalRowReplacement(kind, row);
+      if (action === "insert" || action === "replace") {
+        followUpLiveUpdate(
+          kind,
+          row,
+          (patch, v) => applyLocalRowPatch(kind, row.id, patch, v),
+          (v) => applyLocalRowDelete(kind, row.id, v),
+        );
+      }
       // This room is scoped to the open {book, chapter}, so any row.upserted
       // here is for this book. The server may have flipped lint-relevant state
       // without moving row content or version — e.g. a no-op review-flag clear
@@ -598,6 +642,12 @@ export function Shell({
       // rule (newer version, or a same-version preserve/hint/trash flip) —
       // also when replayed onto a chapter-0 fetch still in flight.
       bookInsertRow?.("tn", row);
+      followUpLiveUpdate(
+        "tn",
+        row,
+        (patch, v) => bookPatchRow?.("tn", 0, row.id, patch, v),
+        (v) => bookDeleteRow?.("tn", 0, row.id, v),
+      );
       // Book lint covers chapter-0 tN too.
       scheduleLintRefetch();
     },
