@@ -26,7 +26,7 @@ const theirs = { id: "q-1", book: "ZEC", chapter: 1, verse: 1, question: "Q2", r
 test("item 5: this user's waiting save goes back on top of another user's live update", () => {
   const out = liveUpdateFollowUp(theirs, target, [
     op("op-2", { response: "ABC" }, { status: "in_flight" }),
-    op("op-3", { response: "ABCD" }),
+    op("op-3", { response: "ABCD" }, { baseline: { response: "ABC" } }),
     { ...op("op-x", { response: "other" }), target: otherRow },
   ]);
   assert.deepEqual(out, { t: "patch", patch: { response: "ABCD" } });
@@ -86,6 +86,35 @@ test("only a waiting save that will land on top is re-applied (Claude F2)", () =
   // Mixed: the conflicting one is left off, the healable one kept.
   const out = liveUpdateFollowUp(xyz, target, [op("op-2", { response: "ABC" }), op("op-3", { question: "Q3" }, { baseline: { question: "Q2" } })]);
   assert.deepEqual(out, { t: "patch", patch: { question: "Q3" } });
+});
+
+test("chained saves to one field are judged against the row built so far (Codex)", () => {
+  // AB→ABC then ABC→ABCD, while another user changed only the question.
+  const out = liveUpdateFollowUp(theirs, target, [
+    op("op-2", { response: "ABC" }),
+    op("op-3", { response: "ABCD" }, { baseline: { response: "ABC" } }),
+  ]);
+  assert.deepEqual(out, { t: "patch", patch: { response: "ABCD" } });
+  // Once the first is left off as a genuine conflict, the second is judged
+  // against the other user's value and left off too.
+  const xyz = { ...theirs, response: "XYZ" };
+  assert.equal(
+    liveUpdateFollowUp(xyz, target, [op("op-2", { response: "ABC" }), op("op-3", { response: "ABCD" }, { baseline: { response: "ABC" } })]),
+    null,
+  );
+});
+
+test("the same auto-heal rule as the outbox: reorders land, the retry cap does not (Claude F2, F3)", () => {
+  const moved = { ...theirs, sort_order: 7 };
+  assert.deepEqual(liveUpdateFollowUp(moved, target, [op("op-2", { sort_order: 2 }, { baseline: undefined })]), {
+    t: "patch",
+    patch: { sort_order: 2 },
+  });
+  assert.equal(liveUpdateFollowUp(theirs, target, [op("op-2", { response: "ABC" }, { conflictRetries: 5 })]), null);
+  assert.deepEqual(liveUpdateFollowUp(theirs, target, [op("op-2", { response: "ABC" }, { conflictRetries: 4 })]), {
+    t: "patch",
+    patch: { response: "ABC" },
+  });
 });
 
 test("item 4: a waiting delete takes the row back out only when sent at the broadcast's version (Claude F1)", () => {
