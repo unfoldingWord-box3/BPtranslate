@@ -576,7 +576,9 @@ function NoteCardInner({
   // Clear the in-flight gate once the server-confirmed version moves past
   // the one we saved against. A conflict (409) keeps row.version stuck and
   // savePendingVersion stays set — that's intentional, the user has to
-  // resolve via the SyncStatusBar before sending another save. Adjusted during
+  // resolve via the SyncStatusBar before sending another save. A save that ends
+  // without landing (fatal, "locked", discarded) clears it in the save-end
+  // listener below instead, since the version never moves (#660). Adjusted during
   // render, in the same pass as the `saved` rebase above, so both react to the
   // version bump together.
   if (savePendingVersion !== null && row.version > savePendingVersion) {
@@ -1128,7 +1130,12 @@ function NoteCardInner({
       const sent = sentRef.current;
       if (!sent || !isPendingRowSave(sent.patch as Record<string, unknown>, op, target)) return;
       sentRef.current = null;
-      if (rerun) setSentTick((n) => n + 1);
+      if (rerun) {
+        setSentTick((n) => n + 1);
+        // A save that ended without landing never moves the version, so the
+        // Save gate would stay shut (#660).
+        setSavePendingVersion(null);
+      }
     };
     const offResult = onOutboxResult((op, result) => {
       if (rowSaveEnded(result)) end(op, result.kind !== "ok");
