@@ -1,24 +1,33 @@
 // A row editor's hold on the text of its refused saves (refusedSaveHold.ts,
-// issue #637 item 1). Call `noteSave(patch)` with the exact patch a Save hands
-// to the outbox, and check `keepsHeld(field, local)` before a field adopts a
-// new row value. `onRelease` runs when the user discards a held save, with the
-// patch it sent, so the editor can put the row's value back in each field
-// still showing it.
+// issue #637 item 1).
+//   * `noteSave(patch, version)`: call with the exact patch a Save hands to the
+//     outbox and the row version it is sent at.
+//   * In the effect that reconciles fields with a changed row: call
+//     `rowChanged(row.version)` once, then `decide(field, local, released)` per
+//     field ("keep" the local text, "adopt" the row's new value, or
+//     "reconcile" as usual). `local` is in the form the Save sends.
+//   * `onRelease` runs when the user discards a held save or the row's draft,
+//     with the fields still held, so the editor can put the row's value back in
+//     each field still showing them.
 
 import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { onOutboxDrop, onOutboxResult } from "../sync/outbox";
+import { onDraftDiscarded, rowKey } from "../sync/drafts";
+import type { RowKind } from "../sync/api";
 import {
   EMPTY_HOLD,
+  holdDecision,
+  holdOnDraftDiscard,
   holdOnDrop,
   holdOnResult,
+  holdOnRowVersion,
   holdOnSave,
-  keepsHeldText,
   type Fields,
   type HoldState,
 } from "../sync/refusedSaveHold";
 
 export function useRefusedSaveHold(
-  rowKind: string,
+  rowKind: RowKind,
   id: string,
   book: string,
   onRelease: (released: Fields) => void,
@@ -32,6 +41,7 @@ export function useRefusedSaveHold(
   useEffect(() => {
     stateRef.current = EMPTY_HOLD;
     const target = { rowKind, id, book };
+    const key = rowKey(rowKind, book, id);
     const offResult = onOutboxResult((op, result) => {
       stateRef.current = holdOnResult(stateRef.current, op, result, target);
     });
@@ -40,18 +50,30 @@ export function useRefusedSaveHold(
       stateRef.current = state;
       if (released) onReleaseRef.current(released);
     });
+    const offDiscard = onDraftDiscarded((k) => {
+      if (k !== key) return;
+      const { state, released } = holdOnDraftDiscard(stateRef.current);
+      stateRef.current = state;
+      for (const f of released) onReleaseRef.current(f);
+    });
     return () => {
       offResult();
       offDrop();
+      offDiscard();
     };
   }, [rowKind, id, book]);
 
-  const noteSave = useCallback((patch: Fields) => {
-    stateRef.current = holdOnSave(stateRef.current, patch);
+  const noteSave = useCallback((patch: Fields, version: number) => {
+    stateRef.current = holdOnSave(stateRef.current, patch, version);
   }, []);
-  const keepsHeld = useCallback(
-    (field: string, local: unknown) => keepsHeldText(stateRef.current, field, local),
+  const rowChanged = useCallback((version: number): Fields[] => {
+    const { state, released } = holdOnRowVersion(stateRef.current, version);
+    stateRef.current = state;
+    return released;
+  }, []);
+  const decide = useCallback(
+    (field: string, local: unknown, released: Fields[]) => holdDecision(stateRef.current, released, field, local),
     [],
   );
-  return { noteSave, keepsHeld };
+  return { noteSave, rowChanged, decide };
 }

@@ -82,7 +82,7 @@ function QuestionCardInner({
   const baselineRef = useRef(tqCardBaseline(row));
   // Text of a refused save stays when the row is rebuilt to the server's copy
   // (#637 item 1); discarding that save puts the row's value back.
-  const { noteSave, keepsHeld } = useRefusedSaveHold("tq", row.id, row.book, (released) => {
+  const { noteSave, rowChanged, decide } = useRefusedSaveHold("tq", row.id, row.book, (released) => {
     const base = baselineRef.current;
     if ("question" in released) setQuestion((q) => (q === released.question ? base.question : q));
     if ("response" in released) setResponse((r) => (r === released.response ? base.response : r));
@@ -91,9 +91,14 @@ function QuestionCardInner({
     const prev = baselineRef.current;
     const next = tqCardBaseline({ question: row.question, response: row.response });
     baselineRef.current = next;
-    setQuestion((q) => (keepsHeld("question", q) ? q : reconcileField(prev.question, next.question, q)));
-    setResponse((r) => (keepsHeld("response", r) ? r : reconcileField(prev.response, next.response, r)));
-  }, [row.question, row.response, keepsHeld]);
+    const released = rowChanged(row.version);
+    const pick = (field: string, p: string, n: string, local: string): string => {
+      const d = decide(field, local, released);
+      return d === "keep" ? local : d === "adopt" ? n : reconcileField(p, n, local);
+    };
+    setQuestion((q) => pick("question", prev.question, next.question, q));
+    setResponse((r) => pick("response", prev.response, next.response, r));
+  }, [row.question, row.response, row.version, rowChanged, decide]);
 
   const draftKey = useMemo(() => rowKey("tq", row.book, row.id), [row.book, row.id]);
 
@@ -167,7 +172,7 @@ function QuestionCardInner({
 
   const handleSave = () => {
     if (!isDirty) return;
-    noteSave(diff);
+    noteSave(diff, row.version);
     onSave(diff);
   };
 

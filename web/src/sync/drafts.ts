@@ -135,6 +135,13 @@ function db() {
 
 const subscribers = new Set<Subscriber>();
 
+// Called with the key of each draft the user discarded (drafts.discard).
+const discardListeners = new Set<(key: string) => void>();
+export function onDraftDiscarded(fn: (key: string) => void): () => void {
+  discardListeners.add(fn);
+  return () => discardListeners.delete(fn);
+}
+
 // Synchronous mirror of "a draft was written this session and not yet cleared".
 // The subscription-driven signal (useUnsavedGuard's hasDrafts) only updates
 // after an async listAll()+notify round-trip, which lags the set() call — a
@@ -373,6 +380,21 @@ export const drafts = {
     latestGenerationByKey.delete(key);
     await (await db()).delete(STORE, key);
     void notify();
+  },
+
+  // The user threw this draft away (the unsaved list's Discard). Clears it,
+  // then tells this tab's onDraftDiscarded listeners, so an editor still
+  // showing the text (a refused save it holds, #637 item 1) puts the row's
+  // value back instead of writing the draft again.
+  async discard(key: string): Promise<void> {
+    await drafts.clear(key);
+    for (const l of discardListeners) {
+      try {
+        l(key);
+      } catch (e) {
+        console.warn("draft discard listener failed", e);
+      }
+    }
   },
 
   // Delete only the exact draft generation that produced a successful save.

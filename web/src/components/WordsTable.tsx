@@ -440,7 +440,7 @@ const WordRow = memo(function WordRow({
   // Text of a refused save stays when the row is rebuilt to the server's copy
   // (#637 item 1); discarding that save puts the row's value back. The held
   // patch uses the row's field names (twlDiff).
-  const { noteSave, keepsHeld } = useRefusedSaveHold("twl", row.id, row.book, (released) => {
+  const { noteSave, rowChanged, decide } = useRefusedSaveHold("twl", row.id, row.book, (released) => {
     const base = baselineRef.current;
     if ("orig_words" in released) setQuote((q) => (q === released.orig_words ? base.quote : q));
     if ("tw_link" in released) setTwLink((l) => (l === released.tw_link ? base.twLink : l));
@@ -450,10 +450,15 @@ const WordRow = memo(function WordRow({
     const prev = baselineRef.current;
     const next = twlBaseline({ orig_words: row.orig_words, tw_link: row.tw_link, occurrence: row.occurrence });
     baselineRef.current = next;
-    setQuote((q) => (keepsHeld("orig_words", q) ? q : reconcileField(prev.quote, next.quote, q)));
-    setTwLink((l) => (keepsHeld("tw_link", l) ? l : reconcileField(prev.twLink, next.twLink, l)));
-    setOccurrence((o) => (keepsHeld("occurrence", o) ? o : reconcileField(prev.occurrence, next.occurrence, o)));
-  }, [row.orig_words, row.tw_link, row.occurrence, keepsHeld]);
+    const released = rowChanged(row.version);
+    const pick = <T,>(field: string, p: T, n: T, local: T): T => {
+      const d = decide(field, local, released);
+      return d === "keep" ? local : d === "adopt" ? n : reconcileField(p, n, local);
+    };
+    setQuote((q) => pick("orig_words", prev.quote, next.quote, q));
+    setTwLink((l) => pick("tw_link", prev.twLink, next.twLink, l));
+    setOccurrence((o) => pick("occurrence", prev.occurrence, next.occurrence, o));
+  }, [row.orig_words, row.tw_link, row.occurrence, row.version, rowChanged, decide]);
 
   const draftKey = useMemo(() => rowKey("twl", row.book, row.id), [row.book, row.id]);
 
@@ -533,7 +538,7 @@ const WordRow = memo(function WordRow({
 
   const handleSave = () => {
     if (!isDirty) return;
-    noteSave(diff);
+    noteSave(diff, row.version);
     onSave(diff);
   };
 

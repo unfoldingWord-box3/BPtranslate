@@ -658,7 +658,9 @@ function NoteCardInner({
   // it here would drop the text from the screen and, through the no-diff
   // clear below, from the drafts store. The held patch is in the TSV form
   // flushPending sends. Discarding that save puts the saved value back.
-  const { noteSave, keepsHeld } = useRefusedSaveHold("tn", row.id, row.book, (released) => {
+  // A field adopts the row's value unless it is held, so a hold the server
+  // moved past (rowChanged) simply ends here.
+  const { noteSave, rowChanged, decide } = useRefusedSaveHold("tn", row.id, row.book, (released) => {
     const saved = savedRef.current;
     if ("quote" in released) setQuote((q) => (toTsv(q) === released.quote ? tsvToDisplay(saved.quote) : q));
     if ("note" in released) setNote((n) => (toTsv(n) === released.note ? tsvToDisplay(saved.note) : n));
@@ -669,18 +671,21 @@ function NoteCardInner({
   useEffect(() => {
     if (sessionSnapshotRef.current !== null) return;
     if ("quote" in pendingRef.current) return;
-    setQuote((q) => (keepsHeld("quote", toTsv(q)) ? q : tsvToDisplay(row.quote)));
-  }, [row.id, row.version, row.quote, keepsHeld]);
+    rowChanged(row.version);
+    setQuote((q) => (decide("quote", toTsv(q), []) === "keep" ? q : tsvToDisplay(row.quote)));
+  }, [row.id, row.version, row.quote, rowChanged, decide]);
   useEffect(() => {
     if (sessionSnapshotRef.current !== null) return;
     if ("note" in pendingRef.current) return;
-    setNote((n) => (keepsHeld("note", toTsv(n)) ? n : tsvToDisplay(row.note)));
-  }, [row.id, row.version, row.note, keepsHeld]);
+    rowChanged(row.version);
+    setNote((n) => (decide("note", toTsv(n), []) === "keep" ? n : tsvToDisplay(row.note)));
+  }, [row.id, row.version, row.note, rowChanged, decide]);
   useEffect(() => {
     if (sessionSnapshotRef.current !== null) return;
     if ("support_reference" in pendingRef.current) return;
-    setSupportRef((s) => (keepsHeld("support_reference", s) ? s : row.support_reference));
-  }, [row.id, row.version, row.support_reference, keepsHeld]);
+    rowChanged(row.version);
+    setSupportRef((s) => (decide("support_reference", s, []) === "keep" ? s : row.support_reference));
+  }, [row.id, row.version, row.support_reference, rowChanged, decide]);
 
   // Restore unsaved typing on first mount. If a draft exists for this row,
   // overwrite local state from its patch — otherwise the user's typing
@@ -786,7 +791,7 @@ function NoteCardInner({
     // with the same If-Match, the second of which lands as a phantom 409.
     setSavePendingVersion(savedRef.current.version);
     sentRef.current = { patch };
-    noteSave(patch);
+    noteSave(patch, row.version);
     onSave(patch);
     // Rebase the snapshot so the chip stops showing "*" after a manual
     // save and a follow-up Undo reverts to the just-saved state.
@@ -912,7 +917,7 @@ function NoteCardInner({
     if (Object.keys(patch).length === 0) return;
     onChange(patch);
     sentRef.current = { patch };
-    noteSave(patch);
+    noteSave(patch, row.version);
     onSave(patch, { restoredFromVersion: fromVersion });
   };
 

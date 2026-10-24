@@ -126,7 +126,7 @@ const Row = memo(function Row({
   const baselineRef = useRef(tqTableBaseline(row));
   // Text of a refused save stays when the row is rebuilt to the server's copy
   // (#637 item 1); discarding that save puts the row's value back.
-  const { noteSave, keepsHeld } = useRefusedSaveHold("tq", row.id, row.book, (released) => {
+  const { noteSave, rowChanged, decide } = useRefusedSaveHold("tq", row.id, row.book, (released) => {
     const base = baselineRef.current;
     if ("ref_raw" in released) setRefRaw((v) => (v === released.ref_raw ? base.refRaw : v));
     if ("question" in released) setQuestion((q) => (q === released.question ? base.question : q));
@@ -136,10 +136,15 @@ const Row = memo(function Row({
     const prev = baselineRef.current;
     const next = tqTableBaseline({ ref_raw: row.ref_raw, question: row.question, response: row.response });
     baselineRef.current = next;
-    setRefRaw((v) => (keepsHeld("ref_raw", v) ? v : reconcileField(prev.refRaw, next.refRaw, v)));
-    setQuestion((q) => (keepsHeld("question", q) ? q : reconcileField(prev.question, next.question, q)));
-    setResponse((r) => (keepsHeld("response", r) ? r : reconcileField(prev.response, next.response, r)));
-  }, [row.ref_raw, row.question, row.response, keepsHeld]);
+    const released = rowChanged(row.version);
+    const pick = <T,>(field: string, p: T, n: T, local: T): T => {
+      const d = decide(field, local, released);
+      return d === "keep" ? local : d === "adopt" ? n : reconcileField(p, n, local);
+    };
+    setRefRaw((v) => pick("ref_raw", prev.refRaw, next.refRaw, v));
+    setQuestion((q) => pick("question", prev.question, next.question, q));
+    setResponse((r) => pick("response", prev.response, next.response, r));
+  }, [row.ref_raw, row.question, row.response, row.version, rowChanged, decide]);
 
   const draftKey = useMemo(() => rowKey("tq", row.book, row.id), [row.book, row.id]);
 
@@ -191,7 +196,7 @@ const Row = memo(function Row({
 
   const handleSave = () => {
     if (!isDirty) return;
-    noteSave(diff);
+    noteSave(diff, row.version);
     onSave(diff);
   };
 

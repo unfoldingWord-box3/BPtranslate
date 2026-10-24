@@ -13,20 +13,31 @@
 // The text the user typed is not lost by this: the drafts store keeps a
 // refused save's text (refusedRowDraft.ts, #647) and the classic editors keep
 // showing it as unsaved (refusedSaveHold.ts). A dropped conflict whose row
-// cannot be read falls back to the server row its 409 carried. When the row
-// cannot be read otherwise (offline, a 404, an error), the cache is left as it
-// is, as before this fix.
+// cannot be read (offline, an error) falls back to the server row its 409
+// carried, which may replace a cached row but never puts a missing one back.
+// A 404 (the row is gone) leaves the cache alone, and so does any other
+// failure to read the row, as before this fix. Only the row's own delete,
+// refused or discarded, may put a missing row back, and only from a fresh
+// read (rowRebuildAction's `mayInsert`, review A1/A2).
 //
 // Only this tab hears the outbox's results (the tab that drains), so another
 // open tab keeps showing its own optimistic value (#637 item 3, out of scope).
 
-import { api, type TnRow, type TqRow, type TwlRow } from "./api";
+import { api, ApiError, type TnRow, type TqRow, type TwlRow } from "./api";
 import { onOutboxDrop, onOutboxResult, outbox, type OutboxOp, type RowTarget } from "./outbox";
 import { rebuildsAfterResult } from "./outboxTargeting";
 
 export type AnyRow = TnRow | TqRow | TwlRow;
 export type RebuildCause = "fatal" | "locked" | "drop";
-type Listener = (target: RowTarget, server: AnyRow, queued: OutboxOp[] | null, cause: RebuildCause) => void;
+export interface RowRebuild {
+  target: RowTarget;
+  server: AnyRow;
+  queued: OutboxOp[] | null;
+  cause: RebuildCause;
+  /** The op was the row's own delete and `server` was read just now: a missing row may go back. */
+  mayInsert: boolean;
+}
+type Listener = (r: RowRebuild) => void;
 
 const listeners = new Set<Listener>();
 
@@ -51,16 +62,22 @@ async function rebuild(op: OutboxOp, cause: RebuildCause) {
   if (op.target.kind !== "row" || listeners.size === 0) return;
   const target = op.target;
   let server: AnyRow | null = null;
+  let read = false;
   try {
     const row = await api.getRow(target.rowKind, target.id, target.book);
-    if (isServerRow(row, target)) server = row;
-  } catch {
-    /* fall back below */
+    if (isServerRow(row, target)) {
+      server = row;
+      read = true;
+    }
+  } catch (e) {
+    // The row is gone: nothing to put back, and no older copy may stand in.
+    if (e instanceof ApiError && e.status === 404) return;
   }
   if (!server && cause === "drop" && isServerRow(op.conflictCurrent, target)) {
     server = op.conflictCurrent;
   }
   if (!server) return;
+  const mayInsert = read && op.action === "delete";
   // Read after the row, so a save that lands meanwhile is either in the row
   // (and gone from the outbox) or still waiting here; a newer cached row
   // than this one is left alone by rowRebuildAction.
@@ -72,7 +89,7 @@ async function rebuild(op: OutboxOp, cause: RebuildCause) {
   }
   for (const l of listeners) {
     try {
-      l(target, server, queued, cause);
+      l({ target, server, queued, cause, mayInsert });
     } catch (e) {
       console.warn("row rebuild listener failed", e);
     }

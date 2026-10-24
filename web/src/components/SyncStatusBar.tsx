@@ -604,7 +604,9 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
                   onClick={(e) => {
                     // Stop the MenuItem's navigate onClick from also firing.
                     e.stopPropagation();
-                    void drafts.clear(d.key);
+                    // discard, not clear: an editor holding a refused save's
+                    // text lets it go too (#637 item 1).
+                    void drafts.discard(d.key);
                   }}
                   sx={{ p: 0.25 }}
                 >

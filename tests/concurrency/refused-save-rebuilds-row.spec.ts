@@ -213,17 +213,68 @@ test("tQ table: discarding a conflict that cannot be resolved (keep theirs) show
   await context.close();
 });
 
+test('tQ table: discarding the draft of a "locked" save from the unsaved list shows the server text', async ({
+  browser,
+}) => {
+  // Review A3: a locked drop leaves no failed edit to discard, so the unsaved
+  // list's Discard must end the editor's hold too, or the text would come back
+  // as "unsaved" for good.
+  test.setTimeout(60_000);
+  const tq = await pickRow(1);
+  const key = `row:tq:ZEC:${tq.id}`;
+  const server = (await serverQuestion(tq.id)) ?? "";
+  const { context } = await newUserContext(browser, "rebuild-tq-locked-discard");
+  const page = await context.newPage();
+  const refused = await refusePatches(context, tq.id, 409, {
+    error: "chapter_locked",
+    jobId: "job-637b",
+    pipelineType: "translate",
+    startedAt: 1,
+  });
+
+  await openQuestions(page, tq.verse);
+  const typed = `LOCKED DISCARD ${Date.now()}`;
+  await questionField(page, tq.id).fill(typed);
+  await saveButton(page, tq.id).click();
+  await expect.poll(refused).toBeGreaterThan(0);
+  await expect(saveButton(page, tq.id)).toBeEnabled();
+  await expect.poll(() => readDraftPatch(page, key)).toEqual(expect.objectContaining({ question: typed }));
+
+  // The top bar's status chip opens a popover whose "N unsaved" chip opens the
+  // list of unsaved edits, each with a Discard icon.
+  await page.getByRole("button", { name: /^1 unsaved$/ }).first().click();
+  await page.getByRole("button", { name: "jump to an unsaved edit" }).click();
+  await page.getByRole("menu").locator('button:has([data-testid="DeleteOutlineIcon"])').click();
+
+  await expect(questionField(page, tq.id)).toHaveValue(server);
+  await expect.poll(() => readDraftPatch(page, key), { message: "the discarded draft stays gone" }).toBeNull();
+  await expect(saveButton(page, tq.id)).toHaveCount(0);
+
+  await context.close();
+});
+
 test("tQ table: a refused delete brings the row back", async ({ browser }) => {
   test.setTimeout(60_000);
   const tq = await pickRow(2);
   const { context } = await newUserContext(browser, "rebuild-tq-delete");
   const page = await context.newPage();
-  const refused = await refusePatches(context, tq.id, 422, { error: "validation_failed" }, "DELETE");
+  // Hold the DELETE until the optimistic removal has been seen.
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  let refused = 0;
+  await context.route(`**/api/rows/tq/${tq.id}**`, async (route, request) => {
+    if (request.method() !== "DELETE") return route.continue();
+    refused++;
+    await held;
+    await route.fulfill({ status: 422, contentType: "application/json", body: JSON.stringify({ error: "validation_failed" }) });
+  });
 
   await openQuestions(page, tq.verse);
   await expect(rowBox(page, tq.id)).toBeVisible();
   await rowBox(page, tq.id).locator('button:has([data-testid="DeleteOutlineIcon"])').click();
-  await expect.poll(refused, { message: "the DELETE should reach the route" }).toBeGreaterThan(0);
+  await expect.poll(() => refused, { message: "the DELETE should reach the route" }).toBeGreaterThan(0);
+  await expect(rowBox(page, tq.id), "the delete removes the row at once").toHaveCount(0);
+  release();
 
   await expect(rowBox(page, tq.id), "the row should come back once the delete is refused").toBeVisible();
   await expect(questionField(page, tq.id)).toHaveValue(tq.question ?? "");
@@ -253,7 +304,16 @@ test("tN card: a save refused after the card was left keeps its text on screen a
   let release!: () => void;
   const held = new Promise<void>((r) => (release = r));
   let seen = 0;
+  // The rebuild's re-read of the row is answered with the server's row plus a
+  // marker quote, so the test can see the rebuilt row reach the card (the
+  // quote field adopts it; only the note is held) before checking the note.
+  const MARK = `REBUILT QUOTE ${Date.now()}`;
   await context.route(`**/api/rows/tn/${tn.id}**`, async (route, request) => {
+    if (request.method() === "GET") {
+      const response = await route.fetch();
+      const json = { ...(await response.json()), quote: MARK };
+      return route.fulfill({ response, json });
+    }
     if (request.method() !== "PATCH") return route.continue();
     seen++;
     await held;
@@ -271,7 +331,10 @@ test("tN card: a save refused after the card was left keeps its text on screen a
   await note(other.id).click();
   release();
 
-  await page.waitForTimeout(1500);
+  // The rebuilt row reached the card...
+  const quote = page.locator(`[data-note-id="${tn.id}"]`).locator('textarea:not([aria-hidden="true"])').first();
+  await expect(quote, "the rebuilt row should reach the card").toHaveValue(MARK);
+  // ...and the refused note is still what the card shows.
   await expect(note(tn.id)).toHaveValue(typed);
   await expect.poll(() => readDraftPatch(page, key)).toEqual(expect.objectContaining({ note: typed }));
 

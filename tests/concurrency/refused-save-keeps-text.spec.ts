@@ -284,10 +284,14 @@ test("tQ table: a refused question survives editing and saving the response", as
     .poll(() => readDraftPatch(page, key), { message: "the re-write keeps the refused question" })
     .toEqual(expect.objectContaining({ question: typed, response }));
   await saveQuestion(page, tq.id);
-  await expect.poll(() => bodies.length, { message: "the second save should reach the route" }).toBe(2);
-  expect(bodies[1], "the Save resends the refused question with the response").toEqual(
-    expect.objectContaining({ question: typed, response }),
-  );
+  // `bodies` holds this row's PATCHes only (the route is per row id).
+  await expect
+    .poll(() => bodies.some((b) => b.response === response), { message: "the second save should reach the route" })
+    .toBe(true);
+  expect(
+    bodies.find((b) => b.response === response),
+    "the Save resends the refused question with the response",
+  ).toEqual(expect.objectContaining({ question: typed, response }));
   await expect
     .poll(() => readDraftPatch(page, key), { message: "the second refusal keeps both" })
     .toEqual(expect.objectContaining({ question: typed, response }));

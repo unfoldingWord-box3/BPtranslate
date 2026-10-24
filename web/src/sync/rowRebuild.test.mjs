@@ -65,8 +65,20 @@ test("trap 1: a refused or discarded optimistic delete brings the row back", () 
   // leaves it failed, Discard deleted it), so the row is inserted back.
   const failedDelete = { ...op("op-d", undefined), action: "delete", status: "failed", lastError: "http 422" };
   for (const queued of [[failedDelete], []]) {
-    assert.deepEqual(rowRebuildAction(undefined, rebuiltRow(server, target, queued, "fatal")), { t: "insert", row: server });
+    assert.deepEqual(rowRebuildAction(undefined, rebuiltRow(server, target, queued, "fatal"), true), {
+      t: "insert",
+      row: server,
+    });
   }
+});
+
+test("review A2: a row missing after a refused or discarded PATCH is not inserted back", () => {
+  // Something deleted it (this user's later delete, a conflicted delete, another
+  // user): only the op that was itself the row's delete may bring it back.
+  assert.equal(rowRebuildAction(undefined, rebuiltRow(server, target, [], "fatal"), false), null);
+  assert.equal(rowRebuildAction(undefined, rebuiltRow(server, target, [], "drop"), false), null);
+  // A cached row is still replaced either way.
+  assert.equal(rowRebuildAction(optimistic, rebuiltRow(server, target, [], "drop"), false).t, "replace");
 });
 
 test("trap 1: a row with a delete still waiting stays removed", () => {

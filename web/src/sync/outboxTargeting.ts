@@ -309,17 +309,21 @@ export function rebuiltRow<R extends { version: number }>(
 }
 
 // How to put `rebuilt` into a cache that holds `cached` for the row. A row the
-// cache no longer has (an optimistic delete the server refused, or one the
-// user discarded) is inserted back. A cached row at a newer version than the
-// server row read is left alone: something newer landed meanwhile (the guard
+// cache no longer has is inserted back only when `mayInsert`: the op that never
+// landed was itself this row's delete (refused or discarded), and the row was
+// read from the server just now. A row missing after any other op is missing
+// because something deleted it (a later delete of this user's, another user's),
+// so it stays out (review A2). A cached row at a newer version than the server
+// row read is left alone: something newer landed meanwhile (the guard
 // liveUpdateFollowUp's caller applies, review F4 of #642).
 export type RowRebuildAction<R> = { t: "replace"; row: R } | { t: "insert"; row: R } | null;
 export function rowRebuildAction<R extends { version: number }>(
   cached: R | undefined,
   rebuilt: R | null,
+  mayInsert: boolean,
 ): RowRebuildAction<R> {
   if (!rebuilt) return null;
-  if (!cached) return { t: "insert", row: rebuilt };
+  if (!cached) return mayInsert ? { t: "insert", row: rebuilt } : null;
   if (cached.version > rebuilt.version) return null;
   return { t: "replace", row: rebuilt };
 }
