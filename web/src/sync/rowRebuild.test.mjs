@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import {
   MAX_ATTEMPTS_SENTINEL,
   RowGenerations,
+  bumpsRowGeneration,
   rebuildsAfterResult,
   rebuiltRow,
   rowRebuildAction,
@@ -165,6 +166,14 @@ test("B1: a later event for the row makes an in-flight rebuild stale", () => {
   const other = g.bump("row:tq:ZEC:q-2");
   g.bump("row:tq:ZEC:q-1");
   assert.equal(g.isCurrent("row:tq:ZEC:q-2", other), true);
+});
+
+test("round 3 C1: only results that change or settle the server row move the counter", () => {
+  assert.equal(bumpsRowGeneration({ kind: "ok", updated: {} }), true);
+  assert.equal(bumpsRowGeneration({ kind: "fatal", reason: "http 422" }), true);
+  assert.equal(bumpsRowGeneration({ kind: "locked", lockBody: {} }), true);
+  assert.equal(bumpsRowGeneration({ kind: "retry", reason: "network" }), false, "a sibling's retry keeps the rebuild");
+  assert.equal(bumpsRowGeneration({ kind: "conflict", current: {} }), false, "a sibling's 409 keeps the rebuild");
 });
 
 test("B1: of two overlapping rebuilds for a row, only the one started last applies, whichever read returns first", () => {

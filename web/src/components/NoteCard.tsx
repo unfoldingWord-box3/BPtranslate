@@ -661,7 +661,10 @@ function NoteCardInner({
   // When the server moves past a held save (rowChanged), a field still showing
   // the held text adopts the row's value, and a field whose hold ended but
   // that shows other text (typed after the refused save) keeps it as unsaved
-  // typing, as in the tQ / tW-link editors (round 2, B5).
+  // typing, as in the tQ / tW-link editors (round 2, B5). A field that was not
+  // part of a held save follows this card's rule from before #637: with no
+  // session open and no stashed pick, it takes the row's value (unsaved typing
+  // in it is replaced on a row change, the same as on main; round 3, C2).
   const { noteSave, rowChanged, decide } = useRefusedSaveHold("tn", row.id, row.book, (released) => {
     const saved = savedRef.current;
     if ("quote" in released) setQuote((q) => (toTsv(q) === released.quote ? tsvToDisplay(saved.quote) : q));

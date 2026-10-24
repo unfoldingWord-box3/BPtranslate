@@ -25,7 +25,7 @@
 
 import { api, ApiError, type TnRow, type TqRow, type TwlRow } from "./api";
 import { onOutboxDrop, onOutboxResult, outbox, type OutboxOp, type RowTarget } from "./outbox";
-import { RowGenerations, rebuildsAfterResult, targetKey } from "./outboxTargeting";
+import { RowGenerations, bumpsRowGeneration, rebuildsAfterResult, targetKey } from "./outboxTargeting";
 
 export type AnyRow = TnRow | TqRow | TwlRow;
 export type RebuildCause = "fatal" | "locked" | "drop";
@@ -58,8 +58,10 @@ function isServerRow(v: unknown, target: RowTarget): v is AnyRow {
   );
 }
 
-// Per-row counter (review round 2, B1): every outbox result or drop for a row
-// bumps it, and so does each rebuild's start. A rebuild hands its read on only
+// Per-row counter (review round 2, B1): every outbox result that changes or
+// settles the server row (bumpsRowGeneration: ok, fatal, locked; not a retry
+// or a 409, round 3 C1) or drop for a row bumps it, and so does each rebuild's
+// start. A rebuild hands its read on only
 // if the counter has not moved since it started, so a read that was in flight
 // while something newer happened to the row (a later delete that landed,
 // another rebuild for the row) is dropped instead of overwriting it.
@@ -108,7 +110,7 @@ async function rebuild(op: OutboxOp, cause: RebuildCause) {
 
 onOutboxResult((op, result) => {
   if (op.target.kind !== "row") return;
-  generations.bump(targetKey(op.target));
+  if (bumpsRowGeneration(result)) generations.bump(targetKey(op.target));
   if (!rebuildsAfterResult(result)) return;
   void rebuild(op, result.kind === "locked" ? "locked" : "fatal");
 });

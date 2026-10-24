@@ -386,8 +386,12 @@ export const drafts = {
   // then tells this tab's onDraftDiscarded listeners, so an editor still
   // showing the text (a refused save it holds, #637 item 1) puts the row's
   // value back instead of writing the draft again.
+  // The listeners run before subscribers are notified (round 3, C3), so an
+  // editor's hold has ended before anything reacts to the draft being gone.
   async discard(key: string): Promise<void> {
-    await drafts.clear(key);
+    pendingKeys.delete(key);
+    latestGenerationByKey.delete(key);
+    await (await db()).delete(STORE, key);
     for (const l of discardListeners) {
       try {
         l(key);
@@ -395,6 +399,7 @@ export const drafts = {
         console.warn("draft discard listener failed", e);
       }
     }
+    void notify();
   },
 
   // Delete only the exact draft generation that produced a successful save.

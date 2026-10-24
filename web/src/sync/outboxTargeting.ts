@@ -278,6 +278,15 @@ export function liveUpdateFollowUp(
 // its start (review round 2, B1): otherwise something newer happened to the
 // row while the read was in flight (a later delete that landed, another
 // rebuild), and the older read must not overwrite it.
+// Only results that change or settle the server's row move the counter
+// (round 3, C1): "ok", "fatal" and "locked" (and a drop, counted by
+// rowRebuild.ts). A "retry" or a "conflict" leaves the server row as it was,
+// so a sibling op's network retry or 409 must not make a refused op's rebuild
+// stale: nothing would schedule it again.
+export function bumpsRowGeneration(result: OutboxResult): boolean {
+  return result.kind === "ok" || result.kind === "fatal" || result.kind === "locked";
+}
+
 export class RowGenerations {
   private readonly gens = new Map<string, number>();
   bump(key: string): number {
