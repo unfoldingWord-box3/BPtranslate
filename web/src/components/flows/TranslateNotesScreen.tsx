@@ -1099,7 +1099,8 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
       }
       return false;
     }
-    baselineRef.current = draftValue;
+    // The sent text (this render's draftValue), not whatever is typed now.
+    baselineRef.current = patch.note;
     // The outbox's 200 handler clears a draft holding only the saved text, but
     // only one written before it ran. If the row reached a new version between
     // that clear and the baseline move above (a refetch, or the confirmed row
