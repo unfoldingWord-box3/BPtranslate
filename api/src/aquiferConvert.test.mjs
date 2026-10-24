@@ -18,6 +18,7 @@ import {
   planFormattingRepair,
   legacyHtmlToMarkdown,
 } from "./aquiferConvert.ts";
+import { parseEnglishTitle } from "./aquiferLinks.ts";
 
 const en = (Reference, ID, SupportReference, Quote, Occurrence, Note) => ({
   Reference, ID, Tags: "", SupportReference, Quote, Occurrence, Note,
@@ -274,4 +275,107 @@ test("planFormattingRepair repairs the approval snapshot, and survives a junk on
     assert.equal(r.repairs[0].preDraftJson, null, `snapshot left alone: ${junk}`);
     assert.equal(r.repairs[0].note, FIXED, "the note itself is still repaired");
   }
+});
+
+// ---------- English-link join (primary key) ----------
+
+// PHM 1:1 shape: two en_tn rows on the SAME words. Quote-first cannot tell the
+// notes apart and hands the first row to whichever note it sees first.
+const phmRows = () => [
+  en("1:1", "mtph", "rc://*/ta/man/translate/figs-metaphor", "ὁ ἀδελφὸς", "1", "metaphor note"),
+  en("1:1", "excl", "rc://*/ta/man/translate/figs-exclusive", "ὁ ἀδελφὸς", "1", "exclusive note"),
+];
+const links = (pairs) => new Map(pairs.map(([id, title]) => [id, { engContentId: `e-${id}`, engTitle: title }]));
+
+test("parseEnglishTitle reads reference + ordinal, ranges too, and rejects intros", () => {
+  assert.deepEqual(parseEnglishTitle("Titus 1:1 (#1)"), { ref: "1:1", ordinal: 1 });
+  assert.deepEqual(parseEnglishTitle("1 John 2:3-5 (#12)"), { ref: "2:3-5", ordinal: 12 });
+  assert.equal(parseEnglishTitle("Titus - Introduction"), null);
+  assert.equal(parseEnglishTitle("Titus - Chapter 1 Introduction"), null);
+  assert.equal(parseEnglishTitle(undefined), null);
+});
+
+test("link join: two rows on the same quote each get their own note (quote-first would swap them)", () => {
+  // Aquifer order is the reverse of en_tn order: the exclusive note comes first.
+  const items = [
+    aq("फिलेमोन 1:1 (#4)", "57001001", "PHM 1:1", noteHtml("ὁ ἀδελφὸς", "ltr", "x", "exclusive prose")),
+    aq("फिलेमोन 1:1 (#3)", "57001001", "PHM 1:1", noteHtml("ὁ ἀδελφὸς", "ltr", "y", "metaphor prose")),
+  ];
+  // English numbers match en_tn order (#1 = first row at 1:1); Hindi's do not.
+  const l = links([["c-फिलेमोन 1:1 (#4)", "Philemon 1:1 (#2)"], ["c-फिलेमोन 1:1 (#3)", "Philemon 1:1 (#1)"]]);
+  const { notes, report } = convertAquiferBook(items, phmRows(), l);
+  const byProse = (t) => notes.find((n) => n.note.includes(t));
+  assert.equal(byProse("exclusive prose").enId, "excl");
+  assert.equal(byProse("exclusive prose").supportReference, "rc://*/ta/man/translate/figs-exclusive");
+  assert.equal(byProse("metaphor prose").enId, "mtph");
+  assert.equal(byProse("metaphor prose").supportReference, "rc://*/ta/man/translate/figs-metaphor");
+  assert.ok(notes.every((n) => n.joinMethod === "link" && n.reviewReason === null));
+  assert.equal(report.matchedLink, 2);
+  assert.equal(report.matchedQuote, 0);
+
+  // Control: the same data without links takes quote-first and swaps them.
+  const swapped = convertAquiferBook(items, phmRows()).notes;
+  assert.equal(swapped.find((n) => n.note.includes("exclusive prose")).enId, "mtph");
+});
+
+test("link join flags a note whose quote differs from the linked row's", () => {
+  const items = [aq("Leviticus 1:1 (#1)", "03001001", "LEV 1:1", noteHtml("לֵ⁠אמֹֽר׃ דַּבֵּ֞ר", "rtl", "saying", "Address."))];
+  const rows = [en("1:1", "aaaa", "rc://*/ta/man/translate/figs-x", "מֵ⁠אֹ֥הֶל מוֹעֵ֖ד", "1", "from the tent")];
+  const { notes, report } = convertAquiferBook(items, rows, links([["c-Leviticus 1:1 (#1)", "Leviticus 1:1 (#1)"]]));
+  assert.equal(notes[0].joinMethod, "link");
+  assert.equal(notes[0].enId, "aaaa");
+  assert.ok(notes[0].reviewReason, "quote mismatch is flagged");
+  assert.equal(report.matchedLink, 1);
+  assert.equal(report.flagged, 1);
+});
+
+test("a link pointing past the en_tn rows, or with no link at all, falls back to quote then ordinal", () => {
+  const rows = [en("1:1", "aaaa", "rc://*/ta/man/translate/figs-x", "ὁ πρεσβύτερος", "1", "n")];
+  const items = [
+    aq("a 1:1 (#1)", "64001001", "3JN 1:1", noteHtml("ὁ πρεσβύτερος", "ltr", "g", "linked past the end")),
+    aq("b 1:1 (#2)", "64001001", "3JN 1:1", noteHtml("ἄλλο", "ltr", "g", "no link")),
+  ];
+  const l = links([["c-a 1:1 (#1)", "X 1:1 (#9)"]]);
+  const { notes, report } = convertAquiferBook(items, rows, l);
+  const a = notes.find((n) => n.note.includes("linked past the end"));
+  assert.equal(a.joinMethod, "quote");
+  assert.equal(a.enId, "aaaa");
+  assert.equal(notes.find((n) => n.note.includes("no link")).joinMethod, "unmatched"); // row already taken
+  assert.equal(report.matchedLink, 0);
+});
+
+test("a linked note claims its row before a quote match can take it", () => {
+  // Two notes quote the same words; only one is linked. The linked one must get
+  // its own row even though the other is first in Aquifer order.
+  const items = [
+    aq("n 1:1 (#7)", "57001001", "PHM 1:1", noteHtml("ὁ ἀδελφὸς", "ltr", "x", "unlinked")),
+    aq("n 1:1 (#8)", "57001001", "PHM 1:1", noteHtml("ὁ ἀδελφὸς", "ltr", "y", "linked to second")),
+  ];
+  const l = links([["c-n 1:1 (#8)", "Philemon 1:1 (#1)"]]);
+  const { notes } = convertAquiferBook(items, phmRows(), l);
+  assert.equal(notes.find((n) => n.note.includes("linked to second")).enId, "mtph");
+  assert.equal(notes.find((n) => n.note.includes("unlinked")).enId, "excl");
+});
+
+test("link to a row whose quote disagrees yields to an exact quote match on a free row (en_tn drifted from the pinned release)", () => {
+  // The link says "#1", but en_tn has since gained a row in front, so row 1 is
+  // not the note Aquifer meant. The note's quote matches row 2 exactly.
+  const rows = [
+    en("1:1", "newr", "rc://*/ta/man/translate/figs-new", "ἄλλο", "1", "added after the release"),
+    en("1:1", "mtph", "rc://*/ta/man/translate/figs-metaphor", "ὁ ἀδελφὸς", "1", "metaphor note"),
+  ];
+  const items = [aq("n 1:1 (#1)", "57001001", "PHM 1:1", noteHtml("ὁ ἀδελφὸς", "ltr", "x", "prose"))];
+  const { notes, report } = convertAquiferBook(items, rows, links([["c-n 1:1 (#1)", "Philemon 1:1 (#1)"]]));
+  assert.equal(notes[0].enId, "mtph");
+  assert.equal(notes[0].joinMethod, "quote");
+  assert.equal(notes[0].reviewReason, null);
+  assert.equal(report.matchedLink, 0);
+});
+
+test("link whose English reference differs from the note's own reference is flagged", () => {
+  const rows = [en("1:2", "aaaa", "rc://*/ta/man/translate/figs-x", "ὁ ἀδελφὸς", "1", "n")];
+  const items = [aq("n 1:1 (#1)", "57001001", "PHM 1:1", noteHtml("ὁ ἀδελφὸς", "ltr", "x", "prose"))];
+  const { notes } = convertAquiferBook(items, rows, links([["c-n 1:1 (#1)", "Philemon 1:2 (#1)"]]));
+  assert.equal(notes[0].joinMethod, "link");
+  assert.ok(notes[0].reviewReason, "reference disagreement is flagged even when the quote matches");
 });
