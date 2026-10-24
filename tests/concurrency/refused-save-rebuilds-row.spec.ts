@@ -138,7 +138,9 @@ test("tQ table: a save refused with a fatal 422 shows as unsaved, Save works aga
 
   // Discard the failed save: the server's text comes back and no draft is left.
   await page.getByText(/^1 failed$/).first().click();
-  await page.getByRole("button", { name: "discard this edit" }).click();
+  // The failed edit's line (its error, then its Retry and Discard icons).
+  const failedLine = page.getByText("http 422", { exact: true }).locator("xpath=../..");
+  await failedLine.locator('button:has([data-testid="DeleteOutlineIcon"])').click();
   await page.getByRole("dialog").getByRole("button", { name: /^discard$/i }).click();
   await expect(questionField(page, tq.id)).toHaveValue(server);
   await expect.poll(() => readDraftPatch(page, key), { message: "Discard should leave no draft" }).toBeNull();
@@ -225,6 +227,53 @@ test("tQ table: a refused delete brings the row back", async ({ browser }) => {
 
   await expect(rowBox(page, tq.id), "the row should come back once the delete is refused").toBeVisible();
   await expect(questionField(page, tq.id)).toHaveValue(tq.question ?? "");
+
+  await context.close();
+});
+
+test("tN card: a save refused after the card was left keeps its text on screen and in drafts", async ({ browser }) => {
+  // The shape of PR #642's F1: a NoteCard with no session open adopts the row's
+  // note, so a rebuild to the server's copy would show the old note, and its
+  // no-diff clear would then drop the draft.
+  test.setTimeout(60_000);
+  const probe = await apiRequest.newContext({ baseURL: BASE });
+  const auth = await mintToken(probe, "probe-637-tn");
+  const chapter = await fetchChapter(probe, auth.token, "ZEC", CHAPTER);
+  await probe.dispose();
+  const notes = chapter.tn as Array<{ id: string; verse: number; note: string | null }>;
+  const byVerse = new Map<number, typeof notes>();
+  for (const n of notes) if (n.verse > 1) byVerse.set(n.verse, [...(byVerse.get(n.verse) ?? []), n]);
+  const pair = [...byVerse.values()].find((list) => list.length >= 2);
+  expect(pair, `expected a verse with two tN rows on ZEC ${CHAPTER}`).toBeTruthy();
+  const [tn, other] = pair!;
+  const key = `row:tn:ZEC:${tn.id}`;
+
+  const { context } = await newUserContext(browser, "rebuild-tn-left");
+  const page = await context.newPage();
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  let seen = 0;
+  await context.route(`**/api/rows/tn/${tn.id}**`, async (route, request) => {
+    if (request.method() !== "PATCH") return route.continue();
+    seen++;
+    await held;
+    await route.fulfill({ status: 422, contentType: "application/json", body: JSON.stringify({ error: "validation_failed" }) });
+  });
+
+  await gotoVerse(page, "ZEC", CHAPTER, tn.verse);
+  const note = (id: string) =>
+    page.locator(`[data-note-id="${id}"]`).locator('textarea:not([aria-hidden="true"])').nth(1);
+  const typed = `REFUSED NOTE ${Date.now()}`;
+  await note(tn.id).fill(typed);
+  await page.locator(`[data-note-id="${tn.id}"]`).locator('button:has([data-testid="SaveIcon"])').click();
+  await expect.poll(() => seen).toBeGreaterThan(0);
+  // Leave the card for another note, then let the refusal arrive.
+  await note(other.id).click();
+  release();
+
+  await page.waitForTimeout(1500);
+  await expect(note(tn.id)).toHaveValue(typed);
+  await expect.poll(() => readDraftPatch(page, key)).toEqual(expect.objectContaining({ note: typed }));
 
   await context.close();
 });

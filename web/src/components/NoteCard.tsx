@@ -57,6 +57,7 @@ import { QUICK_DRAFTS_NEED_ORG_KEY } from "../lib/aiProviderErrors";
 import { drafts, rowKey, draftDirtyBorderSx } from "../sync/drafts";
 import { isPendingRowSave, rowSaveEnded, withPendingReverts } from "../sync/draftSaveState";
 import { onOutboxDrop, onOutboxResult, type OutboxOp } from "../sync/outbox";
+import { useRefusedSaveHold } from "../hooks/useRefusedSaveHold";
 import { isAquiferDraftRow } from "./flows/translateShared";
 import { noteLockedReadOnly } from "../lib/chapterLock";
 
@@ -209,6 +210,11 @@ interface Props {
 // data in D1 transitions to true newlines as users edit.
 function tsvToDisplay(s: string | null): string {
   return (s ?? "").replace(/\\n/g, "\n");
+}
+
+// The TSV form flushPending sends for a display value.
+function toTsv(s: string): string {
+  return s.replace(/\n/g, "\\n");
 }
 
 // Detect the primary script of a string for directing RTL/LTR rendering and
@@ -647,21 +653,34 @@ function NoteCardInner({
   // survives a deactivate, and an unrelated version bump elsewhere (e.g.
   // an AI-suggest save landing after the user wandered off) must not stamp
   // that pending pick back to the server's stale value.
+  // Also keep a field still showing the text of a refused save of this card's
+  // (#637 item 1): the cached row goes back to the server's copy, and adopting
+  // it here would drop the text from the screen and, through the no-diff
+  // clear below, from the drafts store. The held patch is in the TSV form
+  // flushPending sends. Discarding that save puts the saved value back.
+  const { noteSave, keepsHeld } = useRefusedSaveHold("tn", row.id, row.book, (released) => {
+    const saved = savedRef.current;
+    if ("quote" in released) setQuote((q) => (toTsv(q) === released.quote ? tsvToDisplay(saved.quote) : q));
+    if ("note" in released) setNote((n) => (toTsv(n) === released.note ? tsvToDisplay(saved.note) : n));
+    if ("support_reference" in released) {
+      setSupportRef((s) => (s === released.support_reference ? saved.support_reference : s));
+    }
+  });
   useEffect(() => {
     if (sessionSnapshotRef.current !== null) return;
     if ("quote" in pendingRef.current) return;
-    setQuote(tsvToDisplay(row.quote));
-  }, [row.id, row.version, row.quote]);
+    setQuote((q) => (keepsHeld("quote", toTsv(q)) ? q : tsvToDisplay(row.quote)));
+  }, [row.id, row.version, row.quote, keepsHeld]);
   useEffect(() => {
     if (sessionSnapshotRef.current !== null) return;
     if ("note" in pendingRef.current) return;
-    setNote(tsvToDisplay(row.note));
-  }, [row.id, row.version, row.note]);
+    setNote((n) => (keepsHeld("note", toTsv(n)) ? n : tsvToDisplay(row.note)));
+  }, [row.id, row.version, row.note, keepsHeld]);
   useEffect(() => {
     if (sessionSnapshotRef.current !== null) return;
     if ("support_reference" in pendingRef.current) return;
-    setSupportRef(row.support_reference);
-  }, [row.id, row.version, row.support_reference]);
+    setSupportRef((s) => (keepsHeld("support_reference", s) ? s : row.support_reference));
+  }, [row.id, row.version, row.support_reference, keepsHeld]);
 
   // Restore unsaved typing on first mount. If a draft exists for this row,
   // overwrite local state from its patch — otherwise the user's typing
@@ -767,6 +786,7 @@ function NoteCardInner({
     // with the same If-Match, the second of which lands as a phantom 409.
     setSavePendingVersion(savedRef.current.version);
     sentRef.current = { patch };
+    noteSave(patch);
     onSave(patch);
     // Rebase the snapshot so the chip stops showing "*" after a manual
     // save and a follow-up Undo reverts to the just-saved state.
@@ -892,6 +912,7 @@ function NoteCardInner({
     if (Object.keys(patch).length === 0) return;
     onChange(patch);
     sentRef.current = { patch };
+    noteSave(patch);
     onSave(patch, { restoredFromVersion: fromVersion });
   };
 

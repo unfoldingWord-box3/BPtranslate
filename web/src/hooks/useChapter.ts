@@ -20,7 +20,8 @@ import {
 import { fetchWithRetry } from "../sync/fetchWithRetry";
 import { rowAtVersion } from "../lib/bookCache";
 import { onOutboxResult } from "../sync/outbox";
-import { rowWithLivePatches } from "../sync/outboxTargeting";
+import { rebuiltRow, rowRebuildAction, rowWithLivePatches } from "../sync/outboxTargeting";
+import { onRowRebuild } from "../sync/rowRebuild";
 
 type Status = "idle" | "loading" | "ready" | "error" | "retrying";
 
@@ -304,6 +305,31 @@ export function useChapter(book: string, chapter: number): UseChapterReturn {
       }
     });
   }, [book, chapter, applyLocalRowReplacement, applyLocalVerse, applyLocalVerseStatus, applyLaneCheckers]);
+
+  // A row op that never landed (refused, dropped as locked, discarded): put
+  // the server's row back, with the row's saves still waiting on top, or put
+  // back a row whose delete never landed (#637 item 1). Decided inside the
+  // updater against the row cached then, so a newer row that landed while the
+  // server row was being read is kept.
+  useEffect(() => {
+    return onRowRebuild((target, server, queued, cause) => {
+      if (server.book !== book || server.chapter !== chapter) return;
+      const kind = target.rowKind;
+      const rebuilt = rebuiltRow(server, target, queued, cause);
+      if (!rebuilt) return;
+      setData((prev) => {
+        if (!prev) return prev;
+        const list = prev[kind] as Array<TnRow | TqRow | TwlRow>;
+        const action = rowRebuildAction(list.find((r) => r.id === target.id), rebuilt);
+        if (!action) return prev;
+        const next =
+          action.t === "insert"
+            ? [...list, action.row]
+            : list.map((r) => (r.id === target.id ? action.row : r));
+        return { ...prev, [kind]: next } as ChapterPayload;
+      });
+    });
+  }, [book, chapter]);
 
   return {
     status,

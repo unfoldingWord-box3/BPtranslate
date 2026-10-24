@@ -26,7 +26,8 @@ import {
 } from "../sync/api";
 import { fetchWithRetry } from "../sync/fetchWithRetry";
 import { onOutboxResult } from "../sync/outbox";
-import { rowWithLivePatches } from "../sync/outboxTargeting";
+import { rebuiltRow, rowWithLivePatches } from "../sync/outboxTargeting";
+import { onRowRebuild } from "../sync/rowRebuild";
 import { applyCacheOp, ChapterFetchTracker, type CacheOp } from "../lib/bookCache";
 
 export type ChapterState =
@@ -245,6 +246,25 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
       }
     });
   }, [book, enabled, applyLocalVerse, mutate]);
+
+  // A row op that never landed: put the server's row back, with the row's
+  // saves still waiting on top (#637 item 1). The two cache ops carry
+  // rowRebuildAction's rule: "replace" skips a cached row at a newer version
+  // (or no cached row), and "insert" adds the row only when it is not cached
+  // (an optimistic delete that never landed); after a replace the cached row
+  // is the rebuilt one, so the insert leaves it. Both are recorded, so a fetch
+  // in flight replays them, and both read the server row just fetched, so no
+  // copy kept here can be older than the cache.
+  useEffect(() => {
+    if (!enabled) return;
+    return onRowRebuild((target, server, queued, cause) => {
+      if (server.book !== book) return;
+      const rebuilt = rebuiltRow(server, target, queued, cause);
+      if (!rebuilt) return;
+      mutate(rebuilt.chapter, { t: "replace", kind: target.rowKind, row: rebuilt });
+      mutate(rebuilt.chapter, { t: "insert", kind: target.rowKind, row: rebuilt });
+    });
+  }, [book, enabled, mutate]);
 
   return {
     summary,
