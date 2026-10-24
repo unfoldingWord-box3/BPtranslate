@@ -142,6 +142,97 @@ test("tN card: a note typed back during a pending save, plus a quote edit, survi
   }
 });
 
+// Issue #658. Same as above, but the card remounts between the type-back and
+// the quote edit: leave the chapter and come back while the save is still
+// held. The new card starts with none of the old card's memory of its pending
+// save, so before the fix the quote edit replaced the draft with {quote} only,
+// the 200 rebased the baseline to N1, and the reopened card showed the
+// server's N1 as clean.
+test("tN card: a note typed back during a pending save survives a remount before the save lands", async ({
+  browser,
+}) => {
+  test.setTimeout(90_000);
+  const row = await pickRow();
+  const key = `row:tn:ZEC:${row.id}`;
+  const { context, auth } = await newUserContext(browser, "typeback-658");
+  const page = await context.newPage();
+
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  let seen = 0;
+  await context.route(`**/api/rows/tn/${row.id}**`, async (route, request) => {
+    if (request.method() !== "PATCH") return route.continue();
+    seen++;
+    await held;
+    await route.continue();
+  });
+
+  const leave = async () => {
+    await page.evaluate(() => {
+      location.hash = "#/ZEC/9/2";
+    });
+    await page.locator(`[data-note-id="${row.id}"]`).waitFor({ state: "detached", timeout: 10_000 });
+  };
+  const reopen = async () => {
+    await page.evaluate((v) => {
+      location.hash = `#/ZEC/10/${v}`;
+    }, row.verse);
+    await noteTextarea(page, row.id).waitFor({ timeout: 10_000 });
+  };
+
+  try {
+    await gotoVerse(page, "ZEC", CHAPTER, row.verse);
+    const n0 = await noteTextarea(page, row.id).inputValue();
+    const q0 = await quoteTextarea(page, row.id).inputValue();
+    const n1 = `${n0} SAVED ${Date.now()}`;
+    await noteTextarea(page, row.id).fill(n1);
+    await saveNote(page, row.id);
+    await expect.poll(() => seen, { message: "the PATCH should reach the route" }).toBeGreaterThan(0);
+
+    // While the save is held: note back to N0, recorded in the draft.
+    await noteTextarea(page, row.id).fill(n0);
+    await expect
+      .poll(async () => (await readDraft(page, key))?.patch, { message: "the type-back should be in the drafts store" })
+      .toEqual(expect.objectContaining({ note: n0 }));
+
+    // Remount the card with the save still held, then edit the quote.
+    await leave();
+    await reopen();
+    await expect(noteTextarea(page, row.id)).toHaveValue(n0);
+    const q1 = `${q0} EDITED`;
+    await quoteTextarea(page, row.id).fill(q1);
+    await expect
+      .poll(async () => (await readDraft(page, key))?.patch, { message: "the quote edit should be in the drafts store" })
+      .toEqual(expect.objectContaining({ quote: q1 }));
+    console.log("draft after the remount and quote edit:", JSON.stringify((await readDraft(page, key))?.patch));
+
+    // Leave, then let the save land.
+    await leave();
+    release();
+    await waitForServerNote(context.request, auth.token, "ZEC", CHAPTER, row.id, (n) => n === n1);
+    await expect
+      .poll(async () => (await readDraft(page, key))?.baseline?.note, { message: "the settle should rebase the baseline" })
+      .toBe(n1);
+
+    const after = await readDraft(page, key);
+    console.log("draft after the save landed:", JSON.stringify(after?.patch));
+    expect(after?.patch, "the revert to N0 must still be in the draft").toEqual(
+      expect.objectContaining({ quote: q1, note: n0 }),
+    );
+
+    await reopen();
+    await expect(noteTextarea(page, row.id)).toHaveValue(n0);
+    await expect(quoteTextarea(page, row.id)).toHaveValue(q1);
+    await expect(
+      noteTextarea(page, row.id).locator('xpath=ancestor::*[@data-dirty="true"][1]'),
+      "the note field should be marked dirty",
+    ).toHaveCount(1);
+  } finally {
+    release();
+    await context.close();
+  }
+});
+
 // Review A1: when the held save is refused instead, the server keeps N0, so
 // the typed-back note equals it and must not linger as a phantom "unsaved"
 // field; only the quote edit stays in the draft.
