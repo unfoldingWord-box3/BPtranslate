@@ -40,6 +40,11 @@ async function pickRow(): Promise<NoteRow> {
 // lookup as refused-save-keeps-text.spec.ts).
 type DraftPayload = { patch?: Record<string, unknown>; baseline?: Record<string, unknown> };
 function readDraft(page: Page, key: string) {
+  return readRecord(page, key).then((rec) => (rec ? (rec.payload ?? {}) : null));
+}
+// The whole record; its `generation` changes on every drafts.set, so a test
+// can tell that an editor re-wrote (or cleared) the draft.
+function readRecord(page: Page, key: string) {
   return page.evaluate(async (k) => {
     try {
       const dbs = (await indexedDB.databases()).filter((d) => (d.name ?? "").startsWith("bible-editor-drafts"));
@@ -51,12 +56,12 @@ function readDraft(page: Page, key: string) {
         });
         try {
           if (!db.objectStoreNames.contains("drafts")) continue;
-          const rec = await new Promise<{ payload?: DraftPayload } | undefined>((resolve, reject) => {
+          const rec = await new Promise<{ payload?: DraftPayload; generation?: string } | undefined>((resolve, reject) => {
             const req = db.transaction("drafts", "readonly").objectStore("drafts").get(k);
             req.onsuccess = () => resolve(req.result);
             req.onerror = () => reject(req.error);
           });
-          if (rec) return rec.payload ?? {};
+          if (rec) return { payload: rec.payload, generation: rec.generation };
         } finally {
           db.close();
         }
@@ -65,7 +70,7 @@ function readDraft(page: Page, key: string) {
     } catch {
       return null;
     }
-  }, key) as Promise<DraftPayload | null>;
+  }, key) as Promise<{ payload?: DraftPayload; generation?: string } | null>;
 }
 
 function quoteTextarea(page: Page, rowId: string) {
@@ -204,7 +209,6 @@ test("tN card: a note typed back during a pending save survives a remount before
     await expect
       .poll(async () => (await readDraft(page, key))?.patch, { message: "the quote edit should be in the drafts store" })
       .toEqual(expect.objectContaining({ quote: q1 }));
-    console.log("draft after the remount and quote edit:", JSON.stringify((await readDraft(page, key))?.patch));
 
     // Leave, then let the save land.
     await leave();
@@ -215,7 +219,6 @@ test("tN card: a note typed back during a pending save survives a remount before
       .toBe(n1);
 
     const after = await readDraft(page, key);
-    console.log("draft after the save landed:", JSON.stringify(after?.patch));
     expect(after?.patch, "the revert to N0 must still be in the draft").toEqual(
       expect.objectContaining({ quote: q1, note: n0 }),
     );
@@ -328,15 +331,24 @@ test("flows notes: a note typed back during a pending save survives leaving and 
     await editor().fill(start);
     await expect
       .poll(async () => (await readDraft(page, key))?.patch, { message: "the type-back should be in the drafts store" })
-      .toEqual({ note: start });
+      .toEqual(expect.objectContaining({ note: start }));
 
-    // Leave and come back with the save still held.
+    // Leave and come back with the save still held. The returning screen's
+    // persist effect either re-writes the draft (new generation) or clears it;
+    // wait for one of the two before judging.
+    const before = (await readRecord(page, key))?.generation;
     await leave();
     await open();
     await expect(shown()).toHaveText(start, { timeout: 15_000 });
-    // Give the returning screen's persist effect its pass.
-    await page.waitForTimeout(500);
-    expect((await readDraft(page, key))?.patch, "the returning screen must keep the type-back").toEqual({ note: start });
+    await expect
+      .poll(async () => {
+        const rec = await readRecord(page, key);
+        return rec === null || rec.generation !== before;
+      }, { message: "the returning screen's persist effect should run" })
+      .toBe(true);
+    expect((await readDraft(page, key))?.patch, "the returning screen must keep the type-back").toEqual(
+      expect.objectContaining({ note: start }),
+    );
 
     await leave();
     release();
@@ -344,7 +356,9 @@ test("flows notes: a note typed back during a pending save survives leaving and 
     await expect
       .poll(async () => (await readDraft(page, key))?.baseline?.note, { message: "the settle should rebase the baseline" })
       .toBe(n1);
-    expect((await readDraft(page, key))?.patch, "the revert must still be in the draft").toEqual({ note: start });
+    expect((await readDraft(page, key))?.patch, "the revert must still be in the draft").toEqual(
+      expect.objectContaining({ note: start }),
+    );
 
     await open();
     await expect(shown()).toHaveText(start, { timeout: 15_000 });
@@ -397,7 +411,7 @@ test("tN card: after a remount, a type-back protection ends when the save is ref
     await quoteTextarea(page, row.id).fill(q1);
     await expect
       .poll(async () => (await readDraft(page, key))?.patch, { message: "the remounted card should keep the type-back" })
-      .toEqual({ quote: q1, note: n0 });
+      .toEqual(expect.objectContaining({ quote: q1, note: n0 }));
 
     release();
     await expect
