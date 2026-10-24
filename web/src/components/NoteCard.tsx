@@ -55,8 +55,8 @@ import { getLockUnapprovedDrafts } from "../lib/editorPrefs";
 import { formatEpochSecondsDateTime } from "../lib/formatDate";
 import { QUICK_DRAFTS_NEED_ORG_KEY } from "../lib/aiProviderErrors";
 import { drafts, rowKey, draftDirtyBorderSx } from "../sync/drafts";
-import { isPendingRowSave, rowSaveEnded, withPendingReverts } from "../sync/draftSaveState";
-import { onOutboxDrop, onOutboxResult, type OutboxOp } from "../sync/outbox";
+import { isPendingRowSave, pendingRevertSave, rowSaveEnded, withPendingReverts } from "../sync/draftSaveState";
+import { onOutboxDrop, onOutboxResult, outbox, type OutboxOp } from "../sync/outbox";
 import { useRefusedSaveHold } from "../hooks/useRefusedSaveHold";
 import { isAquiferDraftRow } from "./flows/translateShared";
 import { noteLockedReadOnly } from "../lib/chapterLock";
@@ -729,9 +729,20 @@ function NoteCardInner({
   const hydratedFromDraftRef = useRef(false);
   useEffect(() => {
     if (hydratedFromDraftRef.current) return;
-    void drafts.get(rowKey("tn", row.book, row.id)).then((rec) => {
+    // The outbox is read alongside the draft (#658): a remount while this
+    // card's save is pending starts with no sentRef, so a note typed back to
+    // its baseline would drop out of the next draft write. A failed outbox
+    // read must not stop the draft restore.
+    void Promise.all([
+      drafts.get(rowKey("tn", row.book, row.id)),
+      outbox.listWithUncommitted().catch(() => [] as OutboxOp[]),
+    ]).then(([rec, ops]) => {
       if (hydratedFromDraftRef.current) return;
       hydratedFromDraftRef.current = true;
+      if (!sentRef.current) {
+        const pending = pendingRevertSave(rec, ops, { rowKind: "tn", id: row.id, book: row.book });
+        if (pending) sentRef.current = { patch: pending as Partial<TnRow> };
+      }
       const payload = rec?.payload as
         | {
             patch?: Partial<TnRow>;

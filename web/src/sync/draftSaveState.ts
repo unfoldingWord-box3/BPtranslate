@@ -105,6 +105,50 @@ export function withPendingReverts<T extends Record<string, unknown>>(
   return out;
 }
 
+// The pending save a freshly mounted editor must keep protecting (#658).
+// withPendingReverts needs the patch of the pending save, which an editor
+// keeps in a ref; a remount while the save is pending starts without it, so a
+// field typed back to the baseline would drop out of the next draft write and
+// the 200 would rebase it away. The draft itself records the type-back: a
+// field in its patch equal to its baseline is written only by
+// withPendingReverts (an editor's own diff leaves such a field out). So when
+// the draft holds such a field and a live op for `target` sends a different
+// value for it, return that op's whole patch (whole, so isPendingRowSave
+// recognises the op when it ends). The newest such op wins. Gated on the
+// draft's record, not on the op alone: a fresh mount showing the server's copy
+// next to a conflicted op must not write a draft the user never typed.
+export function pendingRevertSave(
+  draft: DraftRecord | undefined,
+  ops: OutboxOp[],
+  target: { rowKind: string; id: string; book: string },
+): Record<string, unknown> | undefined {
+  const payload = draft?.payload as { patch?: unknown; baseline?: unknown } | undefined;
+  const patch = payload?.patch;
+  const baseline = payload?.baseline;
+  if (!patch || typeof patch !== "object" || !baseline || typeof baseline !== "object") return undefined;
+  const p = patch as Record<string, unknown>;
+  const b = baseline as Record<string, unknown>;
+  const reverted = Object.keys(p).filter((k) => k in b && rowValueKey(p[k]) === rowValueKey(b[k]));
+  if (reverted.length === 0) return undefined;
+  const key = targetKey({ kind: "row", ...target } as OutboxOp["target"]);
+  // Newest first: the newest live op sending a field decides what the server
+  // will hold for it. One sending the reverted value itself needs no guard.
+  const decided = new Set<string>();
+  for (let i = ops.length - 1; i >= 0; i--) {
+    const o = ops[i];
+    if (targetKey(o.target) !== key || !isLiveOp(o) || o.action === "delete") continue;
+    const sent = o.patch as unknown;
+    if (!sent || typeof sent !== "object") continue;
+    const s = sent as Record<string, unknown>;
+    for (const k of reverted) {
+      if (decided.has(k) || !(k in s)) continue;
+      if (rowValueKey(s[k]) !== rowValueKey(p[k])) return s;
+      decided.add(k);
+    }
+  }
+  return undefined;
+}
+
 // Whether `op` is an editor's pending save, sent with `patch` for the row
 // `target` (#632 item 2 review A1). Matched by row and exact patch, not op id
 // or version: NoteCard's save goes through Shell and never sees its op, and a

@@ -110,7 +110,7 @@ import {
 import { realChapters } from "../../lib/bookSummary";
 import { resolveFlowChipStatus, flowChipKind, type FlowChipStatus } from "../../lib/flowStatusChip";
 import { drafts, rowKey } from "../../sync/drafts";
-import { isPendingRowSave, rowSaveEnded, withPendingReverts } from "../../sync/draftSaveState";
+import { isPendingRowSave, pendingRevertSave, rowSaveEnded, withPendingReverts } from "../../sync/draftSaveState";
 import { onOutboxDrop, onOutboxResult, outbox, type OutboxOp } from "../../sync/outbox";
 import { api, ApiError, type ChapterLockedBody, type TqRow } from "../../sync/api";
 import { SCRIPTURE_FONT_STACK } from "../../theme";
@@ -689,8 +689,15 @@ export default function TranslateQuestionsScreen({
       setEditingField(null);
     }
     let cancelled = false;
-    void drafts.get(key).then((rec) => {
+    // The outbox is read alongside the draft (#658): returning to this screen
+    // while its save is pending starts with no sentRef, so a field typed back
+    // to its baseline would drop out of the drafts store.
+    void Promise.all([drafts.get(key), outbox.listWithUncommitted().catch(() => [] as OutboxOp[])]).then(([rec, ops]) => {
       if (cancelled || hydratedKeyRef.current !== nonceKey) return;
+      if (sentRef.current?.id !== row.id) {
+        const pending = pendingRevertSave(rec, ops, { rowKind: "tq", id: row.id, book });
+        if (pending) sentRef.current = { id: row.id, patch: pending as Record<string, string> };
+      }
       const payload = rec?.payload as
         | { patch?: Record<string, unknown>; baseline?: Record<string, unknown> }
         | undefined;
@@ -801,7 +808,11 @@ export default function TranslateQuestionsScreen({
       if (!sent || !isPendingRowSave(sent.patch, op, { rowKind: "tq", id: sent.id, book })) return;
       sentRef.current = null;
       if (ok && hydratedKeyRef.current?.startsWith(`${rowKey("tq", book, sent.id)}#`)) {
-        baselineRef.current = { ...baselineRef.current, ...sent.patch };
+        // Only this screen's fields, in display form: a save recovered from
+        // the outbox (#658) may be another editor's.
+        const moved = { ...baselineRef.current };
+        for (const f of FIELDS) if (typeof sent.patch[f] === "string") moved[f] = unescapeNewlines(sent.patch[f]);
+        baselineRef.current = moved;
       }
       setSentTick((n) => n + 1);
     };

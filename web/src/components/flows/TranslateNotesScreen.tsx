@@ -146,7 +146,7 @@ import { flowLaneSegmentsAcross, type FlowSegment } from "../../lib/flowHighligh
 import { isHebrewBook } from "../../lib/sourceSearch";
 import { realChapters } from "../../lib/bookSummary";
 import { drafts, rowKey } from "../../sync/drafts";
-import { isPendingRowSave, rowSaveEnded, withPendingReverts } from "../../sync/draftSaveState";
+import { isPendingRowSave, pendingRevertSave, rowSaveEnded, withPendingReverts } from "../../sync/draftSaveState";
 import { onOutboxDrop, onOutboxResult, outbox, type OutboxOp } from "../../sync/outbox";
 import { pipelineStore, getSessionKey, type PipelineJob } from "../../sync/pipelineStore";
 import { jobLocksChapterNotes, jobLocksNote, lockJobReleased } from "../../lib/chapterLock";
@@ -658,8 +658,15 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
       setEditing(false);
     }
     let cancelled = false;
-    void drafts.get(key).then((rec) => {
+    // The outbox is read alongside the draft (#658): returning to this screen
+    // while its save is pending starts with no sentRef, so a note typed back
+    // to its baseline would be cleared from the drafts store.
+    void Promise.all([drafts.get(key), outbox.listWithUncommitted().catch(() => [] as OutboxOp[])]).then(([rec, ops]) => {
       if (cancelled || hydratedKeyRef.current !== nonceKey) return;
+      if (sentRef.current?.id !== row.id) {
+        const pending = pendingRevertSave(rec, ops, { rowKind: "tn", id: row.id, book });
+        if (pending) sentRef.current = { id: row.id, patch: pending as { note: string } };
+      }
       const payload = rec?.payload as
         | { patch?: Record<string, unknown>; baseline?: Record<string, unknown> }
         | undefined;
@@ -757,7 +764,9 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
       if (!sent || !isPendingRowSave(sent.patch, op, { rowKind: "tn", id: sent.id, book })) return;
       sentRef.current = null;
       if (ok && hydratedKeyRef.current?.startsWith(`${rowKey("tn", book, sent.id)}#`)) {
-        baselineRef.current = sent.patch.note;
+        // Display form: a save recovered from the outbox (#658) may be
+        // NoteCard's, which sends TSV newlines.
+        baselineRef.current = unescapeNewlines(sent.patch.note);
       }
       setSentTick((n) => n + 1);
     };
