@@ -16,11 +16,16 @@
 //   * the held save is retried and lands;
 //   * the user discards the held save, or the row's draft (the editor then
 //     puts the row's value back in each field still showing the held text);
-//   * the cached row moves past the version the save was sent at (review A3):
-//     another user's save or an AI apply after a "locked" drop. The editor then
-//     adopts the newer server value where it still shows the held text, as on
-//     main, and the drafts store keeps the user's text as a refused draft, so
-//     no newer server text is overwritten without a 409.
+//   * the cached row moves past the version the save was sent at (review A3;
+//     the op's own expectedVersion, round 2 B2): another user's save or an AI
+//     apply after a "locked" drop. The editor then adopts the newer server
+//     value where it still shows the held text, as on main, so no newer server
+//     text is overwritten without a 409. For tQ and tW links the drafts store
+//     keeps the user's text as a refused draft (refusedRowDraft.ts). For tN it
+//     does not: NoteCard's draft is not marked refused, so once the card adopts
+//     the server text its no-diff clear drops the draft and the refused text is
+//     lost, the same as main (known limit; whether an edit should win over a
+//     later AI apply is a product decision, #601).
 //
 // Kept free of IndexedDB / api.ts imports so it can be unit-tested from a plain
 // Node script (refusedSaveHold.test.mjs).
@@ -53,7 +58,7 @@ export interface HoldTarget {
 
 export const EMPTY_HOLD: HoldState = { sent: [], held: [] };
 
-type ResultOp = Pick<OutboxOp, "target" | "patch"> & Partial<Pick<OutboxOp, "action">>;
+type ResultOp = Pick<OutboxOp, "target" | "patch"> & Partial<Pick<OutboxOp, "action" | "expectedVersion">>;
 
 // The held list with `fields` removed from every entry (entries left empty go).
 function withoutFields(held: HeldSave[], fields: Iterable<string>): HeldSave[] {
@@ -93,19 +98,23 @@ export function holdOnResult(state: HoldState, op: ResultOp, result: OutboxResul
     return h < 0 ? state : { sent: state.sent, held: state.held.filter((_, j) => j !== h) };
   }
   const sent = state.sent.filter((_, j) => j !== i);
+  // The version the op was actually sent at (round 2, B2): a 409 auto-heal
+  // re-arms it at the server's version, and the outbox threads a confirmed
+  // version to a quick second save, so it can be later than the version at
+  // the Save click.
+  const from = typeof op.expectedVersion === "number" ? op.expectedVersion : state.sent[i].version;
   if (result.kind === "ok") {
     // This editor's own save moved the row one version on, with nobody
     // else's write between (it was sent at version v and landed at v+1): the
     // server did not move past the held text, so the holds follow the row's
     // new version instead of ending in holdOnRowVersion.
     const landed = (result.updated as { version?: unknown } | null | undefined)?.version;
-    const from = state.sent[i].version;
     if (typeof landed !== "number" || landed !== from + 1) return { sent, held: state.held };
     return { sent, held: state.held.map((h) => (h.version === from ? { ...h, version: landed } : h)) };
   }
   if (!rebuildsAfterResult(result)) return { sent, held: state.held };
   const s = state.sent[i];
-  return { sent, held: [...state.held, { ...s, fields: { ...s.patch } }] };
+  return { sent, held: [...state.held, { patch: s.patch, version: from, fields: { ...s.patch } }] };
 }
 
 // An op the user dropped from the outbox (Discard of a failed save, keep
@@ -132,10 +141,11 @@ export function holdOnDrop(
 
 // The user discarded the row's draft (the unsaved list's Discard): every hold
 // ends, and the held fields are returned so the editor can put the row's value
-// back where they still show.
+// back where they still show. Saves still pending stop being watched too
+// (round 2, B3), so a refusal arriving after the discard holds nothing.
 export function holdOnDraftDiscard(state: HoldState): { state: HoldState; released: Fields[] } {
-  if (state.held.length === 0) return { state, released: [] };
-  return { state: { sent: state.sent, held: [] }, released: state.held.map((h) => h.fields) };
+  if (state.held.length === 0 && state.sent.length === 0) return { state, released: [] };
+  return { state: EMPTY_HOLD, released: state.held.map((h) => h.fields) };
 }
 
 // The cached row is at `version`. Holds of saves sent at an older version end:
@@ -152,8 +162,9 @@ export function holdOnRowVersion(state: HoldState, version: number): { state: Ho
 // What a field showing `local` does when the row changes: "keep" it (it still
 // shows the text of a held refused save), "adopt" the row's new value (it shows
 // the text of a hold that just ended because the server moved on, so it is not
-// the user's newer typing: as on main, the server's value shows and the drafts
-// store keeps the text), or "reconcile" as usual. `local` is in the form the
+// the user's newer typing: as on main, the server's value shows; for tQ and tW
+// links the drafts store keeps the text as a refused draft, for tN it does not,
+// see the header), or "reconcile" as usual. `local` is in the form the
 // editor's Save sends; `released` is what holdOnRowVersion just returned.
 export function holdDecision(
   state: HoldState,

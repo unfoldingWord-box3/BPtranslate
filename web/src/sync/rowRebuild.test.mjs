@@ -12,7 +12,13 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MAX_ATTEMPTS_SENTINEL, rebuildsAfterResult, rebuiltRow, rowRebuildAction } from "./outboxTargeting.ts";
+import {
+  MAX_ATTEMPTS_SENTINEL,
+  RowGenerations,
+  rebuildsAfterResult,
+  rebuiltRow,
+  rowRebuildAction,
+} from "./outboxTargeting.ts";
 
 const target = { kind: "row", rowKind: "tq", id: "q-1", book: "ZEC" };
 const otherRow = { kind: "row", rowKind: "tq", id: "q-2", book: "ZEC" };
@@ -143,4 +149,30 @@ test("trap 7: after a locked drop no waiting save is re-applied (each will be dr
 test("trap 7: the AI apply's newer row is not rolled back by a late rebuild", () => {
   const aiApplied = { ...server, response: "AI TEXT", version: 4 };
   assert.equal(rowRebuildAction(aiApplied, rebuiltRow(server, target, [], "locked")), null);
+});
+
+// Review round 2 B1: a rebuild's server read is applied only if nothing else
+// happened to the row (another outbox result or drop, or another rebuild)
+// since that rebuild started.
+test("B1: a later event for the row makes an in-flight rebuild stale", () => {
+  // A refused DELETE's read is in flight; then a later DELETE for the row
+  // succeeds. The old read must not put the row back.
+  const g = new RowGenerations();
+  const started = g.bump("row:tq:ZEC:q-1");
+  g.bump("row:tq:ZEC:q-1"); // the later delete's "ok" result
+  assert.equal(g.isCurrent("row:tq:ZEC:q-1", started), false);
+  // Another row's events do not touch it.
+  const other = g.bump("row:tq:ZEC:q-2");
+  g.bump("row:tq:ZEC:q-1");
+  assert.equal(g.isCurrent("row:tq:ZEC:q-2", other), true);
+});
+
+test("B1: of two overlapping rebuilds for a row, only the one started last applies, whichever read returns first", () => {
+  const key = "row:tq:ZEC:q-1";
+  for (const order of [["first", "second"], ["second", "first"]]) {
+    const g = new RowGenerations();
+    const gens = { first: g.bump(key), second: g.bump(key) };
+    const applied = order.filter((name) => g.isCurrent(key, gens[name]));
+    assert.deepEqual(applied, ["second"], `returns in order ${order.join(", ")}`);
+  }
 });

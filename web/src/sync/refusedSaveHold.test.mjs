@@ -97,6 +97,37 @@ test("review A3/A5: this editor's own later save landing does not end the hold",
   assert.equal(keeps(holdOnRowVersion(t, 5).state, "question", "ABC"), false);
 });
 
+test("round 2 B2: the hold takes the version the op was actually sent at", () => {
+  // A 409 auto-heal re-armed the save at v3 (the Save clicked at v2), then it
+  // was refused. The rebuild reads v3: the hold must stay.
+  const healed = holdOnResult(holdOnSave(EMPTY_HOLD, patch, 2), opFor(patch, { expectedVersion: 3 }), fatal, target);
+  assert.equal(keeps(holdOnRowVersion(healed, 3).state, "question", "ABC"), true);
+  assert.equal(keeps(holdOnRowVersion(healed, 4).state, "question", "ABC"), false);
+  // Quick double save: the first landed v2 -> v3, and the outbox threaded v3
+  // to the second (clicked at v2), which was then refused.
+  let s = holdOnSave(EMPTY_HOLD, { question: "AB" }, 2);
+  s = holdOnSave(s, patch, 2);
+  s = holdOnResult(s, opFor({ question: "AB" }, { expectedVersion: 2 }), { kind: "ok", updated: { version: 3 } }, target);
+  s = holdOnResult(s, opFor(patch, { expectedVersion: 3 }), fatal, target);
+  assert.equal(keeps(holdOnRowVersion(s, 3).state, "question", "ABC"), true);
+});
+
+test("round 2 B2: this editor's own save landing one version on follows the version it was sent at", () => {
+  // The held save was sent at v3 (healed); the response save threaded to v3
+  // lands at v4: nobody else wrote, so the hold follows to v4.
+  let s = holdOnResult(holdOnSave(EMPTY_HOLD, patch, 2), opFor(patch, { expectedVersion: 3 }), fatal, target);
+  s = holdOnSave(s, { response: "R" }, 2);
+  s = holdOnResult(s, opFor({ response: "R" }, { expectedVersion: 3 }), { kind: "ok", updated: { version: 4 } }, target);
+  assert.equal(keeps(holdOnRowVersion(s, 4).state, "question", "ABC"), true);
+});
+
+test("round 2 B3: discarding the row's draft while its save is still pending stops a later refusal from holding", () => {
+  const pending = holdOnSave(EMPTY_HOLD, patch, 2);
+  const { state } = holdOnDraftDiscard(pending);
+  assert.deepEqual(state.sent, []);
+  assert.equal(keeps(holdOnResult(state, opFor(patch), fatal, target), "question", "ABC"), false);
+});
+
 test("review A3: discarding the row's draft from the unsaved list ends every hold", () => {
   const { state, released } = holdOnDraftDiscard(heldAt2());
   assert.equal(keeps(state, "question", "ABC"), false);

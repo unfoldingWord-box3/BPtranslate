@@ -272,6 +272,24 @@ export function liveUpdateFollowUp(
 // stale: same-version server changes (preserve/hint, the review-state sweep)
 // and rows from a book-view fetch are simply part of what the server returns.
 
+// A counter per row (keyed by targetKey) that rowRebuild.ts bumps on every
+// outbox result or drop for the row and when a rebuild starts. A rebuild's
+// server read is applied only if the row's counter is still the one it got at
+// its start (review round 2, B1): otherwise something newer happened to the
+// row while the read was in flight (a later delete that landed, another
+// rebuild), and the older read must not overwrite it.
+export class RowGenerations {
+  private readonly gens = new Map<string, number>();
+  bump(key: string): number {
+    const n = (this.gens.get(key) ?? 0) + 1;
+    this.gens.set(key, n);
+    return n;
+  }
+  isCurrent(key: string, gen: number): boolean {
+    return this.gens.get(key) === gen;
+  }
+}
+
 // Whether a drain result ends a row op without the server applying it, so the
 // cached row is rebuilt: "fatal" (refused for good) or "locked" (dropped while
 // an AI pipeline holds the chapter). Not a fatal 404: the row is gone. Not a

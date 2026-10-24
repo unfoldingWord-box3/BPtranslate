@@ -25,7 +25,7 @@
 
 import { api, ApiError, type TnRow, type TqRow, type TwlRow } from "./api";
 import { onOutboxDrop, onOutboxResult, outbox, type OutboxOp, type RowTarget } from "./outbox";
-import { rebuildsAfterResult } from "./outboxTargeting";
+import { RowGenerations, rebuildsAfterResult, targetKey } from "./outboxTargeting";
 
 export type AnyRow = TnRow | TqRow | TwlRow;
 export type RebuildCause = "fatal" | "locked" | "drop";
@@ -58,9 +58,18 @@ function isServerRow(v: unknown, target: RowTarget): v is AnyRow {
   );
 }
 
+// Per-row counter (review round 2, B1): every outbox result or drop for a row
+// bumps it, and so does each rebuild's start. A rebuild hands its read on only
+// if the counter has not moved since it started, so a read that was in flight
+// while something newer happened to the row (a later delete that landed,
+// another rebuild for the row) is dropped instead of overwriting it.
+const generations = new RowGenerations();
+
 async function rebuild(op: OutboxOp, cause: RebuildCause) {
   if (op.target.kind !== "row" || listeners.size === 0) return;
   const target = op.target;
+  const key = targetKey(target);
+  const gen = generations.bump(key);
   let server: AnyRow | null = null;
   let read = false;
   try {
@@ -87,6 +96,7 @@ async function rebuild(op: OutboxOp, cause: RebuildCause) {
   } catch {
     queued = null;
   }
+  if (!generations.isCurrent(key, gen)) return;
   for (const l of listeners) {
     try {
       l({ target, server, queued, cause, mayInsert });
@@ -97,11 +107,14 @@ async function rebuild(op: OutboxOp, cause: RebuildCause) {
 }
 
 onOutboxResult((op, result) => {
-  if (op.target.kind !== "row" || !rebuildsAfterResult(result)) return;
+  if (op.target.kind !== "row") return;
+  generations.bump(targetKey(op.target));
+  if (!rebuildsAfterResult(result)) return;
   void rebuild(op, result.kind === "locked" ? "locked" : "fatal");
 });
 
 onOutboxDrop((op) => {
   if (op.target.kind !== "row") return;
+  generations.bump(targetKey(op.target));
   void rebuild(op, "drop");
 });
