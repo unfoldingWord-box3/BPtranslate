@@ -55,8 +55,15 @@ import { getLockUnapprovedDrafts } from "../lib/editorPrefs";
 import { formatEpochSecondsDateTime } from "../lib/formatDate";
 import { QUICK_DRAFTS_NEED_ORG_KEY } from "../lib/aiProviderErrors";
 import { drafts, rowKey, draftDirtyBorderSx } from "../sync/drafts";
-import { isPendingRowSave, rowSaveEnded, withPendingReverts } from "../sync/draftSaveState";
-import { onOutboxDrop, onOutboxResult, type OutboxOp } from "../sync/outbox";
+import {
+  isEditorsPendingSave,
+  pendingRevertSave,
+  revertMarks,
+  rowSaveEnded,
+  withPendingReverts,
+  type PendingRowSave,
+} from "../sync/draftSaveState";
+import { onOutboxDrop, onOutboxResult, outbox, type OutboxOp } from "../sync/outbox";
 import { useRefusedSaveHold } from "../hooks/useRefusedSaveHold";
 import { isAquiferDraftRow } from "./flows/translateShared";
 import { noteLockedReadOnly } from "../lib/chapterLock";
@@ -208,6 +215,15 @@ interface Props {
 // line-break marker. tcCreate renders those as real newlines; we do the same
 // on read, and on save we write back whatever the user typed verbatim. The
 // data in D1 transitions to true newlines as users edit.
+// This card's save as sentRef remembers it: the TSV values it sent, and the
+// same values as the card shows them (#658).
+function sentSave(patch: Partial<TnRow>): PendingRowSave {
+  const shown: Record<string, unknown> = { ...patch };
+  if (typeof patch.quote === "string") shown.quote = tsvToDisplay(patch.quote);
+  if (typeof patch.note === "string") shown.note = tsvToDisplay(patch.note);
+  return { patch: patch as Record<string, unknown>, shown };
+}
+
 function tsvToDisplay(s: string | null): string {
   return (s ?? "").replace(/\\n/g, "\n");
 }
@@ -604,7 +620,10 @@ function NoteCardInner({
   // sent (withPendingReverts, #632 item 2). Cleared by that save's outcome
   // (the listener below), never by a version check: the row can reach a new
   // version (a refetch) before the save lands (review A2).
-  const sentRef = useRef<{ patch: Partial<TnRow> } | null>(null);
+  const sentRef = useRef<PendingRowSave | null>(null);
+  // Ops this card heard end since it mounted, so the on-mount outbox read
+  // cannot restore a save that ended while the read was in flight (#658).
+  const endedOpsRef = useRef(new Set<string>());
   // Re-runs the draft write when a refused or discarded save ends the
   // protection, so a type-back equal to the server copy leaves the draft.
   const [sentTick, setSentTick] = useState(0);
@@ -729,9 +748,20 @@ function NoteCardInner({
   const hydratedFromDraftRef = useRef(false);
   useEffect(() => {
     if (hydratedFromDraftRef.current) return;
-    void drafts.get(rowKey("tn", row.book, row.id)).then((rec) => {
+    // The outbox is read alongside the draft (#658): a remount while this
+    // card's save is pending starts with no sentRef, so a note typed back to
+    // its baseline would drop out of the next draft write. A failed outbox
+    // read must not stop the draft restore.
+    void Promise.all([
+      drafts.get(rowKey("tn", row.book, row.id)),
+      outbox.listWithUncommitted().catch(() => [] as OutboxOp[]),
+    ]).then(([rec, ops]) => {
       if (hydratedFromDraftRef.current) return;
       hydratedFromDraftRef.current = true;
+      if (!sentRef.current) {
+        const pending = pendingRevertSave(rec, ops, { rowKind: "tn", id: row.id, book: row.book }, endedOpsRef.current);
+        if (pending) sentRef.current = pending;
+      }
       const payload = rec?.payload as
         | {
             patch?: Partial<TnRow>;
@@ -819,7 +849,7 @@ function NoteCardInner({
     // double-clicking Save before the server responds enqueues two PATCHes
     // with the same If-Match, the second of which lands as a phantom 409.
     setSavePendingVersion(savedRef.current.version);
-    sentRef.current = { patch };
+    sentRef.current = sentSave(patch);
     noteSave(patch, row.version);
     onSave(patch);
     // Rebase the snapshot so the chip stops showing "*" after a manual
@@ -945,7 +975,7 @@ function NoteCardInner({
     if (rawSr !== savedRef.current.support_reference) patch.support_reference = rawSr;
     if (Object.keys(patch).length === 0) return;
     onChange(patch);
-    sentRef.current = { patch };
+    sentRef.current = sentSave(patch);
     noteSave(patch, row.version);
     onSave(patch, { restoredFromVersion: fromVersion });
   };
@@ -1127,8 +1157,9 @@ function NoteCardInner({
   useEffect(() => {
     const target = { rowKind: "tn", id: row.id, book: row.book };
     const end = (op: OutboxOp, rerun: boolean) => {
+      endedOpsRef.current.add(op.id);
       const sent = sentRef.current;
-      if (!sent || !isPendingRowSave(sent.patch as Record<string, unknown>, op, target)) return;
+      if (!sent || !isEditorsPendingSave(sent, op, target)) return;
       sentRef.current = null;
       if (rerun) {
         setSentTick((n) => n + 1);
@@ -1153,6 +1184,8 @@ function NoteCardInner({
       { quote, note, support_reference: supportRef },
       sentRef.current?.patch,
     );
+    // Record the kept type-backs so a remount can restore the protection (#658).
+    const reverted = revertMarks(rowDiff, draftPatch, sentRef.current ?? undefined);
     if (Object.keys(draftPatch).length > 0) {
       void drafts.set(
         draftKey,
@@ -1167,6 +1200,7 @@ function NoteCardInner({
             note: savedRef.current.note,
             support_reference: savedRef.current.support_reference,
           },
+          ...(reverted ? { reverted } : {}),
         },
         row.version,
         {

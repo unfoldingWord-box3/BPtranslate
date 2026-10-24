@@ -20,6 +20,9 @@ import {
   withPendingReverts,
   isPendingRowSave,
   rowSaveEnded,
+  pendingRevertSave,
+  revertMarks,
+  isEditorsPendingSave,
 } from "./draftSaveState.ts";
 
 const draft = {
@@ -630,4 +633,72 @@ assert.equal(rowSaveEnded({ kind: "locked" }), true, "A1: a locked drop ends it"
 assert.equal(rowSaveEnded({ kind: "conflict" }), false, "A1: a 409 awaiting keep-mine keeps it");
 assert.equal(rowSaveEnded({ kind: "retry", reason: "http 503" }), false, "A1: a retry keeps it");
 
-console.log("draftSaveState: 88 passed");
+// #658: a field kept by withPendingReverts is marked in the draft with what the
+// pending save sent, and a remounted editor restores the protection only from
+// a live op that sends exactly that value.
+const ownSave = { patch: { note: "N1\\nb" }, shown: { note: "N1\nb" } };
+assert.deepEqual(
+  revertMarks({ quote: "Q1" }, { quote: "Q1", note: "N0" }, ownSave),
+  { note: { sent: "N1\\nb", shown: "N1\nb" } },
+  "#658: a kept field is marked with the sent and display values",
+);
+assert.equal(revertMarks({ quote: "Q1", note: "N2" }, { quote: "Q1", note: "N2" }, ownSave), undefined, "#658: a field in the diff is typing, not a type-back");
+assert.equal(revertMarks({ quote: "Q1" }, { quote: "Q1" }, undefined), undefined, "#658: no pending save, no marks");
+assert.deepEqual(
+  revertMarks({}, { note: "N0" }, { patch: { note: "N1" }, shown: {} }),
+  { note: { sent: "N1", shown: "N1" } },
+  "#658: shown defaults to the sent value",
+);
+
+const markedDraft = (patch, reverted) => ({ ...rowDraft({}), payload: { patch, baseline: { quote: "Q0", note: "N0" }, ...(reverted ? { reverted } : {}) } });
+const n0Back = markedDraft({ quote: "Q1", note: "N0" }, { note: { sent: "N1", shown: "N1" } });
+const liveN1 = tnOp({ id: "op1", status: "in_flight" });
+assert.deepEqual(
+  pendingRevertSave(n0Back, [liveN1], tnTarget),
+  { patch: { note: "N1" }, shown: { note: "N1" }, opId: "op1" },
+  "#658: a marked field with its save still live restores the protection",
+);
+assert.equal(pendingRevertSave(n0Back, [liveN1], tnTarget, new Set(["op1"])), undefined, "#658 A2: an op heard ending after the read is not restored");
+assert.equal(pendingRevertSave(undefined, [liveN1], tnTarget), undefined, "#658: no draft, nothing to protect");
+assert.equal(pendingRevertSave(n0Back, [], tnTarget), undefined, "#658: no live op, nothing to protect");
+assert.equal(pendingRevertSave(n0Back, [tnOp({ id: "op1", status: "failed", lastError: "http 422" })], tnTarget), undefined, "#658: a refused op will not land");
+assert.equal(pendingRevertSave(n0Back, [tnOp({ id: "op1", status: "done" })], tnTarget), undefined, "#658: a finished op is not live");
+assert.deepEqual(pendingRevertSave(n0Back, [tnOp({ id: "op1", status: "conflict" })], tnTarget)?.opId, "op1", "#658: a 409 awaiting keep-mine can still land");
+assert.equal(pendingRevertSave(n0Back, [tnOp({ id: "d", status: "pending", action: "delete", patch: {} })], tnTarget), undefined, "#658: a delete is not a save");
+assert.equal(
+  pendingRevertSave(n0Back, [tnOp({ id: "o", status: "pending", target: { kind: "row", rowKind: "tn", id: "other", book: "ZEC" } })], tnTarget),
+  undefined,
+  "#658: another row's op does not count",
+);
+assert.equal(pendingRevertSave(n0Back, [tnOp({ id: "x", status: "pending", patch: { note: "X" } })], tnTarget), undefined, "#658 A1: an op sending another value is not this save");
+assert.equal(
+  pendingRevertSave(markedDraft({ quote: "Q1" }, { note: { sent: "N1", shown: "N1" } }), [liveN1], tnTarget),
+  undefined,
+  "#658: a mark whose field left the patch (typed again) restores nothing",
+);
+// Review A1/F1: save N1, edit the quote, unmount; the 200 rebases the baseline
+// to N1 and leaves note N1 in the patch, so note equals its baseline without
+// any type-back. A later remount next to another live save of the note must
+// not adopt it.
+const f1 = { ...rowDraft({}), payload: { patch: { quote: "Q1", note: "N1" }, baseline: { quote: "Q0", note: "N1" } } };
+assert.equal(pendingRevertSave(f1, [tnOp({ id: "x", status: "pending", patch: { note: "X" } })], tnTarget), undefined, "#658 A1: a rebased field with no mark is not a type-back");
+assert.deepEqual(
+  pendingRevertSave(n0Back, [tnOp({ id: "op1", status: "in_flight", patch: { note: "N1", quote: "Q9" } })], tnTarget)?.patch,
+  { note: "N1" },
+  "#658 A3: only the marked fields are restored, not the op's whole patch",
+);
+assert.deepEqual(
+  pendingRevertSave(n0Back, [liveN1, tnOp({ id: "op2", status: "pending", patch: { note: "N1" } })], tnTarget)?.opId,
+  "op2",
+  "#658: the newest op sending the marked value wins",
+);
+assert.deepEqual(
+  pendingRevertSave(markedDraft({ note: "a\nb" }, { note: { sent: "N1\\nx", shown: "N1\nx" } }), [tnOp({ id: "t", status: "pending", patch: { note: "N1\\nx" } })], tnTarget)?.shown,
+  { note: "N1\nx" },
+  "#658 A4: the display form comes from the mark",
+);
+assert.equal(isEditorsPendingSave({ patch: { note: "N1" }, shown: {}, opId: "op1" }, tnOp({ id: "op1", patch: { note: "N1", quote: "q" } }), tnTarget), true, "#658: a recovered save ends by op id");
+assert.equal(isEditorsPendingSave({ patch: { note: "N1" }, shown: {}, opId: "op1" }, tnOp({ id: "op2" }), tnTarget), false, "#658: another op with the same patch does not end a recovered save");
+assert.equal(isEditorsPendingSave({ patch: { note: "N1" }, shown: {} }, tnOp({ id: "any" }), tnTarget), true, "#658: an editor's own save still ends by row and patch");
+
+console.log("draftSaveState: 110 passed");

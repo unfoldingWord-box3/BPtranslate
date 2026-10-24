@@ -146,7 +146,14 @@ import { flowLaneSegmentsAcross, type FlowSegment } from "../../lib/flowHighligh
 import { isHebrewBook } from "../../lib/sourceSearch";
 import { realChapters } from "../../lib/bookSummary";
 import { drafts, rowKey } from "../../sync/drafts";
-import { isPendingRowSave, rowSaveEnded, withPendingReverts } from "../../sync/draftSaveState";
+import {
+  isEditorsPendingSave,
+  pendingRevertSave,
+  revertMarks,
+  rowSaveEnded,
+  withPendingReverts,
+  type PendingRowSave,
+} from "../../sync/draftSaveState";
 import { onOutboxDrop, onOutboxResult, outbox, type OutboxOp } from "../../sync/outbox";
 import { pipelineStore, getSessionKey, type PipelineJob } from "../../sync/pipelineStore";
 import { jobLocksChapterNotes, jobLocksNote, lockJobReleased } from "../../lib/chapterLock";
@@ -545,7 +552,10 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   // stays a draft (withPendingReverts, #632 item 2). Cleared by that save's
   // outcome (the listener below the persist effect), never by a version check:
   // the row can reach a new version before the save lands (review A2).
-  const sentRef = useRef<{ id: string; patch: { note: string } } | null>(null);
+  const sentRef = useRef<(PendingRowSave & { id: string }) | null>(null);
+  // Ops this screen heard end since it mounted, so a draft lookup's outbox
+  // read cannot restore a save that ended while the read was in flight (#658).
+  const endedOpsRef = useRef(new Set<string>());
   // Re-runs the persist effect when the protection ends.
   const [sentTick, setSentTick] = useState(0);
   // "Hydration for this key has started" — set synchronously, guards against
@@ -658,8 +668,24 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
       setEditing(false);
     }
     let cancelled = false;
-    void drafts.get(key).then((rec) => {
+    // The outbox is read alongside the draft (#658): returning to this screen
+    // while its save is pending starts with no sentRef, so a note typed back
+    // to its baseline would be cleared from the drafts store.
+    void Promise.all([drafts.get(key), outbox.listWithUncommitted().catch(() => [] as OutboxOp[])]).then(([rec, ops]) => {
       if (cancelled || hydratedKeyRef.current !== nonceKey) return;
+      if (sentRef.current?.id !== row.id) {
+        const pending = pendingRevertSave(rec, ops, { rowKind: "tn", id: row.id, book }, endedOpsRef.current);
+        // Only the field this screen edits; a mark NoteCard left for the quote
+        // is not this screen's to keep.
+        if (pending && typeof pending.patch.note === "string") {
+          sentRef.current = {
+            id: row.id,
+            patch: { note: pending.patch.note },
+            shown: { note: pending.shown.note },
+            opId: pending.opId,
+          };
+        }
+      }
       const payload = rec?.payload as
         | { patch?: Record<string, unknown>; baseline?: Record<string, unknown> }
         | undefined;
@@ -726,16 +752,15 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
     const key = rowKey("tn", book, row.id);
     const nonceKey = `${key}#${reloadNonce}`;
     if (settledKey !== nonceKey) return;
-    const sent = sentRef.current;
-    const patch = withPendingReverts(
-      draftValue !== baselineRef.current ? { note: draftValue } : {},
-      { note: draftValue },
-      sent && sent.id === row.id ? sent.patch : undefined,
-    );
+    const sent = sentRef.current && sentRef.current.id === row.id ? sentRef.current : undefined;
+    const diff = draftValue !== baselineRef.current ? { note: draftValue } : {};
+    const patch = withPendingReverts(diff, { note: draftValue }, sent?.patch);
+    // Record a kept type-back so a remount can restore the protection (#658).
+    const reverted = revertMarks(diff, patch, sent);
     if ("note" in patch) {
       void drafts.set(
         key,
-        { patch: { note: draftValue }, baseline: { note: baselineRef.current } },
+        { patch: { note: draftValue }, baseline: { note: baselineRef.current }, ...(reverted ? { reverted } : {}) },
         row.version,
         { kind: "row", rowKind: "tn", id: row.id, book, chapter: row.chapter, verse: row.verse },
       );
@@ -753,11 +778,16 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   // persist effect re-runs against it, so a kept revert stays a draft.
   useEffect(() => {
     const end = (op: OutboxOp, ok: boolean) => {
+      endedOpsRef.current.add(op.id);
       const sent = sentRef.current;
-      if (!sent || !isPendingRowSave(sent.patch, op, { rowKind: "tn", id: sent.id, book })) return;
+      if (!sent || !isEditorsPendingSave(sent, op, { rowKind: "tn", id: sent.id, book })) return;
       sentRef.current = null;
       if (ok && hydratedKeyRef.current?.startsWith(`${rowKey("tn", book, sent.id)}#`)) {
-        baselineRef.current = sent.patch.note;
+        // The display form of what was sent: this screen's own text as typed,
+        // or, for a save recovered from the outbox (#658), the form its mark
+        // recorded (NoteCard sends TSV newlines).
+        const shown = sent.shown.note;
+        if (typeof shown === "string") baselineRef.current = shown;
       }
       setSentTick((n) => n + 1);
     };
@@ -1076,7 +1106,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
     const patch = { note: draftValue };
     const baseline = { note: baselineRef.current };
     applyLocalRowPatch("tn", target.id, patch as Partial<TnRow & TqRow>);
-    sentRef.current = { id: target.id, patch };
+    sentRef.current = { id: target.id, patch, shown: patch };
     const op = await outbox.enqueueRow("tn", target.id, target.version, patch, { book, baseline });
     const result = await waitForOp(op.id);
     if (result === null) {
