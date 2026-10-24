@@ -278,3 +278,134 @@ test("tN card: a note typed back during a save that is then refused leaves no ph
     await context.close();
   }
 });
+
+// #658, flows Translate Notes: the same type-back, then leave the screen and
+// come back while the save is held. Before the fix the returning screen saw
+// the note equal to its baseline and cleared the draft at once, so the save's
+// 200 left the server's N1 showing as clean.
+test("flows notes: a note typed back during a pending save survives leaving and returning", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const row = await pickRow();
+  const key = `row:tn:ZEC:${row.id}`;
+  const { context, auth } = await newUserContext(browser, "typeback-658-flows");
+  const page = await context.newPage();
+
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  let seen = 0;
+  await context.route(`**/api/rows/tn/${row.id}**`, async (route, request) => {
+    if (request.method() !== "PATCH") return route.continue();
+    seen++;
+    await held;
+    await route.continue();
+  });
+
+  const shown = () => page.locator('[role="button"][dir="auto"]').first();
+  const editor = () => page.locator('textarea:not([aria-hidden="true"])').first();
+  const open = async () => {
+    await page.evaluate((v) => {
+      location.hash = `#/notes/ZEC/10/${v}`;
+    }, row.verse);
+  };
+  const leave = async () => {
+    await page.evaluate(() => {
+      location.hash = "#/ZEC/9/2";
+    });
+    await page.locator('[role="button"][dir="auto"]').first().waitFor({ state: "detached", timeout: 10_000 });
+  };
+
+  try {
+    await page.goto(`/#/notes/ZEC/10/${row.verse}`);
+    // The tests above may have saved this row already; read what the screen shows.
+    await expect(shown()).not.toHaveText("", { timeout: 15_000 });
+    const start = await shown().innerText();
+    const n1 = `${start} SAVED ${Date.now()}`;
+    await shown().click();
+    await editor().fill(n1);
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect.poll(() => seen, { message: "the PATCH should reach the route" }).toBeGreaterThan(0);
+
+    await editor().fill(start);
+    await expect
+      .poll(async () => (await readDraft(page, key))?.patch, { message: "the type-back should be in the drafts store" })
+      .toEqual({ note: start });
+
+    // Leave and come back with the save still held.
+    await leave();
+    await open();
+    await expect(shown()).toHaveText(start, { timeout: 15_000 });
+    // Give the returning screen's persist effect its pass.
+    await page.waitForTimeout(500);
+    expect((await readDraft(page, key))?.patch, "the returning screen must keep the type-back").toEqual({ note: start });
+
+    await leave();
+    release();
+    await waitForServerNote(context.request, auth.token, "ZEC", CHAPTER, row.id, (n) => n === n1);
+    await expect
+      .poll(async () => (await readDraft(page, key))?.baseline?.note, { message: "the settle should rebase the baseline" })
+      .toBe(n1);
+    expect((await readDraft(page, key))?.patch, "the revert must still be in the draft").toEqual({ note: start });
+
+    await open();
+    await expect(shown()).toHaveText(start, { timeout: 15_000 });
+  } finally {
+    release();
+    await context.close();
+  }
+});
+
+// #658, refused after the remount: the protection the remounted card recovered
+// from the outbox must end with that save, like the one the original card
+// held, so the typed-back note leaves the draft (the server kept it).
+test("tN card: after a remount, a type-back protection ends when the save is refused", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const row = await pickRow();
+  const key = `row:tn:ZEC:${row.id}`;
+  const { context } = await newUserContext(browser, "typeback-658-refused");
+  const page = await context.newPage();
+
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  let seen = 0;
+  await context.route(`**/api/rows/tn/${row.id}**`, async (route, request) => {
+    if (request.method() !== "PATCH") return route.continue();
+    seen++;
+    await held;
+    await route.fulfill({ status: 422, contentType: "application/json", body: JSON.stringify({ error: "validation_failed" }) });
+  });
+
+  try {
+    await gotoVerse(page, "ZEC", CHAPTER, row.verse);
+    const n0 = await noteTextarea(page, row.id).inputValue();
+    const q0 = await quoteTextarea(page, row.id).inputValue();
+    await noteTextarea(page, row.id).fill(`${n0} REFUSED ${Date.now()}`);
+    await saveNote(page, row.id);
+    await expect.poll(() => seen, { message: "the PATCH should reach the route" }).toBeGreaterThan(0);
+    await noteTextarea(page, row.id).fill(n0);
+    await expect.poll(async () => (await readDraft(page, key))?.patch).toEqual(expect.objectContaining({ note: n0 }));
+
+    // Remount with the save still held.
+    await page.evaluate(() => {
+      location.hash = "#/ZEC/9/2";
+    });
+    await page.locator(`[data-note-id="${row.id}"]`).waitFor({ state: "detached", timeout: 10_000 });
+    await page.evaluate((v) => {
+      location.hash = `#/ZEC/10/${v}`;
+    }, row.verse);
+    await expect(noteTextarea(page, row.id)).toHaveValue(n0);
+    const q1 = `${q0} EDITED`;
+    await quoteTextarea(page, row.id).fill(q1);
+    await expect
+      .poll(async () => (await readDraft(page, key))?.patch, { message: "the remounted card should keep the type-back" })
+      .toEqual({ quote: q1, note: n0 });
+
+    release();
+    await expect
+      .poll(async () => (await readDraft(page, key))?.patch, { message: "the refusal should end the recovered protection" })
+      .toEqual({ quote: q1 });
+    await expect(noteTextarea(page, row.id).locator('xpath=ancestor::*[@data-dirty="true"][1]')).toHaveCount(0);
+  } finally {
+    release();
+    await context.close();
+  }
+});
