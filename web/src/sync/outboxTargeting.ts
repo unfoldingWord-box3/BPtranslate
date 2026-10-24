@@ -259,3 +259,98 @@ export function liveUpdateFollowUp(
   if ("restored_from_version" in row) patch.restored_from_version = row.restored_from_version;
   return { t: "patch", patch };
 }
+
+// ---------- rebuild after a row op that never lands (#637 item 1) ----------
+//
+// A Save patches the cached row at once (Shell's enqueueRow; a row delete
+// removes it at once). When the server never applies the op, nothing used to
+// take that back: the unsaved value stayed in the cache, on screen and as the
+// classic editors' saved baseline, until a refetch. rowRebuild.ts now reads
+// the row from the server after such an op, and the cache hooks (useChapter,
+// useBook) put it back with these helpers. Reading the server's row, rather
+// than keeping a "last confirmed" copy in each hook, means no such copy can go
+// stale: same-version server changes (preserve/hint, the review-state sweep)
+// and rows from a book-view fetch are simply part of what the server returns.
+
+// A counter per row (keyed by targetKey) that rowRebuild.ts bumps on every
+// outbox result or drop for the row and when a rebuild starts. A rebuild's
+// server read is applied only if the row's counter is still the one it got at
+// its start (review round 2, B1): otherwise something newer happened to the
+// row while the read was in flight (a later delete that landed, another
+// rebuild), and the older read must not overwrite it.
+// Only results that change or settle the server's row move the counter
+// (round 3, C1): "ok", "fatal" and "locked" (and a drop, counted by
+// rowRebuild.ts). A "retry" or a "conflict" leaves the server row as it was,
+// so a sibling op's network retry or 409 must not make a refused op's rebuild
+// stale: nothing would schedule it again.
+export function bumpsRowGeneration(result: OutboxResult): boolean {
+  return result.kind === "ok" || result.kind === "fatal" || result.kind === "locked";
+}
+
+export class RowGenerations {
+  private readonly gens = new Map<string, number>();
+  bump(key: string): number {
+    const n = (this.gens.get(key) ?? 0) + 1;
+    this.gens.set(key, n);
+    return n;
+  }
+  isCurrent(key: string, gen: number): boolean {
+    return this.gens.get(key) === gen;
+  }
+}
+
+// Whether a drain result ends a row op without the server applying it, so the
+// cached row is rebuilt: "fatal" (refused for good) or "locked" (dropped while
+// an AI pipeline holds the chapter). Not a fatal 404: the row is gone. Not a
+// "conflict": it waits for the user (keep mine re-sends it; keep theirs and
+// Discard reach rowRebuild.ts as an outbox drop). Not "retry": it re-sends.
+export function rebuildsAfterResult(result: OutboxResult): boolean {
+  if (result.kind === "locked") return true;
+  return result.kind === "fatal" && result.reason !== "http 404";
+}
+
+// The row the cache should hold after a row op ended without landing: the
+// server's row as just read, plus the row's saves still waiting that will land
+// on top of it (liveUpdateFollowUp's rule: sent at the server's version, or one
+// the outbox's 409 rule would auto-heal, judged against the row built so far).
+// After a "locked" drop no waiting save is re-applied: the chapter is locked,
+// so each one will be dropped the same way. Null when the outbox could not be
+// read (a waiting save cannot be ruled out) or a delete for the row is waiting
+// (the row stays removed).
+export function rebuiltRow<R extends { version: number }>(
+  server: R,
+  target: OpTarget,
+  queued: OutboxOp[] | null | undefined,
+  cause: "fatal" | "locked" | "drop",
+): R | null {
+  if (!queued) return null;
+  if (hasQueuedDelete(target, queued)) return null;
+  if (cause === "locked") return server;
+  return rowWithQueuedPatches(
+    server,
+    target,
+    queued,
+    undefined,
+    (o, soFar) => o.expectedVersion === server.version || wouldAutoHeal(o, soFar),
+  );
+}
+
+// How to put `rebuilt` into a cache that holds `cached` for the row. A row the
+// cache no longer has is inserted back only when `mayInsert`: the op that never
+// landed was itself this row's delete (refused or discarded), and the row was
+// read from the server just now. A row missing after any other op is missing
+// because something deleted it (a later delete of this user's, another user's),
+// so it stays out (review A2). A cached row at a newer version than the server
+// row read is left alone: something newer landed meanwhile (the guard
+// liveUpdateFollowUp's caller applies, review F4 of #642).
+export type RowRebuildAction<R> = { t: "replace"; row: R } | { t: "insert"; row: R } | null;
+export function rowRebuildAction<R extends { version: number }>(
+  cached: R | undefined,
+  rebuilt: R | null,
+  mayInsert: boolean,
+): RowRebuildAction<R> {
+  if (!rebuilt) return null;
+  if (!cached) return mayInsert ? { t: "insert", row: rebuilt } : null;
+  if (cached.version > rebuilt.version) return null;
+  return { t: "replace", row: rebuilt };
+}

@@ -604,7 +604,9 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
                   onClick={(e) => {
                     // Stop the MenuItem's navigate onClick from also firing.
                     e.stopPropagation();
-                    void drafts.clear(d.key);
+                    // discard, not clear: an editor holding a refused save's
+                    // text lets it go too (#637 item 1).
+                    void drafts.discard(d.key);
                   }}
                   sx={{ p: 0.25 }}
                 >
@@ -771,7 +773,7 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
                         variant="text"
                         color="error"
                         onClick={async () => {
-                          for (const d of quarantinedDrafts) await drafts.clear(d.key);
+                          for (const d of quarantinedDrafts) await drafts.discard(d.key);
                         }}
                         sx={{ minWidth: 0, py: 0, fontSize: 11 }}
                       >
@@ -826,7 +828,7 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
                       <IconButton
                         size="small"
                         color="error"
-                        onClick={() => void drafts.clear(d.key)}
+                        onClick={() => void drafts.discard(d.key)}
                         sx={{ p: 0.25 }}
                       >
                         <DeleteOutlineIcon fontSize="inherit" />

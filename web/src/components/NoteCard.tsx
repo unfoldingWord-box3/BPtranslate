@@ -57,6 +57,7 @@ import { QUICK_DRAFTS_NEED_ORG_KEY } from "../lib/aiProviderErrors";
 import { drafts, rowKey, draftDirtyBorderSx } from "../sync/drafts";
 import { isPendingRowSave, rowSaveEnded, withPendingReverts } from "../sync/draftSaveState";
 import { onOutboxDrop, onOutboxResult, type OutboxOp } from "../sync/outbox";
+import { useRefusedSaveHold } from "../hooks/useRefusedSaveHold";
 import { isAquiferDraftRow } from "./flows/translateShared";
 import { noteLockedReadOnly } from "../lib/chapterLock";
 
@@ -209,6 +210,11 @@ interface Props {
 // data in D1 transitions to true newlines as users edit.
 function tsvToDisplay(s: string | null): string {
   return (s ?? "").replace(/\\n/g, "\n");
+}
+
+// The TSV form flushPending sends for a display value.
+function toTsv(s: string): string {
+  return s.replace(/\n/g, "\\n");
 }
 
 // Detect the primary script of a string for directing RTL/LTR rendering and
@@ -647,20 +653,65 @@ function NoteCardInner({
   // survives a deactivate, and an unrelated version bump elsewhere (e.g.
   // an AI-suggest save landing after the user wandered off) must not stamp
   // that pending pick back to the server's stale value.
+  // Also keep a field still showing the text of a refused save of this card's
+  // (#637 item 1): the cached row goes back to the server's copy, and adopting
+  // it here would drop the text from the screen and, through the no-diff
+  // clear below, from the drafts store. The held patch is in the TSV form
+  // flushPending sends. Discarding that save puts the saved value back.
+  // When the server moves past a held save (rowChanged), a field still showing
+  // the held text adopts the row's value, and a field whose hold ended but
+  // that shows other text (typed after the refused save) keeps it as unsaved
+  // typing, as in the tQ / tW-link editors (round 2, B5). A field that was not
+  // part of a held save follows this card's rule from before #637: with no
+  // session open and no stashed pick, it takes the row's value (unsaved typing
+  // in it is replaced on a row change, the same as on main; round 3, C2).
+  const { noteSave, rowChanged, decide } = useRefusedSaveHold("tn", row.id, row.book, (released) => {
+    const saved = savedRef.current;
+    if ("quote" in released) setQuote((q) => (toTsv(q) === released.quote ? tsvToDisplay(saved.quote) : q));
+    if ("note" in released) setNote((n) => (toTsv(n) === released.note ? tsvToDisplay(saved.note) : n));
+    if ("support_reference" in released) {
+      setSupportRef((s) => (s === released.support_reference ? saved.support_reference : s));
+    }
+  });
+  // The three field effects below all run on a version change; the first one
+  // asks rowChanged and the others reuse its answer for that version.
+  const releaseRef = useRef<{ version: number; released: Array<Record<string, unknown>> }>({
+    version: row.version,
+    released: [],
+  });
+  const releasedAt = (version: number) => {
+    if (releaseRef.current.version !== version) {
+      releaseRef.current = { version, released: rowChanged(version) };
+    }
+    return releaseRef.current.released;
+  };
+  // The value a field shows after the row changed (no session open).
+  const resynced = <T,>(field: string, local: T, sendForm: unknown, rowValue: T, released: Array<Record<string, unknown>>): T => {
+    const d = decide(field, sendForm, released);
+    if (d === "keep") return local;
+    if (d === "reconcile" && released.some((f) => field in f)) return local;
+    return rowValue;
+  };
   useEffect(() => {
     if (sessionSnapshotRef.current !== null) return;
     if ("quote" in pendingRef.current) return;
-    setQuote(tsvToDisplay(row.quote));
+    const released = releasedAt(row.version);
+    setQuote((q) => resynced("quote", q, toTsv(q), tsvToDisplay(row.quote), released));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- releasedAt/resynced read refs and stable hook callbacks only.
   }, [row.id, row.version, row.quote]);
   useEffect(() => {
     if (sessionSnapshotRef.current !== null) return;
     if ("note" in pendingRef.current) return;
-    setNote(tsvToDisplay(row.note));
+    const released = releasedAt(row.version);
+    setNote((n) => resynced("note", n, toTsv(n), tsvToDisplay(row.note), released));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- releasedAt/resynced read refs and stable hook callbacks only.
   }, [row.id, row.version, row.note]);
   useEffect(() => {
     if (sessionSnapshotRef.current !== null) return;
     if ("support_reference" in pendingRef.current) return;
-    setSupportRef(row.support_reference);
+    const released = releasedAt(row.version);
+    setSupportRef((s) => resynced("support_reference", s, s, row.support_reference, released));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- releasedAt/resynced read refs and stable hook callbacks only.
   }, [row.id, row.version, row.support_reference]);
 
   // Restore unsaved typing on first mount. If a draft exists for this row,
@@ -767,6 +818,7 @@ function NoteCardInner({
     // with the same If-Match, the second of which lands as a phantom 409.
     setSavePendingVersion(savedRef.current.version);
     sentRef.current = { patch };
+    noteSave(patch, row.version);
     onSave(patch);
     // Rebase the snapshot so the chip stops showing "*" after a manual
     // save and a follow-up Undo reverts to the just-saved state.
@@ -892,6 +944,7 @@ function NoteCardInner({
     if (Object.keys(patch).length === 0) return;
     onChange(patch);
     sentRef.current = { patch };
+    noteSave(patch, row.version);
     onSave(patch, { restoredFromVersion: fromVersion });
   };
 

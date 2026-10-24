@@ -1960,6 +1960,11 @@ export const api = {
   // book is required after the composite-(book, id) PK migration (0015);
   // the server returns 400 if it's missing because the same 4-char id can
   // exist in two books with different content.
+  // The server's current copy of one row (404 once deleted). Read after a row
+  // save that never landed, to rebuild the cached row (rowRebuild.ts, #637).
+  getRow: <T = TnRow | TqRow | TwlRow>(kind: RowKind, id: string, book: string) =>
+    request<T>(`/api/rows/${kind}/${encodeURIComponent(id)}?book=${encodeURIComponent(book)}`),
+
   getRowHistory: (kind: RowKind, id: string, book: string) =>
     request<RowHistory>(
       `/api/rows/${kind}/${encodeURIComponent(id)}/history?book=${encodeURIComponent(book)}`,

@@ -143,3 +143,33 @@ test("broadcastUpsertAction: same-version tn state flips (preserve / hint / tras
   assert.equal(broadcastUpsertAction("tn", row("a", { trashed_at: null }), row("a", { trashed_at: 7 })), "replace");
   assert.equal(broadcastUpsertAction("tq", row("a", { trashed_at: null }), row("a", { trashed_at: 7 })), "skip");
 });
+
+// #637 item 1 review A6/A7: the rebuild op (a row re-read after an op that
+// never landed) carries rowRebuildAction's guards for useChapter and useBook
+// alike, and puts a re-inserted row back in the server's order.
+test("rebuild replaces a cached row at the same or an older version, never a newer one", () => {
+  const base = payload([row("a", { version: 2, note: "optimistic" })]);
+  assert.equal(applyCacheOp(base, { t: "rebuild", kind: "tn", row: row("a", { version: 2, note: "server" }), mayInsert: false }).tn[0].note, "server");
+  const newer = payload([row("a", { version: 3, note: "landed" })]);
+  assert.equal(applyCacheOp(newer, { t: "rebuild", kind: "tn", row: row("a", { version: 2 }), mayInsert: true }), newer);
+});
+
+test("rebuild inserts a missing row only when allowed, in verse / sort_order / id order, once", () => {
+  const base = payload([
+    row("a", { verse: 1, sort_order: 1 }),
+    row("b", { verse: 2, sort_order: 1 }),
+    row("d", { verse: 2, sort_order: 3 }),
+    row("e", { verse: 3, sort_order: null }),
+  ]);
+  const back = row("c", { verse: 2, sort_order: 2 });
+  assert.equal(applyCacheOp(base, { t: "rebuild", kind: "tn", row: back, mayInsert: false }), base);
+  const p = applyCacheOp(base, { t: "rebuild", kind: "tn", row: back, mayInsert: true });
+  assert.deepEqual(ids(p), ["a", "b", "c", "d", "e"]);
+  // Applied again (e.g. replayed onto a fetch), it replaces instead of duplicating.
+  assert.deepEqual(ids(applyCacheOp(p, { t: "rebuild", kind: "tn", row: back, mayInsert: true })), ["a", "b", "c", "d", "e"]);
+  // NULL sort_order sorts last within its verse; a later verse goes after.
+  const nullOrder = applyCacheOp(base, { t: "rebuild", kind: "tn", row: row("z", { verse: 2, sort_order: null }), mayInsert: true });
+  assert.deepEqual(ids(nullOrder), ["a", "b", "d", "z", "e"]);
+  const first = applyCacheOp(base, { t: "rebuild", kind: "tn", row: row("0", { verse: 0, sort_order: 5 }), mayInsert: true });
+  assert.deepEqual(ids(first), ["0", "a", "b", "d", "e"]);
+});

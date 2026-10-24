@@ -248,24 +248,26 @@ test("tN card: text refused with a fatal 422 survives a reload", async ({ browse
 });
 
 test("tQ table: a refused question survives editing and saving the response", async ({ browser }) => {
-  // Review A1: the editor's diff against the optimistic row is {response}
-  // only, so its re-write and the response save's 200 must keep the question.
+  // Review A1 of #657: editing the response must keep the refused question in
+  // the draft. Since #637 item 1 the cached row goes back to the server's
+  // question after the refusal, so the question shows as unsaved and the
+  // response Save sends it again with the response (before, the editor's diff
+  // was {response} only and the question waited in the draft).
   test.setTimeout(60_000);
   const { tq } = await pickRows();
   const key = `row:tq:ZEC:${tq.id}`;
   const { context } = await newUserContext(browser, "refused-tq-other-field");
   const page = await context.newPage();
 
-  // Refuse any PATCH that sends the question; let the rest reach the server.
-  let refused = 0;
-  let passed = 0;
+  // Refuse any PATCH that sends the question.
+  const bodies: Record<string, unknown>[] = [];
   await context.route(`**/api/rows/tq/${tq.id}**`, async (route, request) => {
     if (request.method() !== "PATCH") return route.continue();
-    if ("question" in (request.postDataJSON() ?? {})) {
-      refused++;
+    const body = (request.postDataJSON() ?? {}) as Record<string, unknown>;
+    bodies.push(body);
+    if ("question" in body) {
       return route.fulfill({ status: 422, contentType: "application/json", body: JSON.stringify({ error: "validation_failed" }) });
     }
-    passed++;
     return route.continue();
   });
 
@@ -273,25 +275,32 @@ test("tQ table: a refused question survives editing and saving the response", as
   const typed = `REFUSED Q ${Date.now()}`;
   await questionField(page, tq.id).fill(typed);
   await saveQuestion(page, tq.id);
-  await expect.poll(() => refused).toBeGreaterThan(0);
+  await expect.poll(() => bodies.length).toBeGreaterThan(0);
   await expect.poll(() => readDraftPatch(page, key)).toEqual(expect.objectContaining({ question: typed }));
 
   const response = `RESPONSE ${Date.now()}`;
   await responseField(page, tq.id).fill(response);
   await expect
     .poll(() => readDraftPatch(page, key), { message: "the re-write keeps the refused question" })
-    .toEqual({ question: typed, response });
+    .toEqual(expect.objectContaining({ question: typed, response }));
   await saveQuestion(page, tq.id);
-  await expect.poll(() => passed, { message: "the response save should reach the server" }).toBeGreaterThan(0);
+  // `bodies` holds this row's PATCHes only (the route is per row id).
   await expect
-    .poll(() => readDraftPatch(page, key), { message: "the 200 keeps the refused question" })
-    .toEqual(expect.objectContaining({ question: typed }));
+    .poll(() => bodies.some((b) => b.response === response), { message: "the second save should reach the route" })
+    .toBe(true);
+  expect(
+    bodies.find((b) => b.response === response),
+    "the Save resends the refused question with the response",
+  ).toEqual(expect.objectContaining({ question: typed, response }));
+  await expect
+    .poll(() => readDraftPatch(page, key), { message: "the second refusal keeps both" })
+    .toEqual(expect.objectContaining({ question: typed, response }));
 
   await page.reload();
   await page.getByRole("button", { name: /^Questions/ }).click();
   await expect(questionField(page, tq.id)).toHaveValue(typed);
   await expect(responseField(page, tq.id)).toHaveValue(response);
-  expect(await readDraftPatch(page, key)).toEqual(expect.objectContaining({ question: typed }));
+  expect(await readDraftPatch(page, key)).toEqual(expect.objectContaining({ question: typed, response }));
 
   await context.close();
 });

@@ -1,4 +1,5 @@
 import type { ChapterPayload, TnRow, TqRow, TwlRow, VerseDto } from "../sync/api";
+import { rowRebuildAction } from "../sync/outboxTargeting.ts";
 
 // Pure pieces of useBook's per-chapter cache (#562), kept out of the hook so
 // they can be unit-tested.
@@ -12,7 +13,25 @@ export type CacheOp =
   | { t: "patch"; kind: RowKind; id: string; patch: Partial<TnRow & TqRow & TwlRow>; onlyAtVersion?: number }
   | { t: "replace"; kind: RowKind; row: AnyRow }
   | { t: "insert"; kind: RowKind; row: AnyRow; afterId?: string }
-  | { t: "delete"; kind: RowKind; id: string; onlyAtVersion?: number };
+  | { t: "delete"; kind: RowKind; id: string; onlyAtVersion?: number }
+  // A row re-read after an op that never landed (#637 item 1): rowRebuildAction
+  // decides, and a row put back goes to its place in the server's order.
+  | { t: "rebuild"; kind: RowKind; row: AnyRow; mayInsert: boolean };
+
+// The index at which `row` goes in a list kept in the chapter endpoint's order
+// (verse, sort_order with NULL last, id). The rows around it are assumed to be
+// in that order; where they are not, it goes before the first row after it.
+export function serverOrderIndex(list: AnyRow[], row: AnyRow): number {
+  const key = (r: AnyRow) => [r.verse, r.sort_order ?? Number.POSITIVE_INFINITY] as const;
+  const [v, s] = key(row);
+  const i = list.findIndex((r) => {
+    const [rv, rs] = key(r);
+    if (rv !== v) return rv > v;
+    if (rs !== s) return rs > s;
+    return r.id > row.id;
+  });
+  return i < 0 ? list.length : i;
+}
 
 /**
  * Whether a patch or delete given `onlyAtVersion` may touch `row`: always when
@@ -46,6 +65,19 @@ export function applyCacheOp(data: ChapterPayload, op: CacheOp): ChapterPayload 
     const cur = list.find((r) => r.id === op.row.id);
     if (!cur || cur.version > op.row.version) return data;
     next = list.map((r) => (r.id === op.row.id ? op.row : r));
+  } else if (op.t === "rebuild") {
+    const action = rowRebuildAction(
+      list.find((r) => r.id === op.row.id),
+      op.row,
+      op.mayInsert,
+    );
+    if (!action) return data;
+    if (action.t === "replace") {
+      next = list.map((r) => (r.id === op.row.id ? action.row : r));
+    } else {
+      const i = serverOrderIndex(list, action.row);
+      next = [...list.slice(0, i), action.row, ...list.slice(i)];
+    }
   } else if (op.t === "insert") {
     const cur = list.find((r) => r.id === op.row.id);
     if (cur) {

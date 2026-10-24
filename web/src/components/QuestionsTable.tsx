@@ -8,6 +8,7 @@ import type { TqRow } from "../sync/api";
 import { drafts, rowKey, draftDirtyBorderSx } from "../sync/drafts";
 import { tqTableBaseline } from "../lib/tqRowFields";
 import { reconcileField } from "../lib/twlRowFields";
+import { useRefusedSaveHold } from "../hooks/useRefusedSaveHold";
 import { useTranslation } from "react-i18next";
 
 interface Props {
@@ -123,14 +124,27 @@ const Row = memo(function Row({
   // it since the last baseline. Resetting on every version bump dropped text
   // typed between Save and the server's answer, and cleared its draft (#617).
   const baselineRef = useRef(tqTableBaseline(row));
+  // Text of a refused save stays when the row is rebuilt to the server's copy
+  // (#637 item 1); discarding that save puts the row's value back.
+  const { noteSave, rowChanged, decide } = useRefusedSaveHold("tq", row.id, row.book, (released) => {
+    const base = baselineRef.current;
+    if ("ref_raw" in released) setRefRaw((v) => (v === released.ref_raw ? base.refRaw : v));
+    if ("question" in released) setQuestion((q) => (q === released.question ? base.question : q));
+    if ("response" in released) setResponse((r) => (r === released.response ? base.response : r));
+  });
   useEffect(() => {
     const prev = baselineRef.current;
     const next = tqTableBaseline({ ref_raw: row.ref_raw, question: row.question, response: row.response });
     baselineRef.current = next;
-    setRefRaw((v) => reconcileField(prev.refRaw, next.refRaw, v));
-    setQuestion((q) => reconcileField(prev.question, next.question, q));
-    setResponse((r) => reconcileField(prev.response, next.response, r));
-  }, [row.ref_raw, row.question, row.response]);
+    const released = rowChanged(row.version);
+    const pick = <T,>(field: string, p: T, n: T, local: T): T => {
+      const d = decide(field, local, released);
+      return d === "keep" ? local : d === "adopt" ? n : reconcileField(p, n, local);
+    };
+    setRefRaw((v) => pick("ref_raw", prev.refRaw, next.refRaw, v));
+    setQuestion((q) => pick("question", prev.question, next.question, q));
+    setResponse((r) => pick("response", prev.response, next.response, r));
+  }, [row.ref_raw, row.question, row.response, row.version, rowChanged, decide]);
 
   const draftKey = useMemo(() => rowKey("tq", row.book, row.id), [row.book, row.id]);
 
@@ -182,6 +196,7 @@ const Row = memo(function Row({
 
   const handleSave = () => {
     if (!isDirty) return;
+    noteSave(diff, row.version);
     onSave(diff);
   };
 

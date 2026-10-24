@@ -14,6 +14,7 @@ import SaveOutlinedIcon from "@mui/icons-material/SaveOutlined";
 import OpenInNewIcon from "@mui/icons-material/OpenInNew";
 import type { TwlRow } from "../sync/api";
 import { reconcileField, twlBaseline, twlDiff, type TwlFields } from "../lib/twlRowFields";
+import { useRefusedSaveHold } from "../hooks/useRefusedSaveHold";
 import { useCatalogs } from "../hooks/useCatalogs";
 import { CatalogPicker } from "./CatalogPicker";
 import { TwArticleDialog } from "./TwArticleDialog";
@@ -436,14 +437,28 @@ const WordRow = memo(function WordRow({
   // each version bump, so the server's answer to a Save dropped text typed
   // after the Save and cleared its draft (#616).
   const baselineRef = useRef<TwlFields>(twlBaseline(row));
+  // Text of a refused save stays when the row is rebuilt to the server's copy
+  // (#637 item 1); discarding that save puts the row's value back. The held
+  // patch uses the row's field names (twlDiff).
+  const { noteSave, rowChanged, decide } = useRefusedSaveHold("twl", row.id, row.book, (released) => {
+    const base = baselineRef.current;
+    if ("orig_words" in released) setQuote((q) => (q === released.orig_words ? base.quote : q));
+    if ("tw_link" in released) setTwLink((l) => (l === released.tw_link ? base.twLink : l));
+    if ("occurrence" in released) setOccurrence((o) => (o === released.occurrence ? base.occurrence : o));
+  });
   useEffect(() => {
     const prev = baselineRef.current;
     const next = twlBaseline({ orig_words: row.orig_words, tw_link: row.tw_link, occurrence: row.occurrence });
     baselineRef.current = next;
-    setQuote((q) => reconcileField(prev.quote, next.quote, q));
-    setTwLink((l) => reconcileField(prev.twLink, next.twLink, l));
-    setOccurrence((o) => reconcileField(prev.occurrence, next.occurrence, o));
-  }, [row.orig_words, row.tw_link, row.occurrence]);
+    const released = rowChanged(row.version);
+    const pick = <T,>(field: string, p: T, n: T, local: T): T => {
+      const d = decide(field, local, released);
+      return d === "keep" ? local : d === "adopt" ? n : reconcileField(p, n, local);
+    };
+    setQuote((q) => pick("orig_words", prev.quote, next.quote, q));
+    setTwLink((l) => pick("tw_link", prev.twLink, next.twLink, l));
+    setOccurrence((o) => pick("occurrence", prev.occurrence, next.occurrence, o));
+  }, [row.orig_words, row.tw_link, row.occurrence, row.version, rowChanged, decide]);
 
   const draftKey = useMemo(() => rowKey("twl", row.book, row.id), [row.book, row.id]);
 
@@ -523,6 +538,7 @@ const WordRow = memo(function WordRow({
 
   const handleSave = () => {
     if (!isDirty) return;
+    noteSave(diff, row.version);
     onSave(diff);
   };
 

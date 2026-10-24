@@ -26,7 +26,8 @@ import {
 } from "../sync/api";
 import { fetchWithRetry } from "../sync/fetchWithRetry";
 import { onOutboxResult } from "../sync/outbox";
-import { rowWithLivePatches } from "../sync/outboxTargeting";
+import { rebuiltRow, rowWithLivePatches } from "../sync/outboxTargeting";
+import { onRowRebuild } from "../sync/rowRebuild";
 import { applyCacheOp, ChapterFetchTracker, type CacheOp } from "../lib/bookCache";
 
 export type ChapterState =
@@ -245,6 +246,23 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
       }
     });
   }, [book, enabled, applyLocalVerse, mutate]);
+
+  // A row op that never landed: put the server's row back, with the row's
+  // saves still waiting on top (#637 item 1). One "rebuild" cache op, the same
+  // one useChapter applies (rowRebuildAction's guards: a newer cached row is
+  // kept; a missing row goes back, in server order, only after its own
+  // refused or discarded delete). It is recorded, so a fetch in flight
+  // replays it, and it carries the server row just read, so no copy kept here
+  // can be older than the cache.
+  useEffect(() => {
+    if (!enabled) return;
+    return onRowRebuild(({ target, server, queued, cause, mayInsert }) => {
+      if (server.book !== book) return;
+      const rebuilt = rebuiltRow(server, target, queued, cause);
+      if (!rebuilt) return;
+      mutate(rebuilt.chapter, { t: "rebuild", kind: target.rowKind, row: rebuilt, mayInsert });
+    });
+  }, [book, enabled, mutate]);
 
   return {
     summary,

@@ -22,6 +22,7 @@ import type { SourceQuestion } from "../hooks/useSourceQuestions";
 import { drafts, rowKey, draftDirtyBorderSx } from "../sync/drafts";
 import { tqCardBaseline, tsvToDisplay } from "../lib/tqRowFields";
 import { reconcileField } from "../lib/twlRowFields";
+import { useRefusedSaveHold } from "../hooks/useRefusedSaveHold";
 
 // Translation-review card for translationQuestions — the tQ analogue of
 // NoteCard's translation mode. Only rendered in a gateway-language project
@@ -79,13 +80,25 @@ function QuestionCardInner({
   // it since the last baseline. Resetting on every version bump dropped text
   // typed between Save and the server's answer, and cleared its draft (#617).
   const baselineRef = useRef(tqCardBaseline(row));
+  // Text of a refused save stays when the row is rebuilt to the server's copy
+  // (#637 item 1); discarding that save puts the row's value back.
+  const { noteSave, rowChanged, decide } = useRefusedSaveHold("tq", row.id, row.book, (released) => {
+    const base = baselineRef.current;
+    if ("question" in released) setQuestion((q) => (q === released.question ? base.question : q));
+    if ("response" in released) setResponse((r) => (r === released.response ? base.response : r));
+  });
   useEffect(() => {
     const prev = baselineRef.current;
     const next = tqCardBaseline({ question: row.question, response: row.response });
     baselineRef.current = next;
-    setQuestion((q) => reconcileField(prev.question, next.question, q));
-    setResponse((r) => reconcileField(prev.response, next.response, r));
-  }, [row.question, row.response]);
+    const released = rowChanged(row.version);
+    const pick = (field: string, p: string, n: string, local: string): string => {
+      const d = decide(field, local, released);
+      return d === "keep" ? local : d === "adopt" ? n : reconcileField(p, n, local);
+    };
+    setQuestion((q) => pick("question", prev.question, next.question, q));
+    setResponse((r) => pick("response", prev.response, next.response, r));
+  }, [row.question, row.response, row.version, rowChanged, decide]);
 
   const draftKey = useMemo(() => rowKey("tq", row.book, row.id), [row.book, row.id]);
 
@@ -159,6 +172,7 @@ function QuestionCardInner({
 
   const handleSave = () => {
     if (!isDirty) return;
+    noteSave(diff, row.version);
     onSave(diff);
   };
 
