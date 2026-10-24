@@ -115,6 +115,7 @@ import {
   type ProgressPair,
 } from "../../lib/packageLifecycle";
 import { FlowStatusChip } from "./FlowStatusChip";
+import { FlowAiRunAction } from "./FlowAiRunAction";
 
 export interface PackageHubScreenProps extends FlowScreenContext {
   book: string;
@@ -593,6 +594,7 @@ export default function PackageHubScreen({ book, role, lastPosition }: PackageHu
   const { skip } = theme.palette.flows;
   // md+ (>=900px): the surface cards flow into the grid-3 desk (file header).
   const wide = useMediaQuery(theme.breakpoints.up("md"));
+  const isTabletUp = useMediaQuery(theme.breakpoints.up("tablet"));
 
   const projectConfig = useProjectConfig();
   const translationMode = isTranslationProject(projectConfig);
@@ -601,6 +603,9 @@ export default function PackageHubScreen({ book, role, lastPosition }: PackageHu
   const { summary, summaryStatus } = useBook(book, true);
 
   const [open, setOpen] = useState<ExpandableSurface | null>(null);
+  // The AI run's chapter field starts at the chapter last worked on in this
+  // book, else 1; its range input ("1-14") covers more of the book.
+  const aiChapter = lastPosition && lastPosition.book === book ? Math.max(1, lastPosition.chapter) : 1;
 
   // BookSummary includes a chapter-0 entry for book front matter (intro tn
   // rows, 0 verses — verified against GET /api/chapters/ZEC: ids 0–14 for a
@@ -707,6 +712,14 @@ export default function PackageHubScreen({ book, role, lastPosition }: PackageHu
                 {t("flowVerse.hub.chapterCount", { count: totals.chapters })}
               </Typography>
             )}
+            {/* AI run (#481): top bar on tablet+, "more" menu on phone;
+                nothing for viewers. */}
+            <FlowAiRunAction
+              book={book}
+              chapter={aiChapter}
+              role={role}
+              phone={!isTabletUp}
+            />
           </Stack>
           {/* Progress lives on the lifecycle card below (A4), fed by the A2
               rollup — not duplicated in this topbar. */}
