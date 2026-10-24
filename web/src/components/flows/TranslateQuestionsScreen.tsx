@@ -812,6 +812,9 @@ export default function TranslateQuestionsScreen({
     return () => {
       offResult();
       offDrop();
+      // A save from the previous book can no longer be heard here, so its
+      // protection must not outlive the listener.
+      sentRef.current = null;
     };
   }, [book]);
 
