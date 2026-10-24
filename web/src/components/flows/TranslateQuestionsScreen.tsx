@@ -110,7 +110,14 @@ import {
 import { realChapters } from "../../lib/bookSummary";
 import { resolveFlowChipStatus, flowChipKind, type FlowChipStatus } from "../../lib/flowStatusChip";
 import { drafts, rowKey } from "../../sync/drafts";
-import { isPendingRowSave, pendingRevertSave, rowSaveEnded, withPendingReverts } from "../../sync/draftSaveState";
+import {
+  isEditorsPendingSave,
+  pendingRevertSave,
+  revertMarks,
+  rowSaveEnded,
+  withPendingReverts,
+  type PendingRowSave,
+} from "../../sync/draftSaveState";
 import { onOutboxDrop, onOutboxResult, outbox, type OutboxOp } from "../../sync/outbox";
 import { api, ApiError, type ChapterLockedBody, type TqRow } from "../../sync/api";
 import { SCRIPTURE_FONT_STACK } from "../../theme";
@@ -616,7 +623,10 @@ export default function TranslateQuestionsScreen({
   // that save's outcome (the listener below the persist effect), never by a
   // version check: the row can reach a new version before the save lands
   // (review A2).
-  const sentRef = useRef<{ id: string; patch: Record<string, string> } | null>(null);
+  const sentRef = useRef<(PendingRowSave & { id: string }) | null>(null);
+  // Ops this screen heard end since it mounted, so a draft lookup's outbox
+  // read cannot restore a save that ended while the read was in flight (#658).
+  const endedOpsRef = useRef(new Set<string>());
   // Re-runs the persist effect when the protection ends.
   const [sentTick, setSentTick] = useState(0);
   // "Hydration for this key has started" — set synchronously, guards against
@@ -695,8 +705,15 @@ export default function TranslateQuestionsScreen({
     void Promise.all([drafts.get(key), outbox.listWithUncommitted().catch(() => [] as OutboxOp[])]).then(([rec, ops]) => {
       if (cancelled || hydratedKeyRef.current !== nonceKey) return;
       if (sentRef.current?.id !== row.id) {
-        const pending = pendingRevertSave(rec, ops, { rowKind: "tq", id: row.id, book });
-        if (pending) sentRef.current = { id: row.id, patch: pending as Record<string, string> };
+        const pending = pendingRevertSave(rec, ops, { rowKind: "tq", id: row.id, book }, endedOpsRef.current);
+        // Only the fields this screen edits.
+        const kept: PendingRowSave = { patch: {}, shown: {}, opId: pending?.opId };
+        for (const f of FIELDS) {
+          if (typeof pending?.patch[f] !== "string") continue;
+          kept.patch[f] = pending.patch[f];
+          kept.shown[f] = pending.shown[f];
+        }
+        if (Object.keys(kept.patch).length > 0) sentRef.current = { id: row.id, ...kept };
       }
       const payload = rec?.payload as
         | { patch?: Record<string, unknown>; baseline?: Record<string, unknown> }
@@ -771,18 +788,16 @@ export default function TranslateQuestionsScreen({
     for (const f of FIELDS) {
       if (values[f] !== baselineRef.current[f]) diff[f] = values[f];
     }
-    const sent = sentRef.current;
-    const patch = withPendingReverts(
-      diff,
-      values,
-      sent && sent.id === row.id ? sent.patch : undefined,
-    );
+    const sent = sentRef.current && sentRef.current.id === row.id ? sentRef.current : undefined;
+    const patch = withPendingReverts(diff, values, sent?.patch);
+    // Record kept type-backs so a remount can restore the protection (#658).
+    const reverted = revertMarks(diff, patch, sent);
     const baseline: Record<string, string> = {};
     for (const f of FIELDS) {
       if (f in patch) baseline[f] = baselineRef.current[f];
     }
     if (Object.keys(patch).length > 0) {
-      void drafts.set(key, { patch, baseline }, row.version, {
+      void drafts.set(key, { patch, baseline, ...(reverted ? { reverted } : {}) }, row.version, {
         kind: "row",
         rowKind: "tq",
         id: row.id,
@@ -804,14 +819,19 @@ export default function TranslateQuestionsScreen({
   // persist effect re-runs against it, so a kept revert stays a draft.
   useEffect(() => {
     const end = (op: OutboxOp, ok: boolean) => {
+      endedOpsRef.current.add(op.id);
       const sent = sentRef.current;
-      if (!sent || !isPendingRowSave(sent.patch, op, { rowKind: "tq", id: sent.id, book })) return;
+      if (!sent || !isEditorsPendingSave(sent, op, { rowKind: "tq", id: sent.id, book })) return;
       sentRef.current = null;
       if (ok && hydratedKeyRef.current?.startsWith(`${rowKey("tq", book, sent.id)}#`)) {
-        // Only this screen's fields, in display form: a save recovered from
-        // the outbox (#658) may be another editor's.
+        // The display form of what was sent: this screen's own text as typed,
+        // or, for a save recovered from the outbox (#658), the form its mark
+        // recorded. Only this screen's fields.
         const moved = { ...baselineRef.current };
-        for (const f of FIELDS) if (typeof sent.patch[f] === "string") moved[f] = unescapeNewlines(sent.patch[f]);
+        for (const f of FIELDS) {
+          const shown = sent.shown[f];
+          if (typeof shown === "string") moved[f] = shown;
+        }
         baselineRef.current = moved;
       }
       setSentTick((n) => n + 1);
@@ -930,7 +950,7 @@ export default function TranslateQuestionsScreen({
     }
     if (Object.keys(patch).length === 0) return true;
     applyLocalRowPatch("tq", target.id, patch);
-    sentRef.current = { id: target.id, patch: { ...patch } as Record<string, string> };
+    sentRef.current = { id: target.id, patch: { ...patch }, shown: { ...patch } };
     const op = await outbox.enqueueRow("tq", target.id, target.version, patch, { book, baseline });
     const result = await waitForOp(op.id);
     if (result === null) {

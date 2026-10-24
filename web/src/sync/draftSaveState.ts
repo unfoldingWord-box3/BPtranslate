@@ -105,48 +105,94 @@ export function withPendingReverts<T extends Record<string, unknown>>(
   return out;
 }
 
+// A field withPendingReverts kept in a row draft, recorded in the draft's
+// payload (`reverted`) so the protection survives a remount (#658): what the
+// pending save sent for it (`sent`, in the form it was sent) and the same
+// value in display form (`shown`), for an editor that moves its baseline to
+// the sent value on the 200.
+export type RevertMark = { sent: unknown; shown: unknown };
+export type RevertMarks = Record<string, RevertMark>;
+
+// An editor's pending save as it remembers it (sentRef): the fields it sent
+// (`patch`), the same values in display form (`shown`), and, for a save
+// recovered from the outbox after a remount, its op id (`opId`).
+export type PendingRowSave = { patch: Record<string, unknown>; shown: Record<string, unknown>; opId?: string };
+
+// The marks for a draft write: each field `kept` holds that the editor's own
+// `diff` left out (withPendingReverts added it), with what `sent` sent for it.
+// Undefined when there are none, so the draft carries no `reverted` key.
+export function revertMarks(
+  diff: Record<string, unknown>,
+  kept: Record<string, unknown>,
+  sent: PendingRowSave | undefined,
+): RevertMarks | undefined {
+  if (!sent) return undefined;
+  let out: RevertMarks | undefined;
+  for (const k of Object.keys(kept)) {
+    if (k in diff || !(k in sent.patch)) continue;
+    out ??= {};
+    out[k] = { sent: sent.patch[k], shown: k in sent.shown ? sent.shown[k] : sent.patch[k] };
+  }
+  return out;
+}
+
 // The pending save a freshly mounted editor must keep protecting (#658).
-// withPendingReverts needs the patch of the pending save, which an editor
-// keeps in a ref; a remount while the save is pending starts without it, so a
-// field typed back to the baseline would drop out of the next draft write and
-// the 200 would rebase it away. The draft itself records the type-back: a
-// field in its patch equal to its baseline is written only by
-// withPendingReverts (an editor's own diff leaves such a field out). So when
-// the draft holds such a field and a live op for `target` sends a different
-// value for it, return that op's whole patch (whole, so isPendingRowSave
-// recognises the op when it ends). The newest such op wins. Gated on the
-// draft's record, not on the op alone: a fresh mount showing the server's copy
-// next to a conflicted op must not write a draft the user never typed.
+// withPendingReverts needs the editor's pending save, which it keeps in a
+// ref; a remount while the save is pending starts without it, so a field typed
+// back to the baseline would drop out of the next draft write and the 200
+// would rebase it away. The draft's `reverted` marks record each such field
+// and what the save sent for it. This returns the newest live op for `target`
+// that sends exactly a recorded value for a marked field still in the draft's
+// patch, as the protection to restore: only those fields, with the op's id
+// (the end listener matches it by id). Only the marks count: a field equal to
+// its baseline is not proof (a 200 rebases the baseline under a field it
+// leaves in the patch), and an exact sent value ties the op to the save that
+// was pending, not a find/replace, AI apply or another save of the row.
+// `ended` holds ops this editor heard end after it read `ops`, so a snapshot
+// taken before the op ended cannot restore it.
 export function pendingRevertSave(
   draft: DraftRecord | undefined,
   ops: OutboxOp[],
   target: { rowKind: string; id: string; book: string },
-): Record<string, unknown> | undefined {
-  const payload = draft?.payload as { patch?: unknown; baseline?: unknown } | undefined;
+  ended?: ReadonlySet<string>,
+): PendingRowSave | undefined {
+  const payload = draft?.payload as { patch?: unknown; reverted?: unknown } | undefined;
   const patch = payload?.patch;
-  const baseline = payload?.baseline;
-  if (!patch || typeof patch !== "object" || !baseline || typeof baseline !== "object") return undefined;
-  const p = patch as Record<string, unknown>;
-  const b = baseline as Record<string, unknown>;
-  const reverted = Object.keys(p).filter((k) => k in b && rowValueKey(p[k]) === rowValueKey(b[k]));
-  if (reverted.length === 0) return undefined;
+  const marks = payload?.reverted;
+  if (!patch || typeof patch !== "object" || !marks || typeof marks !== "object") return undefined;
+  const m = marks as Record<string, unknown>;
+  const fields = Object.keys(m).filter(
+    (k) => k in (patch as Record<string, unknown>) && !!m[k] && typeof m[k] === "object" && "sent" in (m[k] as object),
+  );
+  if (fields.length === 0) return undefined;
   const key = targetKey({ kind: "row", ...target } as OutboxOp["target"]);
-  // Newest first: the newest live op sending a field decides what the server
-  // will hold for it. One sending the reverted value itself needs no guard.
-  const decided = new Set<string>();
   for (let i = ops.length - 1; i >= 0; i--) {
     const o = ops[i];
-    if (targetKey(o.target) !== key || !isLiveOp(o) || o.action === "delete") continue;
+    if (ended?.has(o.id) || targetKey(o.target) !== key || !isLiveOp(o) || o.action === "delete") continue;
     const sent = o.patch as unknown;
     if (!sent || typeof sent !== "object") continue;
     const s = sent as Record<string, unknown>;
-    for (const k of reverted) {
-      if (decided.has(k) || !(k in s)) continue;
-      if (rowValueKey(s[k]) !== rowValueKey(p[k])) return s;
-      decided.add(k);
+    const matched = fields.filter((k) => k in s && s[k] === (m[k] as RevertMark).sent);
+    if (matched.length === 0) continue;
+    const out: PendingRowSave = { patch: {}, shown: {}, opId: o.id };
+    for (const k of matched) {
+      out.patch[k] = s[k];
+      out.shown[k] = (m[k] as RevertMark).shown;
     }
+    return out;
   }
   return undefined;
+}
+
+// Whether `op` is the editor's pending save `sent`: by op id for a save
+// recovered from the outbox (#658), else by row and exact patch.
+export function isEditorsPendingSave(
+  sent: PendingRowSave,
+  op: Pick<OutboxOp, "id" | "target" | "patch"> & Partial<Pick<OutboxOp, "action">>,
+  target: { rowKind: string; id: string; book: string },
+): boolean {
+  if (sent.opId !== undefined) return op.id === sent.opId;
+  return isPendingRowSave(sent.patch, op, target);
 }
 
 // Whether `op` is an editor's pending save, sent with `patch` for the row
