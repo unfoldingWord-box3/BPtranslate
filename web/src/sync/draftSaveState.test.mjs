@@ -17,6 +17,9 @@ import {
   liveRowOpHoldsDraft,
   rowDraftSettledByOp,
   verseDraftHasActiveSave,
+  withPendingReverts,
+  isPendingRowSave,
+  rowSaveEnded,
 } from "./draftSaveState.ts";
 
 const draft = {
@@ -551,4 +554,80 @@ assert.equal(
 assert.equal(rowDraftHoldsSaved(tnDraft({}), { note: "saved" }), false, "empty patch is not ours to clear");
 assert.equal(rowDraftHoldsSaved(undefined, { note: "saved" }), false, "no draft");
 
-console.log("draftSaveState: 67 passed");
+// #632 item 2: type-back of one field plus an edit of another while a save is
+// pending. Baseline {quote: Q0, note: N0}; Save {note: N1}; while it is
+// pending, type the note back to N0 and edit the quote to Q1, then leave. The
+// editor's diff against its pre-save baseline leaves `note` out (N0 equals the
+// baseline), so the draft was {quote: Q1}; the 200 then rebased baseline.note
+// to N1 and the reopened row showed the server's N1 as clean, the revert lost.
+// Editors now keep a field in the draft patch while its value differs from
+// what their pending save sent (withPendingReverts).
+const pendingSent = { note: "N1" };
+assert.deepEqual(
+  withPendingReverts({ quote: "Q1" }, { quote: "Q1", note: "N0", support_reference: null }, pendingSent),
+  { quote: "Q1", note: "N0" },
+  "#632.2: a field typed back to its baseline while a save sends other text stays in the draft patch",
+);
+const typedBack = based({ quote: "Q1", note: "N0" }, { quote: "Q0", note: "N0", support_reference: null });
+const typedBackAfter = rowDraftAfterOp(typedBack, opA, [opA]);
+assert.deepEqual(
+  typedBackAfter?.payload,
+  { patch: { quote: "Q1", note: "N0" }, baseline: { quote: "Q0", note: "N1", support_reference: null } },
+  "#632.2: on the 200 the draft keeps note N0 against the rebased baseline N1, so a reopen shows it unsaved",
+);
+assert.deepEqual(
+  withPendingReverts({}, { note: "N0" }, pendingSent),
+  { note: "N0" },
+  "#632.2: all fields typed back while the save is pending: the revert is kept too",
+);
+assert.deepEqual(
+  rowDraftAfterOp(based({ note: "N0" }, { note: "N0" }), opA, [opA])?.payload,
+  { patch: { note: "N0" }, baseline: { note: "N1" } },
+  "#632.2: a kept revert is not settled by the save it reverts, only rebased",
+);
+// The normal type-back is unchanged: nothing pending, or the pending save
+// sends the very value typed, leaves the field out and an empty diff clears.
+assert.deepEqual(withPendingReverts({}, { note: "N0" }, undefined), {}, "#632.2: no pending save: a type-back still clears");
+assert.deepEqual(withPendingReverts({}, { note: "N1" }, pendingSent), {}, "#632.2: text equal to the pending save is not a revert");
+assert.deepEqual(
+  withPendingReverts({}, { note: "a\nb" }, { note: "a\\nb" }),
+  {},
+  "#632.2: display text equal to the TSV text sent is not a revert",
+);
+const ownPatch = { note: "N2" };
+assert.equal(withPendingReverts(ownPatch, { note: "N2" }, pendingSent), ownPatch, "#632.2: a field already in the patch keeps its value");
+assert.deepEqual(
+  withPendingReverts({}, { note: "N0" }, { sort_order: 3 }),
+  {},
+  "#632.2: a sent field the editor does not show is ignored",
+);
+
+// #632 item 2 review A1/A2: an editor's protection lasts exactly as long as
+// its save can still land. It ends on the outbox result of THAT save (ok,
+// fatal, locked) or when the user discards it; a 409 waiting for keep-mine
+// or a retry keeps it. The save is recognised by row and patch, since
+// NoteCard's save goes through Shell and never sees its op id.
+const tnTarget = { rowKind: "tn", id: "abcd", book: "ZEC" };
+const savedPatch = { note: "N1" };
+const tnOp = (over = {}) => ({
+  id: "x",
+  target: { kind: "row", rowKind: "tn", id: "abcd", book: "ZEC" },
+  action: "patch",
+  patch: { note: "N1" },
+  expectedVersion: 4,
+  ...over,
+});
+assert.equal(isPendingRowSave(savedPatch, tnOp(), tnTarget), true, "A1: the editor's own save is recognised");
+assert.equal(isPendingRowSave(savedPatch, tnOp({ expectedVersion: 9 }), tnTarget), true, "A1: a re-sent save (healed conflict) is still recognised");
+assert.equal(isPendingRowSave(savedPatch, tnOp({ patch: { note: "N2" } }), tnTarget), false, "A1: another save of the row is not");
+assert.equal(isPendingRowSave(savedPatch, tnOp({ patch: { note: "N1", quote: "q" } }), tnTarget), false, "A1: a wider patch is not");
+assert.equal(isPendingRowSave(savedPatch, tnOp({ target: { kind: "row", rowKind: "tn", id: "other", book: "ZEC" } }), tnTarget), false, "A1: another row is not");
+assert.equal(isPendingRowSave(savedPatch, tnOp({ target: { kind: "row", rowKind: "tn", id: "abcd", book: "HAG" } }), tnTarget), false, "A1: another book is not");
+assert.equal(isPendingRowSave(savedPatch, tnOp({ action: "delete" }), tnTarget), false, "A1: a delete is not");
+assert.equal(rowSaveEnded({ kind: "ok" }), true, "A1: a 200 ends the protection");
+assert.equal(rowSaveEnded({ kind: "fatal", reason: "http 422" }), true, "A1: a refusal ends it");
+assert.equal(rowSaveEnded({ kind: "locked" }), true, "A1: a locked drop ends it");
+assert.equal(rowSaveEnded({ kind: "conflict" }), false, "A1: a 409 awaiting keep-mine keeps it");
+assert.equal(rowSaveEnded({ kind: "retry", reason: "http 503" }), false, "A1: a retry keeps it");
+
+console.log("draftSaveState: 88 passed");

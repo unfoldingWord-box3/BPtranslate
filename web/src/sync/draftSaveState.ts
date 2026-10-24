@@ -75,6 +75,63 @@ function rowValueKey(v: unknown): unknown {
   return typeof v === "string" ? v.replace(/\\n/g, "\n") : v;
 }
 
+// The patch an editor writes to its row draft while one of its own saves is
+// pending (#632 item 2). `patch` is the editor's diff against its baseline,
+// which stays the pre-save server copy until the 200; `local` is what the
+// editor shows; `sent` is the patch of its pending save (undefined when none).
+// A field the diff leaves out (typed back to the baseline) but whose value
+// differs from what the save sent is a deliberate revert: it goes into the
+// patch with the shown value. Otherwise the draft would not hold it, the 200
+// would rebase its baseline to the sent value, and a reopened editor would
+// show the server's text as clean (Save N1, type the note back to N0 and edit
+// the quote, leave: N0 was lost with no unsaved marker). Kept in the patch, it
+// is not settled by that save (the values differ) and the rebase moves only
+// its baseline, so it shows as unsaved. Values compare in display form
+// (rowValueKey), since NoteCard shows real newlines and sends TSV. Fields the
+// editor does not show are ignored. Returns `patch` itself when nothing is
+// added.
+export function withPendingReverts<T extends Record<string, unknown>>(
+  patch: T,
+  local: Record<string, unknown>,
+  sent: Record<string, unknown> | undefined,
+): T {
+  if (!sent) return patch;
+  let out = patch;
+  for (const [k, v] of Object.entries(sent)) {
+    if (k in patch || !(k in local) || rowValueKey(local[k]) === rowValueKey(v)) continue;
+    if (out === patch) out = { ...patch };
+    (out as Record<string, unknown>)[k] = local[k];
+  }
+  return out;
+}
+
+// Whether `op` is an editor's pending save, sent with `patch` for the row
+// `target` (#632 item 2 review A1). Matched by row and exact patch, not op id
+// or version: NoteCard's save goes through Shell and never sees its op, and a
+// healed 409 re-sends the same op at a newer version. An editor allows one
+// pending save at a time, so the patch identifies it.
+export function isPendingRowSave(
+  patch: Record<string, unknown>,
+  op: Pick<OutboxOp, "target" | "patch"> & Partial<Pick<OutboxOp, "action">>,
+  target: { rowKind: string; id: string; book: string },
+): boolean {
+  const t = op.target;
+  if (t.kind !== "row" || t.rowKind !== target.rowKind || t.id !== target.id || t.book !== target.book) return false;
+  if (op.action === "delete") return false;
+  const sent = op.patch as unknown;
+  if (!sent || typeof sent !== "object") return false;
+  return sameFields(sent as Record<string, unknown>, patch);
+}
+
+// Whether an outbox result ends a pending save's chance to land, and so the
+// editor's type-back protection (withPendingReverts): it landed (ok), was
+// refused (fatal), or was dropped (locked). A 409 waiting for keep-mine and a
+// retry can still land, so they keep it. A user discard (outbox.drop) ends it
+// too; editors hear that through onOutboxDrop.
+export function rowSaveEnded(result: { kind: string }): boolean {
+  return result.kind === "ok" || result.kind === "fatal" || result.kind === "locked";
+}
+
 // Whether a row save's 200 settles the row draft, judged by content alone.
 // True when every field in the draft's patch was sent by this op with an equal
 // value. Every row editor stores only the fields it changed (NoteCard,
@@ -85,11 +142,13 @@ function rowValueKey(v: unknown): unknown {
 // usually typing done after the Save, which must survive even when the editor
 // unmounted before the 200 and never re-wrote it (#618).
 //
-// Known gaps, both shared with the old version rule on main:
-//   * A field typed back to its pre-save value while the save is pending drops
-//     out of the editor's patch (it equals the editor's baseline). If the
-//     editor then unmounts before the 200, the remaining fields can match and
-//     the draft clears; the server keeps the saved value, and the revert is lost.
+// A field typed back to its pre-save value while the save is pending would
+// drop out of an editor's patch (it equals the editor's baseline), so the 200
+// would settle or rebase it and lose the revert. The editors that keep their
+// pre-save baseline until the 200 (NoteCard, flows Translate Notes/Questions)
+// keep such a field in the patch instead (withPendingReverts, #632 item 2).
+//
+// Known gap, shared with the old version rule on main:
 //   * A draft also survives a 200 from an op that did not send its fields
 //     (reorder, find/replace, AI apply, a history restore with other text).
 //     That is unsaved typing, so it stays as an "unsaved" reminder.

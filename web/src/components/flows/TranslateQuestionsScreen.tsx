@@ -110,7 +110,8 @@ import {
 import { realChapters } from "../../lib/bookSummary";
 import { resolveFlowChipStatus, flowChipKind, type FlowChipStatus } from "../../lib/flowStatusChip";
 import { drafts, rowKey } from "../../sync/drafts";
-import { onOutboxResult, outbox } from "../../sync/outbox";
+import { isPendingRowSave, rowSaveEnded, withPendingReverts } from "../../sync/draftSaveState";
+import { onOutboxDrop, onOutboxResult, outbox, type OutboxOp } from "../../sync/outbox";
 import { api, ApiError, type ChapterLockedBody, type TqRow } from "../../sync/api";
 import { SCRIPTURE_FONT_STACK } from "../../theme";
 
@@ -609,6 +610,15 @@ export default function TranslateQuestionsScreen({
   // One value + one baseline per field; one drafts record for the pair.
   const [values, setValues] = useState<Record<Field, string>>({ question: "", response: "" });
   const baselineRef = useRef<Record<Field, string>>({ question: "", response: "" });
+  // The patch of this screen's save for row `id` while it can still land.
+  // Until then the draft keeps a field typed back to the baseline but
+  // differing from what was sent (withPendingReverts, #632 item 2). Cleared by
+  // that save's outcome (the listener below the persist effect), never by a
+  // version check: the row can reach a new version before the save lands
+  // (review A2).
+  const sentRef = useRef<{ id: string; patch: Record<string, string> } | null>(null);
+  // Re-runs the persist effect when the protection ends.
+  const [sentTick, setSentTick] = useState(0);
   // "Hydration for this key has started" — set synchronously, guards against
   // re-entering the hydrate branch and against a stale async lookup landing
   // after a newer row change.
@@ -750,12 +760,19 @@ export default function TranslateQuestionsScreen({
     const key = rowKey("tq", book, row.id);
     const nonceKey = `${key}#${reloadNonce}`;
     if (settledKey !== nonceKey) return;
-    const patch: Record<string, string> = {};
+    const diff: Record<string, string> = {};
+    for (const f of FIELDS) {
+      if (values[f] !== baselineRef.current[f]) diff[f] = values[f];
+    }
+    const sent = sentRef.current;
+    const patch = withPendingReverts(
+      diff,
+      values,
+      sent && sent.id === row.id ? sent.patch : undefined,
+    );
     const baseline: Record<string, string> = {};
     for (const f of FIELDS) {
-      if (values[f] === baselineRef.current[f]) continue;
-      patch[f] = values[f];
-      baseline[f] = baselineRef.current[f];
+      if (f in patch) baseline[f] = baselineRef.current[f];
     }
     if (Object.keys(patch).length > 0) {
       void drafts.set(key, { patch, baseline }, row.version, {
@@ -770,7 +787,36 @@ export default function TranslateQuestionsScreen({
       void drafts.clear(key);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [values, row?.id, row?.version, book, reloadNonce, settledKey]);
+  }, [values, row?.id, row?.version, book, reloadNonce, settledKey, sentTick]);
+
+  // End the type-back protection when this screen's pending save can no
+  // longer land: confirmed, refused, dropped as "locked", or discarded. A 409
+  // that waits for keep-mine, or a save still queued after waitForOp gave up,
+  // keeps it. On a 200 the baseline takes the sent values in the same tick
+  // (also after a keep-mine, where saveDraft no longer moves it), and the
+  // persist effect re-runs against it, so a kept revert stays a draft.
+  useEffect(() => {
+    const end = (op: OutboxOp, ok: boolean) => {
+      const sent = sentRef.current;
+      if (!sent || !isPendingRowSave(sent.patch, op, { rowKind: "tq", id: sent.id, book })) return;
+      sentRef.current = null;
+      if (ok && hydratedKeyRef.current?.startsWith(`${rowKey("tq", book, sent.id)}#`)) {
+        baselineRef.current = { ...baselineRef.current, ...sent.patch };
+      }
+      setSentTick((n) => n + 1);
+    };
+    const offResult = onOutboxResult((op, result) => {
+      if (rowSaveEnded(result)) end(op, result.kind === "ok");
+    });
+    const offDrop = onOutboxDrop((op) => end(op, false));
+    return () => {
+      offResult();
+      offDrop();
+      // A save from the previous book can no longer be heard here, so its
+      // protection must not outlive the listener.
+      sentRef.current = null;
+    };
+  }, [book]);
 
   useUnsavedGuard(hasDiff);
 
@@ -873,6 +919,7 @@ export default function TranslateQuestionsScreen({
     }
     if (Object.keys(patch).length === 0) return true;
     applyLocalRowPatch("tq", target.id, patch);
+    sentRef.current = { id: target.id, patch: { ...patch } as Record<string, string> };
     const op = await outbox.enqueueRow("tq", target.id, target.version, patch, { book, baseline });
     const result = await waitForOp(op.id);
     if (result === null) {
