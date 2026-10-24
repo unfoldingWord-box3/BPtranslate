@@ -336,11 +336,12 @@ rows.get("/:kind/:id", async (c) => {
   const book = c.req.query("book");
   if (!isRowKind(kind)) return c.json({ error: "invalid_kind" }, 400);
   if (!book) return c.json({ error: "book_required" }, 400);
-  const row = await c.env.DB.prepare(
-    `SELECT * FROM ${KIND_TO_TABLE[kind]} WHERE id = ?1${bookClause(2)}`,
-  )
-    .bind(id, book)
-    .first<TnRow | TqRow | TwlRow>();
+  // Same shape as a PATCH response (latest_source for tn/tq): the client puts
+  // this row in its cache after a save that never landed (#637), and a row
+  // without latest_source would drop the AI-pipeline chip.
+  const row = (await selectRowWithLatestSource(c.env, kind, id, book)) as
+    | (TnRow | TqRow | TwlRow)
+    | null;
   if (!row || row.deleted_at) return c.json({ error: "not_found" }, 404);
   return c.json(row);
 });
