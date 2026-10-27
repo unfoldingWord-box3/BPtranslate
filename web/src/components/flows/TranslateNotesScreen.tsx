@@ -587,9 +587,6 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   // outcome (the listener below the persist effect), never by a version check:
   // the row can reach a new version before the save lands (review A2).
   const sentRef = useRef<(PendingRowSave & { id: string }) | null>(null);
-  // Per row: commitQuote's op that has not settled (wait timed out, or held as
-  // a conflict); handleApprove refuses until it leaves the outbox.
-  const quotePendingRef = useRef<Map<string, string>>(new Map());
   // Ops this screen heard end since it mounted, so a draft lookup's outbox
   // read cannot restore a save that ended while the read was in flight (#658).
   const endedOpsRef = useRef(new Set<string>());
@@ -1287,6 +1284,8 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
           setChapterLock({ body: result.lockBody, rowId: target.id });
           say(t("flowTranslate.lockedEditDropped"));
         } else {
+          // Refused for good: the strip must not keep a quote the server rejected.
+          applyLocalRowPatch("tn", target.id, baseline as Partial<TnRow & TqRow>);
           say(t("flowTranslate.saveFailed", { reason: result.reason }));
         }
         return;
@@ -1298,20 +1297,19 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
     setToast(t("flowReview.queue.quoteRebuilt"));
   }
 
-  // Remember a quote op that has not settled yet (timed out, or held as a
-  // conflict), per row, and finish it when it does: Approve refuses while it
-  // is held, and a late 200 still gets the local demotion the server applied.
+  // Finish a quote op that had not settled (timed out, or held as a
+  // conflict) when it does, for local display only — Approve's guard reads
+  // the outbox itself (quoteOpPending). A late 200 gets the local demotion
+  // the server applied; a late refusal restores the commit-time quote.
   function holdQuoteOp(target: TnRow, opId: string, baseline: Record<string, unknown>) {
-    quotePendingRef.current.set(target.id, opId);
     let offDrop: () => void = () => {};
     const offResult = onOutboxResult((op, result) => {
       if (op.id !== opId || result.kind === "retry" || result.kind === "conflict") return;
       offResult();
       offDrop();
-      if (quotePendingRef.current.get(target.id) === opId) quotePendingRef.current.delete(target.id);
       if (result.kind === "ok") {
         finishQuoteSave(target);
-      } else if (result.kind === "locked") {
+      } else {
         applyLocalRowPatch("tn", target.id, baseline as Partial<TnRow & TqRow>);
       }
     });
@@ -1319,7 +1317,6 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
       if (op.id !== opId) return;
       offResult();
       offDrop();
-      if (quotePendingRef.current.get(target.id) === opId) quotePendingRef.current.delete(target.id);
     });
   }
 
@@ -1340,18 +1337,25 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
     });
   }
 
-  // A quote op on this row still in the outbox (commitQuote's wait timed out,
-  // or it is held as a conflict). Approving now would let it land after the
-  // version-less /validate and demote the row again.
+  // Any quote/occurrence op for this row still in the outbox, in any status
+  // (queued, timed out, held as a conflict, failed). Approving now would let
+  // it land after the version-less /validate and demote the row again. Read
+  // from the outbox itself so a second commit or a remount can't lose it;
+  // an unreadable outbox refuses (fail closed).
   async function quoteOpPending(rowId: string): Promise<boolean> {
-    const opId = quotePendingRef.current.get(rowId);
-    if (!opId) return false;
     const ops = await outbox.listWithUncommitted().catch(() => null);
-    if (ops && !ops.some((o) => o.id === opId)) {
-      if (quotePendingRef.current.get(rowId) === opId) quotePendingRef.current.delete(rowId);
-      return false;
-    }
-    return true;
+    if (!ops) return true;
+    return ops.some(
+      (o) =>
+        o.target.kind === "row" &&
+        o.target.rowKind === "tn" &&
+        o.target.book === book &&
+        o.target.id === rowId &&
+        o.action === "patch" &&
+        !!o.patch &&
+        typeof o.patch === "object" &&
+        ("quote" in o.patch || "occurrence" in o.patch),
+    );
   }
 
   async function handleApprove() {
