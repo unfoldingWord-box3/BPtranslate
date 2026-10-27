@@ -6,8 +6,20 @@
 // and everything else on the screen is read-only context for it. There are
 // exactly three verbs — Approve / Not needed / Redo — and no authoring chrome:
 // no preserve, no hint, no TCM/SH chips, no reorder / insert / retarget, no
-// debug row ids, no quote builder, no history dialog. Those belong to the
-// authoring surfaces (ReviewQueue, NoteCard), not to a translator's screen.
+// debug row ids, no history dialog. Those belong to the authoring surfaces
+// (ReviewQueue, NoteCard), not to a translator's screen.
+//
+// ── 2026-10-05 quote picker (Benjamin) ──────────────────────────────────────
+//
+// One exception to "no quote builder": a note can point at the wrong instance
+// of a word (LUK 7:32 — the upstream note picked the wrong καί), and the only
+// fix used to be leaving for the classic editor. A small edit button on the
+// original-language strip opens the classic QuoteBuilderPopper (a dialog below
+// md) seeded from the row's quote/occurrence, with the source en_ult as an
+// extra lane when the project offers it. The commit is its own outbox patch of
+// {quote, occurrence} with its own baseline — never folded into the note-text
+// draft — and, like any tN content edit, the server demotes an approved row to
+// 'edited', which this screen mirrors.
 //
 // ── 2026-08-10 responsive layouts (Benjamin) ────────────────────────────────
 //
@@ -94,6 +106,7 @@ import {
   Snackbar,
   Stack,
   TextField,
+  Tooltip,
   Typography,
 } from "@mui/material";
 import { alpha, useTheme } from "@mui/material/styles";
@@ -105,11 +118,14 @@ import CheckIcon from "@mui/icons-material/Check";
 import SaveIcon from "@mui/icons-material/Save";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import ViewColumnIcon from "@mui/icons-material/ViewColumn";
+import EditOutlinedIcon from "@mui/icons-material/EditOutlined";
 
 import { LockBanner } from "./FlowBanners";
 import { FlowStatusChip, type FlowStatusKind } from "./FlowStatusChip";
 import { escapeNewlines, isAquiferDraftRow, unescapeNewlines, waitForOp } from "./translateShared";
 import { useSwipeNav } from "./useSwipeNav";
+import { QuoteBuilderPopper, type QuoteBuilderExtraLane } from "../QuoteBuilderPopper";
+import { collectStrongs } from "../HebrewLine";
 import { UltAlignmentStrip } from "./UltAlignmentStrip";
 import { buildAlignmentStrip } from "./alignmentStripModel";
 import type { FlowScreenContext } from "./types";
@@ -119,6 +135,9 @@ import { useChapter } from "../../hooks/useChapter";
 import { useProjectConfig, isTranslationProject } from "../../hooks/useProjectConfig";
 import { useSourceNotes } from "../../hooks/useSourceNotes";
 import { useSourceScripture } from "../../hooks/useSourceScripture";
+import { useLexicon } from "../../hooks/useLexicon";
+import { buildQuoteFromSelection, quotePickUnchanged, selectionFromQuote } from "../../lib/quoteBuilder";
+import type { HighlightKey } from "../../lib/highlight";
 import { useUnsavedGuard } from "../../hooks/useUnsavedGuard";
 import { useShowSourceUlt, useShowSourceUltAlignment } from "../../lib/editorPrefs";
 import { resolveSourceRef } from "../../lib/sourceRef";
@@ -128,6 +147,7 @@ import {
   coveredLaneSlices,
   noteCoveredVerses,
   noteRefLabel,
+  verseObjectsOf,
 } from "../../lib/verseRange";
 import { buildTnQuickRequest } from "../../lib/tnQuickRequest";
 import {
@@ -337,7 +357,21 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   }, [sourceLitRef]);
   const [showSourceUlt, setShowSourceUlt] = useShowSourceUlt();
   const sourceUltOn = sourceUltAvailable && showSourceUlt;
-  const sourceUlt = useSourceScripture(sourceUltOn ? book : null, chapter, sourceLitRef, "SOURCE_LIT");
+  // Quote picker (2026-10-05 header): open state lives up here because the
+  // picker also wants the source en_ult lane, fetched while it is open even
+  // when the lane toggle is off.
+  // Keyed by the row it was opened for, so a different card never inherits
+  // an open picker (derived here, not reset in an effect).
+  const [quoteOpenRowId, setQuoteOpenRowId] = useState<string | null>(null);
+  const [quoteKeys, setQuoteKeys] = useState<Set<HighlightKey>>(() => new Set());
+  // State, not a ref: the popper reads its anchor during render.
+  const [quoteAnchor, setQuoteAnchor] = useState<HTMLButtonElement | null>(null);
+  const sourceUlt = useSourceScripture(
+    sourceUltOn || (sourceUltAvailable && quoteOpenRowId != null) ? book : null,
+    chapter,
+    sourceLitRef,
+    "SOURCE_LIT",
+  );
   // Second toggle (#431): draw that lane as a read-only alignment strip. Only
   // offered, and only effective, while the lane itself is on.
   const [showUltAlignment, setShowUltAlignment] = useShowSourceUltAlignment();
@@ -1167,11 +1201,172 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
     return true;
   }
 
+  // ── quote picker (2026-10-05 header) ─────────────────────────────────────
+  // The builder works on one verse: a bridged note's quote lives in its
+  // leading verse (row.verse), the same verse the classic NoteCard builds from.
+  // Intro/general rows (verse 0) have no quote to pick.
+  const quoteVerse = row && row.verse > 0 ? row.verse : null;
+  // Leaving the card closes the picker for good (coming back, e.g. by browser
+  // back, must not reopen it): adjust during render, no effect.
+  const [quoteRowSeen, setQuoteRowSeen] = useState(row?.id);
+  if (row?.id !== quoteRowSeen) {
+    setQuoteRowSeen(row?.id);
+    if (quoteOpenRowId != null) setQuoteOpenRowId(null);
+  }
+  const quoteOpen = quoteOpenRowId != null && quoteOpenRowId === row?.id;
+  const quoteSourceVo = quoteVerse != null ? verseObjectsOf(sourceIndex[quoteVerse]) : null;
+  const quoteUltVo = quoteVerse != null ? verseObjectsOf(ultIndex[quoteVerse]) : null;
+  const quoteUstVo = quoteVerse != null ? verseObjectsOf(ustIndex[quoteVerse]) : null;
+  const quoteSourceUltVo = quoteVerse != null ? verseObjectsOf(sourceUltIndex[quoteVerse]) : null;
+  const canPickQuote = Boolean(quoteSourceVo && quoteSourceVo.length > 0);
+  const quoteExtraLanes = useMemo<QuoteBuilderExtraLane[] | undefined>(
+    () =>
+      sourceUltAvailable && quoteSourceUltVo
+        ? [{ id: "source-ult", label: sourceUltLabel, verseObjects: quoteSourceUltVo }]
+        : undefined,
+    [sourceUltAvailable, sourceUltLabel, quoteSourceUltVo],
+  );
+  // Lexicon hover cards for the source chips — only this verse's words, and
+  // only while the picker is open.
+  const quoteStrongs = useMemo(
+    () => (quoteOpen && quoteSourceVo ? [...new Set(collectStrongs(quoteSourceVo))] : []),
+    [quoteOpen, quoteSourceVo],
+  );
+  const quoteLexicon = useLexicon(quoteStrongs);
+
+  function openQuotePicker() {
+    if (!row || !canPickQuote || editLocked) return;
+    setQuoteKeys(selectionFromQuote(quoteSourceVo, row.quote, row.occurrence));
+    setQuoteOpenRowId(row.id);
+  }
+
+  // Its own outbox op on {quote, occurrence}: the note field is not in the
+  // patch, so an in-flight or unsaved note edit on the same row is untouched
+  // (the outbox threads a confirmed version into the later op, and the
+  // baseline lets a 409 caused only by the other field auto-heal). `busy`
+  // holds Approve off until it settles: /validate carries no version, so a
+  // quote PATCH landing after it would demote the row straight back.
+  async function commitQuote() {
+    if (!row || busy) return;
+    const target = row;
+    const built = buildQuoteFromSelection(quoteSourceVo, quoteKeys);
+    setQuoteOpenRowId(null);
+    if (!built) {
+      say(t("flowReview.queue.noSourceWords"));
+      return;
+    }
+    // Unchanged pick → no PATCH: a no-op write would still bump the version
+    // and demote an approved row (Shell's commitQuoteBuild guard).
+    if (quotePickUnchanged(built, target.quote, target.occurrence)) return;
+    const patch = { quote: built.quote, occurrence: built.occurrence };
+    const baseline = { quote: target.quote, occurrence: target.occurrence };
+    setBusy(true);
+    try {
+      applyLocalRowPatch("tn", target.id, patch as Partial<TnRow & TqRow>);
+      const op = await outbox.enqueueRow("tn", target.id, target.version, patch, { book, baseline });
+      const result = await waitForOp(op.id);
+      if (result === null) {
+        // Still queued: Approve checks this op first (/validate carries no
+        // version, so a quote PATCH landing after it would demote the row).
+        holdQuoteOp(target, op.id, baseline);
+        say(t("flowTranslate.quoteNotConfirmed"));
+        return;
+      }
+      if (result.kind !== "ok") {
+        if (result.kind === "conflict") {
+          // Held for the user; a keep-mine re-send can still land it later.
+          holdQuoteOp(target, op.id, baseline);
+          setConflictRowId(target.id);
+        } else if (result.kind === "locked") {
+          // The outbox dropped the op, so the server row never changed: undo
+          // the optimistic patch (same as saveDraft, issue #561 review R2).
+          applyLocalRowPatch("tn", target.id, baseline as Partial<TnRow & TqRow>);
+          setChapterLock({ body: result.lockBody, rowId: target.id });
+          say(t("flowTranslate.lockedEditDropped"));
+        } else {
+          // Refused for good: the strip must not keep a quote the server rejected.
+          applyLocalRowPatch("tn", target.id, baseline as Partial<TnRow & TqRow>);
+          say(t("flowTranslate.saveFailed", { reason: result.reason }));
+        }
+        return;
+      }
+    } finally {
+      setBusy(false);
+    }
+    finishQuoteSave(target);
+    setToast(t("flowReview.queue.quoteRebuilt"));
+  }
+
+  // Finish a quote op that had not settled (timed out, or held as a
+  // conflict) when it does, for local display only — Approve's guard reads
+  // the outbox itself (quoteOpPending). A late 200 gets the local demotion
+  // the server applied; a late refusal restores the commit-time quote.
+  function holdQuoteOp(target: TnRow, opId: string, baseline: Record<string, unknown>) {
+    let offDrop: () => void = () => {};
+    const offResult = onOutboxResult((op, result) => {
+      if (op.id !== opId || result.kind === "retry" || result.kind === "conflict") return;
+      offResult();
+      offDrop();
+      if (result.kind === "ok") {
+        finishQuoteSave(target);
+      } else {
+        applyLocalRowPatch("tn", target.id, baseline as Partial<TnRow & TqRow>);
+      }
+    });
+    offDrop = onOutboxDrop((op) => {
+      if (op.id !== opId) return;
+      offResult();
+      offDrop();
+    });
+  }
+
+  // Local mirror of a confirmed quote save.
+  function finishQuoteSave(target: TnRow) {
+    // Same server-side demotion as a note-text save (see saveDraft).
+    if (target.translation_state === "ai_draft" || target.translation_state === "validated") {
+      applyLocalRowPatch("tn", target.id, { translation_state: "edited" } as Partial<
+        TnRow & TqRow
+      >);
+    }
+    setEditedIds((prev) => new Set(prev).add(target.id));
+    setStatuses((prev) => {
+      if (prev[target.id] === undefined) return prev;
+      const next = { ...prev };
+      delete next[target.id];
+      return next;
+    });
+  }
+
+  // Any quote/occurrence op for this row still in the outbox, in any status
+  // (queued, timed out, held as a conflict, failed). Approving now would let
+  // it land after the version-less /validate and demote the row again. Read
+  // from the outbox itself so a second commit or a remount can't lose it;
+  // an unreadable outbox refuses (fail closed).
+  async function quoteOpPending(rowId: string): Promise<boolean> {
+    const ops = await outbox.listWithUncommitted().catch(() => null);
+    if (!ops) return true;
+    return ops.some(
+      (o) =>
+        o.target.kind === "row" &&
+        o.target.rowKind === "tn" &&
+        o.target.book === book &&
+        o.target.id === rowId &&
+        o.action === "patch" &&
+        !!o.patch &&
+        typeof o.patch === "object" &&
+        ("quote" in o.patch || "occurrence" in o.patch),
+    );
+  }
+
   async function handleApprove() {
     if (!row || busy) return;
     setBusy(true);
     setNotice(null);
     try {
+      if (await quoteOpPending(row.id)) {
+        say(t("flowTranslate.quotePendingApprove"));
+        return;
+      }
       if (hasDiff && !(await saveDraft(row))) return;
       const updated = await api.validateNote(row.id, book, true);
       applyLocalRowReplacement("tn", updated);
@@ -1797,7 +1992,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
         ) : (
           <>
             {/* original-language quote strip */}
-            {row.quote && (
+            {(row.quote || canPickQuote) && (
               <Stack direction="row" alignItems="baseline" spacing={1.25} sx={{ paddingInline: 0.25 }}>
                 <Typography
                   component="p"
@@ -1822,10 +2017,30 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
                     m: 0,
                     minWidth: 0,
                     textAlign: "start",
+                    flex: 1,
                   }}
                 >
-                  {row.quote}
+                  {row.quote || "—"}
                 </Typography>
+                {canPickQuote && (
+                  // The span: a disabled button fires no events, so the
+                  // Tooltip needs a wrapper to hang its listeners on.
+                  <Tooltip title={t("flowTranslate.changeQuote")}>
+                    <span style={{ flex: "none", alignSelf: "center", display: "inline-flex" }}>
+                      <IconButton
+                        ref={setQuoteAnchor}
+                        size="small"
+                        disabled={editLocked || busy}
+                        onClick={openQuotePicker}
+                        aria-label={t("flowTranslate.changeQuote")}
+                        aria-haspopup="dialog"
+                        sx={{ color: "text.secondary" }}
+                      >
+                        <EditOutlinedIcon fontSize="small" />
+                      </IconButton>
+                    </span>
+                  </Tooltip>
+                )}
               </Stack>
             )}
 
@@ -2579,6 +2794,38 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
       )}
       {!wide && !focusMode && actionBar}
 
+      {row && quoteVerse != null && (
+        <QuoteBuilderPopper
+          open={quoteOpen}
+          anchorEl={quoteAnchor}
+          book={book}
+          chapter={row.chapter}
+          verse={quoteVerse}
+          uhbVerseObjects={quoteSourceVo}
+          ultVerseObjects={quoteUltVo}
+          ustVerseObjects={quoteUstVo}
+          extraLanes={quoteExtraLanes}
+          lexiconMap={quoteLexicon}
+          selectedKeys={quoteKeys}
+          onToggleKey={(key) =>
+            setQuoteKeys((prev) => {
+              const next = new Set(prev);
+              if (next.has(key)) next.delete(key);
+              else next.add(key);
+              return next;
+            })
+          }
+          onSelectKeys={(keys) =>
+            setQuoteKeys((prev) => {
+              const next = new Set(prev);
+              for (const k of keys) next.add(k);
+              return next;
+            })
+          }
+          onCancel={() => setQuoteOpenRowId(null)}
+          onCommit={() => void commitQuote()}
+        />
+      )}
       <Snackbar
         open={toast !== null}
         message={toast ?? ""}
