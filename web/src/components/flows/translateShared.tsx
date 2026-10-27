@@ -41,6 +41,11 @@ export function waitForOp(opId: string, timeoutMs = 20_000): Promise<OutboxResul
     const timer = setTimeout(() => finish(null), timeoutMs);
     off = onOutboxResult((op, result) => {
       if (op.id !== opId || result.kind === "retry") return;
+      // A 409 the outbox auto-healed is not a settlement either: it re-armed
+      // the op (status back to "pending") and will re-send it, and listeners
+      // still hear the 409. Only a held conflict (status "conflict") is a
+      // question for the user (#593).
+      if (result.kind === "conflict" && op.status !== "conflict") return;
       finish(result);
     });
   });
