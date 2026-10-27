@@ -410,6 +410,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
     const seed: Record<string, CardStatus> = {};
     for (const r of ordered) if (r.translation_state === "validated") seed[r.id] = "approved";
     const firstOpen = ordered.findIndex((r) => !seed[r.id]);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- builds and seeds the frozen per-chapter queue (cursor, statuses, view, type filter) once the chapter payload lands; queue progression is kept on its proven post-commit timing, as in TranslateScriptureScreen.
     setQueue({ key: chapterKey, ids: ordered.map((r) => r.id) });
     setStatuses(seed);
     setEditedIds(new Set());
@@ -487,52 +488,53 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   // for the current chapter — e.g. editing the URL from #/notes/RUT/1 to
   // #/notes/RUT/1/9, or Back/Forward between two verses of the same chapter
   // (issue #201). Cross-chapter deep links are handled above, by the queue
-  // rebuild itself. Guarded on an actual change of `verse` (via the ref, not
-  // just its presence in the dep array) so this never fires on plain cursor
+  // rebuild itself. Guarded on an actual change of `verse` (compared with the
+  // previous value, not just any re-render) so this never fires on plain cursor
   // navigation (Prev/Next), a status change, or unrelated re-renders — only a
   // real prop change moves the cursor here. Uses the same setCursor/setView
   // pair the list pane's row click uses, so drafts stash/hydrate exactly as
   // they do for a manual row click — no queue rebuild, no reset of statuses/
-  // editedIds.
-  const prevVerseRef = useRef(verse);
-  const prevRowIdRef = useRef(rowId);
-  useEffect(() => {
-    if (prevVerseRef.current === verse && prevRowIdRef.current === rowId) return;
-    prevVerseRef.current = verse;
-    prevRowIdRef.current = rowId;
-    if (!queueIds || queueIds.length === 0) return;
-    // Honoring a same-chapter verse change always overrides an active type
-    // filter (issue #226, gap 2). The requested verse's note may be a different
-    // type — hidden by the filter — and the filter effect below would otherwise
-    // immediately yank the cursor to the first visible row, so the URL never
-    // lands on the requested verse. Clearing the filter first (batched with the
-    // setCursor) lets that effect early-return instead of fighting this one, and
-    // mirrors what the queue-build path does on a cross-chapter deep link.
-    setTypeFilter(null);
-    // Same precedence as the queue-build seek: an exact note id (from the
-    // "N unsaved" jump menu) beats the verse's first-card heuristic.
-    if (rowId != null) {
-      const rowIdx = queueIds.indexOf(rowId);
+  // editedIds. Adjusted during render (React's "adjust state when a prop
+  // changes" pattern, as in TranslateScriptureScreen) with the previous
+  // verse/rowId held in state; the commit this skips only re-showed the card
+  // that was already open, so no row is hydrated or stashed differently.
+  const [prevVerse, setPrevVerse] = useState(verse);
+  const [prevRowId, setPrevRowId] = useState(rowId);
+  if (prevVerse !== verse || prevRowId !== rowId) {
+    setPrevVerse(verse);
+    setPrevRowId(rowId);
+    if (queueIds && queueIds.length > 0) {
+      // Honoring a same-chapter verse change always overrides an active type
+      // filter (issue #226, gap 2). The requested verse's note may be a
+      // different type — hidden by the filter — and the filter effect below
+      // would otherwise immediately yank the cursor to the first visible row,
+      // so the URL never lands on the requested verse. Clearing the filter
+      // first (batched with the setCursor) lets that effect early-return
+      // instead of fighting this one, and mirrors what the queue-build path
+      // does on a cross-chapter deep link.
+      setTypeFilter(null);
+      // Same precedence as the queue-build seek: an exact note id (from the
+      // "N unsaved" jump menu) beats the verse's first-card heuristic.
+      const rowIdx = rowId != null ? queueIds.indexOf(rowId) : -1;
       if (rowIdx >= 0) {
         setCursor(rowIdx);
         setView("cards");
-        return;
+      } else if (verse == null) {
+        // The verse segment was dropped (e.g. #/notes/RUT/1/9 → #/notes/RUT/1
+        // via Back/Forward or a manual URL edit). Restore the same no-verse
+        // init the mount/queue-build path uses: first still-open card, or the
+        // done view when every card in the chapter is already statused (issue
+        // #226, gap 1).
+        const firstOpen = queueIds.findIndex((id) => !statuses[id]);
+        setCursor(firstOpen < 0 ? 0 : firstOpen);
+        setView(firstOpen < 0 ? "done" : "cards");
+      } else {
+        const seekIdx = queueIds.findIndex((id) => (rowById.get(id)?.verse ?? -Infinity) >= verse);
+        setCursor(seekIdx < 0 ? queueIds.length - 1 : seekIdx);
+        setView("cards");
       }
     }
-    if (verse == null) {
-      // The verse segment was dropped (e.g. #/notes/RUT/1/9 → #/notes/RUT/1 via
-      // Back/Forward or a manual URL edit). Restore the same no-verse init the
-      // mount/queue-build path uses: first still-open card, or the done view
-      // when every card in the chapter is already statused (issue #226, gap 1).
-      const firstOpen = queueIds.findIndex((id) => !statuses[id]);
-      setCursor(firstOpen < 0 ? 0 : firstOpen);
-      setView(firstOpen < 0 ? "done" : "cards");
-      return;
-    }
-    const seekIdx = queueIds.findIndex((id) => (rowById.get(id)?.verse ?? -Infinity) >= verse);
-    setCursor(seekIdx < 0 ? queueIds.length - 1 : seekIdx);
-    setView("cards");
-  }, [verse, rowId, queueIds, rowById, statuses]);
+  }
 
   // ── article-type filter (2026-08-10) ─────────────────────────────────────
   // Distinct types present in THIS chapter's queue, with counts — the filter
@@ -571,6 +573,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   useEffect(() => {
     if (!typeFilter || !queueIds) return;
     if (!typeOptions.some((o) => o.slug === typeFilter)) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- kept after commit on purpose: "Review again" and the row-gone Next button can move the cursor to a card the filter hides, and that card is committed (and its draft hydrated) before this snap; moving the snap into render would skip that row's hydration and change the drafts sequence.
       setTypeFilter(null);
       return;
     }
@@ -580,7 +583,16 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
 
   // ── editor state ─────────────────────────────────────────────────────────
   const [draftValue, setDraftValue] = useState("");
+  // The saved text the editor diffs against. `baseline` (state) is what render
+  // reads for hasDiff; `baselineRef` is the same value for handlers and
+  // effects, several of which read it after an await. Always write both
+  // through setBaseline so they never disagree (the ReviewQueue pattern, #636).
+  const [baseline, setBaselineState] = useState("");
   const baselineRef = useRef("");
+  const setBaseline = useCallback((next: string) => {
+    baselineRef.current = next;
+    setBaselineState(next);
+  }, []);
   // The note of this screen's save for row `id` while it can still land. Until
   // then a note typed back to the baseline but differing from what was sent
   // stays a draft (withPendingReverts, #632 item 2). Cleared by that save's
@@ -622,8 +634,9 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   // done job clears that draft — so anything typed in the meantime would be
   // silently discarded (codex P1 on #300). A ref can't gate a render.
   const [introRedoRowId, setIntroRedoRowId] = useState<string | null>(null);
+  // Every setRedoing call writes this ref on the line before, so handlers that
+  // read it after an await see the latest value without a render-time copy.
   const redoingRef = useRef(false);
-  redoingRef.current = redoing;
   const introRedoTimerRef = useRef<number | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ text: string; severity: "info" | "warning" } | null>(null);
@@ -703,7 +716,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
     if (hydratedKeyRef.current !== nonceKey) {
       hydratedKeyRef.current = nonceKey;
       const fallback = unescapeNewlines(row.note);
-      baselineRef.current = fallback;
+      setBaseline(fallback);
       setDraftValue(fallback);
       setEditing(false);
     }
@@ -732,7 +745,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
       const patchVal = payload?.patch?.note;
       if (typeof patchVal === "string") setDraftValue(unescapeNewlines(patchVal));
       const baselineVal = payload?.baseline?.note;
-      if (typeof baselineVal === "string") baselineRef.current = unescapeNewlines(baselineVal);
+      if (typeof baselineVal === "string") setBaseline(unescapeNewlines(baselineVal));
       // Mark this key fully settled — sync setup AND the async lookup have
       // both landed — whether or not a persisted draft was found. This is
       // STATE, not a ref: setting it is guaranteed to produce a render/effect
@@ -748,7 +761,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [row?.id, book, reloadNonce, settledKey]);
 
-  const hasDiff = draftValue !== baselineRef.current;
+  const hasDiff = draftValue !== baseline;
 
   // While THIS row has a background redraft in flight the inline editor is
   // read-only: settling a done job clears the row's draft and refetches, so
@@ -827,7 +840,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
         // or, for a save recovered from the outbox (#658), the form its mark
         // recorded (NoteCard sends TSV newlines).
         const shown = sent.shown.note;
-        if (typeof shown === "string") baselineRef.current = shown;
+        if (typeof shown === "string") setBaseline(shown);
       }
       setSentTick((n) => n + 1);
     };
@@ -842,7 +855,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
       // protection must not outlive the listener.
       sentRef.current = null;
     };
-  }, [book]);
+  }, [book, setBaseline]);
 
   useUnsavedGuard(hasDiff);
 
@@ -1170,7 +1183,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
       return false;
     }
     // The sent text (this render's draftValue), not whatever is typed now.
-    baselineRef.current = draftValue;
+    setBaseline(draftValue);
     // The outbox's 200 handler clears a draft holding only the saved text, but
     // only one written before it ran. If the row reached a new version between
     // that clear and the baseline move above (a refetch, or the confirmed row
@@ -1440,7 +1453,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
       // re-keys to the next row (the drafts.clear immediately below).
       const next = unescapeNewlines(updated.note);
       setDraftValue(next);
-      baselineRef.current = next;
+      setBaseline(next);
       void drafts.clear(rowKey("tn", book, row.id));
       setToast(t("flowTranslate.toastNotNeeded"));
       advanceAfter(row.id, "skipped");

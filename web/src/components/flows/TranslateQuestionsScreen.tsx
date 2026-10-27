@@ -508,6 +508,7 @@ export default function TranslateQuestionsScreen({
     const seed: Record<string, CardStatus> = {};
     for (const r of ordered) if (r.translation_state === "validated") seed[r.id] = "approved";
     const firstOpen = ordered.findIndex((r) => !seed[r.id]);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- builds and seeds the frozen per-chapter queue (cursor, statuses, view) once the chapter payload lands; queue progression is kept on its proven post-commit timing, as in TranslateScriptureScreen.
     setQueue({ key: chapterKey, ids: ordered.map((r) => r.id) });
     setStatuses(seed);
     setEditedIds(new Set());
@@ -553,36 +554,36 @@ export default function TranslateQuestionsScreen({
   // built for the current chapter — e.g. editing the URL from #/questions/RUT/1
   // to #/questions/RUT/1/9, or a second "N unsaved" jump to a different question
   // in the same chapter. Cross-chapter deep links are handled by the queue
-  // rebuild above. Guarded on an actual change (via the refs) so it never fires
-  // on plain Prev/Next, a status change, or unrelated re-renders. Mirrors the
-  // notes screen's re-seek effect; `rowId` wins over `verse`.
-  const prevVerseRef = useRef(verse);
-  const prevRowIdRef = useRef(rowId);
-  useEffect(() => {
-    if (prevVerseRef.current === verse && prevRowIdRef.current === rowId) return;
-    prevVerseRef.current = verse;
-    prevRowIdRef.current = rowId;
-    if (!queueIds || queueIds.length === 0) return;
-    if (rowId != null) {
-      const rowIdx = queueIds.indexOf(rowId);
+  // rebuild above. Guarded on an actual change (compared with the previous
+  // values) so it never fires on plain Prev/Next, a status change, or unrelated
+  // re-renders. Mirrors the notes screen's re-seek; `rowId` wins over `verse`.
+  // Adjusted during render (React's "adjust state when a prop changes"
+  // pattern, as in TranslateScriptureScreen) with the previous verse/rowId held
+  // in state; the commit this skips only re-showed the card that was already
+  // open, so no row is hydrated or stashed differently.
+  const [prevVerse, setPrevVerse] = useState(verse);
+  const [prevRowId, setPrevRowId] = useState(rowId);
+  if (prevVerse !== verse || prevRowId !== rowId) {
+    setPrevVerse(verse);
+    setPrevRowId(rowId);
+    if (queueIds && queueIds.length > 0) {
+      const rowIdx = rowId != null ? queueIds.indexOf(rowId) : -1;
       if (rowIdx >= 0) {
         setCursor(rowIdx);
         setView("cards");
-        return;
+      } else if (verse == null) {
+        // The verse segment was dropped (Back/Forward or a manual URL edit).
+        // Restore the same no-verse init the queue-build path uses.
+        const firstOpen = queueIds.findIndex((id) => !statuses[id]);
+        setCursor(firstOpen < 0 ? 0 : firstOpen);
+        setView(firstOpen < 0 ? "done" : "cards");
+      } else {
+        const seekIdx = queueIds.findIndex((id) => (rowById.get(id)?.verse ?? -Infinity) >= verse);
+        setCursor(seekIdx < 0 ? queueIds.length - 1 : seekIdx);
+        setView("cards");
       }
     }
-    if (verse == null) {
-      // The verse segment was dropped (Back/Forward or a manual URL edit).
-      // Restore the same no-verse init the queue-build path uses.
-      const firstOpen = queueIds.findIndex((id) => !statuses[id]);
-      setCursor(firstOpen < 0 ? 0 : firstOpen);
-      setView(firstOpen < 0 ? "done" : "cards");
-      return;
-    }
-    const seekIdx = queueIds.findIndex((id) => (rowById.get(id)?.verse ?? -Infinity) >= verse);
-    setCursor(seekIdx < 0 ? queueIds.length - 1 : seekIdx);
-    setView("cards");
-  }, [verse, rowId, queueIds, rowById, statuses]);
+  }
 
   // Question rows in THIS book holding persisted unsaved typing (IndexedDB
   // drafts from this browser). Drives the list pane's "Unsaved" chip so a
@@ -616,7 +617,16 @@ export default function TranslateQuestionsScreen({
   // ── editor state ─────────────────────────────────────────────────────────
   // One value + one baseline per field; one drafts record for the pair.
   const [values, setValues] = useState<Record<Field, string>>({ question: "", response: "" });
+  // `baseline` (state) is what render reads for dirtyFields; `baselineRef` is
+  // the same value for handlers and effects, several of which read it after an
+  // await. Always write both through setBaseline so they never disagree (the
+  // ReviewQueue pattern, #636).
+  const [baseline, setBaselineState] = useState<Record<Field, string>>({ question: "", response: "" });
   const baselineRef = useRef<Record<Field, string>>({ question: "", response: "" });
+  const setBaseline = useCallback((next: Record<Field, string>) => {
+    baselineRef.current = next;
+    setBaselineState(next);
+  }, []);
   // The patch of this screen's save for row `id` while it can still land.
   // Until then the draft keeps a field typed back to the baseline but
   // differing from what was sent (withPendingReverts, #632 item 2). Cleared by
@@ -700,7 +710,7 @@ export default function TranslateQuestionsScreen({
     };
     if (hydratedKeyRef.current !== nonceKey) {
       hydratedKeyRef.current = nonceKey;
-      baselineRef.current = { ...fallback };
+      setBaseline({ ...fallback });
       setValues(fallback);
       setEditingField(null);
     }
@@ -733,7 +743,7 @@ export default function TranslateQuestionsScreen({
           const baselineVal = payload.baseline?.[f];
           if (typeof baselineVal === "string") nextBaseline[f] = unescapeNewlines(baselineVal);
         }
-        baselineRef.current = nextBaseline;
+        setBaseline(nextBaseline);
         setValues(nextValues);
       }
       // Mark this key fully settled — sync setup AND the async lookup have
@@ -751,7 +761,7 @@ export default function TranslateQuestionsScreen({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [row?.id, book, reloadNonce, settledKey]);
 
-  const dirtyFields = FIELDS.filter((f) => values[f] !== baselineRef.current[f]);
+  const dirtyFields = FIELDS.filter((f) => values[f] !== baseline[f]);
   const hasDiff = dirtyFields.length > 0;
 
   // Stash every keystroke. Nothing leaves the browser here — the draft store
@@ -838,7 +848,7 @@ export default function TranslateQuestionsScreen({
           const shown = sent.shown[f];
           if (typeof shown === "string") moved[f] = shown;
         }
-        baselineRef.current = moved;
+        setBaseline(moved);
       }
       setSentTick((n) => n + 1);
     };
@@ -853,7 +863,7 @@ export default function TranslateQuestionsScreen({
       // protection must not outlive the listener.
       sentRef.current = null;
     };
-  }, [book]);
+  }, [book, setBaseline]);
 
   useUnsavedGuard(hasDiff);
 
@@ -979,7 +989,7 @@ export default function TranslateQuestionsScreen({
       }
       return false;
     }
-    baselineRef.current = { ...values };
+    setBaseline({ ...values });
     // The outbox's 200 handler clears a draft holding only the saved text, but
     // only one written before it ran. A draft re-written at a newer version
     // between that clear and the baseline move above holds only the saved text
