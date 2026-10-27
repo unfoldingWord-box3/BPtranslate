@@ -377,6 +377,9 @@ export function QuoteBuilderPopper({
         fullScreen={phone}
         fullWidth
         maxWidth="sm"
+        // Explicit (MUI's DialogPaper already is a bounded flex column): the
+        // header and footer stay pinned and only the lanes Box scrolls.
+        PaperProps={{ sx: { display: "flex", flexDirection: "column", overflow: "hidden" } }}
         aria-label={t("dialogs.quoteBuilder.header", { book, chapter, verse })}
       >
         {body}

@@ -587,8 +587,9 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   // outcome (the listener below the persist effect), never by a version check:
   // the row can reach a new version before the save lands (review A2).
   const sentRef = useRef<(PendingRowSave & { id: string }) | null>(null);
-  // commitQuote's op whose wait timed out; handleApprove refuses until it leaves the outbox.
-  const quotePendingRef = useRef<{ rowId: string; opId: string } | null>(null);
+  // Per row: commitQuote's op that has not settled (wait timed out, or held as
+  // a conflict); handleApprove refuses until it leaves the outbox.
+  const quotePendingRef = useRef<Map<string, string>>(new Map());
   // Ops this screen heard end since it mounted, so a draft lookup's outbox
   // read cannot restore a save that ended while the read was in flight (#658).
   const endedOpsRef = useRef(new Set<string>());
@@ -1270,12 +1271,14 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
       if (result === null) {
         // Still queued: Approve checks this op first (/validate carries no
         // version, so a quote PATCH landing after it would demote the row).
-        quotePendingRef.current = { rowId: target.id, opId: op.id };
+        holdQuoteOp(target, op.id, baseline);
         say(t("flowTranslate.quoteNotConfirmed"));
         return;
       }
       if (result.kind !== "ok") {
         if (result.kind === "conflict") {
+          // Held for the user; a keep-mine re-send can still land it later.
+          holdQuoteOp(target, op.id, baseline);
           setConflictRowId(target.id);
         } else if (result.kind === "locked") {
           // The outbox dropped the op, so the server row never changed: undo
@@ -1291,6 +1294,37 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
     } finally {
       setBusy(false);
     }
+    finishQuoteSave(target);
+    setToast(t("flowReview.queue.quoteRebuilt"));
+  }
+
+  // Remember a quote op that has not settled yet (timed out, or held as a
+  // conflict), per row, and finish it when it does: Approve refuses while it
+  // is held, and a late 200 still gets the local demotion the server applied.
+  function holdQuoteOp(target: TnRow, opId: string, baseline: Record<string, unknown>) {
+    quotePendingRef.current.set(target.id, opId);
+    let offDrop: () => void = () => {};
+    const offResult = onOutboxResult((op, result) => {
+      if (op.id !== opId || result.kind === "retry" || result.kind === "conflict") return;
+      offResult();
+      offDrop();
+      if (quotePendingRef.current.get(target.id) === opId) quotePendingRef.current.delete(target.id);
+      if (result.kind === "ok") {
+        finishQuoteSave(target);
+      } else if (result.kind === "locked") {
+        applyLocalRowPatch("tn", target.id, baseline as Partial<TnRow & TqRow>);
+      }
+    });
+    offDrop = onOutboxDrop((op) => {
+      if (op.id !== opId) return;
+      offResult();
+      offDrop();
+      if (quotePendingRef.current.get(target.id) === opId) quotePendingRef.current.delete(target.id);
+    });
+  }
+
+  // Local mirror of a confirmed quote save.
+  function finishQuoteSave(target: TnRow) {
     // Same server-side demotion as a note-text save (see saveDraft).
     if (target.translation_state === "ai_draft" || target.translation_state === "validated") {
       applyLocalRowPatch("tn", target.id, { translation_state: "edited" } as Partial<
@@ -1304,18 +1338,17 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
       delete next[target.id];
       return next;
     });
-    setToast(t("flowReview.queue.quoteRebuilt"));
   }
 
   // A quote op on this row still in the outbox (commitQuote's wait timed out,
   // or it is held as a conflict). Approving now would let it land after the
   // version-less /validate and demote the row again.
   async function quoteOpPending(rowId: string): Promise<boolean> {
-    const pending = quotePendingRef.current;
-    if (!pending || pending.rowId !== rowId) return false;
+    const opId = quotePendingRef.current.get(rowId);
+    if (!opId) return false;
     const ops = await outbox.listWithUncommitted().catch(() => null);
-    if (ops && !ops.some((o) => o.id === pending.opId)) {
-      quotePendingRef.current = null;
+    if (ops && !ops.some((o) => o.id === opId)) {
+      if (quotePendingRef.current.get(rowId) === opId) quotePendingRef.current.delete(rowId);
       return false;
     }
     return true;
