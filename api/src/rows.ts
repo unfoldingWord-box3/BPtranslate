@@ -12,6 +12,7 @@ import { contentPatchClearClauses } from "./contentPatchClauses.ts";
 import { normalizeBookCode, CHAPTER_EXISTS_SQL } from "./rowsCreateGuard.ts";
 import { isValidTwlRefRaw } from "./twlRefGuard.ts";
 import { boundHistoryToLastCreate } from "./rowHistoryBoundary.ts";
+import { logRowConflict } from "./rowConflictLog.ts";
 
 export const rows = new Hono<{ Bindings: Env; Variables: { userId?: number } }>();
 
@@ -733,6 +734,16 @@ rows.patch("/:kind/:id", requireEditor, async (c) => {
           .bind(id, book)
           .first<{ version: number; deleted_at: number | null }>();
         if (!fresh || fresh.deleted_at) return c.json({ error: "not_found" }, 404);
+        logRowConflict(c, {
+          kind,
+          rowId: id,
+          book,
+          action: "patch",
+          userId: currentUserId(c),
+          expectedVersion: expected,
+          fields,
+          current: fresh,
+        });
         return c.json({ error: "version_mismatch", current: fresh }, 409);
       }
       return c.json(current);
@@ -768,6 +779,16 @@ rows.patch("/:kind/:id", requireEditor, async (c) => {
         .bind(id, book)
         .first<{ version: number; deleted_at: number | null }>();
       if (!fresh || fresh.deleted_at) return c.json({ error: "not_found" }, 404);
+      logRowConflict(c, {
+        kind,
+        rowId: id,
+        book,
+        action: "patch",
+        userId: currentUserId(c),
+        expectedVersion: expected,
+        fields,
+        current: fresh,
+      });
       return c.json({ error: "version_mismatch", current: fresh }, 409);
     }
     const updated = await selectRowWithLatestSource(c.env, kind, id, book);
@@ -864,6 +885,16 @@ rows.patch("/:kind/:id", requireEditor, async (c) => {
       .bind(id, book)
       .first<{ version: number; deleted_at: number | null }>();
     if (!fresh || fresh.deleted_at) return c.json({ error: "not_found" }, 404);
+    logRowConflict(c, {
+      kind,
+      rowId: id,
+      book,
+      action: "patch",
+      userId: currentUserId(c),
+      expectedVersion: expected,
+      fields,
+      current: fresh,
+    });
     return c.json({ error: "version_mismatch", current: fresh }, 409);
   }
 
@@ -951,6 +982,16 @@ rows.delete("/:kind/:id", requireEditor, async (c) => {
       .bind(id, book)
       .first<{ version: number; deleted_at: number | null }>();
     if (!fresh || fresh.deleted_at) return c.json({ error: "not_found" }, 404);
+    logRowConflict(c, {
+      kind,
+      rowId: id,
+      book,
+      action: "delete",
+      userId: currentUserId(c),
+      expectedVersion: expected,
+      fields: [],
+      current: fresh,
+    });
     return c.json({ error: "version_mismatch", current: fresh }, 409);
   }
   if (scope) {
