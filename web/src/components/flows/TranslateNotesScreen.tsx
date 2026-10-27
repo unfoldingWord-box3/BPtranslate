@@ -1206,6 +1206,13 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   // leading verse (row.verse), the same verse the classic NoteCard builds from.
   // Intro/general rows (verse 0) have no quote to pick.
   const quoteVerse = row && row.verse > 0 ? row.verse : null;
+  // Leaving the card closes the picker for good (coming back, e.g. by browser
+  // back, must not reopen it): adjust during render, no effect.
+  const [quoteRowSeen, setQuoteRowSeen] = useState(row?.id);
+  if (row?.id !== quoteRowSeen) {
+    setQuoteRowSeen(row?.id);
+    if (quoteOpenRowId != null) setQuoteOpenRowId(null);
+  }
   const quoteOpen = quoteOpenRowId != null && quoteOpenRowId === row?.id;
   const quoteSourceVo = quoteVerse != null ? verseObjectsOf(sourceIndex[quoteVerse]) : null;
   const quoteUltVo = quoteVerse != null ? verseObjectsOf(ultIndex[quoteVerse]) : null;
