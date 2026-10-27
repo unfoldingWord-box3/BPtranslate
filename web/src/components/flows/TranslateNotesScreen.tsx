@@ -136,9 +136,8 @@ import { useProjectConfig, isTranslationProject } from "../../hooks/useProjectCo
 import { useSourceNotes } from "../../hooks/useSourceNotes";
 import { useSourceScripture } from "../../hooks/useSourceScripture";
 import { useLexicon } from "../../hooks/useLexicon";
-import { buildQuoteFromSelection, selectionFromQuote } from "../../lib/quoteBuilder";
+import { buildQuoteFromSelection, quotePickUnchanged, selectionFromQuote } from "../../lib/quoteBuilder";
 import type { HighlightKey } from "../../lib/highlight";
-import { nfc } from "../../lib/hebrew";
 import { useUnsavedGuard } from "../../hooks/useUnsavedGuard";
 import { useShowSourceUlt, useShowSourceUltAlignment } from "../../lib/editorPrefs";
 import { resolveSourceRef } from "../../lib/sourceRef";
@@ -361,11 +360,14 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   // Quote picker (2026-10-05 header): open state lives up here because the
   // picker also wants the source en_ult lane, fetched while it is open even
   // when the lane toggle is off.
-  const [quoteOpen, setQuoteOpen] = useState(false);
+  // Keyed by the row it was opened for, so a different card never inherits
+  // an open picker (derived here, not reset in an effect).
+  const [quoteOpenRowId, setQuoteOpenRowId] = useState<string | null>(null);
   const [quoteKeys, setQuoteKeys] = useState<Set<HighlightKey>>(() => new Set());
-  const quoteButtonRef = useRef<HTMLButtonElement | null>(null);
+  // State, not a ref: the popper reads its anchor during render.
+  const [quoteAnchor, setQuoteAnchor] = useState<HTMLButtonElement | null>(null);
   const sourceUlt = useSourceScripture(
-    sourceUltOn || (sourceUltAvailable && quoteOpen) ? book : null,
+    sourceUltOn || (sourceUltAvailable && quoteOpenRowId != null) ? book : null,
     chapter,
     sourceLitRef,
     "SOURCE_LIT",
@@ -1204,6 +1206,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   // leading verse (row.verse), the same verse the classic NoteCard builds from.
   // Intro/general rows (verse 0) have no quote to pick.
   const quoteVerse = row && row.verse > 0 ? row.verse : null;
+  const quoteOpen = quoteOpenRowId != null && quoteOpenRowId === row?.id;
   const quoteSourceVo = quoteVerse != null ? verseObjectsOf(sourceIndex[quoteVerse]) : null;
   const quoteUltVo = quoteVerse != null ? verseObjectsOf(ultIndex[quoteVerse]) : null;
   const quoteUstVo = quoteVerse != null ? verseObjectsOf(ustIndex[quoteVerse]) : null;
@@ -1223,53 +1226,58 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
     [quoteOpen, quoteSourceVo],
   );
   const quoteLexicon = useLexicon(quoteStrongs);
-  // A different card never inherits an open picker.
-  useEffect(() => {
-    setQuoteOpen(false);
-  }, [row?.id]);
 
   function openQuotePicker() {
-    if (!row || !canPickQuote) return;
+    if (!row || !canPickQuote || editLocked) return;
     setQuoteKeys(selectionFromQuote(quoteSourceVo, row.quote, row.occurrence));
-    setQuoteOpen(true);
+    setQuoteOpenRowId(row.id);
   }
 
+  // Its own outbox op on {quote, occurrence}: the note field is not in the
+  // patch, so an in-flight or unsaved note edit on the same row is untouched
+  // (the outbox threads a confirmed version into the later op, and the
+  // baseline lets a 409 caused only by the other field auto-heal). `busy`
+  // holds Approve off until it settles: /validate carries no version, so a
+  // quote PATCH landing after it would demote the row straight back.
   async function commitQuote() {
-    if (!row) return;
+    if (!row || busy) return;
     const target = row;
     const built = buildQuoteFromSelection(quoteSourceVo, quoteKeys);
-    setQuoteOpen(false);
+    setQuoteOpenRowId(null);
     if (!built) {
       say(t("flowReview.queue.noSourceWords"));
       return;
     }
     // Unchanged pick → no PATCH: a no-op write would still bump the version
     // and demote an approved row (Shell's commitQuoteBuild guard).
-    if (
-      nfc(built.quote) === nfc(target.quote ?? "") &&
-      built.occurrence === (target.occurrence ?? 1)
-    ) {
-      return;
-    }
+    if (quotePickUnchanged(built, target.quote, target.occurrence)) return;
     const patch = { quote: built.quote, occurrence: built.occurrence };
     const baseline = { quote: target.quote, occurrence: target.occurrence };
-    applyLocalRowPatch("tn", target.id, patch as Partial<TnRow & TqRow>);
-    const op = await outbox.enqueueRow("tn", target.id, target.version, patch, { book, baseline });
-    const result = await waitForOp(op.id);
-    if (result === null) {
-      say(t("flowTranslate.queuedNotConfirmed"));
-      return;
-    }
-    if (result.kind !== "ok") {
-      if (result.kind === "conflict") {
-        setConflictNotice(t("flowTranslate.conflictNotice"));
-      } else if (result.kind === "locked") {
-        setChapterLock(result.lockBody);
-        say(t("flowTranslate.lockedEditDropped"));
-      } else {
-        say(t("flowTranslate.saveFailed", { reason: result.reason }));
+    setBusy(true);
+    try {
+      applyLocalRowPatch("tn", target.id, patch as Partial<TnRow & TqRow>);
+      const op = await outbox.enqueueRow("tn", target.id, target.version, patch, { book, baseline });
+      const result = await waitForOp(op.id);
+      if (result === null) {
+        say(t("flowTranslate.queuedNotConfirmed"));
+        return;
       }
-      return;
+      if (result.kind !== "ok") {
+        if (result.kind === "conflict") {
+          setConflictRowId(target.id);
+        } else if (result.kind === "locked") {
+          // The outbox dropped the op, so the server row never changed: undo
+          // the optimistic patch (same as saveDraft, issue #561 review R2).
+          applyLocalRowPatch("tn", target.id, baseline as Partial<TnRow & TqRow>);
+          setChapterLock({ body: result.lockBody, rowId: target.id });
+          say(t("flowTranslate.lockedEditDropped"));
+        } else {
+          say(t("flowTranslate.saveFailed", { reason: result.reason }));
+        }
+        return;
+      }
+    } finally {
+      setBusy(false);
     }
     // Same server-side demotion as a note-text save (see saveDraft).
     if (target.translation_state === "ai_draft" || target.translation_state === "validated") {
@@ -1950,8 +1958,9 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
                 {canPickQuote && (
                   <Tooltip title={t("flowTranslate.changeQuote")}>
                     <IconButton
-                      ref={quoteButtonRef}
+                      ref={setQuoteAnchor}
                       size="small"
+                      disabled={editLocked || busy}
                       onClick={openQuotePicker}
                       aria-label={t("flowTranslate.changeQuote")}
                       aria-haspopup="dialog"
@@ -2717,7 +2726,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
       {row && quoteVerse != null && (
         <QuoteBuilderPopper
           open={quoteOpen}
-          anchorEl={quoteButtonRef.current}
+          anchorEl={quoteAnchor}
           book={book}
           chapter={row.chapter}
           verse={quoteVerse}
@@ -2742,7 +2751,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
               return next;
             })
           }
-          onCancel={() => setQuoteOpen(false)}
+          onCancel={() => setQuoteOpenRowId(null)}
           onCommit={() => void commitQuote()}
         />
       )}

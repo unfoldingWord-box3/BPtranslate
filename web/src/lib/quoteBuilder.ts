@@ -12,6 +12,7 @@
 
 import type { HighlightKey } from "./highlight";
 import { matchNorm, matchSourceTokens } from "./highlight.ts";
+import { nfc } from "./hebrew.ts";
 import { isCharacterWrapper, isSourceWordContainer, isSuperscription } from "./usfm.ts";
 
 // Build a HighlightKey from a Hebrew/Greek string + 1-based occurrence.
@@ -133,6 +134,19 @@ export function selectionFromQuote(
     out.add(tokenKey(t.text, t.occurrence));
   }
   return out;
+}
+
+// True when a built quote is the one the row already stores, so committing
+// it would be a no-op write (which still bumps the version and demotes an
+// approved row). Quotes compare NFC-normalized: the builder emits UHB's legacy
+// combining-mark order while a stored quote may be NFC. A null stored
+// occurrence means "first", == 1. Same rule as Shell's commitQuoteBuild.
+export function quotePickUnchanged(
+  built: { quote: string; occurrence: number },
+  storedQuote: string | null | undefined,
+  storedOccurrence: number | null | undefined,
+): boolean {
+  return nfc(built.quote) === nfc(storedQuote ?? "") && built.occurrence === (storedOccurrence ?? 1);
 }
 
 // Separator to place after `w` when rejoining it with the next word in the
