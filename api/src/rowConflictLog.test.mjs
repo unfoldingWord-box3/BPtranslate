@@ -89,3 +89,19 @@ test("client-supplied header text is clamped", () => {
   assert.equal(values[11].length, 120);
   assert.equal(values[12].length, 64);
 });
+
+test("an X-Op-Queued-At past the safe-integer range is stored as null, not rounded", () => {
+  const base = {
+    kind: "tn",
+    rowId: "r",
+    book: "LUK",
+    action: "patch",
+    userId: 1,
+    expectedVersion: 1,
+    fields: ["note"],
+    current: null,
+  };
+  assert.equal(rowConflictBindValues({ ...base, headers: { opQueuedAt: "99999999999999999999" } })[10], null);
+  assert.equal(rowConflictBindValues({ ...base, headers: { opQueuedAt: "12ab" } })[10], null);
+  assert.equal(rowConflictBindValues({ ...base, headers: { opQueuedAt: "1790000000123" } })[10], 1790000000123);
+});

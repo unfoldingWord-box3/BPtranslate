@@ -35,7 +35,10 @@ function intOrNull(v: unknown): number | null {
 /** Positional bind values for ROW_CONFLICT_INSERT_SQL. Pure, for tests. */
 export function rowConflictBindValues(input: RowConflictInput): unknown[] {
   const queuedRaw = clampText(input.headers.opQueuedAt, 20);
-  const queued = queuedRaw !== null && /^\d+$/.test(queuedRaw) ? Number(queuedRaw) : null;
+  // Digits only, and only a value Number() holds exactly; anything longer
+  // would round to a timestamp the client never sent.
+  const queuedNum = queuedRaw !== null && /^\d+$/.test(queuedRaw) ? Number(queuedRaw) : NaN;
+  const queued = Number.isSafeInteger(queuedNum) ? queuedNum : null;
   const cur = input.current ?? null;
   return [
     input.kind,
