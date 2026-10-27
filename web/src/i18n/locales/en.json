@@ -1613,6 +1613,8 @@
     "conflictNotice": "Another editor changed this note while you were working on it. Your version was not saved.",
     "reloadNote": "Reload note",
     "queuedNotConfirmed": "Your edit is queued but the server hasn't confirmed it yet — it was not approved.",
+    "quoteNotConfirmed": "Your quote change is queued but the server hasn't confirmed it yet.",
+    "quotePendingApprove": "Your quote change hasn't been confirmed yet — wait for it to save, then approve.",
     "lockedEditDropped": "An AI run is rewriting this chapter — your edit was dropped rather than overwritten.",
     "noteLockedByTranslate": "An AI translation is writing this note. Try again after it finishes.",
     "saveFailed": "Saving this note failed ({{reason}}). It was not approved.",

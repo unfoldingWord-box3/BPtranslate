@@ -587,6 +587,8 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   // outcome (the listener below the persist effect), never by a version check:
   // the row can reach a new version before the save lands (review A2).
   const sentRef = useRef<(PendingRowSave & { id: string }) | null>(null);
+  // commitQuote's op whose wait timed out; handleApprove refuses until it leaves the outbox.
+  const quotePendingRef = useRef<{ rowId: string; opId: string } | null>(null);
   // Ops this screen heard end since it mounted, so a draft lookup's outbox
   // read cannot restore a save that ended while the read was in flight (#658).
   const endedOpsRef = useRef(new Set<string>());
@@ -1266,7 +1268,10 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
       const op = await outbox.enqueueRow("tn", target.id, target.version, patch, { book, baseline });
       const result = await waitForOp(op.id);
       if (result === null) {
-        say(t("flowTranslate.queuedNotConfirmed"));
+        // Still queued: Approve checks this op first (/validate carries no
+        // version, so a quote PATCH landing after it would demote the row).
+        quotePendingRef.current = { rowId: target.id, opId: op.id };
+        say(t("flowTranslate.quoteNotConfirmed"));
         return;
       }
       if (result.kind !== "ok") {
@@ -1302,11 +1307,29 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
     setToast(t("flowReview.queue.quoteRebuilt"));
   }
 
+  // A quote op on this row still in the outbox (commitQuote's wait timed out,
+  // or it is held as a conflict). Approving now would let it land after the
+  // version-less /validate and demote the row again.
+  async function quoteOpPending(rowId: string): Promise<boolean> {
+    const pending = quotePendingRef.current;
+    if (!pending || pending.rowId !== rowId) return false;
+    const ops = await outbox.listWithUncommitted().catch(() => null);
+    if (ops && !ops.some((o) => o.id === pending.opId)) {
+      quotePendingRef.current = null;
+      return false;
+    }
+    return true;
+  }
+
   async function handleApprove() {
     if (!row || busy) return;
     setBusy(true);
     setNotice(null);
     try {
+      if (await quoteOpPending(row.id)) {
+        say(t("flowTranslate.quotePendingApprove"));
+        return;
+      }
       if (hasDiff && !(await saveDraft(row))) return;
       const updated = await api.validateNote(row.id, book, true);
       applyLocalRowReplacement("tn", updated);
@@ -1963,18 +1986,22 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
                   {row.quote || "—"}
                 </Typography>
                 {canPickQuote && (
+                  // The span: a disabled button fires no events, so the
+                  // Tooltip needs a wrapper to hang its listeners on.
                   <Tooltip title={t("flowTranslate.changeQuote")}>
-                    <IconButton
-                      ref={setQuoteAnchor}
-                      size="small"
-                      disabled={editLocked || busy}
-                      onClick={openQuotePicker}
-                      aria-label={t("flowTranslate.changeQuote")}
-                      aria-haspopup="dialog"
-                      sx={{ flex: "none", alignSelf: "center", color: "text.secondary" }}
-                    >
-                      <EditOutlinedIcon fontSize="small" />
-                    </IconButton>
+                    <span style={{ flex: "none", alignSelf: "center", display: "inline-flex" }}>
+                      <IconButton
+                        ref={setQuoteAnchor}
+                        size="small"
+                        disabled={editLocked || busy}
+                        onClick={openQuotePicker}
+                        aria-label={t("flowTranslate.changeQuote")}
+                        aria-haspopup="dialog"
+                        sx={{ color: "text.secondary" }}
+                      >
+                        <EditOutlinedIcon fontSize="small" />
+                      </IconButton>
+                    </span>
                   </Tooltip>
                 )}
               </Stack>
