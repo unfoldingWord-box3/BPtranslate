@@ -42,10 +42,11 @@ test("multi-line note: a version bump that left the note alone auto-heals", () =
     ),
     "auto_heal",
   );
-  // The pre-fix shape (real newlines on the wire) is what produced the prompt.
+  // The pre-fix shape (real newlines on the wire) produced the prompt until
+  // classifyRowPatchConflict folded newline forms (#664); it heals now too.
   assert.equal(
     classifyRowPatchConflict({ note: draftInEditor }, { note: baselineInEditor }, server),
-    "conflict",
+    "auto_heal",
   );
 });
 
