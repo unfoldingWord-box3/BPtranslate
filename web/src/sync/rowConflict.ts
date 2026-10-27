@@ -63,10 +63,18 @@ export function wouldAutoHeal(
 
 // null and undefined are the same "absent" value here: the server serializes an
 // empty column as null, while an un-set optimistic field is undefined. Types are
-// otherwise primitives (string | number) straight from JSON, so === is right.
+// otherwise primitives (string | number) straight from JSON, so === is right,
+// except that text compares with newlines folded: D1 holds tn/tq text with a
+// literal backslash-n (TSV imports, NoteCard) or a real newline (rows the flows
+// Translate screens saved before #593), and the same text in either form must
+// not read as a conflict (#664). Same fold as rowValueKey in draftSaveState.ts.
+function foldNewlines(v: unknown): unknown {
+  return typeof v === "string" ? v.replace(/\\n/g, "\n") : v;
+}
+
 function valuesEqual(a: unknown, b: unknown): boolean {
-  const na = a === undefined ? null : a;
-  const nb = b === undefined ? null : b;
+  const na = a === undefined ? null : foldNewlines(a);
+  const nb = b === undefined ? null : foldNewlines(b);
   return na === nb;
 }
 
