@@ -91,7 +91,7 @@ import ViewColumnIcon from "@mui/icons-material/ViewColumn";
 
 import { LockBanner } from "./FlowBanners";
 import { FlowStatusChip, type FlowStatusKind } from "./FlowStatusChip";
-import { isAquiferDraftRow, unescapeNewlines, waitForOp } from "./translateShared";
+import { escapeNewlines, isAquiferDraftRow, unescapeNewlines, waitForOp } from "./translateShared";
 import { useSwipeNav } from "./useSwipeNav";
 import type { FlowScreenContext } from "./types";
 
@@ -649,7 +649,13 @@ export default function TranslateQuestionsScreen({
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ text: string; severity: "info" | "warning" } | null>(null);
-  const [conflictNotice, setConflictNotice] = useState<string | null>(null);
+  // The row a settled 409 belongs to — not a bare flag. The outbox listener
+  // hears every conflict in this book, including leftover ops from earlier
+  // sessions or another tab; a flag painted "another editor changed THIS
+  // note" on whatever card happened to be open (2026-10-03 report). Keyed by
+  // id, the banner shows only on its own card; conflicts on other rows stay
+  // in SyncStatusBar's conflict panel, which lists every conflicted op.
+  const [conflictRowId, setConflictRowId] = useState<string | null>(null);
   const [chapterLock, setChapterLock] = useState<ChapterLockedBody | null>(null);
 
   const say = useCallback((text: string, severity: "info" | "warning" = "warning") => {
@@ -869,7 +875,7 @@ export default function TranslateQuestionsScreen({
         // Only a settled conflict is a question for the user: the outbox
         // auto-heals the healable ones and still notifies listeners.
         if (result.kind === "conflict" && op.status === "conflict") {
-          setConflictNotice(t("flowQuestions.conflict"));
+          setConflictRowId(op.target.id);
         }
       }),
     [book, t],
@@ -943,14 +949,19 @@ export default function TranslateQuestionsScreen({
   async function saveDraft(target: TqRow): Promise<boolean> {
     const patch: { question?: string; response?: string } = {};
     const baseline: Record<string, string> = {};
+    // The same fields as typed (real newlines): the display form the drafts
+    // store and the type-back protection compare against.
+    const shown: Record<string, string> = {};
     for (const f of FIELDS) {
       if (values[f] === baselineRef.current[f]) continue;
-      patch[f] = values[f];
-      baseline[f] = baselineRef.current[f];
+      // Sent in the stored escaped form; see escapeNewlines.
+      patch[f] = escapeNewlines(values[f]);
+      baseline[f] = escapeNewlines(baselineRef.current[f]);
+      shown[f] = values[f];
     }
     if (Object.keys(patch).length === 0) return true;
     applyLocalRowPatch("tq", target.id, patch);
-    sentRef.current = { id: target.id, patch: { ...patch }, shown: { ...patch } };
+    sentRef.current = { id: target.id, patch: { ...patch }, shown };
     const op = await outbox.enqueueRow("tq", target.id, target.version, patch, { book, baseline });
     const result = await waitForOp(op.id);
     if (result === null) {
@@ -959,7 +970,7 @@ export default function TranslateQuestionsScreen({
     }
     if (result.kind !== "ok") {
       if (result.kind === "conflict") {
-        setConflictNotice(t("flowQuestions.conflict"));
+        setConflictRowId(target.id);
       } else if (result.kind === "locked") {
         setChapterLock(result.lockBody);
         say(t("flowQuestions.aiRunDropped"));
@@ -974,7 +985,7 @@ export default function TranslateQuestionsScreen({
     // between that clear and the baseline move above holds only the saved text
     // and the persist effect won't re-run for the moved baseline, so drop it;
     // newer typing stays (#616 review, #618).
-    void drafts.clearRowIfSaved(rowKey("tq", book, target.id), patch);
+    void drafts.clearRowIfSaved(rowKey("tq", book, target.id), shown);
     setEditedIds((prev) => new Set(prev).add(target.id));
     // Mirror the server's demotion locally so the row object stays consistent
     // with what a refetch will report: a content edit demotes an AI draft or a
@@ -1048,7 +1059,7 @@ export default function TranslateQuestionsScreen({
   }
 
   function reloadRow() {
-    setConflictNotice(null);
+    setConflictRowId(null);
     void refetch().then(() => setReloadNonce((n) => n + 1));
   }
 
@@ -1314,7 +1325,7 @@ export default function TranslateQuestionsScreen({
           <LockBanner pipelineType={chapterLock.pipelineType} startedAt={chapterLock.startedAt} />
         )}
 
-        {conflictNotice && (
+        {row && conflictRowId === row.id && (
           <Alert
             severity="warning"
             action={
@@ -1323,7 +1334,7 @@ export default function TranslateQuestionsScreen({
               </Button>
             }
           >
-            {conflictNotice}
+            {t("flowQuestions.conflict")}
           </Alert>
         )}
 
