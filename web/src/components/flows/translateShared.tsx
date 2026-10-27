@@ -5,11 +5,7 @@
 
 import { onOutboxResult, type OutboxResult } from "../../sync/outbox";
 
-// Row text comes across with literal "\n" escape sequences (the source TSV
-// format), not real newlines — same treatment ReviewQueue/NoteCard give it.
-export function unescapeNewlines(text: string | null | undefined): string {
-  return (text ?? "").replace(/\\n/g, "\n");
-}
+export { escapeNewlines, unescapeNewlines } from "../../lib/tsvNewlines";
 
 // Distinct provenance: a row whose draft text came from an Aquifer import
 // (draft_meta_json.source === "aquifer"), not from the AI translate bot. Kept in
