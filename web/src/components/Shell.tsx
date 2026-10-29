@@ -1099,7 +1099,7 @@ export function Shell({
             reloadBookChapter?.(0);
           }
         } else if (job.state === "failed" && prev !== "failed") {
-          pushPipelineToast(t("shell.aiFailed", { pipelineType: job.pipeline_type, where, error: job.error_kind ? errorCopy(job.error_kind, t) : t("shell.error") }), "error");
+          pushPipelineToast(t("shell.aiFailed", { pipelineType: job.pipeline_type, where, error: job.error_kind ? errorCopy(job.error_kind, t, job.error_message) : t("shell.error") }), "error");
         }
       }),
     [pushPipelineToast, promptChapterRefresh, reloadBookChapter, book, chapter, mode, hasBookFront, t],
