@@ -155,8 +155,9 @@ test("errorCopy falls back to the unrecognized-error copy for an unknown kind", 
 // the dispatch POST was refused with a 4xx (pipelines.ts writes
 // "upstream <status>: …" / "upstream <status> (body unreadable)"): the same
 // request gets the same refusal. Those get provider_error's "check the AI
-// settings; retrying won't help" copy. 408 and 429 are 4xx but do clear on a
-// retry, so they keep the generic copy.
+// settings; retrying won't help" copy. 408, 409 and 429 are 4xx but do clear
+// on a retry (409: another run holds that scope until it finishes), so they
+// keep the generic copy.
 test("errorCopy: sdk_error refused upstream with a 4xx says retrying won't help", () => {
   const t = (key, opts) => (opts ? `${key}|${opts.kind}` : key);
   const refused = "aiStudio.errors.provider_error";
@@ -167,6 +168,7 @@ test("errorCopy: sdk_error refused upstream with a 4xx says retrying won't help"
   // Retryable or not a 4xx: unchanged.
   assert.equal(errorCopy("sdk_error", t, "upstream 429: slow down"), generic);
   assert.equal(errorCopy("sdk_error", t, "upstream 408 (body unreadable)"), generic);
+  assert.equal(errorCopy("sdk_error", t, "upstream 409: another job holds this scope"), generic);
   assert.equal(errorCopy("sdk_error", t, "upstream 503: unavailable"), generic);
   assert.equal(errorCopy("sdk_error", t, "translate_workflow_create_failed: boom"), generic);
   assert.equal(errorCopy("sdk_error", t, "upstream 4000: not a status"), generic);
