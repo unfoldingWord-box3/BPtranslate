@@ -111,6 +111,15 @@ async function apiFor(ws, path) {
       }
       if (path === "/api/chapters/TIT/8") return { status: 200, body: { verses: {}, tn: [], tq: [] } };
       if (path === "/api/chapters/TIT/9") return { status: 200, body: { verses: { ULT: lane([1, 2, 3, 4, 5]) }, tn: [], tq: [] } };
+      if (path === "/api/chapters/TIT/10") {
+        // Verse 3 is missing from the lane between two markers, and a note sits
+        // on verse 7, past the lane's last verse (5).
+        return { status: 200, body: {
+          verses: { ULT: lane([1, 2, 4, 5], { 2: TS_NEW, 4: TS_NEW }) },
+          tn: [tnRow(600, 0), tnRow(601, 3), tnRow(602, 7)],
+          tq: [tqRow(603, 0), tqRow(604, 3)],
+        } };
+      }
       if (path.startsWith("/api/rows/tn/r5")) return { status: 200, body: tnRow(5, 2) };
       return { status: 404, body: { error: "not_found" } };
 }
@@ -390,6 +399,15 @@ console.log("[tools] chunks");
   const plain = await call("bpt_chunks", { book: "TIT", chapter: 9 });
   assert(plain.data.lane === "ULT" && plain.data.split === "whole_chapter" && span(plain) === "1-5", "ULT without markers: one chunk");
   assert(/no \\ts\\\* markers/.test(plain.data.note), "the note says there are no markers");
+
+  const gap = await call("bpt_chunks", { book: "TIT", chapter: 10 });
+  assert(span(gap) === "1-2,3-4,5-7", `chunks cover the chapter with no gaps, out to the last note (${span(gap)})`);
+  assert(gap.data.chunks[1].tn === 1 && gap.data.chunks[1].tq === 1, "a note on a verse missing from the lane lands in a chunk");
+  assert(gap.data.chunks[2].tn === 1, "a note past the lane's last verse lands in the last chunk");
+  assert(gap.data.outside_chunks.tn === 1 && gap.data.outside_chunks.tq === 1, "outside_chunks counts only verse 0");
+  const gapBy = await call("bpt_chunks", { book: "TIT", chapter: 10, by: 2 });
+  assert(span(gapBy) === "1-2,3-4,5-7", `by counts a missing verse toward n (${span(gapBy)})`);
+  assert(gapBy.data.outside_chunks.tn === 1, "by: outside_chunks still only verse 0");
 
   const missing = await call("bpt_chunks", { book: "TIT", chapter: 99 });
   assert(missing.isError, "missing chapter -> isError");

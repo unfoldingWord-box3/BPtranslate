@@ -430,28 +430,37 @@ function verseUnits(laneVerses: Record<string, VerseEntry>): VerseUnit[] {
     .sort((a, b) => a.start - b.start);
 }
 
-// Groups verse units into chunks: at each marker, or once a chunk holds at
-// least `by` verses. A bridged verse is never split across two chunks.
-function groupUnits(units: VerseUnit[], by: number | null): { start: number; end: number }[] {
+// Groups verse units into chunks: at each marker, or once a chunk spans at
+// least `by` verse numbers. The chunks cover verse 1 through `lastVerse` with
+// no gaps: each starts right after the previous one ends, so a verse missing
+// from the lane still lands in a chunk (with `by`, a missing verse counts
+// toward n, since n is a span of verse numbers), and the last chunk stretches
+// to `lastVerse` so notes past the lane's last verse are not lost. A bridged
+// verse is never split across two chunks.
+function groupUnits(units: VerseUnit[], by: number | null, lastVerse: number): { start: number; end: number }[] {
   const chunks: { start: number; end: number }[] = [];
+  let next = 1;
   let cur: { start: number; end: number } | null = null;
   for (const u of units) {
-    if (cur) cur.end = u.end;
-    else cur = { start: u.start, end: u.end };
+    if (cur) cur.end = Math.max(cur.end, u.end);
+    else cur = { start: next, end: Math.max(next, u.end) };
     const full = by === null ? u.ts : cur.end - cur.start + 1 >= by;
     if (full) {
       chunks.push(cur);
+      next = cur.end + 1;
       cur = null;
     }
   }
   if (cur) chunks.push(cur);
+  const last = chunks.at(-1);
+  if (last && lastVerse > last.end) last.end = lastVerse;
   return chunks;
 }
 
 const chunkList: ToolDef = {
   name: "bpt_chunks",
   description:
-    "Split one chapter into review chunks, each with how many translation notes (tN) and questions (tQ) it holds (trashed ones left out). By default the chapter's \\ts\\* chunk markers in ULT decide the chunks (UST's if ULT is unavailable). Pass by: n to split every n verses instead. If the chapter has no markers and no by is given, the whole chapter comes back as one chunk with a note saying so. Notes on verse 0 (the chapter introduction) are counted in outside_chunks. Pass a chunk's start and end to bpt_chunk_work as verse_start and verse_end.",
+    "Split one chapter into review chunks, each with how many translation notes (tN) and questions (tQ) it holds (trashed ones left out). By default the chapter's \\ts\\* chunk markers in ULT decide the chunks (UST's if ULT is unavailable). Pass by: n to split every n verses instead. If the chapter has no markers and no by is given, the whole chapter comes back as one chunk with a note saying so. The chunks cover the whole chapter with no gaps, from verse 1 to the last verse the text or any note uses. Notes on verse 0 (the chapter introduction), or with no verse number, are counted in outside_chunks. Pass a chunk's start and end to bpt_chunk_work as verse_start and verse_end.",
   inputSchema: {
     type: "object",
     properties: {
@@ -498,13 +507,16 @@ const chunkList: ToolDef = {
           : "The source text carries no chunk markers, so the chapter is one chunk. Pass by: n to split it every n verses.",
       );
     }
-    const ranges = groupUnits(units, by);
-
     // Live rows only, the same rule bpt_chunk_work and the book summary use.
     const live = (k: "tn" | "tq") =>
       ((body[k] as Record<string, unknown>[] | undefined) ?? []).filter((r) => !r.trashed_at).map((r) => Number(r.verse));
     const tnVerses = live("tn");
     const tqVerses = live("tq");
+    const lastVerse = Math.max(
+      ...units.map((u) => u.end),
+      ...[...tnVerses, ...tqVerses].filter((v) => Number.isSafeInteger(v) && v > 0),
+    );
+    const ranges = groupUnits(units, by, lastVerse);
     const inRange = (vs: number[], s: number, e: number) => vs.filter((v) => v >= s && v <= e).length;
     const out = ranges.map((c) => ({ ...c, tn: inRange(tnVerses, c.start, c.end), tq: inRange(tqVerses, c.start, c.end) }));
     const tnIn = out.reduce((n, c) => n + c.tn, 0);
