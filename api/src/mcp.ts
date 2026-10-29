@@ -17,6 +17,7 @@
 // first workspace: a wrong slug must not read another org's database.
 
 import { TOOLS, ToolInputError, type ToolContext } from "./mcpTools.ts";
+import type { ChatPrincipal, ClaimResult } from "./chatLinks.ts";
 
 export const MCP_PATH_PREFIX = "/api/mcp/";
 const PROTOCOL_VERSION = "2025-03-26";
@@ -35,6 +36,9 @@ export interface McpDeps {
   findWorkspace: (slug: string) => Promise<McpWorkspace | null>;
   // In-process GET against the given workspace's env.
   getJson: (ws: McpWorkspace, path: string) => Promise<{ status: number; body: unknown }>;
+  // Account links (chatLinks.ts), run against the workspace's env.
+  claimLink: (ws: McpWorkspace, code: string) => Promise<ClaimResult>;
+  resolveSession: (ws: McpWorkspace, token: string) => Promise<ChatPrincipal | null>;
 }
 
 // Returns the workspace slug when the request is for the MCP endpoint, else null.
@@ -108,6 +112,8 @@ export async function handleMcp(request: Request, slug: string, deps: McpDeps): 
   const ctx: ToolContext = {
     workspace: { slug: ws.slug, label: ws.label, org: ws.org },
     getJson: (path) => deps.getJson(ws, path),
+    claimLink: (code) => deps.claimLink(ws, code),
+    resolveSession: (token) => deps.resolveSession(ws, token),
   };
   const reply = await dispatch(msg, ctx);
   // Notifications get no body.
@@ -142,7 +148,7 @@ export async function dispatch(msg: unknown, ctx: ToolContext): Promise<unknown 
         protocolVersion: PROTOCOL_VERSION,
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: "bptranslate", version: "0.1.0" },
-        instructions: `BPtranslate language project "${ctx.workspace.label}". Read-only for now.`,
+        instructions: `BPtranslate language project "${ctx.workspace.label}". Reading needs no link; acting as a person needs a session_token from bpt_link_account.`,
       });
     case "ping":
       return ok({});

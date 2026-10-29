@@ -234,7 +234,9 @@ export async function lookupUserRole(env: Env, dcsUsername: string): Promise<Rol
 // teams lookup is structurally broken here" (e.g. an OAuth grant without
 // org-read scope), and in the latter case failing closed would turn a feature
 // that silently does nothing into a project-wide lockout.
-async function maybeResyncTeamRole(env: Env, dcsUsername: string): Promise<void> {
+// Exported for chat links (chatLinks.ts): a chat-only reviewer never refreshes
+// a web session, so the same best-effort re-check runs when their token is used.
+export async function maybeResyncTeamRole(env: Env, dcsUsername: string): Promise<void> {
   try {
     // Two databases, so two statements: user_roles is per-org (env.DB), while
     // the OAuth token lives ONLY in the shared users table — ensureWorkspaceUser

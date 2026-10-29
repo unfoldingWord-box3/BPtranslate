@@ -1767,6 +1767,14 @@ export interface InferredOrgConfigResponse {
   warnings: string[];
 }
 
+export interface ChatLink {
+  id: number;
+  workspace: string;
+  createdAt: number;
+  expiresAt: number;
+  lastUsedAt: number | null;
+}
+
 export const api = {
   getBookSummary: (book: string, signal?: AbortSignal) =>
     request<BookSummary>(`/api/chapters/${encodeURIComponent(book)}`, { signal }),
@@ -2356,6 +2364,16 @@ export const api = {
       `/api/pipelines/${encodeURIComponent(jobId)}/notified`,
       { method: "POST", signal },
     ),
+
+  // ── Chat assistant links (api/src/chatLinkRoutes.ts) ──
+  chatLinkCode: () =>
+    request<{ code: string; expiresAt: number; ttlSeconds: number; workspace: string }>(
+      "/api/chat-links/code",
+      { method: "POST" },
+    ),
+  chatLinksList: () => request<{ links: ChatLink[] }>("/api/chat-links"),
+  chatLinkRevoke: (id: number) =>
+    request<{ ok: boolean }>(`/api/chat-links/${encodeURIComponent(String(id))}`, { method: "DELETE" }),
 
   // ── Nightly export admin surface (api/src/exports.ts) ──
   // Previously hand-rolled per admin screen (ObserveScreen.tsx's observeFetch,
