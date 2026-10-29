@@ -45,10 +45,24 @@ export function ChatLinkDialog({ open, onClose }: Props) {
     }
   }, []);
 
-  // Load the list each time the dialog opens.
+  // Load the list each time the dialog opens. State is set only in the
+  // promise callbacks (react-hooks/set-state-in-effect), as in
+  // WorkspaceSwitcher.
   useEffect(() => {
-    if (open) void refresh();
-  }, [open, refresh]);
+    if (!open) return;
+    let cancelled = false;
+    api
+      .chatLinksList()
+      .then((res) => {
+        if (!cancelled) setLinks(res.links);
+      })
+      .catch(() => {
+        if (!cancelled) setError(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
 
   // Drop the code and any error on close, so the next open starts clean.
   const close = () => {
