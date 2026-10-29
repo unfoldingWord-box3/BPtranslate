@@ -15,7 +15,7 @@
 
 import { DatabaseSync } from "node:sqlite";
 import { Hono } from "hono";
-import { SignJWT } from "jose";
+import { SignJWT, decodeJwt } from "jose";
 import {
   attachAuth,
   requireCsrf,
@@ -31,6 +31,7 @@ import {
   lookupUserRole,
 } from "./auth.ts";
 import { syncTeamRole, RESYNC_AFTER_SECONDS } from "./dcsTeams.ts";
+import { chatLinkRoutes } from "./chatLinkRoutes.ts";
 
 function assert(cond, msg) {
   if (!cond) {
@@ -72,9 +73,12 @@ async function makeToken({
   issuer = ISSUER,
   key = KEY,
   expiresIn = 3600,
+  // Workspace the token is bound to (#680). baseEnv sets no WORKSPACE_SLUG,
+  // which resolves to "default"; pass null to mint a claim-less token.
+  ws = "default",
 } = {}) {
   const now = Math.floor(Date.now() / 1000);
-  return new SignJWT({ username, role })
+  return new SignJWT(ws === null ? { username, role } : { username, role, ws })
     .setProtectedHeader({ alg: "HS256" })
     .setSubject(sub)
     .setIssuer(issuer)
@@ -438,6 +442,81 @@ console.log("[refreshToken → maybeResyncTeamRole] re-check reads the OAuth tok
   } finally {
     globalThis.fetch = realFetch;
   }
+}
+
+// ── access token bound to its workspace (#680) ──────────────────────────────
+// The workspace comes from the be_ws cookie, which the server never checks
+// against the token. A token minted for workspace A must not carry A's role
+// into a request that resolved to workspace B: it counts as no sign-in there
+// (401), so the browser's silent refresh re-derives the role for B.
+
+console.log("[attachAuth] access token only authenticates in the workspace it was minted for (#680)");
+{
+  const app = buildApp();
+  const linkApp = new Hono();
+  linkApp.use("*", attachAuth);
+  linkApp.use("*", requireCsrf);
+  linkApp.route("/api/chat-links", chatLinkRoutes);
+  const envA = { ...baseEnv(fakeDb()), WORKSPACE_SLUG: "a" };
+  const envB = { ...baseEnv(fakeDb()), WORKSPACE_SLUG: "b" };
+  const editorA = await makeToken({ role: "editor", ws: "a" });
+  const claimless = await makeToken({ role: "editor", ws: null });
+  const req = (path, tok, env) => app.request(path, { headers: { cookie: `be_access=${tok}` } }, env);
+
+  assert((await req("/editor-only", editorA, envA)).status === 200, "editor token for A passes the editor gate in A");
+  assert((await req("/editor-only", editorA, envB)).status === 401, "editor token for A gets 401 in B (no role carried over)");
+  assert((await req("/authed", editorA, envB)).status === 401, "token for A is not a sign-in in B at all");
+  assert((await req("/api/auth/me", editorA, envB)).status === 401, "/me in B with A's token → 401, so the client refreshes");
+  assert((await req("/editor-only", claimless, envA)).status === 401, "claim-less (pre-#680) token → 401, fail closed");
+  assert((await verifyToken(editorA, envA))?.workspace === "a", "verifyToken exposes the workspace claim");
+
+  const csrf = { cookie: `be_access=${editorA}; be_csrf=t1`, "x-csrf-token": "t1" };
+  const linkB = await linkApp.request("/api/chat-links/code", { method: "POST", headers: csrf }, envB);
+  assert(linkB.status === 401, "chat link code cannot be issued in B with A's token");
+  const linkA = await linkApp.request("/api/chat-links/code", { method: "POST", headers: csrf }, envA);
+  assert(linkA.status === 200 && (await linkA.json()).workspace === "a", "chat link code still issues in A");
+}
+
+console.log("[refreshToken] mints for the request's workspace and re-derives the role there (#680)");
+{
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response("not found", { status: 404 });
+  const app = buildApp();
+  const now = Math.floor(Date.now() / 1000);
+  const sessionRow = { id: "sess1", user_id: 7, expires_at: now + 1000, revoked_at: null, dcs_username: "alice" };
+  // alice is an editor in A and a viewer in B (user_roles is per-org).
+  const envFor = (slug, role) => ({
+    ...baseEnv(
+      fakeDb(({ sql }) => {
+        if (sql.includes("FROM sessions")) return sessionRow;
+        if (sql.includes("FROM user_roles")) return role ? { role } : null;
+        return null;
+      }),
+    ),
+    WORKSPACE_SLUG: slug,
+  });
+  const refreshIn = (env) =>
+    app.request("/api/auth/refresh", { method: "POST", headers: { cookie: "be_refresh=sess1" } }, env);
+  const accessFrom = (res) => /be_access=([^;]+)/.exec(res.headers.get("set-cookie") ?? "")?.[1];
+
+  const resB = await refreshIn(envFor("b", "viewer"));
+  assert(resB.status === 200, "refresh in B succeeds");
+  const tokB = accessFrom(resB);
+  const claimsB = tokB ? decodeJwt(tokB) : {};
+  assert(claimsB.ws === "b", "refreshed token is bound to B");
+  assert(claimsB.role === "viewer", "refreshed token carries B's role, not A's");
+  const envB = envFor("b", "viewer");
+  const withTok = { headers: { cookie: `be_access=${tokB}` } };
+  assert((await app.request("/authed", withTok, envB)).status === 200, "refreshed token authenticates in B");
+  assert((await app.request("/editor-only", withTok, envB)).status === 403, "and is only a viewer there");
+  assert(
+    (await app.request("/authed", withTok, envFor("a", "editor"))).status === 401,
+    "B's refreshed token does not authenticate in A",
+  );
+
+  // No role in B and not a viewer-org member: refresh denies rather than minting.
+  assert((await refreshIn(envFor("b", null))).status === 403, "refresh in B with no access there → 403");
+  globalThis.fetch = realFetch;
 }
 
 // ── updateLastLocation input validation ─────────────────────────────────────
