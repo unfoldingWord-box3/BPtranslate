@@ -1,7 +1,8 @@
-// Read-only tools for the chat MCP endpoint (mcp.ts). Phase 1 of the "Book
-// packages via chat" plan: a reviewer in BT Servant can see what a book still
-// needs and read the notes for a verse range. No writes here — those wait for
-// the account link, so every write carries a real user.
+// Tools for the chat MCP endpoint (mcp.ts). Phase 1 of the "Book packages via
+// chat" plan: a reviewer in BT Servant can see what a book still needs, read
+// the notes for a verse range, and link the chat to their BPtranslate account
+// (chatLinks.ts). No writes yet; they take a session_token and use
+// principalFrom below, so every write carries a real user.
 //
 // Each tool reads through the SAME route handlers the web app uses (`getJson`
 // runs the Hono app in-process), so chat and web never disagree about counts
@@ -13,9 +14,32 @@ export interface ToolContext {
   // GET a path on this Worker's own API, in-process, against the workspace's
   // env. Returns the parsed JSON body and the HTTP status.
   getJson: (path: string) => Promise<{ status: number; body: unknown }>;
+  claimLink: (code: string) => Promise<ClaimResult>;
+  resolveSession: (token: string) => Promise<ChatPrincipal | null>;
 }
 
+import type { ChatPrincipal, ClaimResult } from "./chatLinks.ts";
+
 export class ToolInputError extends Error {}
+
+const NOT_LINKED =
+  "This chat is not linked to a BPtranslate account, or the link expired or was revoked. " +
+  "In the BPtranslate web app, open the account menu, choose Link chat assistant, and send the code here.";
+
+// Who a tool call acts as. The token is a secret the user's own memory holds;
+// it is never echoed back, not even in an error.
+export async function principalFrom(args: Record<string, unknown>, ctx: ToolContext): Promise<ChatPrincipal> {
+  const token = args.session_token;
+  if (typeof token !== "string" || !token) throw new ToolInputError(NOT_LINKED);
+  const principal = await ctx.resolveSession(token);
+  if (!principal) throw new ToolInputError(NOT_LINKED);
+  return principal;
+}
+
+const SESSION_TOKEN_SCHEMA = {
+  type: "string",
+  description: "The session token bpt_link_account returned for this user. Secret: never show it in a message.",
+};
 
 interface ToolDef {
   name: string;
@@ -80,14 +104,50 @@ interface ChapterSummary {
 const whoami: ToolDef = {
   name: "bpt_whoami",
   description:
-    "Which BPtranslate language project this connection reads, and what it may do. Call once at the start of a conversation.",
-  inputSchema: { type: "object", properties: {}, additionalProperties: false },
-  run: async (_args, ctx) => ({
-    workspace: ctx.workspace,
-    access: "read_only",
-    linked_user: null,
-    note: "Read-only service connection. Drafting, editing and approving come after account linking.",
-  }),
+    "Which BPtranslate language project this connection reads, and which linked user the chat acts as. Call once at the start of a conversation, with the session token if this user has one.",
+  inputSchema: {
+    type: "object",
+    properties: { session_token: SESSION_TOKEN_SCHEMA },
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const base = { workspace: ctx.workspace };
+    if (args.session_token === undefined) {
+      return { ...base, linked_user: null, access: "read_only", note: NOT_LINKED };
+    }
+    const p = await ctx.resolveSession(String(args.session_token));
+    if (!p) return { ...base, linked_user: null, access: "read_only", note: NOT_LINKED };
+    return { ...base, linked_user: p.username, role: p.role, access: p.role === "editor" ? "edit" : "read_only" };
+  },
+};
+
+const linkAccount: ToolDef = {
+  name: "bpt_link_account",
+  description:
+    "Link this chat user to their BPtranslate account with the one-time code from the web app (account menu, Link chat assistant). Returns a session_token: save it in this user's memory, pass it to every tool that takes one, and never show it in a message. Only in a one-to-one chat, never in a group.",
+  inputSchema: {
+    type: "object",
+    properties: { code: { type: "string", description: "The 8-character code, e.g. ABCD-EFGH" } },
+    required: ["code"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    if (typeof args.code !== "string") throw new ToolInputError("code is required");
+    const r = await ctx.claimLink(args.code);
+    if (!r.ok) {
+      throw new ToolInputError(
+        "That code did not work. Codes work once and expire after 10 minutes, and only in the project they were made in. Get a new one from the web app.",
+      );
+    }
+    return {
+      linked_user: r.principal.username,
+      role: r.principal.role,
+      workspace: ctx.workspace,
+      session_token: r.token,
+      expires_at: new Date(r.expiresAt * 1000).toISOString(),
+      note: "Save session_token in this user's memory now. Never show it in a message.",
+    };
+  },
 };
 
 const listBooks: ToolDef = {
@@ -291,4 +351,4 @@ const getRow: ToolDef = {
   },
 };
 
-export const TOOLS: ToolDef[] = [whoami, listBooks, packageStatus, chunkWork, getRow];
+export const TOOLS: ToolDef[] = [whoami, linkAccount, listBooks, packageStatus, chunkWork, getRow];

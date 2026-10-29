@@ -73,8 +73,11 @@ Highlights that bite repeatedly:
   middleware. The workspace comes from the URL, the bearer token is per workspace (`MCP_SERVICE_TOKENS`
   secret, JSON `{"<slug>":"<token>"}`, 32+ chars), and an unknown slug is a 404, never the `list[0]`
   fallback the cookie path uses. Tools read through the same route handlers in-process (`app.fetch`), so
-  they see what the web app sees. BT Servant registers one MCP server per language project. Writes wait
-  for the account link (plan: "Book packages via chat" Claude Doc, 2026-10-22).
+  they see what the web app sees. BT Servant registers one MCP server per language project (plan: "Book packages via chat" Claude Doc,
+  2026-10-22). A chat user acts as a person only through a `session_token` from `bpt_link_account`
+  (`api/src/chatLinks.ts`, #669): one-time code from the web app, 30-day token, hash-only storage, bound
+  to one workspace, role re-read every call and capped at editor. Write tools must call
+  `principalFrom()` in `mcpTools.ts`; never accept a username or user id as a tool argument.
 - **Local alignment testing needs the `mltest` workspace, not the default.** `POST /api/auth/dev`
   with no `be_ws` cookie lands on `bsoj` (the first entry in `WORKSPACES`). Its `ar-bsoj` preset
   quarantines the ULT/UST lanes as soon as verses exist (`ensureLaneState` in

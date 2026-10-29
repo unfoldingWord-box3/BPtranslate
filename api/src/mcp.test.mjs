@@ -7,7 +7,9 @@
 //   node --experimental-strip-types --no-warnings src/mcp.test.mjs
 
 import { handleMcp, mcpWorkspaceSlug } from "./mcp.ts";
-import { PAGE_BYTE_BUDGET, ROW_TEXT_CAP, byteLength } from "./mcpTools.ts";
+import { PAGE_BYTE_BUDGET, ROW_TEXT_CAP, byteLength, principalFrom } from "./mcpTools.ts";
+
+const GOOD_TOKEN = "bpt_" + "g".repeat(43);
 
 function assert(cond, msg) {
   if (!cond) {
@@ -65,6 +67,12 @@ function deps(overrides = {}) {
       if (path.startsWith("/api/rows/tn/r5")) return { status: 200, body: tnRow(5, 2) };
       return { status: 404, body: { error: "not_found" } };
     },
+    claimLink: async (ws, code) =>
+      ws.slug === "bsoj" && code === "ABCD-EFGH"
+        ? { ok: true, token: GOOD_TOKEN, expiresAt: 1800000000, principal: { userId: 1, username: "ada", role: "editor", linkId: 9 } }
+        : { ok: false },
+    resolveSession: async (ws, token) =>
+      ws.slug === "bsoj" && token === GOOD_TOKEN ? { userId: 1, username: "ada", role: "editor", linkId: 9 } : null,
     ...overrides,
   };
 }
@@ -158,6 +166,32 @@ console.log("[tools] reads");
   assert(row.data.draft_meta_json === undefined, "internal columns are not returned");
   const missing = await call("bpt_get_row", { book: "TIT", kind: "tn", id: "zzzz" });
   assert(missing.isError, "missing row -> isError");
+}
+
+console.log("[tools] account link");
+{
+  const anon = await call("bpt_whoami", {});
+  assert(anon.data.linked_user === null && anon.data.access === "read_only", "whoami without a token: not linked, read only");
+  const linked = await call("bpt_whoami", { session_token: GOOD_TOKEN });
+  assert(linked.data.linked_user === "ada" && linked.data.access === "edit", "whoami with a token names the user");
+  const stale = await call("bpt_whoami", { session_token: "bpt_revoked" });
+  assert(stale.data.linked_user === null && /Link chat assistant/.test(stale.data.note), "a dead token says how to relink");
+  assert(!JSON.stringify(stale.data).includes("bpt_revoked"), "a dead token is not echoed back");
+
+  const ok = await call("bpt_link_account", { code: "ABCD-EFGH" });
+  assert(!ok.isError && ok.data.session_token === GOOD_TOKEN && ok.data.linked_user === "ada", "link returns the token and user");
+  const bad = await call("bpt_link_account", { code: "ZZZZ-ZZZZ" });
+  assert(bad.isError && /did not work/.test(bad.data.error) && !bad.data.error.includes("ZZZZ"), "a bad code -> one generic message");
+
+  const ctx = { resolveSession: deps().resolveSession.bind(null, WS) };
+  let threw = null;
+  try {
+    await principalFrom({ session_token: "bpt_secret_wrong" }, ctx);
+  } catch (e) {
+    threw = e;
+  }
+  assert(threw && !threw.message.includes("bpt_secret_wrong"), "principalFrom refuses without echoing the token");
+  assert((await principalFrom({ session_token: GOOD_TOKEN }, ctx)).username === "ada", "principalFrom resolves a good token");
 }
 
 console.log("[tools] chunk paging");

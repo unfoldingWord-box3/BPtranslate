@@ -697,6 +697,24 @@
     "chooseFailed": "Couldn't load your organizations — you can switch later in Preferences.",
     "chooseStay": "Continue"
   },
+  "chatLink": {
+    "menuItem": "Link chat assistant",
+    "title": "Link chat assistant",
+    "intro": "Link the BT Servant chat to your account so it can save your edits. Generate a code, then send it to the bot in a one-to-one chat (not a group) within 10 minutes.",
+    "generate": "Generate code",
+    "generating": "Generating...",
+    "expiresIn": "Expires in {{time}}",
+    "expired": "Code expired",
+    "error": "Could not complete that request. Please try again.",
+    "linkedChats": "Linked chats",
+    "none": "No chats linked.",
+    "linked": "Linked {{date}}",
+    "lastUsed": "last used {{when}}",
+    "neverUsed": "never used",
+    "linkExpires": "expires {{date}}",
+    "revoke": "Revoke",
+    "close": "Close"
+  },
   "shell": {
     "scripture": "Scripture",
     "rows": "rows",

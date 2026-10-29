@@ -32,6 +32,7 @@ import {
 } from "@mui/material";
 import AddIcon from "@mui/icons-material/Add";
 import AdminPanelSettingsIcon from "@mui/icons-material/AdminPanelSettings";
+import ChatIcon from "@mui/icons-material/Chat";
 import CheckIcon from "@mui/icons-material/Check";
 import LanguageIcon from "@mui/icons-material/Language";
 import MenuBookIcon from "@mui/icons-material/MenuBook";
@@ -42,6 +43,7 @@ import RemoveIcon from "@mui/icons-material/Remove";
 import { useTranslation } from "react-i18next";
 import { useProjectConfig } from "../hooks/useProjectConfig";
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
+import { ChatLinkDialog } from "./ChatLinkDialog";
 import { UI_LANGUAGES } from "../i18n";
 import { UiLangContext } from "../i18n/UiLangContext";
 import {
@@ -56,13 +58,17 @@ type Props = {
   username?: string | null;
   onLogout?: () => void;
   isAdmin?: boolean;
+  // Admin or editor. Linking a chat only matters for writes, which viewers
+  // cannot make, so the server refuses them and the menu hides the item.
+  canEdit?: boolean;
   onOpenClassic?: () => void;
 };
 
-export function AccountMenu({ username, onLogout, isAdmin, onOpenClassic }: Props) {
+export function AccountMenu({ username, onLogout, isAdmin, canEdit, onOpenClassic }: Props) {
   const { t } = useTranslation();
   const [anchor, setAnchor] = useState<null | HTMLElement>(null);
   const [langAnchor, setLangAnchor] = useState<null | HTMLElement>(null);
+  const [chatLinkOpen, setChatLinkOpen] = useState(false);
   const { lang, setLang } = useContext(UiLangContext);
   const { mode: themeMode, toggle: toggleTheme } = useContext(ThemeModeContext);
   const { scale, setScale } = useContext(FontScaleContext);
@@ -235,6 +241,19 @@ export function AccountMenu({ username, onLogout, isAdmin, onOpenClassic }: Prop
           </MenuItem>
         )}
         {(onOpenClassic || isAdmin) && <Divider />}
+        {canEdit && (
+          <MenuItem
+            onClick={() => {
+              setAnchor(null);
+              setChatLinkOpen(true);
+            }}
+          >
+            <ListItemIcon>
+              <ChatIcon fontSize="small" sx={{ color: "text.secondary" }} />
+            </ListItemIcon>
+            <ListItemText primary={t("chatLink.menuItem")} />
+          </MenuItem>
+        )}
         <MenuItem
           onClick={() => {
             setAnchor(null);
@@ -247,6 +266,9 @@ export function AccountMenu({ username, onLogout, isAdmin, onOpenClassic }: Prop
           <ListItemText primary={t("shell.signOut")} sx={{ color: "#B4462B" }} />
         </MenuItem>
       </Menu>
+      {/* Lives outside the Menu: closing the menu unmounts its children, which
+          would take an open dialog with it. */}
+      {canEdit && <ChatLinkDialog open={chatLinkOpen} onClose={() => setChatLinkOpen(false)} />}
     </>
   );
 }

@@ -29,6 +29,8 @@ import { syncTemplates } from "./templateSync";
 import { attachAuth, requireAuth, requireCsrf, mintDevToken, startDcsAuth, callbackDcsAuth, authMe, authLogout, refreshToken, updateLastLocation, currentUserId } from "./auth";
 import { workspaceRoutes } from "./workspaceRoutes";
 import { handleMcp, mcpWorkspaceSlug } from "./mcp";
+import { chatLinkRoutes } from "./chatLinkRoutes";
+import { claimCode, resolveToken } from "./chatLinks";
 import { blockViewerWrites } from "./viewerGuard";
 import { listWorkspaces, resolveWorkspaceFresh, workspaceEnv, parseWorkspaceCookie, requireWorkspaceMatch, primeWorkspaces, type Workspace } from "./workspaces";
 
@@ -316,6 +318,7 @@ app.route("/api/templates", templates);
 app.route("/api/translation-memory", translationMemory);
 app.route("/api/ai-provider", aiProvider);
 app.route("/api/l10n", l10n);
+app.route("/api/chat-links", chatLinkRoutes);
 
 // WebSocket upgrade into the ChapterRoom DO. WS handshakes are normal HTTP
 // upgrades, so they carry the be_access cookie (same-origin) and attachAuth
@@ -534,6 +537,8 @@ export default {
           );
           return { status: res.status, body: await res.json().catch(() => null) };
         },
+        claimLink: (ws, code) => claimCode(workspaceEnv(env, ws as Workspace), code, ws.slug),
+        resolveSession: (ws, token) => resolveToken(workspaceEnv(env, ws as Workspace), token, ws.slug),
       });
     }
     const ws = await resolveWorkspaceFresh(env, parseWorkspaceCookie(request));
