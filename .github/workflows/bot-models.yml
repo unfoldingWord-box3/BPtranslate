@@ -7,6 +7,12 @@ name: Bot model parity check
 # calls raw.githubusercontent.com, and CI in this repo is offline/deterministic
 # by design — an outage must never redden an unrelated PR.
 #
+# It checks the repo file on bp-assistant's `main`, not the running bot's merged
+# config. The bot accepts its built-in DEFAULT_PROVIDER_CONFIGS merged with a
+# runtime copy of this file, so models only in the built-in defaults are not
+# seen here, and a model just added on `main` passes before the deployed bot
+# (which can lag `main`) knows it.
+#
 # It runs nightly instead, because the drift can come from the bot repo (a model
 # removed or renamed there) as much as from a change here, and the bot repo's
 # commits have nothing in this repo to hang a check on. Also runnable on demand

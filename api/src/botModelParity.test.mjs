@@ -41,8 +41,28 @@ test("a model the bot lacks is reported, with its provider", () => {
   );
 });
 
-test("a model present only as an alias key counts as present", () => {
+test("an alias whose target is a bot model counts as present", () => {
   assert.deepEqual(findModelsMissingFromBot({ claude: ["claude-haiku-4-5"] }, bot), []);
+});
+
+test("a dangling alias (target missing from models) is reported, with its target", () => {
+  const dangling = {
+    providers: {
+      claude: { modelAliases: { "claude-haiku-4-5": "claude-haiku-4-5-gone" }, models: { "claude-opus-5": price } },
+    },
+  };
+  assert.deepEqual(findModelsMissingFromBot({ claude: ["claude-haiku-4-5", "claude-opus-5"] }, dangling), [
+    { provider: "claude", model: "claude-haiku-4-5", aliasOf: "claude-haiku-4-5-gone" },
+  ]);
+});
+
+test("an alias wins over a same-named model, as in the bot's resolver", () => {
+  const shadowed = {
+    providers: { gemini: { modelAliases: { "gemini-3.6-flash": "gemini-gone" }, models: { "gemini-3.6-flash": price } } },
+  };
+  assert.deepEqual(findModelsMissingFromBot({ gemini: ["gemini-3.6-flash"] }, shadowed), [
+    { provider: "gemini", model: "gemini-3.6-flash", aliasOf: "gemini-gone" },
+  ]);
 });
 
 test("a provider the bot lacks entirely reports all its models", () => {

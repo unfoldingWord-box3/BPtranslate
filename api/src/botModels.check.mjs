@@ -6,6 +6,14 @@
 // providerCatalog.test.mjs checks PROVIDER_MODELS against our own catalog, but
 // nothing offline can see the bot's list.
 //
+// What this checks is the repo file on bp-assistant's `main`, not the running
+// bot's merged config. The bot actually accepts its built-in
+// DEFAULT_PROVIDER_CONFIGS (src/api-runner/provider-config.js) merged with a
+// runtime override copy of this file. Two gaps follow: (1) models only in the
+// built-in defaults are not seen here, so this can flag a model the bot would
+// accept; (2) the deployed bot can lag `main`, so a model just added to `main`
+// passes here before the running bot knows it.
+//
 // This hits raw.githubusercontent.com, so it is deliberately NOT in `npm test` —
 // the unit suites in this repo are all offline and deterministic (the pure
 // comparison is unit-tested in botModelParity.test.mjs). It runs nightly via
@@ -65,15 +73,24 @@ if (missing.length > 0) {
   console.error(
     `\n${missing.length} model(s) offered in BPtranslate's AI settings are unknown to the translate bot:\n`,
   );
-  for (const { provider, model } of missing) console.error(`  - ${provider}/${model}`);
+  for (const { provider, model, aliasOf } of missing) {
+    console.error(
+      aliasOf === undefined
+        ? `  - ${provider}/${model}`
+        : `  - ${provider}/${model} (a bot alias for ${aliasOf}, which is not a model in the bot's config)`,
+    );
+  }
   console.error(
     "\nTranslate jobs for an org that picks one fail with model_not_found. Either\n" +
-      "remove it from PROVIDER_MODELS in api/src/aiProvider.ts, or add it to\n" +
-      "model-provider-config.json in unfoldingWord/bp-assistant. Do not swap in a\n" +
+      "remove it from PROVIDER_MODELS in api/src/aiProvider.ts, or add it (or, for a\n" +
+      "dangling alias, its target) to model-provider-config.json in\n" +
+      "unfoldingWord/bp-assistant. Do not swap in a\n" +
       "near-miss id: check the exact id the provider's API accepts.\n",
   );
   process.exit(1);
 }
 
 const total = Object.values(PROVIDER_MODELS).reduce((n, models) => n + models.length, 0);
-console.log(`  ok - all ${total} offered models exist in the bot's model-provider-config.json`);
+console.log(
+  `  ok - all ${total} offered models exist in bp-assistant main's model-provider-config.json`,
+);
