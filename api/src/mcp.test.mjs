@@ -39,6 +39,34 @@ function tnRow(i, verse, noteLen = 40, ch = "n") {
   };
 }
 
+// Chunk fixtures. A verse's content is usfm-js JSON; a `\ts\*` marker is the
+// verse's trailing node, so it closes a chunk at that verse.
+const TS_NEW = { tag: "ts\\*", nextChar: "\n" }; // usfm-js 3.5.0
+const TS_EDITOR = { tag: "ts*" }; // editor-written
+const TS_LEGACY = { tag: "ts", content: "\\*" }; // legacy usfm-js
+function verseDto(verse, marker, verseEnd = null) {
+  const words = [{ text: `w${verse}`, tag: "w", type: "word" }, { type: "text", text: ".\n\n" }];
+  return { verse, verse_end: verseEnd, content: { verseObjects: marker ? [...words, marker] : words } };
+}
+function lane(verses, markers = {}) {
+  return Object.fromEntries(verses.map((v) => [v, verseDto(v, markers[v])]));
+}
+const tqRow = (i, verse) => ({ ...tnRow(i, verse), id: `q${i}`, question: "q?", response: "a.", trashed_at: null });
+// TIT 5: verse 0 (front matter, with a marker that must be ignored), markers
+// in all three shapes, and a bridged verse 9-10 that ends the last chunk.
+const CHUNK_CHAPTER = {
+  verses: {
+    ULT: {
+      ...lane([0, 1, 2, 3, 4, 5, 6, 7, 8], { 0: TS_LEGACY, 2: TS_NEW, 4: TS_EDITOR, 6: TS_LEGACY }),
+      9: verseDto(9, TS_NEW, 10),
+    },
+    UHB: lane([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]),
+  },
+  // Verse 0 is a chapter intro note; r2 (verse 4) is trashed and not counted.
+  tn: [tnRow(400, 0), tnRow(401, 1), tnRow(402, 1), tnRow(2, 4), tnRow(403, 4), tnRow(404, 10)],
+  tq: [tqRow(1, 2), tqRow(3, 9)],
+};
+
 const calls = [];
 // Mutable so a test can trash a row between two page requests.
 let ch1 = Array.from({ length: 30 }, (_v, i) => tnRow(i, 1 + Math.floor(i / 3)));
@@ -72,6 +100,17 @@ async function apiFor(ws, path) {
       if (path === "/api/chapters/TIT/4") {
         return { status: 200, body: { tn: [tnRow(300, 1, 50000), tnRow(301, 2)], tq: [] } };
       }
+      if (path === "/api/chapters/TIT/5") return { status: 200, body: CHUNK_CHAPTER };
+      if (path === "/api/chapters/TIT/6") {
+        // ULT quarantined (left out of the payload): UST carries the markers.
+        return { status: 200, body: { verses: { UST: lane([1, 2, 3, 4], { 2: TS_NEW }), UHB: lane([1, 2, 3, 4]) }, tn: [], tq: [] } };
+      }
+      if (path === "/api/chapters/TIT/7") {
+        // Both target lanes gone: only the source lane numbers the verses.
+        return { status: 200, body: { verses: { ULT: {}, UHB: lane([0, 1, 2, 3, 4]) }, tn: [tnRow(500, 3)], tq: [] } };
+      }
+      if (path === "/api/chapters/TIT/8") return { status: 200, body: { verses: {}, tn: [], tq: [] } };
+      if (path === "/api/chapters/TIT/9") return { status: 200, body: { verses: { ULT: lane([1, 2, 3, 4, 5]) }, tn: [], tq: [] } };
       if (path.startsWith("/api/rows/tn/r5")) return { status: 200, body: tnRow(5, 2) };
       return { status: 404, body: { error: "not_found" } };
 }
@@ -167,6 +206,7 @@ console.log("[jsonrpc] envelope");
   assert(!names.some((n) => /edit|approve|draft|export/.test(n)), "no write tools in the read-only slice");
   const needsToken = list.body.result.tools.filter((t) => t.name !== "bpt_link_account");
   assert(needsToken.every((t) => t.inputSchema.required?.includes("session_token")), "every tool but link_account requires session_token");
+  assert(names.includes("bpt_chunks"), "tools/list includes bpt_chunks");
   const bad = await rpc("tools/call", { name: "bpt_nope", arguments: {} });
   assert(bad.body.error?.code === -32602, "unknown tool -> -32602");
 }
@@ -180,6 +220,7 @@ console.log("[link] the link picks the workspace");
     ["bpt_package_status", { book: "TIT" }],
     ["bpt_chunk_work", { book: "TIT", chapter: 1, kind: "tn" }],
     ["bpt_get_row", { book: "TIT", kind: "tn", id: "r5" }],
+    ["bpt_chunks", { book: "TIT", chapter: 5 }],
   ]) {
     const anon = await call(name, args, { token: null });
     assert(anon.isError && /Link chat assistant/.test(anon.data.error), `${name} without a token -> not linked`);
@@ -311,6 +352,47 @@ console.log("[tools] chunk paging");
 
   const backwards = await call("bpt_chunk_work", { book: "TIT", chapter: 1, kind: "tn", verse_start: 5, verse_end: 1 });
   assert(backwards.isError, "verse_end before verse_start -> isError");
+}
+
+console.log("[tools] chunks");
+{
+  const span = (r) => r.data.chunks.map((c) => `${c.start}-${c.end}`).join(",");
+  const m = await call("bpt_chunks", { book: "tit", chapter: 5 });
+  assert(!m.isError && m.data.book === "TIT" && m.data.lane === "ULT", "markers are read from ULT");
+  assert(m.data.split === "ts_markers" && m.data.by === null, "split says the markers made the chunks");
+  assert(span(m) === "1-2,3-4,5-6,7-10", `all three marker shapes split; verse 0 ignored; a bridge ends the last chunk (${span(m)})`);
+  assert(m.data.chunks.map((c) => `${c.tn}/${c.tq}`).join() === "2/1,1/0,0/0,1/1", "tN/tQ counted per chunk, trashed rows left out");
+  assert(m.data.outside_chunks.tn === 1 && m.data.outside_chunks.tq === 0, "the verse-0 intro note is counted outside every chunk");
+  assert(calls.at(-1).path === "/api/chapters/TIT/5", "one read of the chapter route");
+
+  const by3 = await call("bpt_chunks", { book: "TIT", chapter: 5, by: 3 });
+  assert(by3.data.split === "every_n_verses" && by3.data.by === 3, "by overrides the markers");
+  assert(span(by3) === "1-3,4-6,7-10", `every 3 verses, a bridge never split (${span(by3)})`);
+  const by1 = await call("bpt_chunks", { book: "TIT", chapter: 5, by: "1" });
+  assert(by1.data.chunks.length === 9 && by1.data.chunks.at(-1).start === 9, "by as a numeric string; by 1 keeps the bridge whole");
+  const by0 = await call("bpt_chunks", { book: "TIT", chapter: 5, by: 0 });
+  assert(by0.isError && /by must be/.test(by0.data.error), "by 0 -> readable error");
+
+  const ust = await call("bpt_chunks", { book: "TIT", chapter: 6 });
+  assert(!ust.isError && ust.data.lane === "UST" && span(ust) === "1-2,3-4", "no ULT: UST's markers are used");
+  assert(/ULT/.test(ust.data.note), "the note says ULT was not available");
+
+  const src = await call("bpt_chunks", { book: "TIT", chapter: 7 });
+  assert(!src.isError && src.data.lane === "UHB" && src.data.split === "whole_chapter", "no target lane and no by: the whole chapter as one chunk");
+  assert(span(src) === "1-4" && src.data.chunks[0].tn === 1, "source verses number the chunk, verse 0 left out");
+  assert(/by/.test(src.data.note) && /ULT/.test(src.data.note), "the note says why and how to split");
+  const srcBy = await call("bpt_chunks", { book: "TIT", chapter: 7, by: 2 });
+  assert(srcBy.data.split === "every_n_verses" && span(srcBy) === "1-2,3-4", "no target lane: by still splits");
+
+  const none = await call("bpt_chunks", { book: "TIT", chapter: 8 });
+  assert(none.isError && /no verses/.test(none.data.error), "no lane at all -> readable error, no crash");
+
+  const plain = await call("bpt_chunks", { book: "TIT", chapter: 9 });
+  assert(plain.data.lane === "ULT" && plain.data.split === "whole_chapter" && span(plain) === "1-5", "ULT without markers: one chunk");
+  assert(/no \\ts\\\* markers/.test(plain.data.note), "the note says there are no markers");
+
+  const missing = await call("bpt_chunks", { book: "TIT", chapter: 99 });
+  assert(missing.isError, "missing chapter -> isError");
 }
 
 console.log("all mcp tests passed");
