@@ -32,6 +32,7 @@ import { handleMcp, isMcpPath } from "./mcp";
 import { chatLinkRoutes } from "./chatLinkRoutes";
 import { chatRoleFor, claimCode, lookupLink, revokeLink, type ChatLink } from "./chatLinks";
 import { readPackageRefs } from "./packageRefs";
+import { readSourceNotes } from "./sourceNotes";
 import { blockViewerWrites } from "./viewerGuard";
 import { listWorkspaces, resolveWorkspaceFresh, workspaceEnv, parseWorkspaceCookie, requireWorkspaceMatch, primeWorkspaces } from "./workspaces";
 
@@ -542,6 +543,7 @@ export default {
           },
           // Read-only D1 exception to the route-handler rule; see packageRefs.ts.
           packageRefs: (book: string) => readPackageRefs(wsEnv, book),
+          sourceNotes: (book: string) => readSourceNotes(wsEnv, book),
         };
       };
       return handleMcp(request, {

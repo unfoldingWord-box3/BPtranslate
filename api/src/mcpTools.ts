@@ -31,6 +31,9 @@ export interface McpSession {
   // and note templates a book references, read straight from the workspace's
   // D1 (packageRefs.ts says why). Read-only rows; the tool sends counts only.
   packageRefs: (book: string) => Promise<PackageRefRows>;
+  // The published English tN for a book, keyed by row id, read from the
+  // project's translationSource on Door43 (sourceNotes.ts). Never throws.
+  sourceNotes: (book: string) => Promise<SourceNotes>;
 }
 
 export type LinkClaim =
@@ -45,6 +48,7 @@ export interface ToolContext {
 import type { ChatPrincipal } from "./chatLinks.ts";
 import { isTsMilestone } from "./tsMilestone.ts";
 import { summarizePackageRefs, type PackageRefRows } from "./packageRefs.ts";
+import type { SourceNotes } from "./sourceNotes.ts";
 
 export class ToolInputError extends Error {}
 
@@ -325,7 +329,7 @@ function parseCursor(raw: unknown): SortKey | null {
 const chunkWork: ToolDef = {
   name: "bpt_chunk_work",
   description:
-    "The translation notes (kind tn) or questions (kind tq) for a verse range in one chapter, with each row's id, current text, state (ai_draft, validated, ...) and version. Results are paged: if next_cursor is not null, call again with it to get the rest. Never claim a chunk is complete until next_cursor is null. A row marked truncated has long text cut; read it whole with bpt_get_row.",
+    "The translation notes (kind tn) or questions (kind tq) for a verse range in one chapter, with each row's id, current text, state (ai_draft, validated, ...) and version. Each tn row also has en_note: the published English note it was translated from, for comparison (null when the English source has no note with that id or could not be read; the top-level note says why). Results are paged: if next_cursor is not null, call again with it to get the rest. Never claim a chunk is complete until next_cursor is null. A row marked truncated has long text cut; read it whole with bpt_get_row. en_truncated means the English note was cut.",
   inputSchema: {
     type: "object",
     properties: {
@@ -363,16 +367,32 @@ const chunkWork: ToolDef = {
 
     const start = cursor ? all.findIndex((r) => afterKey(sortKey(r), cursor)) : 0;
     const from = start === -1 ? all.length : start;
-    const rows: ReturnType<typeof projectRow>[] = [];
+    // The English source, only when there are tN rows to return. Its bytes
+    // are part of each row before the budget check, so pages just get shorter.
+    const en = kind === "tn" && from < all.length ? await session.sourceNotes(book) : null;
+    const rows: Record<string, unknown>[] = [];
     let bytes = 0;
     let i = from;
     for (; i < all.length && rows.length < limit; i++) {
-      const row = projectRow(kind, all[i], ROW_TEXT_CAP);
+      let row: Record<string, unknown> = projectRow(kind, all[i], ROW_TEXT_CAP);
+      if (en) {
+        const text = en.ok ? en.notes.get(String(all[i].id)) : undefined;
+        const cut = text === undefined ? null : capText(text, ROW_TEXT_CAP);
+        row = { ...row, en_note: cut ? cut.text : null, en_truncated: cut?.cut || undefined };
+      }
       const size = byteLength(row);
       // Always return at least one row, or the cursor would never move.
       if (rows.length > 0 && bytes + size > PAGE_BYTE_BUDGET) break;
       rows.push(row);
       bytes += size;
+    }
+    let note: string | null = null;
+    if (en && !en.ok) note = `en_note is null on every row: ${en.reason}`;
+    else if (en?.ok) {
+      const missing = rows.filter((r) => r.en_note === null).length;
+      if (missing > 0) {
+        note = `${missing} of these notes have no English note with the same id in ${en.source} (added in this project, or the id changed), so their en_note is null.`;
+      }
     }
     return {
       book,
@@ -383,6 +403,7 @@ const chunkWork: ToolDef = {
       total: all.length,
       returned: rows.length,
       next_cursor: i < all.length ? JSON.stringify(sortKey(all[i - 1])) : null,
+      ...(kind === "tn" ? { en_source: en?.ok ? en.source : null, note } : {}),
       rows,
     };
   },

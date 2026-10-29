@@ -123,6 +123,13 @@ async function apiFor(ws, path) {
           tq: [tqRow(603, 0), tqRow(604, 3)],
         } };
       }
+      if (path === "/api/chapters/TIT/11") {
+        return { status: 200, body: { tn: [tnRow(700, 1), tnRow(701, 1), tnRow(702, 2)], tq: [tqRow(703, 1)] } };
+      }
+      if (path === "/api/chapters/TIT/12") {
+        // Arabic notes with long English sources: both count toward the budget.
+        return { status: 200, body: { tn: Array.from({ length: 25 }, (_v, i) => tnRow(i + 800, 1, 1500, "ع")), tq: [] } };
+      }
       if (path.startsWith("/api/rows/tn/r5")) return { status: 200, body: tnRow(5, 2) };
       return { status: 404, body: { error: "not_found" } };
 }
@@ -175,6 +182,12 @@ async function refsFor(ws, book) {
   if (ws.slug === "mltest") return { translation: false, referenced: [], articleUnits: [], supportRefs: [], templateUnits: [] };
   return book === "TIT" ? TIT_REFS : { ...TIT_REFS, referenced: [], supportRefs: [] };
 }
+// The English source notes for bpt_chunk_work's en_note (sourceNotes.ts).
+// Unreadable by default, so the paging tests above run without one; a test
+// swaps in a map.
+const NO_SOURCE = { ok: false, reason: "stub: no English source" };
+let srcStub = NO_SOURCE;
+const srcCalls = [];
 function sessionFor(token) {
   const l = LINKS[token];
   if (!l || !l.ws) return null;
@@ -183,6 +196,10 @@ function sessionFor(token) {
     principal: l.principal,
     getJson: (path) => apiFor(l.ws, path),
     packageRefs: (book) => refsFor(l.ws, book),
+    sourceNotes: async (book) => {
+      srcCalls.push({ ws: l.ws.slug, book });
+      return srcStub;
+    },
   };
 }
 function deps(overrides = {}) {
@@ -431,6 +448,87 @@ console.log("[tools] chunk paging");
 
   const backwards = await call("bpt_chunk_work", { book: "TIT", chapter: 1, kind: "tn", verse_start: 5, verse_end: 1 });
   assert(backwards.isError, "verse_end before verse_start -> isError");
+}
+
+console.log("[tools] English source notes");
+{
+  const longEn = "e".repeat(ROW_TEXT_CAP + 500);
+  srcStub = { ok: true, source: "unfoldingWord/en_tn", notes: new Map([["r700", "English\\nnote"], ["r701", longEn]]) };
+  srcCalls.length = 0;
+  const { data, isError } = await call("bpt_chunk_work", { book: "TIT", chapter: 11, kind: "tn" });
+  const by = Object.fromEntries(data.rows.map((r) => [r.id, r]));
+  assert(!isError && srcCalls.length === 1 && srcCalls[0].book === "TIT" && srcCalls[0].ws === "bsoj", "the English source is read once, for the link's workspace and book");
+  assert(by.r700.en_note === "English\\nnote" && by.r700.en_truncated === undefined, "en_note is the English note with the same id, in the stored form");
+  assert(by.r701.en_note.length === ROW_TEXT_CAP && by.r701.en_truncated === true, "a long English note is cut and marked en_truncated");
+  assert(by.r702.en_note === null, "a note with no English row gets en_note null");
+  assert(data.en_source === "unfoldingWord/en_tn" && /1 of these notes/.test(data.note), "the page names the source and says how many had no match");
+
+  srcCalls.length = 0;
+  const tq = await call("bpt_chunk_work", { book: "TIT", chapter: 11, kind: "tq" });
+  assert(srcCalls.length === 0 && tq.data.rows[0].en_note === undefined && tq.data.en_source === undefined, "questions get no en_note and no source read");
+  const none = await call("bpt_chunk_work", { book: "TIT", chapter: 11, kind: "tn", verse_start: 9 });
+  assert(none.data.returned === 0 && srcCalls.length === 0, "no rows, no source read");
+
+  srcStub = { ok: false, reason: "Could not read the English notes tn_TIT.tsv from unfoldingWord/en_tn (HTTP 503)." };
+  const down = await call("bpt_chunk_work", { book: "TIT", chapter: 11, kind: "tn" });
+  assert(!down.isError && down.data.returned === 3, "an unreadable source never fails the tool");
+  assert(down.data.rows.every((r) => r.en_note === null) && /HTTP 503/.test(down.data.note) && down.data.en_source === null, "every en_note is null and the note says why");
+
+  srcStub = { ok: true, source: "unfoldingWord/en_tn", notes: new Map(Array.from({ length: 25 }, (_v, i) => [`r${800 + i}`, "E".repeat(1500)])) };
+  const arabic = await call("bpt_chunk_work", { book: "TIT", chapter: 12, kind: "tn", limit: 25 });
+  assert(arabic.data.next_cursor !== null && arabic.data.rows.every((r) => r.en_note.length === 1500), "Arabic notes with English sources page early");
+  assert(byteLength(arabic.data) < PAGE_BYTE_BUDGET + 2000, `the page with en_note stays under the byte budget (${byteLength(arabic.data)} bytes)`);
+  srcStub = NO_SOURCE;
+}
+
+console.log("[sourceNotes] Door43 read, cache and degradation");
+{
+  const { readSourceNotes, clearSourceNotesCache } = await import("./sourceNotes.ts");
+  const { clearProjectConfigCache } = await import("./projectConfig.ts");
+  const envFor = (preset, slug) => ({
+    WORKSPACE_SLUG: slug,
+    DCS_BASE_URL: "https://door43.test",
+    DB: { prepare: () => ({ first: async () => ({ preset, overrides_json: null }) }) },
+  });
+  const realFetch = globalThis.fetch;
+  const fetched = [];
+  let reply = () => new Response("﻿Reference\tID\tTags\tSupportReference\tQuote\tOccurrence\tNote\n1:1\tab12\t\t\tq\t1\tLine one\\nLine two\r\n1:2\tcd34\t\t\tq\t1\tSecond\n", { status: 200 });
+  globalThis.fetch = async (url) => {
+    fetched.push(String(url));
+    return reply();
+  };
+  try {
+    clearSourceNotesCache();
+    clearProjectConfigCache();
+    const ml = envFor("en-bible-editor-ml-test", "src-ml");
+    const a = await readSourceNotes(ml, "TIT");
+    assert(a.ok && a.source === "unfoldingWord/en_tn" && fetched[0] === "https://door43.test/unfoldingWord/en_tn/raw/branch/master/tn_TIT.tsv", "reads tn_<BOOK>.tsv from the project's tN source");
+    assert(a.notes.get("ab12") === "Line one\\nLine two" && a.notes.get("cd34") === "Second" && a.notes.size === 2, "parses past a BOM and CRLF, keyed by ID, \\n escapes kept");
+    await readSourceNotes(ml, "TIT");
+    assert(fetched.length === 1, "a second read inside the TTL is served from cache");
+
+    reply = () => new Response("nope", { status: 404 });
+    const missing = await readSourceNotes(ml, "OBA");
+    assert(!missing.ok && /no such file/.test(missing.reason), "404 -> not ok, with a reason");
+    await readSourceNotes(ml, "OBA");
+    assert(fetched.length === 3, "a failure is not cached");
+
+    globalThis.fetch = async () => {
+      throw new Error("offline");
+    };
+    const offline = await readSourceNotes(ml, "JUD");
+    assert(!offline.ok && /network error/.test(offline.reason), "network failure -> not ok, never throws");
+
+    const authoring = await readSourceNotes(envFor("en-unfoldingword", "src-en"), "TIT");
+    assert(!authoring.ok && /English/.test(authoring.reason), "an authoring project has no separate source");
+
+    const broken = { WORKSPACE_SLUG: "src-broken", DB: { prepare: () => { throw new Error("db down"); } } };
+    const r = await readSourceNotes(broken, "TIT");
+    assert(typeof r.ok === "boolean", "a config read failure still returns a result");
+  } finally {
+    globalThis.fetch = realFetch;
+    clearSourceNotesCache();
+  }
 }
 
 console.log("[tools] chunks");
