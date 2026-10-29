@@ -76,7 +76,9 @@ Highlights that bite repeatedly:
   whose workspace is gone counts as not linked, never the `list[0]` fallback the cookie path uses. It is
   handled in the `index.ts` fetch wrapper before the cookie swap and before every Hono middleware. Tools read
   through the same route handlers in-process (`app.fetch`) on that workspace's env, so they see what the web
-  app sees. Links: one-time code from the web app (any signed-in user, viewers included), 30-day token,
+  app sees. One exception (#671): `session.packageRefs` (`api/src/packageRefs.ts`) reads D1 directly for
+  `bpt_package_status`'s tW/tA/template counts, because the article and template routes are editor-only and
+  the in-process call carries no user; it runs SELECTs only and the tool returns counts only, never text. Links: one-time code from the web app (any signed-in user, viewers included), 30-day token,
   hash-only storage, role re-read from the link's workspace on every call and capped at editor. Reads go
   through `readerFrom()` and write tools must call `principalFrom()` (editor only) in `mcpTools.ts`; never
   accept a workspace, username or user id as a tool argument.

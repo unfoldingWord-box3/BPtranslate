@@ -12,12 +12,41 @@
 import type { Env } from "./index";
 import { getProjectConfig } from "./projectConfig.ts";
 import { isTranslationConfig } from "./workflowLayouts.ts";
-import { dcsRawUrl, fetchTextWithStatus, resolveSourceRef } from "./dcsSources.ts";
+import { dcsRawUrl, resolveSourceRef } from "./dcsSources.ts";
 import { parseTsv } from "./importParsers.ts";
 
 export type SourceNotes =
   | { ok: true; source: string; notes: Map<string, string> }
   | { ok: false; reason: string };
+
+// A hanging Door43 must not stall the tool: past this, en_note is null.
+export const SOURCE_FETCH_TIMEOUT_MS = 8_000;
+
+// Anonymous on purpose. The web app reads this TSV from the browser with no
+// credentials, so a private source repo shows the reviewer nothing there; chat
+// (viewers included) must not see more than that, so the DCS service token
+// that fetchTextWithStatus sends is never attached here. Otherwise the same
+// rules as that helper: a non-2xx is not content, and a body shorter than its
+// Content-Length is a truncated read, not content.
+async function fetchAnonymous(
+  url: string,
+): Promise<{ status: number; text: string | null; truncated?: boolean; timedOut?: boolean }> {
+  try {
+    const r = await fetch(url, { signal: AbortSignal.timeout(SOURCE_FETCH_TIMEOUT_MS) });
+    if (!r.ok) return { status: r.status, text: null };
+    const buf = await r.arrayBuffer();
+    const cl = r.headers.get("content-length");
+    const expected = cl == null ? null : Number(cl);
+    if (expected != null && Number.isFinite(expected) && buf.byteLength < expected) {
+      return { status: 200, text: null, truncated: true };
+    }
+    return { status: 200, text: new TextDecoder("utf-8").decode(buf) };
+  } catch (e) {
+    // DOMException (the abort reason) is not an Error in every runtime.
+    const name = (e as { name?: unknown } | null)?.name;
+    return { status: 0, text: null, timedOut: name === "TimeoutError" || name === "AbortError" };
+  }
+}
 
 // Per isolate. English tN changes rarely and a reviewer pages through a
 // chapter in a few calls, so a short TTL saves a Door43 fetch per page without
@@ -45,9 +74,17 @@ export async function readSourceNotes(env: Env, book: string): Promise<SourceNot
     const hit = cache.get(url);
     if (hit && Date.now() - hit.at < TTL_MS) return { ok: true, source, notes: hit.notes };
 
-    const res = await fetchTextWithStatus(env, url);
+    const res = await fetchAnonymous(url);
     if (res.text === null) {
-      const why = res.status === 404 ? "it has no such file" : res.truncated ? "the download was cut short" : res.status ? `HTTP ${res.status}` : "network error";
+      const why = res.timedOut
+        ? "Door43 did not answer in time"
+        : res.status === 404
+          ? "it has no such file"
+          : res.truncated
+            ? "the download was cut short"
+            : res.status
+              ? `HTTP ${res.status}`
+              : "network error";
       return { ok: false, reason: `Could not read the English notes ${file} from ${source} (${why}).` };
     }
     const notes = new Map<string, string>();

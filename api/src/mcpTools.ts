@@ -211,7 +211,7 @@ const listBooks: ToolDef = {
 const packageStatus: ToolDef = {
   name: "bpt_package_status",
   description:
-    "What a book still needs: per chapter, how many translation notes (tN) and translation questions (tQ) exist and how many are approved, and how many verses are marked done. Also, for the whole book, the translationWords (tW) articles its word links point to, the translationAcademy (tA) articles its notes cite, and the note templates for the support references its notes use, each counted by state (not_started, ai_draft, edited, validated). An article counted as referenced but not loaded has not been fetched into the project yet. Use before suggesting where to start.",
+    "What a book still needs: per chapter, how many translation notes (tN) and translation questions (tQ) exist and how many are approved, and how many verses are marked done. Also, for the whole book, the translationWords (tW) articles its word links (TWL) point to or its notes link in their text, the translationAcademy (tA) articles its notes cite (support reference or a link in the note text), and the note templates for the support references its notes use, each counted by state (not_started, ai_draft, edited, validated). An article counted as referenced but not loaded has not been fetched into the project yet. Use before suggesting where to start.",
   inputSchema: {
     type: "object",
     properties: {
@@ -247,18 +247,27 @@ const packageStatus: ToolDef = {
         tqApproved: c.tqValidated,
       };
     });
-    const refs = await session.packageRefs(book);
+    // The reference counts are extra: if they cannot be read, the chapter
+    // counts still go back, with a note instead of the counts.
+    let references: ReturnType<typeof summarizePackageRefs> | null = null;
+    let referencesNote: string | undefined;
+    try {
+      const refs = await session.packageRefs(book);
+      if (refs.translation) references = summarizePackageRefs(refs);
+      else {
+        referencesNote =
+          "This project writes its notes in English (authoring mode), so tW/tA articles and note templates are not translated here.";
+      }
+    } catch (e) {
+      console.error("bpt_package_status: reading article/template counts failed", e instanceof Error ? (e.stack ?? e.message) : String(e));
+      referencesNote = "The tW/tA article and note template counts could not be read just now; the chapter counts above are complete.";
+    }
     return {
       book,
       totals,
       chapters: rows,
-      ...(refs.translation
-        ? { references: summarizePackageRefs(refs) }
-        : {
-            references: null,
-            references_note:
-              "This project writes its notes in English (authoring mode), so tW/tA articles and note templates are not translated here.",
-          }),
+      references,
+      ...(referencesNote ? { references_note: referencesNote } : {}),
     };
   },
 };

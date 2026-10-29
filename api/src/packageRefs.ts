@@ -1,6 +1,6 @@
 // What a book's notes point at, outside the book itself: the tW articles its
-// TWL rows link, the tA articles its notes cite (SupportReference and inline
-// rc:// links), and the note templates for the support references its notes
+// TWL rows link (plus any its tN notes link inline), the tA articles its notes
+// cite (SupportReference and inline rc:// links), and the note templates for the support references its notes
 // use, each with its translation state. Feeds bpt_package_status (issue #671).
 //
 // DELIBERATE EXCEPTION to "MCP tools read through the route handlers"

@@ -177,8 +177,10 @@ const TIT_REFS = {
   ],
 };
 const refCalls = [];
+let refsFail = false;
 async function refsFor(ws, book) {
   refCalls.push({ ws: ws.slug, book });
+  if (refsFail) throw new Error("D1 down");
   if (ws.slug === "mltest") return { translation: false, referenced: [], articleUnits: [], supportRefs: [], templateUnits: [] };
   return book === "TIT" ? TIT_REFS : { ...TIT_REFS, referenced: [], supportRefs: [] };
 }
@@ -358,6 +360,21 @@ console.log("[tools] package references");
   const authoring = await call("bpt_package_status", { book: "OBA" }, { token: ML_TOKEN });
   assert(!authoring.isError && authoring.data.totals.tn === 30, "an authoring project still gets its chapter counts");
   assert(authoring.data.references === null && /authoring/.test(authoring.data.references_note), "an authoring project gets no article counts, and a note saying why");
+
+  refsFail = true;
+  const realError = console.error;
+  const logged = [];
+  console.error = (...a) => logged.push(a.join(" "));
+  let broken;
+  try {
+    broken = await call("bpt_package_status", { book: "TIT" });
+  } finally {
+    console.error = realError;
+    refsFail = false;
+  }
+  assert(!broken.isError && broken.data.totals.tn === 43 && broken.data.chapters.length === 2, "a failed reference read still returns the chapter counts");
+  assert(broken.data.references === null && /could not be read/.test(broken.data.references_note), "and says the article counts could not be read");
+  assert(logged.some((l) => /D1 down/.test(l)), "the failure is logged");
   const { summarizePackageRefs } = await import("./packageRefs.ts");
   const empty = summarizePackageRefs({ translation: true, referenced: [], articleUnits: [], supportRefs: [], templateUnits: [] });
   assert(empty.tw.referenced === 0 && empty.templates.templates === 0, "a book with no references counts zero");
@@ -492,17 +509,24 @@ console.log("[sourceNotes] Door43 read, cache and degradation");
   });
   const realFetch = globalThis.fetch;
   const fetched = [];
+  const inits = [];
   let reply = () => new Response("﻿Reference\tID\tTags\tSupportReference\tQuote\tOccurrence\tNote\n1:1\tab12\t\t\tq\t1\tLine one\\nLine two\r\n1:2\tcd34\t\t\tq\t1\tSecond\n", { status: 200 });
-  globalThis.fetch = async (url) => {
+  globalThis.fetch = async (url, init) => {
     fetched.push(String(url));
+    inits.push(init);
     return reply();
   };
+  const realTimeout = AbortSignal.timeout;
   try {
     clearSourceNotesCache();
     clearProjectConfigCache();
-    const ml = envFor("en-bible-editor-ml-test", "src-ml");
+    // The service token is set, as in production; it must not be sent.
+    const ml = { ...envFor("en-bible-editor-ml-test", "src-ml"), DCS_SERVICE_TOKEN: "secret-service-token" };
     const a = await readSourceNotes(ml, "TIT");
     assert(a.ok && a.source === "unfoldingWord/en_tn" && fetched[0] === "https://door43.test/unfoldingWord/en_tn/raw/branch/master/tn_TIT.tsv", "reads tn_<BOOK>.tsv from the project's tN source");
+    const headers = new Headers(inits[0]?.headers);
+    assert(!headers.has("authorization") && !JSON.stringify(inits[0] ?? {}).includes("secret-service-token"), "the fetch is anonymous: no Authorization header, like the web app's");
+    assert(inits[0]?.signal instanceof AbortSignal, "the fetch carries a timeout signal");
     assert(a.notes.get("ab12") === "Line one\\nLine two" && a.notes.get("cd34") === "Second" && a.notes.size === 2, "parses past a BOM and CRLF, keyed by ID, \\n escapes kept");
     await readSourceNotes(ml, "TIT");
     assert(fetched.length === 1, "a second read inside the TTL is served from cache");
@@ -519,6 +543,23 @@ console.log("[sourceNotes] Door43 read, cache and degradation");
     const offline = await readSourceNotes(ml, "JUD");
     assert(!offline.ok && /network error/.test(offline.reason), "network failure -> not ok, never throws");
 
+    // A Door43 that never answers: the real abort path, with the 8 s timeout
+    // shortened so the test is quick.
+    AbortSignal.timeout = () => realTimeout.call(AbortSignal, 20);
+    globalThis.fetch = (_url, init) =>
+      new Promise((_resolve, reject) => init.signal.addEventListener("abort", () => reject(init.signal.reason)));
+    // Node unrefs AbortSignal.timeout's timer; hold the loop open meanwhile.
+    const keepAlive = setTimeout(() => {}, 5_000);
+    const hung = await readSourceNotes(ml, "MAL");
+    clearTimeout(keepAlive);
+    assert(!hung.ok && /did not answer in time/.test(hung.reason), "a hanging fetch times out -> not ok, with a reason");
+    AbortSignal.timeout = realTimeout;
+    globalThis.fetch = async () => {
+      throw new DOMException("aborted", "AbortError");
+    };
+    const aborted = await readSourceNotes(ml, "HAG");
+    assert(!aborted.ok && /did not answer in time/.test(aborted.reason), "an AbortError -> the same timeout reason");
+
     const authoring = await readSourceNotes(envFor("en-unfoldingword", "src-en"), "TIT");
     assert(!authoring.ok && /English/.test(authoring.reason), "an authoring project has no separate source");
 
@@ -527,6 +568,7 @@ console.log("[sourceNotes] Door43 read, cache and degradation");
     assert(typeof r.ok === "boolean", "a config read failure still returns a result");
   } finally {
     globalThis.fetch = realFetch;
+    AbortSignal.timeout = realTimeout;
     clearSourceNotesCache();
   }
 }
