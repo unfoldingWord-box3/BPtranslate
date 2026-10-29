@@ -4,12 +4,14 @@
 // reviewer signed into the web app gets a one-time code, types it into the
 // chat, and the MCP tool bpt_link_account trades it for a session token. The
 // bot keeps the token in that user's BT Servant memory and sends it back as
-// `session_token` on every call that acts as a person. BPtranslate re-reads
-// the user's role from its own tables on every call, so the model never
-// chooses who it acts as; it can only present a secret it was given.
+// `session_token` on every call. The link names the workspace and the user;
+// BPtranslate re-reads the user's role from that workspace's tables on every
+// call, so the model can only act as this user, in a project this user
+// linked; it can only present a secret it was given.
 //
 // Limits, by design:
-// - a link is bound to one workspace and refused on any other MCP URL;
+// - a link is bound to the workspace the code was issued in (issue #676: one
+//   MCP server serves every workspace, and the link picks which one);
 // - tokens expire after 30 days and are revocable from the web app;
 // - chat never gets more than editor rights, even for an admin (no export,
 //   no admin sweeps from a phone);
@@ -39,6 +41,15 @@ export interface ChatPrincipal {
   // The user's role in this workspace, capped at editor for chat.
   role: Role | null;
   linkId: number;
+}
+
+// A live link as the shared database records it. No role here: the role
+// lives in the workspace's own database (chatRoleFor).
+export interface ChatLink {
+  linkId: number;
+  userId: number;
+  username: string;
+  workspaceSlug: string;
 }
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -96,13 +107,14 @@ export async function issueCode(env: Env, userId: number, workspaceSlug: string)
 }
 
 export type ClaimResult =
-  | { ok: true; token: string; expiresAt: number; principal: ChatPrincipal }
+  | { ok: true; token: string; expiresAt: number; link: ChatLink }
   | { ok: false };
 
-// Trades a code for a session token. Single use: the UPDATE only matches an
-// unclaimed, unexpired code for this workspace, so two racing claims cannot
-// both win. Every failure looks the same to the caller.
-export async function claimCode(env: Env, rawCode: string, workspaceSlug: string): Promise<ClaimResult> {
+// Trades a code for a session token, in whichever workspace the code was
+// issued. Single use: the UPDATE only matches an unclaimed, unexpired code,
+// so two racing claims cannot both win. Every failure looks the same to the
+// caller. Shared database only; the caller reads the role with chatRoleFor.
+export async function claimCode(env: Env, rawCode: string): Promise<ClaimResult> {
   const code = normalizeCode(rawCode);
   if (code.length !== CODE_LENGTH) return { ok: false };
   const db = sharedDb(env);
@@ -111,19 +123,19 @@ export async function claimCode(env: Env, rawCode: string, workspaceSlug: string
   const claimed = await db
     .prepare(
       `UPDATE chat_link_codes SET claimed_at = ?1
-        WHERE code_hash = ?2 AND claimed_at IS NULL AND expires_at > ?1 AND workspace_slug = ?3`,
+        WHERE code_hash = ?2 AND claimed_at IS NULL AND expires_at > ?1`,
     )
-    .bind(t, codeHash, workspaceSlug)
+    .bind(t, codeHash)
     .run();
   if (!claimed.meta?.changes) return { ok: false };
   const row = await db
     .prepare(
-      `SELECT c.user_id AS userId, u.dcs_username AS username
+      `SELECT c.user_id AS userId, u.dcs_username AS username, c.workspace_slug AS workspaceSlug
          FROM chat_link_codes c JOIN users u ON u.id = c.user_id
         WHERE c.code_hash = ?1`,
     )
     .bind(codeHash)
-    .first<{ userId: number; username: string }>();
+    .first<{ userId: number; username: string; workspaceSlug: string }>();
   if (!row) return { ok: false };
   const token = randomToken();
   const expiresAt = t + LINK_TTL_SECONDS;
@@ -131,7 +143,7 @@ export async function claimCode(env: Env, rawCode: string, workspaceSlug: string
     .prepare(
       `INSERT INTO chat_links (token_hash, user_id, workspace_slug, expires_at, last_used_at) VALUES (?1, ?2, ?3, ?4, ?5)`,
     )
-    .bind(await sha256(token), row.userId, workspaceSlug, expiresAt, t)
+    .bind(await sha256(token), row.userId, row.workspaceSlug, expiresAt, t)
     .run();
   const link = await db
     .prepare(`SELECT id FROM chat_links WHERE token_hash = ?1`)
@@ -141,23 +153,13 @@ export async function claimCode(env: Env, rawCode: string, workspaceSlug: string
     ok: true,
     token,
     expiresAt,
-    principal: {
-      userId: row.userId,
-      username: row.username,
-      role: chatRole(await effectiveRole(env, row.username)),
-      linkId: link?.id ?? 0,
-    },
+    link: { linkId: link?.id ?? 0, userId: row.userId, username: row.username, workspaceSlug: row.workspaceSlug },
   };
 }
 
-// Looks up who a session token belongs to, in this workspace. `env` must be
-// the workspace's env (workspaceEnv), because the role is read from its
-// user_roles table on every call.
-export async function resolveToken(
-  env: Env,
-  token: string,
-  workspaceSlug: string,
-): Promise<ChatPrincipal | null> {
+// Looks up a live link by its session token. Shared database only, so `env`
+// may be the base env; the workspace it names is the one the caller reads.
+export async function lookupLink(env: Env, token: string): Promise<ChatLink | null> {
   if (!token.startsWith("bpt_") || token.length > 100) return null;
   const db = sharedDb(env);
   const row = await db
@@ -178,7 +180,7 @@ export async function resolveToken(
       username: string;
     }>();
   const t = now();
-  if (!row || row.revokedAt || row.expiresAt <= t || row.ws !== workspaceSlug) return null;
+  if (!row || row.revokedAt || row.expiresAt <= t) return null;
   if (!row.lastUsedAt || t - row.lastUsedAt > LAST_USED_GRANULARITY) {
     // Bookkeeping only; a failed write must not fail the caller's request.
     try {
@@ -187,15 +189,18 @@ export async function resolveToken(
       console.warn("chat link last_used_at write failed", e instanceof Error ? e.message : String(e));
     }
   }
+  return { linkId: row.id, userId: row.userId, username: row.username, workspaceSlug: row.ws };
+}
+
+// The linked user's role in one workspace, re-read on every call and capped
+// at editor. `wsEnv` must be that workspace's env (workspaceEnv), because the
+// role comes from its user_roles table. Viewers usually have no row there
+// and get null, which still reads.
+export async function chatRoleFor(wsEnv: Env, username: string): Promise<Role | null> {
   // Same best-effort Door43 team re-check the web app runs on session
   // refresh, so removing someone from the team reaches chat-only users too.
-  await maybeResyncTeamRole(env, row.username);
-  return {
-    userId: row.userId,
-    username: row.username,
-    role: chatRole(await effectiveRole(env, row.username)),
-    linkId: row.id,
-  };
+  await maybeResyncTeamRole(wsEnv, username);
+  return chatRole(await effectiveRole(wsEnv, username));
 }
 
 // The signed-in user's live links, newest first, for the web app's list.

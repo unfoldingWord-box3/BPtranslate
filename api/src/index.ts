@@ -28,11 +28,11 @@ import { templates } from "./templates";
 import { syncTemplates } from "./templateSync";
 import { attachAuth, requireAuth, requireCsrf, mintDevToken, startDcsAuth, callbackDcsAuth, authMe, authLogout, refreshToken, updateLastLocation, currentUserId } from "./auth";
 import { workspaceRoutes } from "./workspaceRoutes";
-import { handleMcp, mcpWorkspaceSlug } from "./mcp";
+import { handleMcp, isMcpPath } from "./mcp";
 import { chatLinkRoutes } from "./chatLinkRoutes";
-import { claimCode, resolveToken } from "./chatLinks";
+import { chatRoleFor, claimCode, lookupLink, revokeLink, type ChatLink } from "./chatLinks";
 import { blockViewerWrites } from "./viewerGuard";
-import { listWorkspaces, resolveWorkspaceFresh, workspaceEnv, parseWorkspaceCookie, requireWorkspaceMatch, primeWorkspaces, type Workspace } from "./workspaces";
+import { listWorkspaces, resolveWorkspaceFresh, workspaceEnv, parseWorkspaceCookie, requireWorkspaceMatch, primeWorkspaces } from "./workspaces";
 
 export interface Env {
   DB: D1Database;
@@ -113,10 +113,10 @@ export interface Env {
   // Unset/empty/malformed means "one implicit workspace on the DB binding
   // above", so every existing deployment is unaffected until this is set.
   WORKSPACES?: string;
-  // Secret. JSON map of workspace slug -> bearer token for the chat MCP
-  // endpoint (POST /api/mcp/<slug>, see mcp.ts). Unset = the endpoint
+  // Secret. The bearer token for the chat MCP endpoint (POST /api/mcp, see
+  // mcp.ts), 32+ characters, one for every workspace. Unset = the endpoint
   // answers 401 to everyone.
-  MCP_SERVICE_TOKENS?: string;
+  MCP_SERVICE_TOKEN?: string;
   // Second binding to the SAME database as DB — holds org-independent state
   // (accounts, sessions, lexicon, alignment frequencies, UI-string overrides)
   // so switching workspaces doesn't log a user out or blank their lexicon.
@@ -519,26 +519,49 @@ export default {
     // claimed on a sibling isolate isn't silently served as list[0] (a
     // different tenant's D1). A genuinely-dead slug still lands on list[0].
     await primeWorkspaces(env);
-    // The chat MCP endpoint picks its workspace from the URL, never the
-    // cookie, and must not fall back to list[0] on an unknown slug.
-    const mcpSlug = mcpWorkspaceSlug(request.url);
-    if (mcpSlug !== null) {
-      return handleMcp(request, mcpSlug, {
-        tokens: env.MCP_SERVICE_TOKENS,
-        findWorkspace: async (slug) => {
-          const ws = await resolveWorkspaceFresh(env, slug);
-          return ws.slug === slug ? ws : null;
+    // The chat MCP endpoint takes its workspace from the caller's account
+    // link, never the cookie, and must not fall back to list[0] when the
+    // link's workspace is gone (that counts as not linked).
+    if (isMcpPath(request.url)) {
+      const sessionFor = async (link: ChatLink) => {
+        const ws = await resolveWorkspaceFresh(env, link.workspaceSlug);
+        if (ws.slug !== link.workspaceSlug) return null;
+        const wsEnv = workspaceEnv(env, ws);
+        return {
+          workspace: { slug: ws.slug, label: ws.label, org: ws.org },
+          principal: {
+            userId: link.userId,
+            username: link.username,
+            role: await chatRoleFor(wsEnv, link.username),
+            linkId: link.linkId,
+          },
+          getJson: async (path: string) => {
+            const res = await app.fetch(new Request(new URL(path, request.url)), wsEnv, ctx);
+            return { status: res.status, body: await res.json().catch(() => null) };
+          },
+        };
+      };
+      return handleMcp(request, {
+        token: env.MCP_SERVICE_TOKEN,
+        resolveSession: async (token) => {
+          const link = await lookupLink(env, token);
+          return link ? sessionFor(link) : null;
         },
-        getJson: async (ws, path) => {
-          const res = await app.fetch(
-            new Request(new URL(path, request.url)),
-            workspaceEnv(env, ws as Workspace),
-            ctx,
-          );
-          return { status: res.status, body: await res.json().catch(() => null) };
+        // The code is spent even if its workspace has since been removed;
+        // the reviewer gets the same "did not work" answer as a bad code.
+        // A link whose token never reached the bot is revoked, so it does
+        // not sit in the user's link list.
+        claimLink: async (code) => {
+          const r = await claimCode(env, code);
+          if (!r.ok) return r;
+          let s: Awaited<ReturnType<typeof sessionFor>> = null;
+          try {
+            s = await sessionFor(r.link);
+          } finally {
+            if (!s) await revokeLink(env, r.link.userId, r.link.linkId);
+          }
+          return s ? { ok: true, token: r.token, expiresAt: r.expiresAt, workspace: s.workspace, principal: s.principal } : { ok: false };
         },
-        claimLink: (ws, code) => claimCode(workspaceEnv(env, ws as Workspace), code, ws.slug),
-        resolveSession: (ws, token) => resolveToken(workspaceEnv(env, ws as Workspace), token, ws.slug),
       });
     }
     const ws = await resolveWorkspaceFresh(env, parseWorkspaceCookie(request));

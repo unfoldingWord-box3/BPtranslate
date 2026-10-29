@@ -1,7 +1,8 @@
 // Unit tests for chat assistant links (chatLinks.ts, issue #669) against a
 // real SQLite with migration 0075 applied: codes are single use, expire, and
-// are bound to one workspace; tokens resolve only in their workspace, stop on
-// revoke or expiry, and never carry more than editor rights.
+// carry the workspace they were issued in to the link; tokens stop on revoke
+// or expiry; the role is read from the link's workspace and never carries
+// more than editor rights.
 //
 // Run from api/:
 //   node --experimental-strip-types --no-warnings src/chatLinks.test.mjs
@@ -9,11 +10,12 @@
 import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import {
+  chatRoleFor,
   claimCode,
   issueCode,
   listLinks,
+  lookupLink,
   normalizeCode,
-  resolveToken,
   revokeLink,
 } from "./chatLinks.ts";
 
@@ -72,24 +74,29 @@ assert(normalizeCode(" abcd-efgh ") === "ABCDEFGH", "codes are normalized: case,
   const stored = raw.prepare("SELECT code_hash FROM chat_link_codes").all();
   assert(stored.length === 1 && !stored[0].code_hash.includes(normalizeCode(code)), "only a hash is stored");
 
-  const wrongWs = await claimCode(env, code, "mltest");
-  assert(!wrongWs.ok, "a code is refused on another workspace");
-  const claim = await claimCode(env, code.toLowerCase(), "bsoj");
-  assert(claim.ok && claim.principal.username === "ada" && claim.principal.role === "editor", "claim returns the user and role");
+  const claim = await claimCode(env, code.toLowerCase());
+  assert(claim.ok && claim.link.username === "ada" && claim.link.userId === 1, "claim returns the user");
+  assert(claim.link.workspaceSlug === "bsoj", "claim takes the workspace from the code");
+  assert(claim.link.role === undefined, "claim reads no role (that needs the workspace's database)");
   assert(claim.token.startsWith("bpt_") && claim.token.length > 40, "token is long and prefixed");
-  const again = await claimCode(env, code, "bsoj");
+  const again = await claimCode(env, code);
   assert(!again.ok, "a code works once");
-  const tokenRow = raw.prepare("SELECT token_hash FROM chat_links").get();
+  const tokenRow = raw.prepare("SELECT token_hash, workspace_slug FROM chat_links").get();
   assert(!tokenRow.token_hash.includes(claim.token), "only a hash of the token is stored");
+  assert(tokenRow.workspace_slug === "bsoj", "the link row records the code's workspace");
+
+  const ml = await issueCode(env, 1, "mltest");
+  const mlClaim = await claimCode(env, ml.code);
+  assert(mlClaim.ok && mlClaim.link.workspaceSlug === "mltest", "a code issued in mltest links mltest");
 
   const first = await issueCode(env, 1, "bsoj");
   const second = await issueCode(env, 1, "bsoj");
-  assert(!(await claimCode(env, first.code, "bsoj")).ok, "a newer code cancels the older unclaimed one");
-  assert((await claimCode(env, second.code, "bsoj")).ok, "the newest code works");
+  assert(!(await claimCode(env, first.code)).ok, "a newer code cancels the older unclaimed one");
+  assert((await claimCode(env, second.code)).ok, "the newest code works");
 
   const inA = await issueCode(env, 1, "bsoj");
   await issueCode(env, 1, "mltest");
-  assert((await claimCode(env, inA.code, "bsoj")).ok, "a code in another workspace does not cancel this one");
+  assert((await claimCode(env, inA.code)).ok, "a code in another workspace does not cancel this one");
 
   raw.prepare("INSERT INTO chat_link_codes (code_hash, user_id, workspace_slug, expires_at) VALUES ('stale', 2, 'bsoj', 1)").run();
   await issueCode(env, 1, "bsoj");
@@ -97,49 +104,54 @@ assert(normalizeCode(" abcd-efgh ") === "ABCDEFGH", "codes are normalized: case,
 
   const old = await issueCode(env, 1, "bsoj");
   raw.prepare("UPDATE chat_link_codes SET expires_at = 1 WHERE claimed_at IS NULL").run();
-  assert(!(await claimCode(env, old.code, "bsoj")).ok, "an expired code is refused");
-  assert(!(await claimCode(env, "short", "bsoj")).ok, "a malformed code is refused");
+  assert(!(await claimCode(env, old.code)).ok, "an expired code is refused");
+  assert(!(await claimCode(env, "short")).ok, "a malformed code is refused");
 }
 
 console.log("[tokens]");
 {
   const { code } = await issueCode(env, 1, "bsoj");
-  const { token, principal } = await claimCode(env, code, "bsoj");
-  const p = await resolveToken(env, token, "bsoj");
-  assert(p && p.userId === 1 && p.username === "ada" && p.linkId === principal.linkId, "token resolves to its user");
-  assert((await resolveToken(env, token, "mltest")) === null, "token refused on another workspace");
-  assert((await resolveToken(env, token + "x", "bsoj")) === null, "a wrong token resolves to no one");
-  assert((await resolveToken(env, "nope", "bsoj")) === null, "a non-token string resolves to no one");
-
-  raw.prepare("UPDATE user_roles SET role = 'viewer' WHERE dcs_username = 'ada'").run();
-  assert((await resolveToken(env, token, "bsoj")).role === "viewer", "role is re-read on every call");
-  raw.prepare("DELETE FROM user_roles WHERE dcs_username = 'ada'").run();
-  assert((await resolveToken(env, token, "bsoj")).role === null, "removed from the team -> no role");
-  raw.prepare("INSERT INTO user_roles (dcs_username, role) VALUES ('ada', 'editor')").run();
+  const { token, link } = await claimCode(env, code);
+  const l = await lookupLink(env, token);
+  assert(l && l.userId === 1 && l.username === "ada" && l.linkId === link.linkId, "token resolves to its user");
+  assert(l.workspaceSlug === "bsoj", "token resolves to its workspace");
+  assert((await lookupLink(env, token + "x")) === null, "a wrong token resolves to no one");
+  assert((await lookupLink(env, "nope")) === null, "a non-token string resolves to no one");
 
   const links = await listLinks(env, 1);
-  assert(links.some((l) => l.id === principal.linkId && l.workspace === "bsoj"), "the user sees the link");
+  assert(links.some((x) => x.id === link.linkId && x.workspace === "bsoj"), "the user sees the link");
   assert((await listLinks(env, 2)).length === 0, "another user does not");
-  assert(!(await revokeLink(env, 2, principal.linkId)), "another user cannot revoke it");
-  assert(await revokeLink(env, 1, principal.linkId), "the owner revokes it");
-  assert((await resolveToken(env, token, "bsoj")) === null, "a revoked token resolves to no one");
-  assert(!(await revokeLink(env, 1, principal.linkId)), "revoking twice reports not found");
+  assert(!(await revokeLink(env, 2, link.linkId)), "another user cannot revoke it");
+  assert(await revokeLink(env, 1, link.linkId), "the owner revokes it");
+  assert((await lookupLink(env, token)) === null, "a revoked token resolves to no one");
+  assert(!(await revokeLink(env, 1, link.linkId)), "revoking twice reports not found");
 
   const c2 = await issueCode(env, 1, "bsoj");
-  const t2 = await claimCode(env, c2.code, "bsoj");
-  raw.prepare("UPDATE chat_links SET expires_at = 1 WHERE id = ?").run(t2.principal.linkId);
-  assert((await resolveToken(env, t2.token, "bsoj")) === null, "an expired token resolves to no one");
-  assert(!(await listLinks(env, 1)).some((l) => l.id === t2.principal.linkId), "expired links drop off the list");
+  const t2 = await claimCode(env, c2.code);
+  raw.prepare("UPDATE chat_links SET expires_at = 1 WHERE id = ?").run(t2.link.linkId);
+  assert((await lookupLink(env, t2.token)) === null, "an expired token resolves to no one");
+  assert(!(await listLinks(env, 1)).some((x) => x.id === t2.link.linkId), "expired links drop off the list");
 }
 
 console.log("[roles]");
 {
-  const { code } = await issueCode(env, 2, "bsoj");
-  const claim = await claimCode(env, code, "bsoj");
-  assert(claim.principal.role === "editor", "an admin is capped at editor over chat");
-  const { code: c3 } = await issueCode(env, 3, "bsoj");
-  const viewer = await claimCode(env, c3, "bsoj");
-  assert(viewer.ok && viewer.principal.role === "viewer", "a viewer can link but stays a viewer");
+  // A second workspace database where ada is only a viewer and bo has no role.
+  const other = new DatabaseSync(":memory:");
+  other.exec(`
+    CREATE TABLE user_roles (dcs_username TEXT PRIMARY KEY, role TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'manual', synced_at INTEGER);
+    INSERT INTO user_roles (dcs_username, role) VALUES ('ada', 'viewer');
+  `);
+  const otherEnv = { DB: sqliteD1(other), SHARED_DB: env.DB };
+  assert((await chatRoleFor(env, "ada")) === "editor", "role read from the workspace's own database");
+  assert((await chatRoleFor(otherEnv, "ada")) === "viewer", "the same user has another workspace's role there");
+  assert((await chatRoleFor(otherEnv, "bo")) === null, "no role row there -> null");
+  assert((await chatRoleFor(env, "bo")) === "editor", "an admin is capped at editor over chat");
+  assert((await chatRoleFor(env, "cy")) === "viewer", "a viewer stays a viewer");
+
+  raw.prepare("UPDATE user_roles SET role = 'viewer' WHERE dcs_username = 'ada'").run();
+  assert((await chatRoleFor(env, "ada")) === "viewer", "role is re-read on every call");
+  raw.prepare("DELETE FROM user_roles WHERE dcs_username = 'ada'").run();
+  assert((await chatRoleFor(env, "ada")) === null, "removed from the team -> no role");
 }
 
 console.log("all chatLinks tests passed");

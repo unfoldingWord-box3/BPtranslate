@@ -959,7 +959,6 @@ export function App() {
                 username={auth.kind === "ready" ? auth.me?.username ?? null : null}
                 onLogout={handleSignOut}
                 isAdmin={auth.kind === "ready" && auth.role === "admin"}
-                canEdit={auth.kind === "ready" && (auth.role === "admin" || auth.role === "editor")}
                 onOpenClassic={async () => {
                   // Candidates in order: the book on screen (its chapter and
                   // verse when known; classic has no chapter 0, so intros open

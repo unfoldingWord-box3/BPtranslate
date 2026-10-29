@@ -1,7 +1,8 @@
 // Dialog for linking the BT Servant chat (WhatsApp/Telegram) to the signed-in
-// editor's account (#669). The editor generates a one-time code, types it to
-// the bot in a one-to-one chat, and from then on the bot can save edits as
-// them. The same dialog lists the existing links so one can be revoked.
+// user's account (#669). The user generates a one-time code for the project
+// they are in, types it to the bot in a one-to-one chat, and from then on the
+// bot reads that project as them, and saves edits if they are an editor
+// (#676). The same dialog lists the existing links so one can be revoked.
 import { useCallback, useEffect, useState } from "react";
 import {
   Box,

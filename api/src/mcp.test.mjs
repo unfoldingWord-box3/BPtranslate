@@ -1,15 +1,21 @@
-// Unit tests for the chat MCP endpoint (mcp.ts + mcpTools.ts): bearer check
-// per workspace, no fallback on an unknown slug, the JSON-RPC envelope, and
-// paging that never drops rows past BT Servant's 32 KB tool-result cap.
-// The in-process API is stubbed, so no D1 is touched.
+// Unit tests for the chat MCP endpoint (mcp.ts + mcpTools.ts): one bearer for
+// every workspace, the account link choosing the workspace (and nothing read
+// without one), the JSON-RPC envelope, and paging that never drops rows past
+// BT Servant's 32 KB tool-result cap. The in-process API is stubbed, so no D1
+// is touched.
 //
 // Run from api/:
 //   node --experimental-strip-types --no-warnings src/mcp.test.mjs
 
-import { handleMcp, mcpWorkspaceSlug } from "./mcp.ts";
-import { PAGE_BYTE_BUDGET, ROW_TEXT_CAP, byteLength, principalFrom } from "./mcpTools.ts";
+import { handleMcp, isMcpPath } from "./mcp.ts";
+import { PAGE_BYTE_BUDGET, ROW_TEXT_CAP, byteLength, principalFrom, readerFrom } from "./mcpTools.ts";
 
+// Session tokens: one link per workspace, plus a viewer's link in bsoj and a
+// link whose workspace has since been removed.
 const GOOD_TOKEN = "bpt_" + "g".repeat(43);
+const ML_TOKEN = "bpt_" + "m".repeat(43);
+const VIEWER_TOKEN = "bpt_" + "v".repeat(43);
+const GONE_TOKEN = "bpt_" + "x".repeat(43);
 
 function assert(cond, msg) {
   if (!cond) {
@@ -21,7 +27,8 @@ function assert(cond, msg) {
 
 const TOKEN = "t".repeat(40);
 const OTHER = "o".repeat(40);
-const WS = { slug: "bsoj", label: "BSOJ", org: "BSOJ", binding: "DB" };
+const BSOJ = { slug: "bsoj", label: "BSOJ", org: "BSOJ" };
+const MLTEST = { slug: "mltest", label: "BibleEditorMLTest", org: "BibleEditorMLTest" };
 
 function tnRow(i, verse, noteLen = 40, ch = "n") {
   return {
@@ -35,12 +42,13 @@ function tnRow(i, verse, noteLen = 40, ch = "n") {
 const calls = [];
 // Mutable so a test can trash a row between two page requests.
 let ch1 = Array.from({ length: 30 }, (_v, i) => tnRow(i, 1 + Math.floor(i / 3)));
-function deps(overrides = {}) {
-  return {
-    tokens: JSON.stringify({ bsoj: TOKEN, other: OTHER }),
-    findWorkspace: async (slug) => (slug === "bsoj" ? WS : null),
-    getJson: async (ws, path) => {
+// Stands in for the routes, per workspace: mltest holds only OBA.
+async function apiFor(ws, path) {
       calls.push({ ws: ws.slug, path });
+      if (ws.slug === "mltest") {
+        if (path === "/api/books") return { status: 200, body: { books: [{ book: "OBA", imported_at: 1 }] } };
+        return { status: 404, body: { error: "not_found" } };
+      }
       if (path === "/api/books") return { status: 200, body: { books: [{ book: "TIT", imported_at: 1 }] } };
       if (path === "/api/chapters/TIT") {
         return { status: 200, body: { book: "TIT", chapters: [
@@ -66,21 +74,38 @@ function deps(overrides = {}) {
       }
       if (path.startsWith("/api/rows/tn/r5")) return { status: 200, body: tnRow(5, 2) };
       return { status: 404, body: { error: "not_found" } };
+}
+
+// Mirrors index.ts: the link names the workspace; a removed workspace is no
+// session at all.
+const LINKS = {
+  [GOOD_TOKEN]: { ws: BSOJ, principal: { userId: 1, username: "ada", role: "editor", linkId: 9 } },
+  [ML_TOKEN]: { ws: MLTEST, principal: { userId: 1, username: "ada", role: "editor", linkId: 10 } },
+  [VIEWER_TOKEN]: { ws: BSOJ, principal: { userId: 3, username: "cy", role: null, linkId: 11 } },
+  [GONE_TOKEN]: { ws: null, principal: { userId: 1, username: "ada", role: "editor", linkId: 12 } },
+};
+function sessionFor(token) {
+  const l = LINKS[token];
+  if (!l || !l.ws) return null;
+  return { workspace: l.ws, principal: l.principal, getJson: (path) => apiFor(l.ws, path) };
+}
+function deps(overrides = {}) {
+  return {
+    token: TOKEN,
+    resolveSession: async (token) => sessionFor(token),
+    claimLink: async (code) => {
+      const token = { "ABCD-EFGH": GOOD_TOKEN, "MLMLMLML": ML_TOKEN, "GONEGONE": GONE_TOKEN }[code];
+      const s = token && sessionFor(token);
+      return s ? { ok: true, token, expiresAt: 1800000000, workspace: s.workspace, principal: s.principal } : { ok: false };
     },
-    claimLink: async (ws, code) =>
-      ws.slug === "bsoj" && code === "ABCD-EFGH"
-        ? { ok: true, token: GOOD_TOKEN, expiresAt: 1800000000, principal: { userId: 1, username: "ada", role: "editor", linkId: 9 } }
-        : { ok: false },
-    resolveSession: async (ws, token) =>
-      ws.slug === "bsoj" && token === GOOD_TOKEN ? { userId: 1, username: "ada", role: "editor", linkId: 9 } : null,
     ...overrides,
   };
 }
 
-function post(slug, body, { token = TOKEN, method = "POST", raw } = {}) {
+function post(body, { token = TOKEN, method = "POST", raw } = {}) {
   const headers = { "Content-Type": "application/json", Accept: "application/json, text/event-stream" };
   if (token) headers.Authorization = `Bearer ${token}`;
-  return new Request(`https://x.test/api/mcp/${slug}`, {
+  return new Request("https://x.test/api/mcp", {
     method,
     headers,
     body: method === "POST" ? (raw ?? JSON.stringify(body)) : undefined,
@@ -88,48 +113,48 @@ function post(slug, body, { token = TOKEN, method = "POST", raw } = {}) {
 }
 
 async function rpc(method, params, opts = {}) {
-  const res = await handleMcp(post("bsoj", { jsonrpc: "2.0", id: 7, method, params }), "bsoj", deps(opts.deps));
+  const res = await handleMcp(post({ jsonrpc: "2.0", id: 7, method, params }), deps(opts.deps));
   return { status: res.status, body: await res.json() };
 }
 
-async function call(name, args) {
-  const { body } = await rpc("tools/call", { name, arguments: args });
+async function call(name, args, { token = GOOD_TOKEN } = {}) {
+  const withToken = token && name !== "bpt_link_account" ? { session_token: token, ...args } : args;
+  const { body } = await rpc("tools/call", { name, arguments: withToken });
   return { isError: body.result?.isError === true, data: JSON.parse(body.result.content[0].text) };
 }
 
-console.log("[path] workspace slug from the URL");
-assert(mcpWorkspaceSlug("https://x.test/api/mcp/bsoj") === "bsoj", "slug parsed");
-assert(mcpWorkspaceSlug("https://x.test/api/mcp/bsoj/") === "bsoj", "trailing slash tolerated");
-assert(mcpWorkspaceSlug("https://x.test/api/chapters/TIT") === null, "other paths ignored");
+console.log("[path] one path for every workspace");
+assert(isMcpPath("https://x.test/api/mcp"), "/api/mcp matched");
+assert(isMcpPath("https://x.test/api/mcp/"), "trailing slash tolerated");
+assert(!isMcpPath("https://x.test/api/mcp/bsoj"), "the old per-workspace path is not the endpoint");
+assert(!isMcpPath("https://x.test/api/chapters/TIT"), "other paths ignored");
 
-console.log("[auth] bearer per workspace");
+console.log("[auth] one bearer for all workspaces");
 {
   const body = { jsonrpc: "2.0", id: 1, method: "tools/list" };
-  let res = await handleMcp(post("bsoj", body, { token: null }), "bsoj", deps());
+  let res = await handleMcp(post(body, { token: null }), deps());
   assert(res.status === 401, "missing token -> 401");
-  res = await handleMcp(post("bsoj", body, { token: OTHER }), "bsoj", deps());
-  assert(res.status === 401, "another workspace's token -> 401");
-  res = await handleMcp(post("bsoj", body), "bsoj", deps({ tokens: undefined }));
-  assert(res.status === 401, "no MCP_SERVICE_TOKENS -> 401");
-  res = await handleMcp(post("bsoj", body), "bsoj", deps({ tokens: JSON.stringify({ bsoj: "short" }) }));
+  res = await handleMcp(post(body, { token: OTHER }), deps());
+  assert(res.status === 401, "wrong token -> 401");
+  res = await handleMcp(post(body), deps({ token: undefined }));
+  assert(res.status === 401, "no MCP_SERVICE_TOKEN -> 401");
+  res = await handleMcp(post(body, { token: "short" }), deps({ token: "short" }));
   assert(res.status === 401, "a token under 32 chars is never accepted");
-  res = await handleMcp(post("other", body, { token: OTHER }), "other", deps());
-  assert(res.status === 404, "valid token but unknown workspace -> 404, no fallback");
-  res = await handleMcp(post("nope", body, { token: TOKEN }), "nope", deps());
-  assert(res.status === 401, "unknown slug without its own token -> 401 (no workspace probing)");
-  res = await handleMcp(post("bsoj", null, { method: "GET" }), "bsoj", deps());
+  res = await handleMcp(post(null, { method: "GET" }), deps());
   assert(res.status === 405, "GET -> 405");
+  res = await handleMcp(post(body), deps());
+  assert(res.status === 200, "the one token lists tools");
 }
 
 console.log("[jsonrpc] envelope");
 {
-  let res = await handleMcp(post("bsoj", null, { raw: "{not json" }), "bsoj", deps());
+  let res = await handleMcp(post(null, { raw: "{not json" }), deps());
   let body = await res.json();
   assert(body.error?.code === -32700, "parse error -> -32700");
-  res = await handleMcp(post("bsoj", { id: 1, method: "tools/list" }), "bsoj", deps());
+  res = await handleMcp(post({ id: 1, method: "tools/list" }), deps());
   body = await res.json();
   assert(body.error?.code === -32600, "missing jsonrpc -> -32600");
-  res = await handleMcp(post("bsoj", { jsonrpc: "2.0", method: "notifications/initialized" }), "bsoj", deps());
+  res = await handleMcp(post({ jsonrpc: "2.0", method: "notifications/initialized" }), deps());
   assert(res.status === 202, "notification -> 202, no body");
   const unknown = await rpc("resources/list", {});
   assert(unknown.body.error?.code === -32601 && unknown.body.id === 7, "unknown method -> -32601 with the request id");
@@ -140,21 +165,54 @@ console.log("[jsonrpc] envelope");
   assert(names.every((n) => n.startsWith("bpt_")), "every tool is bpt_-prefixed");
   assert(list.body.result.tools.every((t) => t.inputSchema?.type === "object"), "every tool has an object inputSchema");
   assert(!names.some((n) => /edit|approve|draft|export/.test(n)), "no write tools in the read-only slice");
+  const needsToken = list.body.result.tools.filter((t) => t.name !== "bpt_link_account");
+  assert(needsToken.every((t) => t.inputSchema.required?.includes("session_token")), "every tool but link_account requires session_token");
   const bad = await rpc("tools/call", { name: "bpt_nope", arguments: {} });
   assert(bad.body.error?.code === -32602, "unknown tool -> -32602");
+}
+
+console.log("[link] the link picks the workspace");
+{
+  calls.length = 0;
+  for (const [name, args] of [
+    ["bpt_whoami", {}],
+    ["bpt_list_books", {}],
+    ["bpt_package_status", { book: "TIT" }],
+    ["bpt_chunk_work", { book: "TIT", chapter: 1, kind: "tn" }],
+    ["bpt_get_row", { book: "TIT", kind: "tn", id: "r5" }],
+  ]) {
+    const anon = await call(name, args, { token: null });
+    assert(anon.isError && /Link chat assistant/.test(anon.data.error), `${name} without a token -> not linked`);
+  }
+  for (const t of ["bpt_revoked", GONE_TOKEN, { not: "a string" }]) {
+    const dead = await call("bpt_list_books", {}, { token: t });
+    assert(dead.isError && /Link chat assistant/.test(dead.data.error), `dead token (${String(t).slice(0, 8)}) -> not linked`);
+    assert(!JSON.stringify(dead.data).includes(String(t)), "a dead token is not echoed back");
+  }
+  assert(calls.length === 0, "no API read happens without a live link");
+
+  const a = await call("bpt_list_books", {}, { token: GOOD_TOKEN });
+  const b = await call("bpt_list_books", {}, { token: ML_TOKEN });
+  assert(a.data.books.join() === "TIT" && b.data.books.join() === "OBA", "same request, each token reads its own workspace");
+  assert(calls.map((c) => c.ws).join() === "bsoj,mltest", "each read ran against its link's workspace only");
+  const cross = await call("bpt_package_status", { book: "TIT" }, { token: ML_TOKEN });
+  assert(cross.isError && calls.at(-1).ws === "mltest", "mltest's token cannot reach bsoj's book");
+
+  const viewer = await call("bpt_list_books", {}, { token: VIEWER_TOKEN });
+  assert(!viewer.isError && viewer.data.books.join() === "TIT", "a viewer's link reads");
 }
 
 console.log("[tools] reads");
 {
   calls.length = 0;
   const who = await call("bpt_whoami", {});
-  assert(who.data.workspace.slug === "bsoj" && who.data.access === "read_only", "whoami names the workspace");
+  assert(who.data.workspace.slug === "bsoj" && who.data.access === "edit", "whoami names the workspace");
   assert(who.data.workspace.binding === undefined, "whoami does not expose the D1 binding name");
 
   const status = await call("bpt_package_status", { book: "tit" });
   assert(status.data.book === "TIT", "book code upper-cased");
   assert(status.data.totals.tn === 43 && status.data.totals.tnApproved === 5, "totals summed across chapters");
-  assert(calls.every((c) => c.ws === "bsoj"), "every API read ran against the URL's workspace");
+  assert(calls.every((c) => c.ws === "bsoj"), "every API read ran against the link's workspace");
 
   const notImported = await call("bpt_package_status", { book: "GEN" });
   assert(notImported.isError && /not imported/.test(notImported.data.error), "empty book -> readable error");
@@ -170,20 +228,24 @@ console.log("[tools] reads");
 
 console.log("[tools] account link");
 {
-  const anon = await call("bpt_whoami", {});
-  assert(anon.data.linked_user === null && anon.data.access === "read_only", "whoami without a token: not linked, read only");
-  const linked = await call("bpt_whoami", { session_token: GOOD_TOKEN });
+  const linked = await call("bpt_whoami", {});
   assert(linked.data.linked_user === "ada" && linked.data.access === "edit", "whoami with a token names the user");
-  const stale = await call("bpt_whoami", { session_token: "bpt_revoked" });
-  assert(stale.data.linked_user === null && /Link chat assistant/.test(stale.data.note), "a dead token says how to relink");
-  assert(!JSON.stringify(stale.data).includes("bpt_revoked"), "a dead token is not echoed back");
+  const viewer = await call("bpt_whoami", {}, { token: VIEWER_TOKEN });
+  assert(viewer.data.linked_user === "cy" && viewer.data.access === "read_only", "a viewer's whoami says read only");
 
   const ok = await call("bpt_link_account", { code: "ABCD-EFGH" });
   assert(!ok.isError && ok.data.session_token === GOOD_TOKEN && ok.data.linked_user === "ada", "link returns the token and user");
+  assert(ok.data.workspace.slug === "bsoj" && ok.data.workspace.label === "BSOJ", "link names the code's workspace and label");
+  assert(ok.data.workspace.binding === undefined, "link does not expose the D1 binding name");
+  assert(ok.data.access === "edit", "link says an editor can edit");
+  const ml = await call("bpt_link_account", { code: "MLMLMLML" });
+  assert(ml.data.workspace.slug === "mltest", "a code from another workspace links that workspace");
   const bad = await call("bpt_link_account", { code: "ZZZZ-ZZZZ" });
   assert(bad.isError && /did not work/.test(bad.data.error) && !bad.data.error.includes("ZZZZ"), "a bad code -> one generic message");
+  const gone = await call("bpt_link_account", { code: "GONEGONE" });
+  assert(gone.isError && /did not work/.test(gone.data.error), "a code for a removed workspace -> the same message");
 
-  const ctx = { resolveSession: deps().resolveSession.bind(null, WS) };
+  const ctx = { session: deps().resolveSession };
   let threw = null;
   try {
     await principalFrom({ session_token: "bpt_secret_wrong" }, ctx);
@@ -191,17 +253,19 @@ console.log("[tools] account link");
     threw = e;
   }
   assert(threw && !threw.message.includes("bpt_secret_wrong"), "principalFrom refuses without echoing the token");
-  assert((await principalFrom({ session_token: GOOD_TOKEN }, ctx)).username === "ada", "principalFrom resolves an editor's token");
-  const viewerCtx = { resolveSession: async () => ({ userId: 3, username: "cy", role: "viewer", linkId: 4 }) };
-  threw = null;
-  try {
-    await principalFrom({ session_token: GOOD_TOKEN }, viewerCtx);
-  } catch (e) {
-    threw = e;
+  const editor = await principalFrom({ session_token: GOOD_TOKEN }, ctx);
+  assert(editor.principal.username === "ada" && editor.workspace.slug === "bsoj", "principalFrom resolves an editor's token and workspace");
+  for (const role of [null, "viewer"]) {
+    const viewerCtx = { session: async () => ({ workspace: BSOJ, principal: { userId: 3, username: "cy", role, linkId: 4 } }) };
+    threw = null;
+    try {
+      await principalFrom({ session_token: VIEWER_TOKEN }, viewerCtx);
+    } catch (e) {
+      threw = e;
+    }
+    assert(threw && /cannot edit/.test(threw.message), `principalFrom refuses a linked reader (role ${role})`);
+    assert((await readerFrom({ session_token: VIEWER_TOKEN }, viewerCtx)).principal.username === "cy", `readerFrom accepts it (role ${role})`);
   }
-  assert(threw && /cannot edit/.test(threw.message), "principalFrom refuses a linked viewer");
-  const objToken = await call("bpt_whoami", { session_token: { not: "a string" } });
-  assert(objToken.data.linked_user === null, "a non-string token resolves to no one");
 }
 
 console.log("[tools] chunk paging");

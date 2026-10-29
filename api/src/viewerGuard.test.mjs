@@ -20,6 +20,7 @@ import { rows } from "./rows.ts";
 import { verses } from "./verses.ts";
 import { l10n } from "./l10n.ts";
 import { projectConfig } from "./projectConfigRoutes.ts";
+import { chatLinkRoutes } from "./chatLinkRoutes.ts";
 
 function assert(cond, msg) {
   if (!cond) {
@@ -74,6 +75,7 @@ function buildApp() {
   app.route("/api/verses", verses);
   app.route("/api/l10n", l10n);
   app.route("/api/project-config", projectConfig);
+  app.route("/api/chat-links", chatLinkRoutes);
   app.post("/api/auth/refresh", refreshToken);
   app.put("/api/users/me/location", requireAuth, updateLastLocation);
   // Deliberately UNGUARDED write route — stands in for a future route someone
@@ -122,12 +124,17 @@ console.log("[isViewerWritable] exact method+path matches for self-scoped writes
   assert(isViewerWritable("PUT", "/api/users/me/location"), "own location self-scoped");
   assert(isViewerWritable("POST", "/api/workspaces/mltest"), "workspace switch self-scoped");
   assert(isViewerWritable("POST", "/api/alerts/7/dismiss"), "alert dismiss self-scoped");
+  assert(isViewerWritable("POST", "/api/chat-links/code"), "own chat link code self-scoped");
+  assert(isViewerWritable("DELETE", "/api/chat-links/12"), "revoking own chat link self-scoped");
   // Exact-match policy: same prefixes, different endpoints must fail CLOSED.
   assert(!isViewerWritable("POST", "/api/users/me/location"), "wrong method on location blocked");
   assert(!isViewerWritable("DELETE", "/api/users/me/everything"), "future /users/me route blocked");
   assert(!isViewerWritable("POST", "/api/workspaces/mltest/nuke"), "future /workspaces subroute blocked");
   assert(!isViewerWritable("POST", "/api/alerts/7/escalate"), "future /alerts subroute blocked");
   assert(!isViewerWritable("POST", "/api/alerts/abc/dismiss"), "non-numeric alert id blocked");
+  assert(!isViewerWritable("POST", "/api/chat-links/12"), "wrong method on a chat link blocked");
+  assert(!isViewerWritable("DELETE", "/api/chat-links/code"), "non-numeric chat link id blocked");
+  assert(!isViewerWritable("POST", "/api/chat-links/code/extra"), "future /chat-links subroute blocked");
   assert(!isViewerWritable("POST", "/api/rows/tn"), "rows are content");
   assert(!isViewerWritable("PATCH", "/api/verses/ZEC/1/1/ULT"), "verses are content");
   assert(!isViewerWritable("POST", "/api/books/ZEC/import"), "imports are content");
@@ -225,6 +232,14 @@ console.log("[viewer] self-scoped writes still work");
 
   const ws = await app.request("/api/workspaces/other", writeReq("POST", viewerTok, {}), env);
   assert(ws.status === 200, `viewer can hit workspace-switch path (got ${ws.status})`);
+
+  const code = await app.request("/api/chat-links/code", writeReq("POST", viewerTok), env);
+  assert(code.status === 200, `viewer can get a chat link code (got ${code.status})`);
+  assert(/^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test((await code.json()).code), "the code reached the handler");
+  const revoke = await app.request("/api/chat-links/5", writeReq("DELETE", viewerTok), env);
+  assert(revoke.status === 200, `viewer can revoke own chat link (got ${revoke.status})`);
+  const otherPost = await app.request("/api/future-unguarded", writeReq("POST", viewerTok, {}), env);
+  assert(otherPost.status === 403, "a viewer POST elsewhere is still blocked");
 
   // CSRF-exempt auth route: the guard must not intercept; the handler's own
   // 401 (no refresh cookie) proves the request reached it.

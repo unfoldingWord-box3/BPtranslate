@@ -37,10 +37,14 @@ const WRITE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 // - own reading position (auth.ts updateLastLocation)
 // - workspace switch (workspaceRoutes.ts — per-user cookie + role re-mint)
 // - dismiss own banner alert (alerts.ts — username-scoped UPDATE)
+// - own chat link: get a code, revoke a link (chatLinkRoutes.ts — user-scoped
+//   rows in the shared DB; the chat itself only lets editors save)
 const VIEWER_WRITABLE: Array<{ method: string; pattern: RegExp }> = [
   { method: "PUT", pattern: /^\/api\/users\/me\/location$/ },
   { method: "POST", pattern: /^\/api\/workspaces\/[A-Za-z0-9._-]+$/ },
   { method: "POST", pattern: /^\/api\/alerts\/\d+\/dismiss$/ },
+  { method: "POST", pattern: /^\/api\/chat-links\/code$/ },
+  { method: "DELETE", pattern: /^\/api\/chat-links\/\d+$/ },
 ];
 
 export function isViewerWritable(method: string, path: string): boolean {

@@ -1,24 +1,41 @@
 // Tools for the chat MCP endpoint (mcp.ts). Phase 1 of the "Book packages via
 // chat" plan: a reviewer in BT Servant can see what a book still needs, read
 // the notes for a verse range, and link the chat to their BPtranslate account
-// (chatLinks.ts). No writes yet; they take a session_token and use
-// principalFrom below, so every write carries a real user.
+// (chatLinks.ts). Every tool but bpt_link_account takes the session_token,
+// because the link decides which workspace is read (issue #676). Reads go
+// through readerFrom; the writes to come go through principalFrom, so every
+// write carries a real editor.
 //
 // Each tool reads through the SAME route handlers the web app uses (`getJson`
 // runs the Hono app in-process), so chat and web never disagree about counts
 // or which rows are live. Tool names carry the bpt_ prefix because BT Servant
 // pools every registered server's tools into one namespace.
 
-export interface ToolContext {
-  workspace: { slug: string; label: string; org: string };
-  // GET a path on this Worker's own API, in-process, against the workspace's
-  // env. Returns the parsed JSON body and the HTTP status.
-  getJson: (path: string) => Promise<{ status: number; body: unknown }>;
-  claimLink: (code: string) => Promise<ClaimResult>;
-  resolveSession: (token: string) => Promise<ChatPrincipal | null>;
+export interface McpWorkspace {
+  slug: string;
+  label: string;
+  org: string;
 }
 
-import type { ChatPrincipal, ClaimResult } from "./chatLinks.ts";
+// One linked user in the workspace their link names.
+export interface McpSession {
+  workspace: McpWorkspace;
+  principal: ChatPrincipal;
+  // GET a path on this Worker's own API, in-process, against the session's
+  // workspace env. Returns the parsed JSON body and the HTTP status.
+  getJson: (path: string) => Promise<{ status: number; body: unknown }>;
+}
+
+export type LinkClaim =
+  | { ok: true; token: string; expiresAt: number; workspace: McpWorkspace; principal: ChatPrincipal }
+  | { ok: false };
+
+export interface ToolContext {
+  session: (token: string) => Promise<McpSession | null>;
+  claimLink: (code: string) => Promise<LinkClaim>;
+}
+
+import type { ChatPrincipal } from "./chatLinks.ts";
 
 export class ToolInputError extends Error {}
 
@@ -26,27 +43,34 @@ const NOT_LINKED =
   "This chat is not linked to a BPtranslate account, or the link expired or was revoked. " +
   "In the BPtranslate web app, open the account menu, choose Link chat assistant, and send the code here.";
 
-// Who a write acts as: the one entry point for tools that change anything.
-// Refuses anyone who is not an editor in this workspace right now (chat caps
-// admins at editor), so a write tool cannot forget the role check. The token
-// is a secret the user's own memory holds; it is never echoed back, not even
-// in an error.
-export async function principalFrom(args: Record<string, unknown>, ctx: ToolContext): Promise<ChatPrincipal> {
+// Who a read acts as, and so which workspace it reads: any live link, viewer
+// or editor. The token is a secret the user's own memory holds; it is never
+// echoed back, not even in an error.
+export async function readerFrom(args: Record<string, unknown>, ctx: ToolContext): Promise<McpSession> {
   const token = args.session_token;
   if (typeof token !== "string" || !token) throw new ToolInputError(NOT_LINKED);
-  const principal = await ctx.resolveSession(token);
-  if (!principal) throw new ToolInputError(NOT_LINKED);
-  if (principal.role !== "editor") {
+  const session = await ctx.session(token);
+  if (!session) throw new ToolInputError(NOT_LINKED);
+  return session;
+}
+
+// Who a write acts as: the one entry point for tools that change anything.
+// Refuses anyone who is not an editor in the link's workspace right now (chat
+// caps admins at editor), so a write tool cannot forget the role check.
+export async function principalFrom(args: Record<string, unknown>, ctx: ToolContext): Promise<McpSession> {
+  const session = await readerFrom(args, ctx);
+  if (session.principal.role !== "editor") {
     throw new ToolInputError(
-      `${principal.username} cannot edit in this project. Ask a project admin to add them to the Door43 team.`,
+      `${session.principal.username} cannot edit in this project. Ask a project admin to add them to the Door43 team.`,
     );
   }
-  return principal;
+  return session;
 }
 
 const SESSION_TOKEN_SCHEMA = {
   type: "string",
-  description: "The session token bpt_link_account returned for this user. Secret: never show it in a message.",
+  description:
+    "The session token bpt_link_account returned for this user. It decides which language project is read. Secret: never show it in a message.",
 };
 
 interface ToolDef {
@@ -91,8 +115,8 @@ function intArg(args: Record<string, unknown>, key: string, opts: { min: number;
   return n;
 }
 
-async function apiGet(ctx: ToolContext, path: string): Promise<Record<string, unknown>> {
-  const { status, body } = await ctx.getJson(path);
+async function apiGet(session: McpSession, path: string): Promise<Record<string, unknown>> {
+  const { status, body } = await session.getJson(path);
   if (status === 404) throw new ToolInputError(`not found: ${path}`);
   if (status !== 200) throw new Error(`BPtranslate API ${path} returned ${status}`);
   return body as Record<string, unknown>;
@@ -112,27 +136,23 @@ interface ChapterSummary {
 const whoami: ToolDef = {
   name: "bpt_whoami",
   description:
-    "Which BPtranslate language project this connection reads, and which linked user the chat acts as. Call once at the start of a conversation, with the session token if this user has one.",
+    "Which BPtranslate language project this user's session token reads, which user it acts as, and whether they can edit. Call once at the start of a conversation.",
   inputSchema: {
     type: "object",
     properties: { session_token: SESSION_TOKEN_SCHEMA },
+    required: ["session_token"],
     additionalProperties: false,
   },
   run: async (args, ctx) => {
-    const base = { workspace: ctx.workspace };
-    if (args.session_token === undefined) {
-      return { ...base, linked_user: null, access: "read_only", note: NOT_LINKED };
-    }
-    const p = typeof args.session_token === "string" ? await ctx.resolveSession(args.session_token) : null;
-    if (!p) return { ...base, linked_user: null, access: "read_only", note: NOT_LINKED };
-    return { ...base, linked_user: p.username, role: p.role, access: p.role === "editor" ? "edit" : "read_only" };
+    const { workspace, principal: p } = await readerFrom(args, ctx);
+    return { workspace, linked_user: p.username, role: p.role, access: p.role === "editor" ? "edit" : "read_only" };
   },
 };
 
 const linkAccount: ToolDef = {
   name: "bpt_link_account",
   description:
-    "Link this chat user to their BPtranslate account with the one-time code from the web app (account menu, Link chat assistant). Returns a session_token: save it in this user's memory, pass it to every tool that takes one, and never show it in a message. Only in a one-to-one chat, never in a group.",
+    "Link this chat user to their BPtranslate account with the one-time code from the web app (account menu, Link chat assistant). The code belongs to one language project. Returns a session_token for that project: save it in this user's memory next to that project (a user may link several projects, one token each), pass it to every other bpt_ tool for that project, and never show it in a message. Only in a one-to-one chat, never in a group.",
   inputSchema: {
     type: "object",
     properties: { code: { type: "string", description: "The 8-character code, e.g. ABCD-EFGH" } },
@@ -144,13 +164,14 @@ const linkAccount: ToolDef = {
     const r = await ctx.claimLink(args.code);
     if (!r.ok) {
       throw new ToolInputError(
-        "That code did not work. Codes work once and expire after 10 minutes, and only in the project they were made in. Get a new one from the web app.",
+        "That code did not work. Codes work once and expire after 10 minutes. Get a new one from the web app.",
       );
     }
     return {
       linked_user: r.principal.username,
       role: r.principal.role,
-      workspace: ctx.workspace,
+      access: r.principal.role === "editor" ? "edit" : "read_only",
+      workspace: r.workspace,
       session_token: r.token,
       expires_at: new Date(r.expiresAt * 1000).toISOString(),
       note: "Save session_token in this user's memory now. Never show it in a message.",
@@ -160,10 +181,15 @@ const linkAccount: ToolDef = {
 
 const listBooks: ToolDef = {
   name: "bpt_list_books",
-  description: "Books imported into this language project, as 3-letter codes.",
-  inputSchema: { type: "object", properties: {}, additionalProperties: false },
-  run: async (_args, ctx) => {
-    const body = await apiGet(ctx, "/api/books");
+  description: "Books imported into this user's language project, as 3-letter codes.",
+  inputSchema: {
+    type: "object",
+    properties: { session_token: SESSION_TOKEN_SCHEMA },
+    required: ["session_token"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const body = await apiGet(await readerFrom(args, ctx), "/api/books");
     const books = (body.books as { book: string }[] | undefined) ?? [];
     return { total: books.length, books: books.map((b) => b.book) };
   },
@@ -175,13 +201,17 @@ const packageStatus: ToolDef = {
     "What a book still needs: per chapter, how many translation notes (tN) and translation questions (tQ) exist and how many are approved, and how many verses are marked done. Use before suggesting where to start.",
   inputSchema: {
     type: "object",
-    properties: { book: { type: "string", description: "3-letter book code, e.g. TIT" } },
-    required: ["book"],
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      book: { type: "string", description: "3-letter book code, e.g. TIT" },
+    },
+    required: ["session_token", "book"],
     additionalProperties: false,
   },
   run: async (args, ctx) => {
+    const session = await readerFrom(args, ctx);
     const book = bookArg(args);
-    const body = await apiGet(ctx, `/api/chapters/${book}`);
+    const body = await apiGet(session, `/api/chapters/${book}`);
     const chapters = (body.chapters as ChapterSummary[] | undefined) ?? [];
     if (chapters.every((c) => c.verses + c.tn + c.tq === 0)) {
       throw new ToolInputError(`${book} is not imported in this project. Call bpt_list_books.`);
@@ -278,6 +308,7 @@ const chunkWork: ToolDef = {
   inputSchema: {
     type: "object",
     properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
       book: { type: "string", description: "3-letter book code, e.g. TIT" },
       chapter: { type: "integer", minimum: 0 },
       kind: { type: "string", enum: ["tn", "tq"] },
@@ -287,10 +318,11 @@ const chunkWork: ToolDef = {
       cursor: { type: "string", description: "next_cursor from the previous page" },
       limit: { type: "integer", minimum: 1, maximum: MAX_PAGE_ROWS },
     },
-    required: ["book", "chapter", "kind"],
+    required: ["session_token", "book", "chapter", "kind"],
     additionalProperties: false,
   },
   run: async (args, ctx) => {
+    const session = await readerFrom(args, ctx);
     const book = bookArg(args);
     const chapter = intArg(args, "chapter", { min: 0, required: true })!;
     const kind = args.kind;
@@ -301,7 +333,7 @@ const chunkWork: ToolDef = {
     const limit = Math.min(intArg(args, "limit", { min: 1 }) ?? DEFAULT_PAGE_ROWS, MAX_PAGE_ROWS);
     const cursor = parseCursor(args.cursor);
 
-    const body = await apiGet(ctx, `/api/chapters/${book}/${chapter}`);
+    const body = await apiGet(session, `/api/chapters/${book}/${chapter}`);
     const all = ((body[kind] as Record<string, unknown>[] | undefined) ?? []).filter((r) => {
       const v = Number(r.verse);
       if (v < vs || v > ve) return false;
@@ -341,20 +373,22 @@ const getRow: ToolDef = {
   inputSchema: {
     type: "object",
     properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
       book: { type: "string", description: "3-letter book code, e.g. TIT" },
       kind: { type: "string", enum: ["tn", "tq"] },
       id: { type: "string", description: "Row id from bpt_chunk_work" },
     },
-    required: ["book", "kind", "id"],
+    required: ["session_token", "book", "kind", "id"],
     additionalProperties: false,
   },
   run: async (args, ctx) => {
+    const session = await readerFrom(args, ctx);
     const book = bookArg(args);
     const kind = args.kind;
     if (kind !== "tn" && kind !== "tq") throw new ToolInputError('kind must be "tn" or "tq"');
     const id = args.id;
     if (typeof id !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(id)) throw new ToolInputError("id is not a row id");
-    const row = await apiGet(ctx, `/api/rows/${kind}/${encodeURIComponent(id)}?book=${book}`);
+    const row = await apiGet(session, `/api/rows/${kind}/${encodeURIComponent(id)}?book=${book}`);
     return projectRow(kind, row);
   },
 };
