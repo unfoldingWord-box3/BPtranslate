@@ -7,7 +7,7 @@
 //   node --experimental-strip-types --no-warnings src/mcp.test.mjs
 
 import { handleMcp, mcpWorkspaceSlug } from "./mcp.ts";
-import { PAGE_BYTE_BUDGET } from "./mcpTools.ts";
+import { PAGE_BYTE_BUDGET, ROW_TEXT_CAP, byteLength } from "./mcpTools.ts";
 
 function assert(cond, msg) {
   if (!cond) {
@@ -21,16 +21,18 @@ const TOKEN = "t".repeat(40);
 const OTHER = "o".repeat(40);
 const WS = { slug: "bsoj", label: "BSOJ", org: "BSOJ", binding: "DB" };
 
-function tnRow(i, verse, noteLen = 40) {
+function tnRow(i, verse, noteLen = 40, ch = "n") {
   return {
     id: `r${i}`, book: "TIT", chapter: 1, verse, ref_raw: `1:${verse}`,
     support_reference: "rc://*/ta/man/translate/figs-metaphor", quote: "q", occurrence: 1,
-    note: "n".repeat(noteLen), translation_state: "ai_draft", version: 3, latest_source: "ai_pipeline",
+    note: ch.repeat(noteLen), translation_state: "ai_draft", version: 3, latest_source: "ai_pipeline",
     trashed_at: i === 2 ? 1700000000 : null, sort_order: i, draft_meta_json: "{}",
   };
 }
 
 const calls = [];
+// Mutable so a test can trash a row between two page requests.
+let ch1 = Array.from({ length: 30 }, (_v, i) => tnRow(i, 1 + Math.floor(i / 3)));
 function deps(overrides = {}) {
   return {
     tokens: JSON.stringify({ bsoj: TOKEN, other: OTHER }),
@@ -48,10 +50,17 @@ function deps(overrides = {}) {
         { chapter: 0, verses: 0, tn: 0, tq: 0, twl: 0, tnValidated: 0, tqValidated: 0, versesDone: 0 },
       ] } };
       if (path === "/api/chapters/TIT/1") {
-        return { status: 200, body: { tn: Array.from({ length: 30 }, (_v, i) => tnRow(i, 1 + Math.floor(i / 3))), tq: [] } };
+        return { status: 200, body: { tn: ch1, tq: [] } };
       }
       if (path === "/api/chapters/TIT/2") {
         return { status: 200, body: { tn: Array.from({ length: 20 }, (_v, i) => tnRow(i + 100, 1, 3000)), tq: [] } };
+      }
+      if (path === "/api/chapters/TIT/3") {
+        // Arabic: two UTF-8 bytes per character, so a character count undercounts.
+        return { status: 200, body: { tn: Array.from({ length: 25 }, (_v, i) => tnRow(i + 200, 1, 1500, "ع")), tq: [] } };
+      }
+      if (path === "/api/chapters/TIT/4") {
+        return { status: 200, body: { tn: [tnRow(300, 1, 50000), tnRow(301, 2)], tq: [] } };
       }
       if (path.startsWith("/api/rows/tn/r5")) return { status: 200, body: tnRow(5, 2) };
       return { status: 404, body: { error: "not_found" } };
@@ -156,7 +165,7 @@ console.log("[tools] chunk paging");
   const first = await call("bpt_chunk_work", { book: "TIT", chapter: 1, kind: "tn", verse_start: 1, verse_end: 5 });
   // verses 1-5 hold rows 0..14; row 2 is trashed.
   assert(first.data.total === 14, "verse range filters rows and drops trashed by default");
-  assert(first.data.returned === 10 && first.data.next_cursor === "10", "default page of 10 with a cursor");
+  assert(first.data.returned === 10 && typeof first.data.next_cursor === "string", "default page of 10 with a cursor");
   const second = await call("bpt_chunk_work", { book: "TIT", chapter: 1, kind: "tn", verse_start: 1, verse_end: 5, cursor: first.data.next_cursor });
   assert(second.data.returned === 4 && second.data.next_cursor === null, "last page closes the cursor");
   const ids = new Set([...first.data.rows, ...second.data.rows].map((r) => r.id));
@@ -165,10 +174,32 @@ console.log("[tools] chunk paging");
   assert(withTrash.data.total === 15, "include_trashed returns the trashed row");
 
   // 20 notes of 3000 chars: the byte budget, not the row limit, ends the page.
+  const restart = await call("bpt_chunk_work", { book: "TIT", chapter: 1, kind: "tn", verse_start: 1, verse_end: 5, cursor: null });
+  assert(restart.data.rows[0].id === first.data.rows[0].id, "cursor null means the first page");
+  const junk = await call("bpt_chunk_work", { book: "TIT", chapter: 1, kind: "tn", cursor: "10" });
+  assert(junk.isError, "a cursor this tool did not return -> isError");
+
+  // A row before the cursor is trashed between pages: the keyset cursor
+  // neither skips nor repeats a row, where an offset would skip one.
+  const p1 = await call("bpt_chunk_work", { book: "TIT", chapter: 1, kind: "tn", limit: 5 });
+  ch1 = ch1.map((r) => (r.id === "r0" ? { ...r, trashed_at: 1700000001 } : r));
+  const p2 = await call("bpt_chunk_work", { book: "TIT", chapter: 1, kind: "tn", limit: 5, cursor: p1.data.next_cursor });
+  const lastP1 = Number(p1.data.rows.at(-1).id.slice(1));
+  assert(p2.data.rows[0].id === `r${lastP1 + 1}`, "page 2 starts right after page 1's last row");
+
   const big = await call("bpt_chunk_work", { book: "TIT", chapter: 2, kind: "tn", limit: 25 });
   const text = JSON.stringify(big.data);
   assert(big.data.returned < 20 && big.data.next_cursor !== null, "large notes page early with a cursor");
   assert(text.length < PAGE_BYTE_BUDGET + 2000, `page stays near the byte budget (${text.length} chars)`);
+
+  const arabic = await call("bpt_chunk_work", { book: "TIT", chapter: 3, kind: "tn", limit: 25 });
+  const arabicBytes = byteLength(arabic.data);
+  assert(arabic.data.next_cursor !== null, "Arabic notes page early");
+  assert(arabicBytes < PAGE_BYTE_BUDGET + 2000, `Arabic page stays under the byte budget (${arabicBytes} bytes)`);
+
+  const huge = await call("bpt_chunk_work", { book: "TIT", chapter: 4, kind: "tn" });
+  assert(huge.data.rows[0].truncated === true && huge.data.rows[0].note.length === ROW_TEXT_CAP, "a single huge note is cut and marked truncated");
+  assert(huge.data.returned === 2 && byteLength(huge.data) < 32000, "a huge note does not push the page over 32 KB");
 
   const backwards = await call("bpt_chunk_work", { book: "TIT", chapter: 1, kind: "tn", verse_start: 5, verse_end: 1 });
   assert(backwards.isError, "verse_end before verse_start -> isError");

@@ -81,15 +81,22 @@ export async function handleMcp(request: Request, slug: string, deps: McpDeps): 
   // workspaces exist.
   const expected = tokenFor(deps.tokens, slug);
   const auth = request.headers.get("authorization") ?? "";
-  const presented = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+  const presented = /^bearer /i.test(auth) ? auth.slice(7).trim() : "";
   if (!expected || !presented || !sameToken(presented, expected)) {
     return json({ error: "unauthorized" }, 401);
   }
-  const ws = await deps.findWorkspace(slug);
+  let ws: McpWorkspace | null;
+  try {
+    ws = await deps.findWorkspace(slug);
+  } catch (e) {
+    console.error("mcp workspace lookup failed", e instanceof Error ? e.message : String(e));
+    return json({ error: "workspace_lookup_failed" }, 503);
+  }
   if (!ws) return json({ error: "unknown_workspace" }, 404);
 
-  const text = await request.text();
-  if (text.length > MAX_BODY_BYTES) {
+  const declared = Number(request.headers.get("content-length") ?? 0);
+  const text = declared > MAX_BODY_BYTES ? "" : await request.text();
+  if (declared > MAX_BODY_BYTES || new TextEncoder().encode(text).length > MAX_BODY_BYTES) {
     return json({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Request too large" } }, 413);
   }
   let msg: unknown;
