@@ -4,6 +4,7 @@
 // these helpers are now the canonical Worker-side source.
 
 import usfm from "usfm-js";
+import { isTsMilestone } from "./tsMilestone.ts";
 
 export interface VerseExtract {
   chapter: number;
@@ -924,13 +925,15 @@ export function dropDuplicateSourceMilestones(verseObjects: unknown[]): unknown[
 //
 // Mirror of isInFlowMarker in web/src/lib/usfm.ts — keep in sync. usfm-js stores
 // poetry markers (\q1, \q2, \qa, …) as {type:"quote", tag} and plain-paragraph
-// markers (\p, \m, \nb, \b, …) as {type:"paragraph", tag}.
+// markers (\p, \m, \nb, \b, …) as {type:"paragraph", tag}. A `\ts\*` chunk
+// milestone counts too, in every node shape usfm-js has produced for it
+// (isTsMilestone): 3.5.0 emits {tag:"ts\\*"}, which a legacy-only check missed.
 function isInFlowMarker(node: unknown): boolean {
   const o = node as Record<string, unknown> | null;
   if (!o) return false;
   const t = o["type"];
   if ((t === "paragraph" || t === "quote") && typeof o["tag"] === "string") return true;
-  if (o["tag"] === "ts" && o["content"] === "\\*") return true;
+  if (isTsMilestone(o)) return true;
   return false;
 }
 
