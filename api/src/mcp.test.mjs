@@ -75,6 +75,9 @@ async function apiFor(ws, path) {
       calls.push({ ws: ws.slug, path });
       if (ws.slug === "mltest") {
         if (path === "/api/books") return { status: 200, body: { books: [{ book: "OBA", imported_at: 1 }] } };
+        if (path === "/api/chapters/OBA") return { status: 200, body: { book: "OBA", chapters: [
+          { chapter: 1, verses: 21, tn: 30, tq: 8, twl: 50, tnValidated: 0, tqValidated: 0, versesDone: 0 },
+        ] } };
         return { status: 404, body: { error: "not_found" } };
       }
       if (path === "/api/books") return { status: 200, body: { books: [{ book: "TIT", imported_at: 1 }] } };
@@ -132,10 +135,55 @@ const LINKS = {
   [VIEWER_TOKEN]: { ws: BSOJ, principal: { userId: 3, username: "cy", role: null, linkId: 11 } },
   [GONE_TOKEN]: { ws: null, principal: { userId: 1, username: "ada", role: "editor", linkId: 12 } },
 };
+// Raw reference rows for bpt_package_status, per workspace (packageRefs.ts).
+// bsoj translates; mltest is an authoring project, so nothing is read.
+// TIT references tW kt/god (one part, validated), kt/faith (ai_draft) and
+// other/paul (not loaded yet); tA figs-metaphor (title validated, body edited),
+// figs-explicit (no translated part) and figs-aside (not loaded). Its notes
+// use figs-metaphor as an rc:// link and figs-explicit bare; the templates
+// table stores bare slugs (one with a stray rc:// form, normalized too).
+const TIT_REFS = {
+  translation: true,
+  referenced: [
+    { resource: "tw", article_id: "kt/god" },
+    { resource: "tw", article_id: "kt/faith" },
+    { resource: "tw", article_id: "other/paul" },
+    { resource: "ta", article_id: "translate/figs-metaphor" },
+    { resource: "ta", article_id: "translate/figs-explicit" },
+    { resource: "ta", article_id: "translate/figs-aside" },
+  ],
+  articleUnits: [
+    { resource: "tw", article_id: "kt/god", translation_state: "validated" },
+    { resource: "tw", article_id: "kt/faith", translation_state: "ai_draft" },
+    { resource: "tw", article_id: "kt/love", translation_state: "validated" }, // not referenced
+    { resource: "ta", article_id: "translate/figs-metaphor", translation_state: "edited" },
+    { resource: "ta", article_id: "translate/figs-metaphor", translation_state: "validated" },
+    { resource: "ta", article_id: "translate/figs-metaphor", translation_state: null },
+    { resource: "ta", article_id: "translate/figs-explicit", translation_state: null },
+  ],
+  supportRefs: ["rc://*/ta/man/translate/figs-metaphor", "figs-explicit", "rc://*/ta/man/translate/figs-hyperbole"],
+  templateUnits: [
+    { support_ref: "figs-metaphor", translation_state: "validated" },
+    { support_ref: "figs-metaphor", translation_state: "ai_draft" },
+    { support_ref: "rc://*/ta/man/translate/figs-explicit", translation_state: null },
+    { support_ref: "figs-simile", translation_state: "validated" }, // not used by TIT
+  ],
+};
+const refCalls = [];
+async function refsFor(ws, book) {
+  refCalls.push({ ws: ws.slug, book });
+  if (ws.slug === "mltest") return { translation: false, referenced: [], articleUnits: [], supportRefs: [], templateUnits: [] };
+  return book === "TIT" ? TIT_REFS : { ...TIT_REFS, referenced: [], supportRefs: [] };
+}
 function sessionFor(token) {
   const l = LINKS[token];
   if (!l || !l.ws) return null;
-  return { workspace: l.ws, principal: l.principal, getJson: (path) => apiFor(l.ws, path) };
+  return {
+    workspace: l.ws,
+    principal: l.principal,
+    getJson: (path) => apiFor(l.ws, path),
+    packageRefs: (book) => refsFor(l.ws, book),
+  };
 }
 function deps(overrides = {}) {
   return {
@@ -274,6 +322,28 @@ console.log("[tools] reads");
   assert(row.data.draft_meta_json === undefined, "internal columns are not returned");
   const missing = await call("bpt_get_row", { book: "TIT", kind: "tn", id: "zzzz" });
   assert(missing.isError, "missing row -> isError");
+}
+
+console.log("[tools] package references");
+{
+  refCalls.length = 0;
+  const { data, isError } = await call("bpt_package_status", { book: "TIT" });
+  const r = data.references;
+  assert(!isError && r && refCalls.at(-1).ws === "bsoj" && refCalls.at(-1).book === "TIT", "package status reads the book's references in the link's workspace");
+  assert(r.tw.referenced === 3 && r.tw.loaded === 2, "tW: three referenced, two loaded (an unreferenced article is not counted)");
+  assert(r.tw.by_state.validated === 1 && r.tw.by_state.ai_draft === 1 && r.tw.by_state.not_started === 0, "tW states counted per article");
+  assert(r.ta.referenced === 3 && r.ta.loaded === 2, "tA: a three-part article counts once");
+  assert(r.ta.by_state.edited === 1 && r.ta.by_state.not_started === 1 && r.ta.by_state.validated === 0, "tA parts roll up like the article rail (an edited part beats a validated one)");
+  assert(r.templates.support_references === 3 && r.templates.with_templates === 2, "templates: rc:// and bare support references both match bare template slugs");
+  assert(r.templates.templates === 3 && r.templates.by_state.validated === 1 && r.templates.by_state.ai_draft === 1 && r.templates.by_state.not_started === 1, "every template for a used reference is counted by state");
+  assert(!JSON.stringify(r).includes("kt/god"), "counts only: no article ids are returned");
+
+  const authoring = await call("bpt_package_status", { book: "OBA" }, { token: ML_TOKEN });
+  assert(!authoring.isError && authoring.data.totals.tn === 30, "an authoring project still gets its chapter counts");
+  assert(authoring.data.references === null && /authoring/.test(authoring.data.references_note), "an authoring project gets no article counts, and a note saying why");
+  const { summarizePackageRefs } = await import("./packageRefs.ts");
+  const empty = summarizePackageRefs({ translation: true, referenced: [], articleUnits: [], supportRefs: [], templateUnits: [] });
+  assert(empty.tw.referenced === 0 && empty.templates.templates === 0, "a book with no references counts zero");
 }
 
 console.log("[tools] account link");

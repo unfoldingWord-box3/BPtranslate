@@ -31,6 +31,7 @@ import { workspaceRoutes } from "./workspaceRoutes";
 import { handleMcp, isMcpPath } from "./mcp";
 import { chatLinkRoutes } from "./chatLinkRoutes";
 import { chatRoleFor, claimCode, lookupLink, revokeLink, type ChatLink } from "./chatLinks";
+import { readPackageRefs } from "./packageRefs";
 import { blockViewerWrites } from "./viewerGuard";
 import { listWorkspaces, resolveWorkspaceFresh, workspaceEnv, parseWorkspaceCookie, requireWorkspaceMatch, primeWorkspaces } from "./workspaces";
 
@@ -539,6 +540,8 @@ export default {
             const res = await app.fetch(new Request(new URL(path, request.url)), wsEnv, ctx);
             return { status: res.status, body: await res.json().catch(() => null) };
           },
+          // Read-only D1 exception to the route-handler rule; see packageRefs.ts.
+          packageRefs: (book: string) => readPackageRefs(wsEnv, book),
         };
       };
       return handleMcp(request, {

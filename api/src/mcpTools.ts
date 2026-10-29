@@ -8,7 +8,10 @@
 //
 // Each tool reads through the SAME route handlers the web app uses (`getJson`
 // runs the Hono app in-process), so chat and web never disagree about counts
-// or which rows are live. Tool names carry the bpt_ prefix because BT Servant
+// or which rows are live. One deliberate exception: the article and template
+// counts in bpt_package_status come from session.packageRefs, a read-only D1
+// query (packageRefs.ts), because those list routes are editor-only and the
+// in-process call carries no user. Tool names carry the bpt_ prefix because BT Servant
 // pools every registered server's tools into one namespace.
 
 export interface McpWorkspace {
@@ -24,6 +27,10 @@ export interface McpSession {
   // GET a path on this Worker's own API, in-process, against the session's
   // workspace env. Returns the parsed JSON body and the HTTP status.
   getJson: (path: string) => Promise<{ status: number; body: unknown }>;
+  // The one read that does NOT go through a route handler: the tW/tA articles
+  // and note templates a book references, read straight from the workspace's
+  // D1 (packageRefs.ts says why). Read-only rows; the tool sends counts only.
+  packageRefs: (book: string) => Promise<PackageRefRows>;
 }
 
 export type LinkClaim =
@@ -37,6 +44,7 @@ export interface ToolContext {
 
 import type { ChatPrincipal } from "./chatLinks.ts";
 import { isTsMilestone } from "./tsMilestone.ts";
+import { summarizePackageRefs, type PackageRefRows } from "./packageRefs.ts";
 
 export class ToolInputError extends Error {}
 
@@ -199,7 +207,7 @@ const listBooks: ToolDef = {
 const packageStatus: ToolDef = {
   name: "bpt_package_status",
   description:
-    "What a book still needs: per chapter, how many translation notes (tN) and translation questions (tQ) exist and how many are approved, and how many verses are marked done. Use before suggesting where to start.",
+    "What a book still needs: per chapter, how many translation notes (tN) and translation questions (tQ) exist and how many are approved, and how many verses are marked done. Also, for the whole book, the translationWords (tW) articles its word links point to, the translationAcademy (tA) articles its notes cite, and the note templates for the support references its notes use, each counted by state (not_started, ai_draft, edited, validated). An article counted as referenced but not loaded has not been fetched into the project yet. Use before suggesting where to start.",
   inputSchema: {
     type: "object",
     properties: {
@@ -235,7 +243,19 @@ const packageStatus: ToolDef = {
         tqApproved: c.tqValidated,
       };
     });
-    return { book, totals, chapters: rows };
+    const refs = await session.packageRefs(book);
+    return {
+      book,
+      totals,
+      chapters: rows,
+      ...(refs.translation
+        ? { references: summarizePackageRefs(refs) }
+        : {
+            references: null,
+            references_note:
+              "This project writes its notes in English (authoring mode), so tW/tA articles and note templates are not translated here.",
+          }),
+    };
   },
 };
 
