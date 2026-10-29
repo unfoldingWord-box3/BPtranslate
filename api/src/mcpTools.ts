@@ -36,6 +36,7 @@ export interface ToolContext {
 }
 
 import type { ChatPrincipal } from "./chatLinks.ts";
+import { isTsMilestone } from "./tsMilestone.ts";
 
 export class ToolInputError extends Error {}
 
@@ -393,4 +394,146 @@ const getRow: ToolDef = {
   },
 };
 
-export const TOOLS: ToolDef[] = [whoami, linkAccount, listBooks, packageStatus, chunkWork, getRow];
+// A verse as the chapter route serves it: verses[lane][verse].
+interface VerseEntry {
+  verse: number;
+  verse_end?: number | null;
+  content?: { verseObjects?: unknown[] } | null;
+}
+
+// One verse (or bridged block, `\v 9-10`) of the lane the chunks are read
+// from, and whether a `\ts\*` marker ends it.
+interface VerseUnit {
+  start: number;
+  end: number;
+  ts: boolean;
+}
+
+// Markers are read from ULT; UST carries the same `\ts\*` markers and stands
+// in when ULT is held back (a lane waiting on a replacement is left out of
+// the chapter payload, chapters.ts). The source text only numbers the verses.
+const MARKER_LANES = ["ULT", "UST"];
+const SOURCE_LANES = ["UHB", "UGNT"];
+
+// usfm-js parks a `\ts\*` as the last node of the verse it follows, so a
+// marker anywhere in a verse's top-level nodes ends the chunk at that verse.
+// Verse 0 is the chapter's front matter and belongs to no chunk.
+function verseUnits(laneVerses: Record<string, VerseEntry>): VerseUnit[] {
+  return Object.values(laneVerses)
+    .filter((v) => Number(v.verse) > 0)
+    .map((v) => {
+      const start = Number(v.verse);
+      const end = Math.max(start, Number(v.verse_end ?? start));
+      const nodes = v.content?.verseObjects;
+      return { start, end, ts: Array.isArray(nodes) && nodes.some(isTsMilestone) };
+    })
+    .sort((a, b) => a.start - b.start);
+}
+
+// Groups verse units into chunks: at each marker, or once a chunk spans at
+// least `by` verse numbers. The chunks cover verse 1 through `lastVerse` with
+// no gaps: each starts right after the previous one ends, so a verse missing
+// from the lane still lands in a chunk (with `by`, a missing verse counts
+// toward n, since n is a span of verse numbers), and the last chunk stretches
+// to `lastVerse` so notes past the lane's last verse are not lost. A bridged
+// verse is never split across two chunks.
+function groupUnits(units: VerseUnit[], by: number | null, lastVerse: number): { start: number; end: number }[] {
+  const chunks: { start: number; end: number }[] = [];
+  let next = 1;
+  let cur: { start: number; end: number } | null = null;
+  for (const u of units) {
+    if (cur) cur.end = Math.max(cur.end, u.end);
+    else cur = { start: next, end: Math.max(next, u.end) };
+    const full = by === null ? u.ts : cur.end - cur.start + 1 >= by;
+    if (full) {
+      chunks.push(cur);
+      next = cur.end + 1;
+      cur = null;
+    }
+  }
+  if (cur) chunks.push(cur);
+  const last = chunks.at(-1);
+  if (last && lastVerse > last.end) last.end = lastVerse;
+  return chunks;
+}
+
+const chunkList: ToolDef = {
+  name: "bpt_chunks",
+  description:
+    "Split one chapter into review chunks, each with how many translation notes (tN) and questions (tQ) it holds (trashed ones left out). By default the chapter's \\ts\\* chunk markers in ULT decide the chunks (UST's if ULT is unavailable). Pass by: n to split every n verses instead. If the chapter has no markers and no by is given, the whole chapter comes back as one chunk with a note saying so. The chunks cover the whole chapter with no gaps, from verse 1 to the last verse the text or any note uses. Notes on verse 0 (the chapter introduction), or with no verse number, are counted in outside_chunks. Pass a chunk's start and end to bpt_chunk_work as verse_start and verse_end.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      book: { type: "string", description: "3-letter book code, e.g. TIT" },
+      chapter: { type: "integer", minimum: 1 },
+      by: { type: "integer", minimum: 1, description: "Split every n verses instead of at the chunk markers" },
+    },
+    required: ["session_token", "book", "chapter"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const session = await readerFrom(args, ctx);
+    const book = bookArg(args);
+    const chapter = intArg(args, "chapter", { min: 1, required: true })!;
+    let by: number | null;
+    try {
+      by = intArg(args, "by", { min: 1 }) ?? null;
+    } catch {
+      throw new ToolInputError("by must be a whole number of verses, 1 or more");
+    }
+
+    const body = await apiGet(session, `/api/chapters/${book}/${chapter}`);
+    const verses = (body.verses as Record<string, Record<string, VerseEntry>> | undefined) ?? {};
+    const hasVerses = (l: string) => verseUnits(verses[l] ?? {}).length > 0;
+    const lane = [...MARKER_LANES, ...SOURCE_LANES].find(hasVerses) ?? Object.keys(verses).find(hasVerses);
+    if (!lane) {
+      throw new ToolInputError(`${book} ${chapter} has no verses in this project. Call bpt_package_status for the chapters it has.`);
+    }
+    const units = verseUnits(verses[lane]);
+    const notes: string[] = [];
+    if (lane !== "ULT") notes.push(`ULT is not available in this project, so the ${lane} text was used.`);
+
+    let split: "ts_markers" | "every_n_verses" | "whole_chapter";
+    if (by !== null) {
+      split = "every_n_verses";
+    } else if (units.some((u) => u.ts)) {
+      split = "ts_markers";
+    } else {
+      split = "whole_chapter";
+      notes.push(
+        MARKER_LANES.includes(lane)
+          ? `${lane} has no \\ts\\* markers in this chapter, so it is one chunk. Pass by: n to split it every n verses.`
+          : "The source text carries no chunk markers, so the chapter is one chunk. Pass by: n to split it every n verses.",
+      );
+    }
+    // Live rows only, the same rule bpt_chunk_work and the book summary use.
+    const live = (k: "tn" | "tq") =>
+      ((body[k] as Record<string, unknown>[] | undefined) ?? []).filter((r) => !r.trashed_at).map((r) => Number(r.verse));
+    const tnVerses = live("tn");
+    const tqVerses = live("tq");
+    const lastVerse = Math.max(
+      ...units.map((u) => u.end),
+      ...[...tnVerses, ...tqVerses].filter((v) => Number.isSafeInteger(v) && v > 0),
+    );
+    const ranges = groupUnits(units, by, lastVerse);
+    const inRange = (vs: number[], s: number, e: number) => vs.filter((v) => v >= s && v <= e).length;
+    const out = ranges.map((c) => ({ ...c, tn: inRange(tnVerses, c.start, c.end), tq: inRange(tqVerses, c.start, c.end) }));
+    const tnIn = out.reduce((n, c) => n + c.tn, 0);
+    const tqIn = out.reduce((n, c) => n + c.tq, 0);
+
+    return {
+      book,
+      chapter,
+      lane,
+      split,
+      by,
+      note: notes.length ? notes.join(" ") : null,
+      total_chunks: out.length,
+      chunks: out,
+      outside_chunks: { tn: tnVerses.length - tnIn, tq: tqVerses.length - tqIn },
+    };
+  },
+};
+
+export const TOOLS: ToolDef[] = [whoami, linkAccount, listBooks, packageStatus, chunkWork, getRow, chunkList];
