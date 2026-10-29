@@ -6,8 +6,8 @@
 // bot keeps the token in that user's BT Servant memory and sends it back as
 // `session_token` on every call. The link names the workspace and the user;
 // BPtranslate re-reads the user's role from that workspace's tables on every
-// call, so the model never chooses which project or person it acts as; it can
-// only present a secret it was given.
+// call, so the model can only act as this user, in a project this user
+// linked; it can only present a secret it was given.
 //
 // Limits, by design:
 // - a link is bound to the workspace the code was issued in (issue #676: one

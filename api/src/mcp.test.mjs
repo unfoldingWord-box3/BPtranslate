@@ -237,6 +237,7 @@ console.log("[tools] account link");
   assert(!ok.isError && ok.data.session_token === GOOD_TOKEN && ok.data.linked_user === "ada", "link returns the token and user");
   assert(ok.data.workspace.slug === "bsoj" && ok.data.workspace.label === "BSOJ", "link names the code's workspace and label");
   assert(ok.data.workspace.binding === undefined, "link does not expose the D1 binding name");
+  assert(ok.data.access === "edit", "link says an editor can edit");
   const ml = await call("bpt_link_account", { code: "MLMLMLML" });
   assert(ml.data.workspace.slug === "mltest", "a code from another workspace links that workspace");
   const bad = await call("bpt_link_account", { code: "ZZZZ-ZZZZ" });

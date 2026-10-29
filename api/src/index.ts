@@ -30,7 +30,7 @@ import { attachAuth, requireAuth, requireCsrf, mintDevToken, startDcsAuth, callb
 import { workspaceRoutes } from "./workspaceRoutes";
 import { handleMcp, isMcpPath } from "./mcp";
 import { chatLinkRoutes } from "./chatLinkRoutes";
-import { chatRoleFor, claimCode, lookupLink, type ChatLink } from "./chatLinks";
+import { chatRoleFor, claimCode, lookupLink, revokeLink, type ChatLink } from "./chatLinks";
 import { blockViewerWrites } from "./viewerGuard";
 import { listWorkspaces, resolveWorkspaceFresh, workspaceEnv, parseWorkspaceCookie, requireWorkspaceMatch, primeWorkspaces } from "./workspaces";
 
@@ -549,10 +549,17 @@ export default {
         },
         // The code is spent even if its workspace has since been removed;
         // the reviewer gets the same "did not work" answer as a bad code.
+        // A link whose token never reached the bot is revoked, so it does
+        // not sit in the user's link list.
         claimLink: async (code) => {
           const r = await claimCode(env, code);
           if (!r.ok) return r;
-          const s = await sessionFor(r.link);
+          let s: Awaited<ReturnType<typeof sessionFor>> = null;
+          try {
+            s = await sessionFor(r.link);
+          } finally {
+            if (!s) await revokeLink(env, r.link.userId, r.link.linkId);
+          }
           return s ? { ok: true, token: r.token, expiresAt: r.expiresAt, workspace: s.workspace, principal: s.principal } : { ok: false };
         },
       });

@@ -152,7 +152,7 @@ const whoami: ToolDef = {
 const linkAccount: ToolDef = {
   name: "bpt_link_account",
   description:
-    "Link this chat user to their BPtranslate account with the one-time code from the web app (account menu, Link chat assistant). The code belongs to one language project. Returns a session_token for that project: save it in this user's memory, pass it to every other bpt_ tool, and never show it in a message. Only in a one-to-one chat, never in a group.",
+    "Link this chat user to their BPtranslate account with the one-time code from the web app (account menu, Link chat assistant). The code belongs to one language project. Returns a session_token for that project: save it in this user's memory next to that project (a user may link several projects, one token each), pass it to every other bpt_ tool for that project, and never show it in a message. Only in a one-to-one chat, never in a group.",
   inputSchema: {
     type: "object",
     properties: { code: { type: "string", description: "The 8-character code, e.g. ABCD-EFGH" } },
@@ -170,6 +170,7 @@ const linkAccount: ToolDef = {
     return {
       linked_user: r.principal.username,
       role: r.principal.role,
+      access: r.principal.role === "editor" ? "edit" : "read_only",
       workspace: r.workspace,
       session_token: r.token,
       expires_at: new Date(r.expiresAt * 1000).toISOString(),

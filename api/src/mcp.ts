@@ -11,8 +11,10 @@
 // token is one secret (MCP_SERVICE_TOKEN), and the workspace comes from the
 // reviewer's account link: every tool but bpt_link_account takes the
 // session_token, and the link row names the workspace the code was issued in.
-// Neither the workspace nor a user is ever a tool argument, so the model
-// cannot pick which project or person it acts as.
+// Neither the workspace nor a user is ever a tool argument: the model can
+// reach only the projects this user linked, and only as this user. A user
+// with several links has one token each; which one the bot sends is the
+// mode's bookkeeping, not a permission boundary.
 //
 // Auth: this runs from the fetch wrapper in index.ts BEFORE the cookie-based
 // workspace swap and before any Hono middleware, so no cookie, CSRF token or
