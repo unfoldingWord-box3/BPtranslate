@@ -68,6 +68,13 @@ For the full corpus, see the memory index at
 `C:\Users\benja\.claude\projects\C--Users-benja-Documents-GitHub-bible-editor\memory\MEMORY.md`.
 Highlights that bite repeatedly:
 
+- **The chat MCP endpoint (`POST /api/mcp/<workspace>`, `api/src/mcp.ts`) never uses the cookie
+  workspace.** It is handled in the `index.ts` fetch wrapper before the cookie swap and before every Hono
+  middleware. The workspace comes from the URL, the bearer token is per workspace (`MCP_SERVICE_TOKENS`
+  secret, JSON `{"<slug>":"<token>"}`, 32+ chars), and an unknown slug is a 404, never the `list[0]`
+  fallback the cookie path uses. Tools read through the same route handlers in-process (`app.fetch`), so
+  they see what the web app sees. BT Servant registers one MCP server per language project. Writes wait
+  for the account link (plan: "Book packages via chat" Claude Doc, 2026-10-22).
 - **Local alignment testing needs the `mltest` workspace, not the default.** `POST /api/auth/dev`
   with no `be_ws` cookie lands on `bsoj` (the first entry in `WORKSPACES`). Its `ar-bsoj` preset
   quarantines the ULT/UST lanes as soon as verses exist (`ensureLaneState` in

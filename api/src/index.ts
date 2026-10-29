@@ -28,8 +28,9 @@ import { templates } from "./templates";
 import { syncTemplates } from "./templateSync";
 import { attachAuth, requireAuth, requireCsrf, mintDevToken, startDcsAuth, callbackDcsAuth, authMe, authLogout, refreshToken, updateLastLocation, currentUserId } from "./auth";
 import { workspaceRoutes } from "./workspaceRoutes";
+import { handleMcp, mcpWorkspaceSlug } from "./mcp";
 import { blockViewerWrites } from "./viewerGuard";
-import { listWorkspaces, resolveWorkspaceFresh, workspaceEnv, parseWorkspaceCookie, requireWorkspaceMatch, primeWorkspaces } from "./workspaces";
+import { listWorkspaces, resolveWorkspaceFresh, workspaceEnv, parseWorkspaceCookie, requireWorkspaceMatch, primeWorkspaces, type Workspace } from "./workspaces";
 
 export interface Env {
   DB: D1Database;
@@ -110,6 +111,10 @@ export interface Env {
   // Unset/empty/malformed means "one implicit workspace on the DB binding
   // above", so every existing deployment is unaffected until this is set.
   WORKSPACES?: string;
+  // Secret. JSON map of workspace slug -> bearer token for the chat MCP
+  // endpoint (POST /api/mcp/<slug>, see mcp.ts). Unset = the endpoint
+  // answers 401 to everyone.
+  MCP_SERVICE_TOKENS?: string;
   // Second binding to the SAME database as DB — holds org-independent state
   // (accounts, sessions, lexicon, alignment frequencies, UI-string overrides)
   // so switching workspaces doesn't log a user out or blank their lexicon.
@@ -511,6 +516,26 @@ export default {
     // claimed on a sibling isolate isn't silently served as list[0] (a
     // different tenant's D1). A genuinely-dead slug still lands on list[0].
     await primeWorkspaces(env);
+    // The chat MCP endpoint picks its workspace from the URL, never the
+    // cookie, and must not fall back to list[0] on an unknown slug.
+    const mcpSlug = mcpWorkspaceSlug(request.url);
+    if (mcpSlug !== null) {
+      return handleMcp(request, mcpSlug, {
+        tokens: env.MCP_SERVICE_TOKENS,
+        findWorkspace: async (slug) => {
+          const ws = await resolveWorkspaceFresh(env, slug);
+          return ws.slug === slug ? ws : null;
+        },
+        getJson: async (ws, path) => {
+          const res = await app.fetch(
+            new Request(new URL(path, request.url)),
+            workspaceEnv(env, ws as Workspace),
+            ctx,
+          );
+          return { status: res.status, body: await res.json().catch(() => null) };
+        },
+      });
+    }
     const ws = await resolveWorkspaceFresh(env, parseWorkspaceCookie(request));
     return app.fetch(request, workspaceEnv(env, ws), ctx);
   },
