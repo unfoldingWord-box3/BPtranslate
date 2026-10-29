@@ -191,7 +191,17 @@ console.log("[tools] account link");
     threw = e;
   }
   assert(threw && !threw.message.includes("bpt_secret_wrong"), "principalFrom refuses without echoing the token");
-  assert((await principalFrom({ session_token: GOOD_TOKEN }, ctx)).username === "ada", "principalFrom resolves a good token");
+  assert((await principalFrom({ session_token: GOOD_TOKEN }, ctx)).username === "ada", "principalFrom resolves an editor's token");
+  const viewerCtx = { resolveSession: async () => ({ userId: 3, username: "cy", role: "viewer", linkId: 4 }) };
+  threw = null;
+  try {
+    await principalFrom({ session_token: GOOD_TOKEN }, viewerCtx);
+  } catch (e) {
+    threw = e;
+  }
+  assert(threw && /cannot edit/.test(threw.message), "principalFrom refuses a linked viewer");
+  const objToken = await call("bpt_whoami", { session_token: { not: "a string" } });
+  assert(objToken.data.linked_user === null, "a non-string token resolves to no one");
 }
 
 console.log("[tools] chunk paging");

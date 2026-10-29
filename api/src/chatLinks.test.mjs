@@ -33,9 +33,9 @@ function freshDb() {
       dcs_user_id INTEGER NOT NULL UNIQUE,
       dcs_username TEXT NOT NULL
     );
-    CREATE TABLE user_roles (dcs_username TEXT PRIMARY KEY, role TEXT NOT NULL);
+    CREATE TABLE user_roles (dcs_username TEXT PRIMARY KEY, role TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'manual', synced_at INTEGER);
     INSERT INTO users (id, dcs_user_id, dcs_username) VALUES (1, 101, 'ada'), (2, 102, 'bo'), (3, 103, 'cy');
-    INSERT INTO user_roles VALUES ('ada', 'editor'), ('bo', 'admin'), ('cy', 'viewer');
+    INSERT INTO user_roles (dcs_username, role) VALUES ('ada', 'editor'), ('bo', 'admin'), ('cy', 'viewer');
   `);
   db.exec(readFileSync(new URL("../migrations/0075_chat_links.sql", import.meta.url), "utf8"));
   return db;
@@ -67,7 +67,8 @@ assert(normalizeCode(" abcd-efgh ") === "ABCDEFGH", "codes are normalized: case,
 {
   const { code, expiresAt } = await issueCode(env, 1, "bsoj");
   assert(/^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/.test(code), `code shape ABCD-EFGH without 0/O/1/I (${code})`);
-  assert(expiresAt - Math.floor(Date.now() / 1000) === 600, "code lives 10 minutes");
+  const ttl = expiresAt - Math.floor(Date.now() / 1000);
+  assert(ttl >= 599 && ttl <= 600, "code lives 10 minutes");
   const stored = raw.prepare("SELECT code_hash FROM chat_link_codes").all();
   assert(stored.length === 1 && !stored[0].code_hash.includes(normalizeCode(code)), "only a hash is stored");
 
@@ -85,6 +86,14 @@ assert(normalizeCode(" abcd-efgh ") === "ABCDEFGH", "codes are normalized: case,
   const second = await issueCode(env, 1, "bsoj");
   assert(!(await claimCode(env, first.code, "bsoj")).ok, "a newer code cancels the older unclaimed one");
   assert((await claimCode(env, second.code, "bsoj")).ok, "the newest code works");
+
+  const inA = await issueCode(env, 1, "bsoj");
+  await issueCode(env, 1, "mltest");
+  assert((await claimCode(env, inA.code, "bsoj")).ok, "a code in another workspace does not cancel this one");
+
+  raw.prepare("INSERT INTO chat_link_codes (code_hash, user_id, workspace_slug, expires_at) VALUES ('stale', 2, 'bsoj', 1)").run();
+  await issueCode(env, 1, "bsoj");
+  assert(!raw.prepare("SELECT 1 FROM chat_link_codes WHERE code_hash = 'stale'").get(), "codes older than a day are purged");
 
   const old = await issueCode(env, 1, "bsoj");
   raw.prepare("UPDATE chat_link_codes SET expires_at = 1 WHERE claimed_at IS NULL").run();
@@ -106,7 +115,7 @@ console.log("[tokens]");
   assert((await resolveToken(env, token, "bsoj")).role === "viewer", "role is re-read on every call");
   raw.prepare("DELETE FROM user_roles WHERE dcs_username = 'ada'").run();
   assert((await resolveToken(env, token, "bsoj")).role === null, "removed from the team -> no role");
-  raw.prepare("INSERT INTO user_roles VALUES ('ada', 'editor')").run();
+  raw.prepare("INSERT INTO user_roles (dcs_username, role) VALUES ('ada', 'editor')").run();
 
   const links = await listLinks(env, 1);
   assert(links.some((l) => l.id === principal.linkId && l.workspace === "bsoj"), "the user sees the link");

@@ -57,7 +57,11 @@ export function ChatLinkDialog({ open, onClose }: Props) {
   const remaining = code ? code.expiresAt - now : 0;
   useEffect(() => {
     if (!open || !code || code.expiresAt <= Math.floor(Date.now() / 1000)) return;
-    const id = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 1000);
+    const id = setInterval(() => {
+      const t = Math.floor(Date.now() / 1000);
+      setNow(t);
+      if (t >= code.expiresAt) clearInterval(id);
+    }, 1000);
     return () => clearInterval(id);
   }, [open, code]);
 
@@ -133,7 +137,7 @@ export function ChatLinkDialog({ open, onClose }: Props) {
               <Stack key={l.id} direction="row" alignItems="center" spacing={1}>
                 <Box sx={{ flex: 1 }}>
                   <Typography variant="body2">
-                    {t("chatLink.linked", { date: formatDate(l.createdAt) })}
+                    {t("chatLink.linked", { date: formatDate(l.createdAt) })} · {l.workspace}
                   </Typography>
                   <Typography variant="caption" color="text.secondary">
                     {lastUsed(l)} · {t("chatLink.linkExpires", { date: formatDate(l.expiresAt) })}

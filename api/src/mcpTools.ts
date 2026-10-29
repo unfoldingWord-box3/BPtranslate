@@ -26,13 +26,21 @@ const NOT_LINKED =
   "This chat is not linked to a BPtranslate account, or the link expired or was revoked. " +
   "In the BPtranslate web app, open the account menu, choose Link chat assistant, and send the code here.";
 
-// Who a tool call acts as. The token is a secret the user's own memory holds;
-// it is never echoed back, not even in an error.
+// Who a write acts as: the one entry point for tools that change anything.
+// Refuses anyone who is not an editor in this workspace right now (chat caps
+// admins at editor), so a write tool cannot forget the role check. The token
+// is a secret the user's own memory holds; it is never echoed back, not even
+// in an error.
 export async function principalFrom(args: Record<string, unknown>, ctx: ToolContext): Promise<ChatPrincipal> {
   const token = args.session_token;
   if (typeof token !== "string" || !token) throw new ToolInputError(NOT_LINKED);
   const principal = await ctx.resolveSession(token);
   if (!principal) throw new ToolInputError(NOT_LINKED);
+  if (principal.role !== "editor") {
+    throw new ToolInputError(
+      `${principal.username} cannot edit in this project. Ask a project admin to add them to the Door43 team.`,
+    );
+  }
   return principal;
 }
 
@@ -115,7 +123,7 @@ const whoami: ToolDef = {
     if (args.session_token === undefined) {
       return { ...base, linked_user: null, access: "read_only", note: NOT_LINKED };
     }
-    const p = await ctx.resolveSession(String(args.session_token));
+    const p = typeof args.session_token === "string" ? await ctx.resolveSession(args.session_token) : null;
     if (!p) return { ...base, linked_user: null, access: "read_only", note: NOT_LINKED };
     return { ...base, linked_user: p.username, role: p.role, access: p.role === "editor" ? "edit" : "read_only" };
   },

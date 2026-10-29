@@ -21,7 +21,7 @@
 // move onto that and tokens go away.
 
 import type { Env } from "./index";
-import { effectiveRole, type Role } from "./auth.ts";
+import { effectiveRole, maybeResyncTeamRole, type Role } from "./auth.ts";
 import { sharedDb } from "./workspaces.ts";
 
 export const CODE_TTL_SECONDS = 10 * 60;
@@ -71,14 +71,20 @@ function chatRole(role: Role | null): Role | null {
 }
 
 // Issues a fresh code for this user in this workspace. Any earlier unclaimed
-// code of theirs stops working, so only the newest code on screen is live.
+// code of theirs for the same workspace stops working, so only the newest
+// code on screen is live. Codes older than a day, claimed or not, are purged
+// here too; the claim is recorded on the chat_links row.
 export async function issueCode(env: Env, userId: number, workspaceSlug: string) {
   const db = sharedDb(env);
   const code = randomCode();
-  const expiresAt = now() + CODE_TTL_SECONDS;
+  const t = now();
+  const expiresAt = t + CODE_TTL_SECONDS;
   await db
-    .prepare(`DELETE FROM chat_link_codes WHERE user_id = ?1 AND claimed_at IS NULL`)
-    .bind(userId)
+    .prepare(
+      `DELETE FROM chat_link_codes
+        WHERE (user_id = ?1 AND workspace_slug = ?2 AND claimed_at IS NULL) OR expires_at < ?3`,
+    )
+    .bind(userId, workspaceSlug, t - 24 * 60 * 60)
     .run();
   await db
     .prepare(
@@ -174,8 +180,16 @@ export async function resolveToken(
   const t = now();
   if (!row || row.revokedAt || row.expiresAt <= t || row.ws !== workspaceSlug) return null;
   if (!row.lastUsedAt || t - row.lastUsedAt > LAST_USED_GRANULARITY) {
-    await db.prepare(`UPDATE chat_links SET last_used_at = ?1 WHERE id = ?2`).bind(t, row.id).run();
+    // Bookkeeping only; a failed write must not fail the caller's request.
+    try {
+      await db.prepare(`UPDATE chat_links SET last_used_at = ?1 WHERE id = ?2`).bind(t, row.id).run();
+    } catch (e) {
+      console.warn("chat link last_used_at write failed", e instanceof Error ? e.message : String(e));
+    }
   }
+  // Same best-effort Door43 team re-check the web app runs on session
+  // refresh, so removing someone from the team reaches chat-only users too.
+  await maybeResyncTeamRole(env, row.username);
   return {
     userId: row.userId,
     username: row.username,
