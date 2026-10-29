@@ -54,7 +54,7 @@ function baseEnv(db) {
 
 async function makeToken({ sub = "1", role = "editor", username = "alice" } = {}) {
   const now = Math.floor(Date.now() / 1000);
-  return new SignJWT({ username, role })
+  return new SignJWT({ username, role, ws: "default" })
     .setProtectedHeader({ alg: "HS256" })
     .setSubject(sub)
     .setIssuer(ISSUER)

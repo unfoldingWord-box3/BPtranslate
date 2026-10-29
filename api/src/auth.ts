@@ -143,6 +143,15 @@ export interface AuthClaims {
   userId: number;
   username?: string;
   role?: Role;
+  // Slug of the workspace the token was minted for (the `ws` claim). The role
+  // only holds there; see attachAuth.
+  workspace?: string;
+}
+
+// The workspace this request resolved to (index.ts picks it from the be_ws
+// cookie). Same fallback as requireWorkspaceMatch.
+function requestWorkspace(env: Env): string {
+  return env.WORKSPACE_SLUG ?? "default";
 }
 
 // Org granted read-only access via DCS membership. Lookup is case-insensitive;
@@ -315,6 +324,7 @@ export async function verifyToken(token: string, env: Env): Promise<AuthClaims |
       userId,
       username: typeof payload.username === "string" ? payload.username : undefined,
       role,
+      workspace: typeof payload.ws === "string" ? payload.ws : undefined,
     };
   } catch {
     return null;
@@ -327,11 +337,20 @@ export async function verifyToken(token: string, env: Env): Promise<AuthClaims |
 // cutover — has been removed; there are no non-browser callers of this API.
 // Doesn't reject on missing/invalid token; that's requireAuth's job. Running
 // on every request lets reads become user-aware later without re-plumbing.
+//
+// The token only counts in the workspace it was minted for (issue #680). The
+// workspace comes from the be_ws cookie, which nothing checks against the
+// user, so without this an editor in org A could hand-edit be_ws and write to
+// org B with A's role. A token for another workspace, or one with no `ws`
+// claim (minted before #680), is treated as no sign-in at all rather than as
+// a role-less one: the 401 that follows is what makes the browser silently
+// call /api/auth/refresh (web/src/sync/api.ts), and refresh re-derives the
+// role for the workspace this request resolved to. A 403 would strand it.
 export const attachAuth: MiddlewareHandler = async (c, next) => {
   const token = getCookie(c, ACCESS_COOKIE);
   if (token) {
     const claims = await verifyToken(token, c.env as Env);
-    if (claims) {
+    if (claims && claims.workspace === requestWorkspace(c.env as Env)) {
       (c as AppContext).set("userId", claims.userId);
       if (claims.username) (c as AppContext).set("username", claims.username);
       if (claims.role) (c as AppContext).set("role", claims.role);
@@ -484,14 +503,21 @@ async function verifyStateCookie(token: string, key: Uint8Array): Promise<string
 // Exported so workspaceRoutes.ts's POST /api/workspaces/:slug can re-mint the
 // Access cookie with a role re-resolved against the TARGET workspace's DB
 // after a switch — reusing this rather than re-implementing the signing.
+//
+// `workspace` is the slug the role was resolved against, and is signed in as
+// the `ws` claim (attachAuth rejects the token anywhere else, #680). It is a
+// parameter rather than read off c.env because two callers mint for a
+// workspace other than the one this request resolved to: the OAuth callback
+// (the workspace login resolution picked) and the switch route (the target).
 export async function mintToken(
   c: AppContext,
   userId: number,
   username: string,
   role: Role,
+  workspace: string,
 ): Promise<string> {
   const key = signingKey(c.env)!;
-  return new SignJWT({ username, role })
+  return new SignJWT({ username, role, ws: workspace })
     .setProtectedHeader({ alg: "HS256" })
     .setSubject(String(userId))
     .setIssuer(c.env.JWT_ISSUER)
@@ -891,7 +917,7 @@ export async function callbackDcsAuth(c: AppContext): Promise<Response> {
     }
   }
 
-  const token = await mintToken(c, userRow.id, dcsUser.login, role);
+  const token = await mintToken(c, userRow.id, dcsUser.login, role, resolution.workspace.slug);
   const { sessionId, csrfToken } = await startSession(c, userRow.id);
   setSessionCookies(c, token, sessionId, csrfToken);
 
@@ -1004,7 +1030,7 @@ export async function refreshToken(c: AppContext): Promise<Response> {
     return c.json({ error: "forbidden", reason: "not_an_editor" }, 403);
   }
 
-  const newToken = await mintToken(c, session.user_id, lookupName, role);
+  const newToken = await mintToken(c, session.user_id, lookupName, role, requestWorkspace(c.env));
   rotateAccessCookie(c, newToken);
   await sharedDb(c.env).prepare(
     `UPDATE sessions SET last_seen_at = unixepoch() WHERE id = ?1`,
@@ -1063,7 +1089,7 @@ export async function mintDevToken(c: AppContext, username: string): Promise<Res
     if (!row) return c.json({ error: "user_create_failed" }, 500);
     userId = row.id;
   }
-  const token = await mintToken(c, userId, username, role);
+  const token = await mintToken(c, userId, username, role, requestWorkspace(c.env));
   const { sessionId, csrfToken } = await startSession(c, userId);
   setSessionCookies(c, token, sessionId, csrfToken);
   // Return MeResponse shape — same as /api/auth/me — so the client can take

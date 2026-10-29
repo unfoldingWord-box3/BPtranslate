@@ -188,6 +188,10 @@ Highlights that bite repeatedly:
   reading off a `BASE_ENV` reference). More generally: **per-org identity cached in a token (e.g. a `role` claim) has to
   be re-resolved when the org changes, not just at sign-in** — a workspace/org switch that only swaps the active database
   while leaving a stale claim in the session token is a privilege-escalation seam, not a cosmetic bug.
+  Since #680 the access JWT carries a `ws` claim and `attachAuth` treats a token whose `ws` differs from the
+  request's resolved workspace (or is missing) as signed out, so the client's 401 refresh re-derives the role.
+  Every `mintToken` call must name the workspace the role was resolved in, and a test that signs a JWT by hand
+  must include `ws` equal to its env's `WORKSPACE_SLUG` (`"default"` when unset) or every request 401s.
 - **`node:sqlite` (`DatabaseSync`) works for D1 schema/trigger testing.** Node 24's built-in SQLite supports `unixepoch()`,
   `?1`/`?2` positional params, triggers with `RAISE(ABORT)`, and CHECK constraints. Use an in-memory DB + the migration
   CREATE TABLE/TRIGGER statements to unit-test schema invariants without Miniflare. Wrap multi-statement batches in

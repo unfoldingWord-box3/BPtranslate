@@ -315,7 +315,7 @@ workspaceRoutes.post("/:slug", async (c) => {
       }
       const role: Role = (await effectiveRole(targetEnv, username)) ?? "viewer";
       if (userId !== null) {
-        const newAccessToken = await mintToken(c, userId, username, role);
+        const newAccessToken = await mintToken(c, userId, username, role, ws.slug);
         rotateAccessCookie(c, newAccessToken);
       }
     } catch {

@@ -105,7 +105,7 @@ function baseEnv(db, dcsServiceToken) {
 
 async function makeToken({ sub = "1", role = "admin", username = "ada" } = {}) {
   const now = Math.floor(Date.now() / 1000);
-  return new SignJWT({ username, role })
+  return new SignJWT({ username, role, ws: "default" })
     .setProtectedHeader({ alg: "HS256" })
     .setSubject(sub)
     .setIssuer(ISSUER)
