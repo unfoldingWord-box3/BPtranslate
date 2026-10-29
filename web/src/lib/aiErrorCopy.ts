@@ -101,7 +101,17 @@ export function adminKeyWarningCopyKey(
 // `kind` is whatever string the server wrote, so it may be a kind this build
 // doesn't know. Own-property check: a plain index would return Object.prototype
 // members for "constructor" or "toString" and hand a function to t().
-export function errorCopy(kind: string | null, t: TFunction): string {
+//
+// `message` is the job's error_message. sdk_error's copy says retrying usually
+// fixes it, which is wrong when the dispatch POST was refused with a 4xx
+// (pipelines.ts writes "upstream <status>: …"): the same request gets the same
+// refusal, so it gets provider_error's "check the AI settings" copy (#678).
+// 408 and 429 are 4xx but clear on a retry, so they keep the generic copy.
+export function errorCopy(kind: string | null, t: TFunction, message?: string | null): string {
+  if (kind === "sdk_error" && message) {
+    const status = /^upstream (4\d\d)\b/.exec(message)?.[1];
+    if (status && status !== "408" && status !== "429") return t(ERROR_COPY_KEY.provider_error);
+  }
   const key = kind && Object.hasOwn(ERROR_COPY_KEY, kind) ? ERROR_COPY_KEY[kind as PipelineErrorKind] : undefined;
   return key ? t(key) : t("aiStudio.unrecognizedError", { kind });
 }
