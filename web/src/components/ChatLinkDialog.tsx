@@ -45,13 +45,17 @@ export function ChatLinkDialog({ open, onClose }: Props) {
     }
   }, []);
 
-  // Load the list each time the dialog opens, and drop a stale code.
+  // Load the list each time the dialog opens.
   useEffect(() => {
-    if (!open) return;
+    if (open) void refresh();
+  }, [open, refresh]);
+
+  // Drop the code and any error on close, so the next open starts clean.
+  const close = () => {
     setCode(null);
     setError(false);
-    void refresh();
-  }, [open, refresh]);
+    onClose();
+  };
 
   // Tick once a second while a code is showing, for the countdown.
   const remaining = code ? code.expiresAt - now : 0;
@@ -95,7 +99,7 @@ export function ChatLinkDialog({ open, onClose }: Props) {
       : t("chatLink.lastUsed", { when: formatDate(l.lastUsedAt) });
 
   return (
-    <Dialog open={open} onClose={onClose} fullWidth maxWidth="sm">
+    <Dialog open={open} onClose={close} fullWidth maxWidth="sm">
       <DialogTitle>{t("chatLink.title")}</DialogTitle>
       <DialogContent>
         <Typography variant="body2" sx={{ mb: 2 }}>
@@ -152,7 +156,7 @@ export function ChatLinkDialog({ open, onClose }: Props) {
         )}
       </DialogContent>
       <DialogActions>
-        <Button onClick={onClose}>{t("chatLink.close")}</Button>
+        <Button onClick={close}>{t("chatLink.close")}</Button>
       </DialogActions>
     </Dialog>
   );
