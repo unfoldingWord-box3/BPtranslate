@@ -68,16 +68,18 @@ For the full corpus, see the memory index at
 `C:\Users\benja\.claude\projects\C--Users-benja-Documents-GitHub-bible-editor\memory\MEMORY.md`.
 Highlights that bite repeatedly:
 
-- **The chat MCP endpoint (`POST /api/mcp/<workspace>`, `api/src/mcp.ts`) never uses the cookie
-  workspace.** It is handled in the `index.ts` fetch wrapper before the cookie swap and before every Hono
-  middleware. The workspace comes from the URL, the bearer token is per workspace (`MCP_SERVICE_TOKENS`
-  secret, JSON `{"<slug>":"<token>"}`, 32+ chars), and an unknown slug is a 404, never the `list[0]`
-  fallback the cookie path uses. Tools read through the same route handlers in-process (`app.fetch`), so
-  they see what the web app sees. BT Servant registers one MCP server per language project (plan: "Book packages via chat" Claude Doc,
-  2026-10-22). A chat user acts as a person only through a `session_token` from `bpt_link_account`
-  (`api/src/chatLinks.ts`, #669): one-time code from the web app, 30-day token, hash-only storage, bound
-  to one workspace, role re-read every call and capped at editor. Write tools must call
-  `principalFrom()` in `mcpTools.ts`; never accept a username or user id as a tool argument.
+- **The chat MCP endpoint (`POST /api/mcp`, `api/src/mcp.ts`) is one server for every workspace, and the
+  account link picks the workspace** (#676). BT Servant pools every registered server's tools for every
+  org, so per-workspace servers would put duplicate `bpt_*` tool sets in front of the bot. The bearer is one
+  secret (`MCP_SERVICE_TOKEN`, 32+ chars). Every tool but `bpt_link_account` requires the `session_token`;
+  the `chat_links` row names the workspace the code was issued in (`api/src/chatLinks.ts`, #669), and a link
+  whose workspace is gone counts as not linked, never the `list[0]` fallback the cookie path uses. It is
+  handled in the `index.ts` fetch wrapper before the cookie swap and before every Hono middleware. Tools read
+  through the same route handlers in-process (`app.fetch`) on that workspace's env, so they see what the web
+  app sees. Links: one-time code from the web app (any signed-in user, viewers included), 30-day token,
+  hash-only storage, role re-read from the link's workspace on every call and capped at editor. Reads go
+  through `readerFrom()` and write tools must call `principalFrom()` (editor only) in `mcpTools.ts`; never
+  accept a workspace, username or user id as a tool argument.
 - **Local alignment testing needs the `mltest` workspace, not the default.** `POST /api/auth/dev`
   with no `be_ws` cookie lands on `bsoj` (the first entry in `WORKSPACES`). Its `ar-bsoj` preset
   quarantines the ULT/UST lanes as soon as verses exist (`ensureLaneState` in

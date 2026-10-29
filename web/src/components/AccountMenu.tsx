@@ -58,13 +58,10 @@ type Props = {
   username?: string | null;
   onLogout?: () => void;
   isAdmin?: boolean;
-  // Admin or editor. Linking a chat only matters for writes, which viewers
-  // cannot make, so the server refuses them and the menu hides the item.
-  canEdit?: boolean;
   onOpenClassic?: () => void;
 };
 
-export function AccountMenu({ username, onLogout, isAdmin, canEdit, onOpenClassic }: Props) {
+export function AccountMenu({ username, onLogout, isAdmin, onOpenClassic }: Props) {
   const { t } = useTranslation();
   const [anchor, setAnchor] = useState<null | HTMLElement>(null);
   const [langAnchor, setLangAnchor] = useState<null | HTMLElement>(null);
@@ -241,7 +238,9 @@ export function AccountMenu({ username, onLogout, isAdmin, canEdit, onOpenClassi
           </MenuItem>
         )}
         {(onOpenClassic || isAdmin) && <Divider />}
-        {canEdit && (
+        {/* Any signed-in user: the link is how the chat knows which project to
+            read, and the server lets only editors save over it. */}
+        {username && (
           <MenuItem
             onClick={() => {
               setAnchor(null);
@@ -268,7 +267,7 @@ export function AccountMenu({ username, onLogout, isAdmin, canEdit, onOpenClassi
       </Menu>
       {/* Lives outside the Menu: closing the menu unmounts its children, which
           would take an open dialog with it. */}
-      {canEdit && <ChatLinkDialog open={chatLinkOpen} onClose={() => setChatLinkOpen(false)} />}
+      {username && <ChatLinkDialog open={chatLinkOpen} onClose={() => setChatLinkOpen(false)} />}
     </>
   );
 }

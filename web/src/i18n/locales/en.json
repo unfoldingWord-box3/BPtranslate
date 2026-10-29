@@ -700,7 +700,7 @@
   "chatLink": {
     "menuItem": "Link chat assistant",
     "title": "Link chat assistant",
-    "intro": "Link the BT Servant chat to your account so it can save your edits. Generate a code, then send it to the bot in a one-to-one chat (not a group) within 10 minutes.",
+    "intro": "Link the BT Servant chat to your account for this project. The bot can then read the project, and save your edits if you are an editor. Generate a code, then send it to the bot in a one-to-one chat (not a group) within 10 minutes.",
     "generate": "Generate code",
     "generating": "Generating...",
     "expiresIn": "Expires in {{time}}",
