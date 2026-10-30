@@ -430,11 +430,14 @@ test("the web app's unpinned validate is unchanged: it still flips a trashed row
 // returns a signed token over the exact id:version list it found; the confirm
 // un-approves only those rows, each pinned to its version and to 'validated'.
 
-// Chapter 2 of TIT: one row in each state the range action meets.
+// Chapter 2 of TIT: one row in each state the range action meets. updated_at
+// is set well in the past: it has 1-second resolution, and every state write
+// in a test lands in the same second, so a default of now would hide the
+// change the confirm checks for.
 function seedBulk(sqlite) {
   const tn = sqlite.prepare(
-    `INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, note, sort_order, version, translation_state, trashed_at)
-     VALUES (?, ?, 2, ?, ?, ?, 10, ?, ?, ?)`,
+    `INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, note, sort_order, version, translation_state, trashed_at, updated_at)
+     VALUES (?, ?, 2, ?, ?, ?, 10, ?, ?, ?, 1000)`,
   );
   tn.run("b001", BOOK, 1, "2:1", "approved one", 5, "validated", null);
   tn.run("b002", BOOK, 1, "2:1", "ai draft", 2, "ai_draft", null);
@@ -444,8 +447,8 @@ function seedBulk(sqlite) {
   tn.run("b006", BOOK, 3, "2:3", "english note", 1, null, null);
   tn.run("b007", BOOK, 4, "2:4", "approved, outside the range", 1, "validated", null);
   const tq = sqlite.prepare(
-    `INSERT INTO tq_rows (id, book, chapter, verse, ref_raw, question, response, version, translation_state)
-     VALUES (?, ?, 2, ?, ?, 'q?', 'a.', ?, ?)`,
+    `INSERT INTO tq_rows (id, book, chapter, verse, ref_raw, question, response, version, translation_state, updated_at)
+     VALUES (?, ?, 2, ?, ?, 'q?', 'a.', ?, ?, 1000)`,
   );
   tq.run("qb01", BOOK, 1, "2:1", 2, "validated");
   tq.run("qb02", BOOK, 1, "2:1", 1, "ai_draft");
@@ -456,6 +459,7 @@ const states = (sqlite, table = "tn_rows") =>
   Object.fromEntries(
     sqlite.prepare(`SELECT id, translation_state FROM ${table} WHERE chapter = 2 ORDER BY id`).all().map((r) => [r.id, r.translation_state]),
   );
+const tnRow2 = (sqlite, id) => ({ ...sqlite.prepare(`SELECT version, translation_state FROM tn_rows WHERE id = ?`).get(id) });
 const BEFORE = { b001: "validated", b002: "ai_draft", b003: "edited", b004: "validated", b005: "validated", b006: null, b007: "validated" };
 
 test("bulk dry run changes nothing and reports what would change and what is skipped", async () => {
@@ -523,6 +527,82 @@ test("a row edited or re-stated between dry run and confirm is not changed; the 
   assert.equal(r.data.remaining, 1, "b001 is approved again at a new version: a new preview would include it");
   assert.equal(sqlite.prepare(`SELECT translation_state FROM tn_rows WHERE id = 'b001'`).get().translation_state, "validated", "the newer approval stands");
   assert.equal(sqlite.prepare(`SELECT translation_state FROM tn_rows WHERE id = 'b007'`).get().translation_state, "edited");
+});
+
+// Review A1: approve and un-approve never bump the version, so a version pin
+// alone cannot tell a re-approval from the row the reviewer agreed to change.
+test("replaying a confirm after a web re-approval does not un-approve the row again", async () => {
+  const { env, ctx, call, sqlite, log } = fresh();
+  seedBulk(sqlite);
+  const dry = await call("bpt_bulk_set_state", RANGE);
+  const first = await call("bpt_bulk_set_state", { ...RANGE, confirm_token: dry.data.confirm_token });
+  assert.deepEqual(first.data.applied_ids, ["b001", "b004"]);
+  // A web reviewer approves b004 again: validated, same version as in the token.
+  assert.equal((await webPost(env, ctx, `/api/rows/tn/b004/validate?book=${BOOK}`, { value: 1 })).status, 200);
+  const entries = log().length;
+
+  const replay = await call("bpt_bulk_set_state", { ...RANGE, confirm_token: dry.data.confirm_token });
+  assert.equal(replay.isError, false, JSON.stringify(replay.data));
+  assert.equal(replay.data.applied, 0);
+  const nc = Object.fromEntries(replay.data.not_changed.map((x) => [x.id, x]));
+  assert.equal(nc.b004.reason, "changed_since_preview");
+  assert.equal(nc.b004.current_state, "validated");
+  assert.equal(sqlite.prepare(`SELECT translation_state FROM tn_rows WHERE id = 'b004'`).get().translation_state, "validated", "the newer approval stands");
+  assert.equal(replay.data.remaining, 1);
+  assert.equal(log().length, entries, "the replay writes nothing");
+});
+
+test("a row un-approved and re-approved on the web between preview and confirm stays approved", async () => {
+  const { env, ctx, call, sqlite } = fresh();
+  seedBulk(sqlite);
+  const dry = await call("bpt_bulk_set_state", RANGE);
+  assert.equal((await webPost(env, ctx, `/api/rows/tn/b001/validate?book=${BOOK}`, { value: 0 })).status, 200);
+  assert.equal((await webPost(env, ctx, `/api/rows/tn/b001/validate?book=${BOOK}`, { value: 1 })).status, 200);
+  assert.deepEqual(tnRow2(sqlite, "b001"), { version: 5, translation_state: "validated" }, "same version and state as in the preview");
+
+  const r = await call("bpt_bulk_set_state", { ...RANGE, confirm_token: dry.data.confirm_token });
+  assert.deepEqual(r.data.applied_ids, ["b004"], JSON.stringify(r.data));
+  assert.deepEqual(r.data.not_changed.map((x) => [x.id, x.reason]), [["b001", "changed_since_preview"]]);
+  assert.equal(tnRow2(sqlite, "b001").translation_state, "validated");
+});
+
+test("a plain replay of a confirm applies nothing and says why", async () => {
+  const { call, sqlite, log } = fresh();
+  seedBulk(sqlite);
+  const dry = await call("bpt_bulk_set_state", RANGE);
+  await call("bpt_bulk_set_state", { ...RANGE, confirm_token: dry.data.confirm_token });
+  const entries = log().length;
+  const replay = await call("bpt_bulk_set_state", { ...RANGE, confirm_token: dry.data.confirm_token });
+  assert.equal(replay.data.applied, 0, JSON.stringify(replay.data));
+  assert.deepEqual(replay.data.not_changed.map((x) => [x.id, x.reason, x.current_state]), [
+    ["b001", "changed_since_preview", "edited"],
+    ["b004", "changed_since_preview", "edited"],
+  ]);
+  assert.match(replay.data.not_changed[0].why, /earlier confirm of this same preview/);
+  assert.match(replay.data.message, /earlier confirm of this same preview/);
+  assert.equal(log().length, entries);
+  assert.equal(sqlite.prepare(`SELECT COUNT(*) AS n FROM row_conflict_log`).get().n, 0, "skipped before the write, so no conflict entries either");
+});
+
+// Review A2: the rows are already changed when the closing count runs.
+test("a failed closing count still returns what the confirm changed, with remaining null", async () => {
+  const { call, sqlite, sessions } = fresh();
+  seedBulk(sqlite);
+  const dry = await call("bpt_bulk_set_state", RANGE);
+  const s = sessions[EDITOR];
+  const realGet = s.getJson;
+  let chapterReads = 0;
+  s.getJson = async (path) => {
+    if (path.startsWith("/api/chapters/") && ++chapterReads === 2) return { status: 500, body: null };
+    return realGet(path);
+  };
+  const r = await call("bpt_bulk_set_state", { ...RANGE, confirm_token: dry.data.confirm_token });
+  s.getJson = realGet;
+  assert.equal(r.isError, false, JSON.stringify(r.data));
+  assert.deepEqual(r.data.applied_ids, ["b001", "b004"]);
+  assert.equal(r.data.remaining, null);
+  assert.match(r.data.message, /could not be read/);
+  assert.deepEqual(states(sqlite), { ...BEFORE, b001: "edited", b004: "edited" });
 });
 
 test("tampered, expired, other-link and different-argument tokens are refused and change nothing", async (t) => {
@@ -630,9 +710,11 @@ test("a bulk confirm costs a bounded number of D1 calls per row", async () => {
   before = d1.calls;
   const r = await call("bpt_bulk_set_state", { ...RANGE, confirm_token: dry.data.confirm_token });
   assert.equal(r.data.applied, 2);
-  const perRow = (d1.calls - before - chapterRead) / 2;
-  console.log(`bulk confirm: ${perRow} D1 calls per row, ${chapterRead} for the closing chapter read`);
+  // The confirm reads the chapter twice: fresh before the writes, and for the
+  // closing count.
+  const perRow = (d1.calls - before - 2 * chapterRead) / 2;
+  console.log(`bulk confirm: ${perRow} D1 calls per row, ${chapterRead} for each of the two chapter reads`);
   // At the 50-row cap, plus one Durable Object broadcast per row, a confirm
   // must stay far under the Worker's ~1000 subrequest budget.
-  assert.ok((perRow + 1) * 50 + chapterRead < 500, `per row ${perRow}, chapter read ${chapterRead}`);
+  assert.ok((perRow + 1) * 50 + 2 * chapterRead < 500, `per row ${perRow}, chapter read ${chapterRead}`);
 });
