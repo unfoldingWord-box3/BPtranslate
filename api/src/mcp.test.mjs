@@ -707,7 +707,7 @@ console.log("[sourceNotes] Door43 read, cache and degradation");
 
 console.log("[sourceNotes] per-book / per-chapter tN source overrides (#691)");
 {
-  const { readSourceNotes, clearSourceNotesCache } = await import("./sourceNotes.ts");
+  const { readSourceNotes, clearSourceNotesCache, noteSourcePlanForClient } = await import("./sourceNotes.ts");
   const { clearProjectConfigCache } = await import("./projectConfig.ts");
   const HEADER = "Reference\tID\tTags\tSupportReference\tQuote\tOccurrence\tNote\n";
   const tsv = (rows) => HEADER + rows.map(([ref, id, note]) => `${ref}\t${id}\t\t\tq\t1\t${note}`).join("\n") + "\n";
@@ -731,14 +731,14 @@ console.log("[sourceNotes] per-book / per-chapter tN source overrides (#691)");
     return body ? new Response(body, { status: 200 }) : new Response("nope", { status: 404 });
   };
   const PRESET = "en-bible-editor-ml-test";
-  const envFor = (preset, slug, ranges) => ({
+  const envFor = (preset, slug, ranges, overrides_json = null) => ({
     WORKSPACE_SLUG: slug,
     DCS_BASE_URL: "https://door43.test",
     DB: {
       prepare: (sql) =>
         /book_source_overrides/.test(sql)
           ? { bind: () => ({ all: async () => ({ results: ranges }) }) }
-          : { first: async () => ({ preset, overrides_json: null }) },
+          : { first: async () => ({ preset, overrides_json }) },
     },
   });
   try {
@@ -804,6 +804,26 @@ console.log("[sourceNotes] per-book / per-chapter tN source overrides (#691)");
     };
     const down = await readSourceNotes(downEnv, "ZEC", 2);
     assert(!down.ok && typeof down.reason === "string", "an unreadable override table is not ok, and never throws");
+
+    // A translation project with no project-wide tN repo: import still reads a
+    // dcs override, so the English source note does too.
+    const NO_TN = JSON.stringify({ mode: "translation", translationSource: { org: "unfoldingWord", repos: { lit: "en_ult" } } });
+    const noBase = envFor(PRESET, "src-nobase", [{ chapter_start: 1, chapter_end: 2, kind: "dcs", org: "OtherOrg", repo: "other_tn" }], NO_TN);
+    const nb1 = await readSourceNotes(noBase, "ZEC", 1);
+    assert(nb1.ok && nb1.source === "OtherOrg/other_tn" && nb1.notes.get("ab12") === "OTHER two", "no project-wide tN: a chapter in a dcs range still reads the override");
+    const nb3 = await readSourceNotes(noBase, "ZEC", 3);
+    assert(!nb3.ok && /no English tN source/.test(nb3.reason), "no project-wide tN: a chapter no override covers has no source, with the existing reason");
+    const nbPlan = await noteSourcePlanForClient(noBase, "ZEC");
+    assert(nbPlan && nbPlan.base === null && nbPlan.ranges.length === 1 && nbPlan.ranges[0].org === "OtherOrg", "the web plan has a null base and the override range");
+
+    const noBaseWhole = envFor(PRESET, "src-nobase-whole", [{ chapter_start: 0, chapter_end: 999, kind: "dcs", org: "WholeOrg", repo: "whole_tn" }], NO_TN);
+    const nbw = await readSourceNotes(noBaseWhole, "ZEC", 4);
+    assert(nbw.ok && nbw.source === "WholeOrg/whole_tn" && nbw.notes.get("cd34") === "WHOLE four", "no project-wide tN: a whole-book override is read");
+    const nbwPlan = await noteSourcePlanForClient(noBaseWhole, "ZEC");
+    assert(nbwPlan?.base?.org === "WholeOrg" && nbwPlan.ranges.length === 0, "and the web plan's base is the whole-book override");
+
+    const authoringPlan = await noteSourcePlanForClient(envFor("en-unfoldingword", "src-auth-plan", []), "ZEC");
+    assert(authoringPlan === null, "an authoring project gets no plan");
   } finally {
     globalThis.fetch = realFetch;
     clearSourceNotesCache();

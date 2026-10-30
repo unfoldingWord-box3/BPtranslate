@@ -86,3 +86,19 @@ test("a source that failed to load contributes nothing; the others still show", 
   assert.equal(m.get("cd34")?.note, "EN four");
   assert.equal(m.has("ab12"), false, "the overridden chapter does not fall back to the project-wide note");
 });
+
+test("no project-wide tN repo (base null): a dcs range still reads its repo, other chapters get nothing", () => {
+  const noBase = { base: null, ranges: [{ chapter_start: 1, chapter_end: 2, ...OTHER }] };
+  assert.deepEqual(noteSourceForChapter(noBase, 1), OTHER);
+  assert.equal(noteSourceForChapter(noBase, 3), null);
+  assert.deepEqual(planRepos(noBase).map(repoKey), [repoKey(OTHER)], "no fetch for a null base");
+  const m = mergeSourceNotes(noBase, new Map([[repoKey(OTHER), parseSourceTsv(tsv([["1:1", "ab12", "OTHER one"], ["3:1", "cd34", "OTHER three"]]))]]));
+  assert.equal(m.get("ab12")?.note, "OTHER one");
+  assert.equal(m.has("cd34"), false, "a chapter no override covers has no note");
+});
+
+test("no project-wide tN repo, whole-book override: the server sends it as the base", () => {
+  const whole = { base: OTHER, ranges: [] };
+  assert.deepEqual(noteSourceForChapter(whole, 7), OTHER);
+  assert.deepEqual(planRepos(whole).map(repoKey), [repoKey(OTHER)]);
+});

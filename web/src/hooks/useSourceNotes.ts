@@ -90,9 +90,11 @@ async function loadSourceNotes(book: string): Promise<SourceNoteMap> {
   return mergeSourceNotes(plan, byRepo);
 }
 
-// `source` is the project's translationSource projection {org, repo}; null (the
-// English root project, or no tN source set up) short-circuits to an empty
-// map, so no fetch fires. The server's plan decides which repos are read.
+// `book` is null outside translation mode, which short-circuits to an empty map
+// with no fetch. `source` is the project's translationSource projection
+// {org, repo}, only prefetched; null (no project-wide tN repo) still reads
+// the plan, since a Door43 override applies without one. The server's plan
+// decides which repos are read.
 export function useSourceNotes(
   book: string | null | undefined,
   source: { org: string; repo: string } | null,
@@ -103,15 +105,15 @@ export function useSourceNotes(
   const org = source?.org ?? null;
   const repo = source?.repo ?? null;
   useEffect(() => {
-    if (!book || org === null || repo === null) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- clear the map when the book or source goes away. Deriving EMPTY in render instead would let the previous book's notes reappear when a source comes back, until its fetch lands.
+    if (!book) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- clear the map when the book goes away. Deriving EMPTY in render instead would let the previous book's notes reappear when a book comes back, until its fetch lands.
       setMap(EMPTY);
       return;
     }
     let mounted = true;
     // Start the project-wide file while the plan loads; almost every chapter
     // reads it, and the shared cache hands it to loadSourceNotes.
-    fetchSourceTsv(org, repo, book).catch(() => {});
+    if (org !== null && repo !== null) fetchSourceTsv(org, repo, book).catch(() => {});
     loadSourceNotes(book)
       .then((m) => {
         if (mounted) setMap(m);

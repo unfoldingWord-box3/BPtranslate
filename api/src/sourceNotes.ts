@@ -25,7 +25,7 @@
 import type { Env } from "./index";
 import { getProjectConfig } from "./projectConfig.ts";
 import { isTranslationConfig } from "./workflowLayouts.ts";
-import { dcsRawUrl, resolveSourceRef } from "./dcsSources.ts";
+import { dcsRawUrl } from "./dcsSources.ts";
 import { parseTsv, refParts } from "./importParsers.ts";
 import { planBookNoteSources, sourceRefForChapter, type ResolvedSourceRange } from "./bookSource.ts";
 import type { RepoRef } from "./repoUrl.ts";
@@ -96,8 +96,9 @@ export function clearSourceNotesCache(): void {
 // sent by GET /api/books/:book/sources so the browser does not re-implement
 // the override rules (validation, the own-repo no-op). Read it with
 // web/src/lib/sourceNotePlan.ts. Only dcs ranges are sent: an Aquifer range
-// reads the base, like any chapter no range covers. null when the project has
-// no English tN source: an authoring project, or none set up. A D1 failure
+// reads the base, like any chapter no range covers. base is null when the
+// project has no project-wide English tN repo; a dcs override still applies
+// then, as it does on import. null for an authoring project. A D1 failure
 // throws; the route catches it.
 export type ClientNoteSourceRange = { chapter_start: number; chapter_end: number; org: string; repo: string };
 export interface ClientNoteSourcePlan {
@@ -107,7 +108,7 @@ export interface ClientNoteSourcePlan {
 
 export async function noteSourcePlanForClient(env: Env, book: string): Promise<ClientNoteSourcePlan | null> {
   const cfg = await getProjectConfig(env);
-  if (!isTranslationConfig(cfg) || !resolveSourceRef(cfg.translationSource, "tn")) return null;
+  if (!isTranslationConfig(cfg)) return null;
   const plan = await planBookNoteSources(env, cfg, book, "tn", true);
   return {
     base: plan.base ? { org: plan.base.owner, repo: plan.base.repo } : null,
@@ -127,11 +128,10 @@ export async function readSourceNotes(env: Env, book: string, chapter: number): 
     if (!isTranslationConfig(cfg)) {
       return { ok: false, reason: "This project writes its notes in English, so they have no separate English source." };
     }
-    if (!resolveSourceRef(cfg.translationSource, "tn")) {
-      return { ok: false, reason: "This project has no English tN source repository set up." };
-    }
     // translateFromSource=true: with no override, the base is the
-    // project-wide translationSource, as before #691.
+    // project-wide translationSource, as before #691. With no project-wide tN
+    // repo the base is null, but a dcs override still applies (import reads
+    // it regardless), so only a chapter that resolves to nothing has no source.
     const plan = await planBookNoteSources(env, cfg, book, "tn", true);
     const ref = sourceForChapter(plan, chapter);
     if (!ref) return { ok: false, reason: "This project has no English tN source repository set up." };
