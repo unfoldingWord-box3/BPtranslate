@@ -680,6 +680,7 @@ export interface AquiferDraftsResponse {
   report: {
     enRows: number;
     aqItems: number;
+    matchedLink: number;
     matchedQuote: number;
     matchedOrdinal: number;
     matchedIntro: number;

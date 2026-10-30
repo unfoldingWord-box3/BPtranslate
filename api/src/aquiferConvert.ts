@@ -6,14 +6,24 @@
 // same per-verse ordinal (#N), and the same embedded original-language quote
 // (Greek/Hebrew). Only the note prose differs. So one converter serves all.
 //
-// Join strategy (validated by scripts/aquifer-join-census.mjs over all 47 books,
-// arb + hin): QUOTE-PRIMARY, ordinal-fallback, and unmatched notes still returned
-// (minted downstream) so nothing is silently dropped.
-//  - The embedded quote is the only language-independent correctness anchor.
-//  - The (#N) ordinal is reliable in Arabic but SCRAMBLED in Hindi, so it is
-//    only a fallback, never the primary key.
+// Join strategy: LINK-PRIMARY, quote second, ordinal last, and unmatched notes
+// still returned (minted downstream) so nothing is silently dropped.
+//  - Aquifer links every translated note to its English note (metadata.json,
+//    see aquiferLinks.ts). The English title's (#N) numbers the en_tn rows at that
+//    reference, so link -> N-th en_tn row is exact. The translated title's own
+//    (#N) is NOT: Hindi (#3) can be English (#4).
+//  - Quote-first alone picks the wrong row when a verse has two rows on the same
+//    words (~16% of en_tn verse rows, e.g. PHM 1:1 figs-metaphor + figs-exclusive
+//    on ὁ ἀδελφὸς): the note then inherits the wrong id and SupportReference with
+//    no flag. Measured against the tA link inside each note, where the two joins
+//    disagreed the link join was right 692 times and quote-first 10.
+//  - A linked match whose quote differs from the en_tn row's is flagged.
+//  - Notes with no English link (or whose link points past the en_tn rows) fall
+//    back to the quote match, then the ordinal.
 //  - Hebrew-OT quotes often quote a different/longer span than en_tn, so those
 //    fall to the ordinal fallback and are flagged for human review.
+
+import { parseEnglishTitle } from "./aquiferLinks.ts";
 
 export type AquiferItem = {
   content_id?: string | number;
@@ -34,7 +44,7 @@ export type EnRow = {
   Note: string;
 };
 
-export type JoinMethod = "quote" | "ordinal" | "intro" | "unmatched" | null;
+export type JoinMethod = "link" | "quote" | "ordinal" | "intro" | "unmatched" | null;
 
 // One resolved Aquifer note. Matched notes carry the en_tn row's sticky id and
 // structural columns (alignment works); unmatched notes have enId=null (the
@@ -55,6 +65,7 @@ export type ResolvedNote = {
 export type ConvertReport = {
   enRows: number;
   aqItems: number;
+  matchedLink: number;
   matchedQuote: number;
   matchedOrdinal: number;
   matchedIntro: number;
@@ -63,6 +74,10 @@ export type ConvertReport = {
 };
 
 // ---------- small pure helpers (exported for unit tests) ----------
+
+// A translated note's English counterpart, keyed by the translated note's
+// content_id (aquiferLinks.ts reads these out of metadata.json).
+export type EnglishLinkMap = ReadonlyMap<string, { engContentId: string; engTitle: string }>;
 
 export const nfc = (s: string | null | undefined): string =>
   (s || "").normalize("NFC").trim();
@@ -100,6 +115,11 @@ export function aquiferRef(it: AquiferItem): { ref: string; isIntro: boolean } |
   const passage = it.associations?.passage?.[0];
   const startUsfm = passage?.start_ref_usfm || "";
   const endUsfm = passage?.end_ref_usfm || "";
+  // The v2026-10-14 release carries stray items from other books under index
+  // "00000000" (hin GEN has 1,224 First Corinthians notes). No book is 00, so
+  // they belong to no import here; without this they would match the book-intro
+  // test below and be minted into the book's front matter.
+  if (idx === "00000000") return null;
   if (/^\d{2}000000$/.test(idx)) return { ref: "front:intro", isIntro: true };
   const start = startUsfm.includes(" ") ? startUsfm.split(" ", 2)[1] : "";
   // Chapter intros carry a NON-NUMERIC index (e.g. "08Ruth000"); a verse RANGE
@@ -227,15 +247,18 @@ function strip(s: string): string {
 
 // ---------- the join ----------
 
+const FLAG_LINK_QUOTE = "Aquifer note matched to its English note, but its quote or reference differs from the en_tn row's — check against the English source";
 const FLAG_ORDINAL = "Aquifer note matched by position (quote unverified) — check against the English source";
 const FLAG_UNMATCHED = "Aquifer note has no matching English source note — quote/support unverified";
 
-// Resolve every Aquifer note to its best en_tn target. Quote-primary, ordinal-
-// fallback; unmatched notes are still returned (with their extracted quote) so
-// the importer can mint rows for them. Emits one ResolvedNote per Aquifer item.
+// Resolve every Aquifer note to its best en_tn target. Link-primary, then quote,
+// then ordinal; unmatched notes are still returned (with their extracted quote)
+// so the importer can mint rows for them. Emits one ResolvedNote per Aquifer
+// item. `links` is optional: without it every note takes the quote/ordinal path.
 export function convertAquiferBook(
   aqItems: AquiferItem[],
   enRows: EnRow[],
+  links?: EnglishLinkMap,
 ): { notes: ResolvedNote[]; report: ConvertReport } {
   const enByRef = new Map<string, EnRow[]>();
   for (const r of enRows) {
@@ -243,7 +266,11 @@ export function convertAquiferBook(
     enByRef.get(r.Reference)!.push(r);
   }
 
-  type AqNote = { ref: string; isIntro: boolean; ord: number | null; quote: string; html: string; contentId: string | null };
+  type AqNote = {
+    ref: string; isIntro: boolean; ord: number | null; quote: string; html: string; contentId: string | null;
+    // Where the English note says this one sits: its reference and (#N) slot.
+    link: { ref: string; ordinal: number } | null;
+  };
   const aqByRef = new Map<string, AqNote[]>();
   let aqCount = 0;
   for (const it of aqItems) {
@@ -257,14 +284,19 @@ export function convertAquiferBook(
       quote: embeddedQuote(it.content),
       html: it.content || "",
       contentId: it.content_id != null ? String(it.content_id) : null,
+      link: null,
     };
+    if (note.contentId && !rr.isIntro) {
+      const l = links?.get(note.contentId);
+      if (l) note.link = parseEnglishTitle(l.engTitle);
+    }
     if (!aqByRef.has(rr.ref)) aqByRef.set(rr.ref, []);
     aqByRef.get(rr.ref)!.push(note);
   }
 
   const report: ConvertReport = {
     enRows: enRows.length, aqItems: aqCount,
-    matchedQuote: 0, matchedOrdinal: 0, matchedIntro: 0, unmatched: 0, flagged: 0,
+    matchedLink: 0, matchedQuote: 0, matchedOrdinal: 0, matchedIntro: 0, unmatched: 0, flagged: 0,
   };
   const notes: ResolvedNote[] = [];
 
@@ -293,13 +325,56 @@ export function convertAquiferBook(
     aquiferContentId: aq.contentId,
   });
 
+  // en_tn rows already taken, per reference. Shared across the link pass (which
+  // can land on another reference than the note's own) and the per-reference
+  // quote/ordinal passes below.
+  const claimedByRef = new Map<string, boolean[]>();
+  const claimedFor = (ref: string): boolean[] => {
+    let c = claimedByRef.get(ref);
+    if (!c) { c = new Array((enByRef.get(ref) || []).length).fill(false); claimedByRef.set(ref, c); }
+    return c;
+  };
+
+  // Pass 0 — English link: the N-th en_tn row at the English note's reference.
+  // Runs over the whole book first so a linked note claims its row before any
+  // quote match could take it. A link that points past the en_tn rows, or at a
+  // row another note already holds, leaves the note for the passes below.
+  const linked = new Map<AqNote, ResolvedNote>();
+  for (const aqList of aqByRef.values()) {
+    for (const aq of aqList) {
+      if (!aq.link) continue;
+      const enList = enByRef.get(aq.link.ref) || [];
+      const claimed = claimedFor(aq.link.ref);
+      const j = aq.link.ordinal - 1;
+      if (j < 0 || j >= enList.length || claimed[j]) continue;
+      const quoteOk = nfc(enList[j].Quote) === aq.quote;
+      // The pinned Aquifer release can lag the live en_tn (a note added or removed
+      // since), so the N-th row may no longer be the one Aquifer meant. If this
+      // row's quote disagrees but another free row at the reference has exactly
+      // this note's quote, leave the note to the quote pass rather than flag it
+      // onto the wrong row.
+      if (!quoteOk && aq.quote && enList.some((r, k) => !claimed[k] && nfc(r.Quote) === aq.quote)) continue;
+      claimed[j] = true;
+      const clean = quoteOk && aq.link.ref === aq.ref;
+      linked.set(aq, fromEn(aq, enList[j], "link", clean ? null : FLAG_LINK_QUOTE));
+      report.matchedLink++;
+      if (!clean) report.flagged++;
+    }
+  }
+
   for (const [ref, aqList] of aqByRef) {
     const enList = enByRef.get(ref) || [];
-    const claimed = new Array(enList.length).fill(false);
+    const claimed = claimedFor(ref);
     const pending: AqNote[] = [];
 
-    // Pass 1 — quote match (the correctness anchor).
     for (const aq of aqList) {
+      const hit = linked.get(aq);
+      if (hit) notes.push(hit);
+    }
+
+    // Pass 1 — quote match, for notes the link did not place.
+    for (const aq of aqList) {
+      if (linked.has(aq)) continue;
       if (aq.isIntro || !aq.quote) { pending.push(aq); continue; }
       let hit = -1;
       for (let j = 0; j < enList.length; j++) {
