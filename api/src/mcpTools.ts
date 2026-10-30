@@ -469,19 +469,19 @@ const getRowBytes = (v: unknown) => byteLength(JSON.stringify(v));
 // then falls back, in order, until one fits: en_note cut to the longest prefix
 // that fits; en_note null; the shortest status; only `en_note: null,
 // en_truncated: true`; and last the bare row with no English fields at all.
-// A row already over the budget on its own gets only that two-field "left
-// out" marker and no source read: it is over BT Servant's cap regardless
-// (that predates en_note), and 35 bytes say why the English note is missing.
-// The explanation is en_note_status, not `note` as chunk_work's page has,
-// because a tn row's `note` is its own text.
+// A row already over the budget on its own is returned bare, with no English
+// fields and no source read: the budget sits 2,000 bytes under BT Servant's
+// real 32 KB cap, so such a row may still be deliverable, and any byte added
+// could tip it over. The explanation is en_note_status, not `note` as
+// chunk_work's page has, because a tn row's `note` is its own text.
 async function withEnNote(
   row: Record<string, unknown>,
   id: string,
   sourceNotes: () => Promise<SourceNotes>,
 ): Promise<Record<string, unknown>> {
   const fits = (r: Record<string, unknown>) => getRowBytes(r) <= GET_ROW_BYTE_BUDGET;
+  if (!fits(row)) return row;
   const leftOut = { ...row, en_note: null, en_truncated: true };
-  if (!fits(row)) return leftOut;
   const en = await sourceNotes();
   let full: Record<string, unknown>;
   let short: Record<string, unknown>;
@@ -499,13 +499,14 @@ async function withEnNote(
       };
       short = { ...row, en_note: null, en_source: en.source, en_note_status: "No English note with this id." };
     } else {
-      const fitted = fitEnNote({
-        ...row,
-        en_note: text,
-        en_source: en.source,
+      // The whole note with no status first; only a note that does not fit
+      // whole is cut, with the status that says so counted in.
+      const whole: Record<string, unknown> = { ...row, en_note: text, en_source: en.source, en_note_status: null };
+      const fitted = fits(whole) ? whole : fitEnNote({
+        ...whole,
         en_note_status: `en_note was cut to keep this response under the chat's 32 KB limit; the whole English note is row ${id} in ${en.source}.`,
       }, GET_ROW_BYTE_BUDGET, getRowBytes);
-      if (!fitted.en_truncated) full = { ...fitted, en_note_status: null };
+      if (!fitted.en_truncated) full = whole;
       else if (fitted.en_note === null) {
         full = {
           ...fitted,
@@ -521,7 +522,7 @@ async function withEnNote(
 const getRow: ToolDef = {
   name: "bpt_get_row",
   description:
-    "One translation note (tn) or question (tq) by id, with its full current text, state and version. A tn row also has en_note: the published English note it was translated from (en_source names where), for comparison, as much of it as fits in one response. en_note is null when the English source has no note with that id, or when the English source could not be read. When the response would pass the size limit, en_note is cut or left out (null) and en_truncated is true. en_note_status says why when there is room for it.",
+    "One translation note (tn) or question (tq) by id, with its full current text, state and version. A tn row also has en_note: the published English note it was translated from (en_source names where), for comparison, as much of it as fits in one response. en_note is null when the English source has no note with that id, or when the English source could not be read. When the response would pass the size limit, en_note is cut or left out (null) and en_truncated is true. en_note_status says why when there is room for it. A note whose own text already fills the size limit comes back with no English fields at all.",
   inputSchema: {
     type: "object",
     properties: {

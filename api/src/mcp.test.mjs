@@ -570,12 +570,13 @@ console.log("[tools] bpt_get_row English source note");
   const wire = (v) => byteLength(JSON.stringify(v));
   assert(wire(huge.data) <= GET_ROW_BYTE_BUDGET && wire(huge.data) < 32000, `the get_row response stays within the budget on the wire (${wire(huge.data)} bytes)`);
 
-  // Own note over the budget on its own: en_note goes, the own note stays.
+  // Own note over the budget on its own: the bare row, unchanged, since the
+  // budget is under the real cap and any added byte could tip it over.
   srcStub = { ok: true, source: "unfoldingWord/en_tn", notes: new Map([["r962", "English"]]) };
   srcCalls.length = 0;
   const over = await call("bpt_get_row", { book: "TIT", kind: "tn", id: "r962" });
-  assert(over.data.en_note === null && over.data.en_truncated === true && over.data.note.length === 6000, "a row over budget on its own note gets en_note null, marked en_truncated, own note whole");
-  assert(over.data.en_note_status === undefined && over.data.en_source === undefined && srcCalls.length === 0, "and nothing else: no status, no source, no source read");
+  assert(!over.isError && over.data.note.length === 6000, "a row over budget on its own keeps its own note whole");
+  assert(Object.keys(over.data).every((k) => !k.startsWith("en_")) && srcCalls.length === 0, "and gets no en_* fields and no source read");
 
   // A row just under the budget on its own: adding the English fields must
   // not push it over, whichever way the English note is missing.
@@ -605,6 +606,17 @@ console.log("[tools] bpt_get_row English source note");
   const roomy = await call("bpt_get_row", { book: "TIT", kind: "tn", id: "r963" });
   assert(roomy.data.en_note === null && typeof roomy.data.en_note_status === "string" && roomy.data.en_note_status.length < 100, "a short status replaces a long one that would not fit");
   assert(wire(roomy.data) <= GET_ROW_BYTE_BUDGET, `and the response stays within the budget (${wire(roomy.data)} bytes)`);
+
+  // An English note that fits whole with a null status, but not with the long
+  // "cut" status counted in, comes back whole: the status is not a reason to cut.
+  const tight = "E".repeat(200);
+  const probeBare = bare(probe.data);
+  const enBytes = wire({ ...probeBare, en_note: tight, en_source: "unfoldingWord/en_tn", en_note_status: null }) - wire(probeBare);
+  nearRow = tnRow(963, 1, nearLen + 15 - enBytes, "a");
+  srcStub = { ok: true, source: "unfoldingWord/en_tn", notes: new Map([["r963", tight]]) };
+  const snug = await call("bpt_get_row", { book: "TIT", kind: "tn", id: "r963" });
+  assert(wire(snug.data) === GET_ROW_BYTE_BUDGET - 5, `the whole English note leaves 5 bytes of the budget (${wire(snug.data)} bytes)`);
+  assert(snug.data.en_note === tight && snug.data.en_truncated === undefined && snug.data.en_note_status === null, "a note that fits whole without the cut status is returned whole, not cut");
   nearRow = null;
   srcStub = NO_SOURCE;
 }
