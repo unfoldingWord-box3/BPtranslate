@@ -947,7 +947,9 @@ export function templatePlaceholders(sourceMd: string): { placeholders: string[]
 export function missingPlaceholders(placeholders: string[], text: string): string[] {
   return placeholders.filter((p) => {
     if (!/^[A-Z]/.test(p)) return !text.includes(p);
-    const bare = new RegExp(`(?<![\\p{L}\\p{N}_])${p}(?![\\p{L}\\p{N}_])`, "u");
+    // ASCII boundaries: a target language may join a letter to the slot
+    // (Arabic writes "and SPEAKER" as one word, وSPEAKER), which still keeps it.
+    const bare = new RegExp(`(?<![A-Za-z0-9_])${p}(?![A-Za-z0-9_])`);
     return !bare.test(text);
   });
 }
@@ -1018,7 +1020,7 @@ interface TemplateListUnit {
 const templatesForRow: ToolDef = {
   name: "bpt_templates_for_row",
   description:
-    "The note templates behind one translation note (tn): call this when the reviewer corrects a note AND says the wording should change for all such notes, for future drafts, or in the template. Returns every template for the note's support reference, each with template_id, source_md (the English), target_md (this project's wording; null means not translated yet, so start from source_md, written in the project's language), state, version, and placeholders (slots filled in when a note is drafted: keep every one exactly as written) and examples (sample text a translation may translate). feeds_drafts marks the one template AI drafts actually read. Then use bpt_edit_template and bpt_approve_template. Requires edit access; not available in an English-authoring project.",
+    "The note templates behind one translation note (tn): call this when the reviewer corrects a note AND says the wording should change for all such notes, for future drafts, or in the template. Returns every template for the note's support reference, each with template_id, source_md (the English), target_md (this project's wording; null means not translated yet, so start from source_md, written in the project's language), state, version, and placeholders (slots filled in when a note is drafted: keep every one exactly as written) and examples (sample text a translation may translate). Templates come in the order the drafter reads them; feeds_drafts marks the one AI drafts read now (the first approved one), and approving wording on a template above it makes that one the template drafts read. Then use bpt_edit_template and bpt_approve_template. Requires edit access; not available in an English-authoring project.",
   inputSchema: {
     type: "object",
     properties: {
@@ -1048,31 +1050,36 @@ const templatesForRow: ToolDef = {
       (u) => shortSupport(u.support_ref).toLowerCase() === slug.toLowerCase(),
     );
     if (units.length === 0) throw new ToolInputError(`This project has no note templates for ${slug}.`);
-    // The order the nightly export and the context export use (exportWorkflow.ts,
-    // contextExport.ts): sheet_order, nulls last, then id.
+    // The order the context export reads them in (exportWorkflow.ts ORDER BY
+    // sheet_order, template_id): SQLite puts NULL first and compares ids as bytes.
     units.sort(
       (a, b) =>
-        (a.sheet_order ?? Number.MAX_SAFE_INTEGER) - (b.sheet_order ?? Number.MAX_SAFE_INTEGER) ||
-        a.template_id.localeCompare(b.template_id),
+        (a.sheet_order ?? -Infinity) - (b.sheet_order ?? -Infinity) ||
+        (a.template_id < b.template_id ? -1 : a.template_id > b.template_id ? 1 : 0),
     );
-    const feeder = units.find((u) => u.origin === "sheet")?.template_id ?? null;
 
     const out = [];
     for (const u of units) {
       const full = await getTemplate(session, u.template_id, false);
-      out.push({
-        ...projectTemplate(full),
-        feeds_drafts: u.template_id === feeder,
-        ...templatePlaceholders(String(full.source_md ?? "")),
-      });
+      out.push({ unit: full, origin: u.origin });
     }
+    // The one the export sends the drafter: the first sheet template that is
+    // approved and has wording (exportWorkflow.ts, contextExport.ts renderTemplatesTsv).
+    const feeder = out.find(
+      (o) => o.origin === "sheet" && o.unit.translation_state === "validated" && String(o.unit.target_md ?? "").trim(),
+    )?.unit.template_id;
+    const templates = out.map((o) => ({
+      ...projectTemplate(o.unit),
+      feeds_drafts: o.unit.template_id === feeder,
+      ...templatePlaceholders(String(o.unit.source_md ?? "")),
+    }));
     return {
       book,
       row_id: id,
       support_reference: slug,
       note:
-        "AI drafts read only the feeds_drafts template, and only once it is approved. They see a change after the next context export, which does not run when a template is approved: it runs nightly on production and when the project's preferences or terms are saved.",
-      templates: out,
+        "AI drafts read only the feeds_drafts template (none: drafts get no template for this yet). Approved wording on a template above it in this list takes its place. Drafts see a change after the next context export, which does not run when a template is approved: it runs nightly on production and when the project's preferences or terms are saved.",
+      templates,
     };
   },
 };

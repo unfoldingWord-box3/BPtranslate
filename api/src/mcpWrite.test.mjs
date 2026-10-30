@@ -24,7 +24,7 @@ import { attachAuth, chatWriteEnv, requireCsrf } from "./auth.ts";
 import { requireWorkspaceMatch } from "./workspaces.ts";
 import { blockViewerWrites } from "./viewerGuard.ts";
 import { dispatch } from "./mcp.ts";
-import { templatePlaceholders } from "./mcpTools.ts";
+import { missingPlaceholders, templatePlaceholders } from "./mcpTools.ts";
 
 function makeDb(sqlite) {
   const mk = (sql, args) => ({
@@ -447,14 +447,15 @@ test("the web app's unpinned validate is unchanged: it still flips a trashed row
 
 const NEW_WORDING = "Kelmat maḥdhūfa. Alternate translation: [text] SPEAKER";
 
-test("bpt_templates_for_row: candidates in export order, drafts fed by the first sheet one only", async () => {
+test("bpt_templates_for_row: candidates in export order, drafts fed by the first approved sheet one", async () => {
   const { call } = fresh();
   const r = await call("bpt_templates_for_row", { id: "el01" });
   assert.equal(r.isError, false, JSON.stringify(r.data));
   assert.equal(r.data.support_reference, "figs-ellipsis");
   assert.ok(r.data.note);
   assert.deepEqual(r.data.templates.map((t) => t.template_id), ["builtin-ellipsis", "figs-ellipsis-01", "figs-ellipsis-02"]);
-  assert.deepEqual(r.data.templates.map((t) => t.feeds_drafts), [false, true, false]);
+  // Drafts read the first approved sheet template: -02 today, since -01 has no wording yet.
+  assert.deepEqual(r.data.templates.map((t) => t.feeds_drafts), [false, false, true]);
   const t1 = r.data.templates[1];
   assert.equal(t1.target_md, null);
   assert.equal(t1.state, null);
@@ -472,6 +473,9 @@ test("templatePlaceholders: slots versus example text", () => {
   for (const want of ["**text**", "[idiomatic_example_text]", "WORD1", "[word2]", "[Name2]"]) assert.ok(r.placeholders.includes(want), want);
   assert.ok(!r.placeholders.includes("ULT") && !r.placeholders.includes("UST"));
   assert.deepEqual(r.examples, ["[passed away]"]);
+  // Arabic joins "and" to the next word: وSPEAKER still keeps the slot.
+  assert.deepEqual(missingPlaceholders(["SPEAKER", "[text]"], "قال وSPEAKER [text]"), []);
+  assert.deepEqual(missingPlaceholders(["SPEAKER"], "SPEAKERS"), ["SPEAKER"]);
 });
 
 test("edit then approve a template: applied, version-pinned, audited as chat", async () => {
@@ -492,6 +496,9 @@ test("edit then approve a template: applied, version-pinned, audited as chat", a
     { row_key: "figs-ellipsis-01", user_id: 9, action: "update", source: "chat" },
     { row_key: "figs-ellipsis-01", user_id: 9, action: "validate", source: "chat" },
   ]);
+  // Approved wording above -02 now takes its place for drafts.
+  const after = await call("bpt_templates_for_row", { id: "el01" });
+  assert.deepEqual(after.data.templates.map((t) => t.feeds_drafts), [false, true, false]);
 });
 
 test("template: a stale version is a conflict and changes nothing", async () => {
