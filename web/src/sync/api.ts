@@ -4,6 +4,7 @@
 
 import type { LayoutSpec } from "../lib/layoutSpec";
 import type { ReviewSweepBody, ReviewSweepResource, ReviewSweepTarget } from "../lib/reviewStateSweep";
+import type { NoteSourcePlan } from "../lib/sourceNotePlan";
 import { getWorkspaceSlug, setWorkspaceSlug } from "./workspace";
 
 export type RowKind = "tn" | "tq" | "twl";
@@ -1852,8 +1853,11 @@ export const api = {
   // Per-book resource source overrides (issue #103). Whole-book override rows
   // come back as (chapter_start=0, chapter_end=999); range rows carry their real
   // bounds. Readable by any authenticated user; the PUT below is admin-only.
+  // tnNoteSources: which source each chapter's English tN source note is read
+  // from (#691; lib/sourceNotePlan.ts). null when the project has no English
+  // tN source, or the server could not resolve it.
   getBookSources: (book: string) =>
-    request<{ book: string; overrides: BookSourceOverride[] }>(
+    request<{ book: string; overrides: BookSourceOverride[]; tnNoteSources?: NoteSourcePlan | null }>(
       `/api/books/${encodeURIComponent(book)}/sources`,
     ),
 

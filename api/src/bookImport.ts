@@ -53,6 +53,7 @@ import {
   type ResolvedSourceRange,
 } from "./bookSource.ts";
 import { populateReferencedArticles } from "./articlePopulate";
+import { noteSourcePlanForClient, type ClientNoteSourcePlan } from "./sourceNotes.ts";
 import type { Context } from "hono";
 import { reimportBookFromDcs, recordResourceSync, resourceSourceRef, type Resource } from "./bookReimport";
 import { lintTnRows, lintUsfmVerses } from "./lint";
@@ -153,7 +154,17 @@ books.get("/:book/sources", requireAuth, async (c) => {
   const book = (c.req.param("book") ?? "").toUpperCase();
   if (!BOOK_NUMBERS[book]) return c.json({ error: "unknown_book", book }, 404);
   const overrides = await listBookSourceOverrides(c.env, book);
-  return c.json({ book, overrides });
+  // Which source each chapter's English tN source note is read from (#691),
+  // resolved here so the web app's Source panel follows the same rules as
+  // import and the chat tools. A failure leaves it null; the overrides list
+  // above still answers.
+  let tnNoteSources: ClientNoteSourcePlan | null = null;
+  try {
+    tnNoteSources = await noteSourcePlanForClient(c.env, book);
+  } catch (e) {
+    console.error("noteSourcePlanForClient failed", e instanceof Error ? e.message : String(e));
+  }
+  return c.json({ book, overrides, tnNoteSources });
 });
 
 // Body:
