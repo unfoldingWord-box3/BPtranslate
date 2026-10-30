@@ -214,8 +214,8 @@ function sessionFor(token) {
     principal: l.principal,
     getJson: (path) => apiFor(l.ws, path),
     packageRefs: (book) => refsFor(l.ws, book),
-    sourceNotes: async (book) => {
-      srcCalls.push({ ws: l.ws.slug, book });
+    sourceNotes: async (book, chapter) => {
+      srcCalls.push({ ws: l.ws.slug, book, chapter });
       return srcStub;
     },
   };
@@ -491,6 +491,7 @@ console.log("[tools] English source notes");
   const { data, isError } = await call("bpt_chunk_work", { book: "TIT", chapter: 11, kind: "tn" });
   const by = Object.fromEntries(data.rows.map((r) => [r.id, r]));
   assert(!isError && srcCalls.length === 1 && srcCalls[0].book === "TIT" && srcCalls[0].ws === "bsoj", "the English source is read once, for the link's workspace and book");
+  assert(srcCalls[0].chapter === 11, "chunk_work reads the English source for the chapter asked for (a per-chapter override can change it, #691)");
   assert(by.r700.en_note === "English\\nnote" && by.r700.en_truncated === undefined, "en_note is the English note with the same id, in the stored form");
   assert(by.r701.en_note.length === ROW_TEXT_CAP && by.r701.en_truncated === true, "a long English note is cut and marked en_truncated");
   assert(by.r702.en_note === null, "a note with no English row gets en_note null");
@@ -539,6 +540,7 @@ console.log("[tools] bpt_get_row English source note");
   srcCalls.length = 0;
   const full = await call("bpt_get_row", { book: "TIT", kind: "tn", id: "r5" });
   assert(!full.isError && srcCalls.length === 1 && srcCalls[0].ws === "bsoj" && srcCalls[0].book === "TIT", "get_row reads the English source once, for the link's workspace and book");
+  assert(srcCalls[0].chapter === 1, "get_row reads the English source for the row's own chapter (#691)");
   assert(full.data.en_note === longEn && full.data.en_truncated === undefined, "get_row returns the whole English note, past ROW_TEXT_CAP");
   assert(full.data.en_source === "unfoldingWord/en_tn" && full.data.en_note_status === null, "get_row names the source and has nothing to explain");
   assert(full.data.note === "n".repeat(40) && full.data.id === "r5", "the row's own note is untouched by the English fields");
@@ -625,10 +627,17 @@ console.log("[sourceNotes] Door43 read, cache and degradation");
 {
   const { readSourceNotes, clearSourceNotesCache } = await import("./sourceNotes.ts");
   const { clearProjectConfigCache } = await import("./projectConfig.ts");
-  const envFor = (preset, slug) => ({
+  // The project config row, and (#691) this book's tN source overrides:
+  // none unless a test passes ranges.
+  const envFor = (preset, slug, ranges = []) => ({
     WORKSPACE_SLUG: slug,
     DCS_BASE_URL: "https://door43.test",
-    DB: { prepare: () => ({ first: async () => ({ preset, overrides_json: null }) }) },
+    DB: {
+      prepare: (sql) =>
+        /book_source_overrides/.test(sql)
+          ? { bind: () => ({ all: async () => ({ results: ranges }) }) }
+          : { first: async () => ({ preset, overrides_json: null }) },
+    },
   });
   const realFetch = globalThis.fetch;
   const fetched = [];
@@ -645,25 +654,25 @@ console.log("[sourceNotes] Door43 read, cache and degradation");
     clearProjectConfigCache();
     // The service token is set, as in production; it must not be sent.
     const ml = { ...envFor("en-bible-editor-ml-test", "src-ml"), DCS_SERVICE_TOKEN: "secret-service-token" };
-    const a = await readSourceNotes(ml, "TIT");
+    const a = await readSourceNotes(ml, "TIT", 1);
     assert(a.ok && a.source === "unfoldingWord/en_tn" && fetched[0] === "https://door43.test/unfoldingWord/en_tn/raw/branch/master/tn_TIT.tsv", "reads tn_<BOOK>.tsv from the project's tN source");
     const headers = new Headers(inits[0]?.headers);
     assert(!headers.has("authorization") && !JSON.stringify(inits[0] ?? {}).includes("secret-service-token"), "the fetch is anonymous: no Authorization header, like the web app's");
     assert(inits[0]?.signal instanceof AbortSignal, "the fetch carries a timeout signal");
     assert(a.notes.get("ab12") === "Line one\\nLine two" && a.notes.get("cd34") === "Second" && a.notes.size === 2, "parses past a BOM and CRLF, keyed by ID, \\n escapes kept");
-    await readSourceNotes(ml, "TIT");
+    await readSourceNotes(ml, "TIT", 1);
     assert(fetched.length === 1, "a second read inside the TTL is served from cache");
 
     reply = () => new Response("nope", { status: 404 });
-    const missing = await readSourceNotes(ml, "OBA");
+    const missing = await readSourceNotes(ml, "OBA", 1);
     assert(!missing.ok && /no such file, or the repository is not public/.test(missing.reason), "404 -> not ok; the reason allows for a private repo");
-    await readSourceNotes(ml, "OBA");
+    await readSourceNotes(ml, "OBA", 1);
     assert(fetched.length === 3, "a failure is not cached");
 
     globalThis.fetch = async () => {
       throw new Error("offline");
     };
-    const offline = await readSourceNotes(ml, "JUD");
+    const offline = await readSourceNotes(ml, "JUD", 1);
     assert(!offline.ok && /network error/.test(offline.reason), "network failure -> not ok, never throws");
 
     // A Door43 that never answers: the real abort path, with the 8 s timeout
@@ -673,25 +682,150 @@ console.log("[sourceNotes] Door43 read, cache and degradation");
       new Promise((_resolve, reject) => init.signal.addEventListener("abort", () => reject(init.signal.reason)));
     // Node unrefs AbortSignal.timeout's timer; hold the loop open meanwhile.
     const keepAlive = setTimeout(() => {}, 5_000);
-    const hung = await readSourceNotes(ml, "MAL");
+    const hung = await readSourceNotes(ml, "MAL", 1);
     clearTimeout(keepAlive);
     assert(!hung.ok && /did not answer in time/.test(hung.reason), "a hanging fetch times out -> not ok, with a reason");
     AbortSignal.timeout = realTimeout;
     globalThis.fetch = async () => {
       throw new DOMException("aborted", "AbortError");
     };
-    const aborted = await readSourceNotes(ml, "HAG");
+    const aborted = await readSourceNotes(ml, "HAG", 1);
     assert(!aborted.ok && /did not answer in time/.test(aborted.reason), "an AbortError -> the same timeout reason");
 
-    const authoring = await readSourceNotes(envFor("en-unfoldingword", "src-en"), "TIT");
+    const authoring = await readSourceNotes(envFor("en-unfoldingword", "src-en"), "TIT", 1);
     assert(!authoring.ok && /English/.test(authoring.reason), "an authoring project has no separate source");
 
     const broken = { WORKSPACE_SLUG: "src-broken", DB: { prepare: () => { throw new Error("db down"); } } };
-    const r = await readSourceNotes(broken, "TIT");
+    const r = await readSourceNotes(broken, "TIT", 1);
     assert(typeof r.ok === "boolean", "a config read failure still returns a result");
   } finally {
     globalThis.fetch = realFetch;
     AbortSignal.timeout = realTimeout;
+    clearSourceNotesCache();
+  }
+}
+
+console.log("[sourceNotes] per-book / per-chapter tN source overrides (#691)");
+{
+  const { readSourceNotes, clearSourceNotesCache, noteSourcePlanForClient } = await import("./sourceNotes.ts");
+  const { clearProjectConfigCache } = await import("./projectConfig.ts");
+  const HEADER = "Reference\tID\tTags\tSupportReference\tQuote\tOccurrence\tNote\n";
+  const tsv = (rows) => HEADER + rows.map(([ref, id, note]) => `${ref}\t${id}\t\t\tq\t1\t${note}`).join("\n") + "\n";
+  const base = "https://door43.test/unfoldingWord/en_tn/raw/branch/master/tn_ZEC.tsv";
+  const other = "https://door43.test/OtherOrg/other_tn/raw/branch/master/tn_ZEC.tsv";
+  const third = "https://door43.test/ThirdOrg/third_tn/raw/branch/master/tn_ZEC.tsv";
+  const whole = "https://door43.test/WholeOrg/whole_tn/raw/branch/master/tn_ZEC.tsv";
+  // Every source carries id "ab12" in chapter 2, with different text, so a
+  // read from the wrong repo shows up as the wrong note.
+  const files = {
+    [base]: tsv([["front:intro", "fr00", "EN front"], ["2:1", "ab12", "EN two"], ["4:1", "cd34", "EN four"], ["5:1", "ef56", "EN five"], ["8:1", "gh78", "EN eight"]]),
+    [other]: tsv([["2:1", "ab12", "OTHER two"], ["3:1", "ij90", "OTHER three"], ["4:1", "cd34", "OTHER four"]]),
+    [third]: tsv([["8:1", "gh78", "THIRD eight"], ["2:1", "ab12", "THIRD two"]]),
+    [whole]: tsv([["2:1", "ab12", "WHOLE two"], ["4:1", "cd34", "WHOLE four"]]),
+  };
+  const realFetch = globalThis.fetch;
+  const fetched = [];
+  globalThis.fetch = async (url) => {
+    fetched.push(String(url));
+    const body = files[String(url)];
+    return body ? new Response(body, { status: 200 }) : new Response("nope", { status: 404 });
+  };
+  const PRESET = "en-bible-editor-ml-test";
+  const envFor = (preset, slug, ranges, overrides_json = null) => ({
+    WORKSPACE_SLUG: slug,
+    DCS_BASE_URL: "https://door43.test",
+    DB: {
+      prepare: (sql) =>
+        /book_source_overrides/.test(sql)
+          ? { bind: () => ({ all: async () => ({ results: ranges }) }) }
+          : { first: async () => ({ preset, overrides_json }) },
+    },
+  });
+  try {
+    clearSourceNotesCache();
+    clearProjectConfigCache();
+    const ranges = [
+      { chapter_start: 1, chapter_end: 3, kind: "dcs", org: "OtherOrg", repo: "other_tn" },
+      { chapter_start: 5, chapter_end: 6, kind: "aquifer", org: "aquifer", repo: "arb" },
+      { chapter_start: 8, chapter_end: 9, kind: "dcs", org: "ThirdOrg", repo: "third_tn" },
+    ];
+    const env = envFor(PRESET, "src-ov", ranges);
+
+    const two = await readSourceNotes(env, "ZEC", 2);
+    assert(two.ok && two.source === "OtherOrg/other_tn" && fetched.at(-1) === other, "a chapter in a dcs override range reads the override's org/repo");
+    assert(two.notes.get("ab12") === "OTHER two", "and matches the override's note for the id, not the project-wide source's");
+    assert(two.notes.get("ij90") === "OTHER three" && !two.notes.has("cd34"), "only the override's rows for chapters the override covers count");
+
+    const eight = await readSourceNotes(env, "ZEC", 8);
+    assert(eight.ok && eight.source === "ThirdOrg/third_tn" && eight.notes.get("gh78") === "THIRD eight", "a second range in the same book resolves on its own");
+    assert(!eight.notes.has("ab12"), "the second range's repo does not answer for the first range's chapters");
+
+    const four = await readSourceNotes(env, "ZEC", 4);
+    assert(four.ok && four.source === "unfoldingWord/en_tn" && fetched.at(-1) === base, "a chapter no override covers reads the project-wide source");
+    assert(four.notes.get("cd34") === "EN four" && four.notes.get("fr00") === "EN front", "with its own notes");
+    assert(!four.notes.has("ab12") && !four.notes.has("gh78"), "but not for chapters a Door43 override takes over");
+
+    const before = fetched.length;
+    // Aquifer rows are built on the project's en_tn and matched ones keep its
+    // ids, so an Aquifer chapter reads the project-wide source.
+    const five = await readSourceNotes(env, "ZEC", 5);
+    assert(five.ok && five.source === "unfoldingWord/en_tn" && fetched.length === before, "an Aquifer range reads the project-wide source (from cache here)");
+    assert(five.notes.get("ef56") === "EN five", "a matched Aquifer row gets the en_tn note with its id");
+    assert(!five.notes.has("mint") && !five.notes.has("ab12"), "an unmatched (minted) id has no note, and an overridden chapter's id still does not answer");
+
+    await readSourceNotes(env, "ZEC", 3);
+    assert(fetched.length === before, "the cache is per resolved repo: chapter 3 reuses chapter 2's OtherOrg read");
+
+    const wholeEnv = envFor(PRESET, "src-whole", [{ chapter_start: 0, chapter_end: 999, kind: "dcs", org: "WholeOrg", repo: "whole_tn" }]);
+    const w = await readSourceNotes(wholeEnv, "ZEC", 4);
+    assert(w.ok && w.source === "WholeOrg/whole_tn" && w.notes.get("cd34") === "WHOLE four", "a whole-book dcs override replaces the project-wide source");
+
+    // An override that only names the project's own repo is not a real
+    // override (import treats it the same way): the project-wide source stays.
+    const ownEnv = envFor(PRESET, "src-own", [{ chapter_start: 1, chapter_end: 3, kind: "dcs", org: "BibleEditorMLTest", repo: "en_tn" }]);
+    const own = await readSourceNotes(ownEnv, "ZEC", 2);
+    assert(own.ok && own.source === "unfoldingWord/en_tn" && own.notes.get("ab12") === "EN two", "an override naming the project's own repo is a no-op");
+
+    // A non-ident stored org is never fetched (bookSource.ts re-validates on read).
+    const badEnv = envFor(PRESET, "src-bad", [{ chapter_start: 1, chapter_end: 3, kind: "dcs", org: "../evil", repo: "x" }]);
+    const bad = await readSourceNotes(badEnv, "ZEC", 2);
+    assert(bad.ok && bad.source === "unfoldingWord/en_tn" && !fetched.some((u) => u.includes("evil")), "a stored override that is not a valid org/repo is ignored");
+
+    // The override table unreadable: no guess at the source, and no throw.
+    const downEnv = {
+      WORKSPACE_SLUG: "src-ovdown",
+      DCS_BASE_URL: "https://door43.test",
+      DB: {
+        prepare: (sql) =>
+          /book_source_overrides/.test(sql)
+            ? { bind: () => ({ all: async () => { throw new Error("D1 overloaded"); } }) }
+            : { first: async () => ({ preset: PRESET, overrides_json: null }) },
+      },
+    };
+    const down = await readSourceNotes(downEnv, "ZEC", 2);
+    assert(!down.ok && typeof down.reason === "string", "an unreadable override table is not ok, and never throws");
+
+    // A translation project with no project-wide tN repo: import still reads a
+    // dcs override, so the English source note does too.
+    const NO_TN = JSON.stringify({ mode: "translation", translationSource: { org: "unfoldingWord", repos: { lit: "en_ult" } } });
+    const noBase = envFor(PRESET, "src-nobase", [{ chapter_start: 1, chapter_end: 2, kind: "dcs", org: "OtherOrg", repo: "other_tn" }], NO_TN);
+    const nb1 = await readSourceNotes(noBase, "ZEC", 1);
+    assert(nb1.ok && nb1.source === "OtherOrg/other_tn" && nb1.notes.get("ab12") === "OTHER two", "no project-wide tN: a chapter in a dcs range still reads the override");
+    const nb3 = await readSourceNotes(noBase, "ZEC", 3);
+    assert(!nb3.ok && /no English tN source/.test(nb3.reason), "no project-wide tN: a chapter no override covers has no source, with the existing reason");
+    const nbPlan = await noteSourcePlanForClient(noBase, "ZEC");
+    assert(nbPlan && nbPlan.base === null && nbPlan.ranges.length === 1 && nbPlan.ranges[0].org === "OtherOrg", "the web plan has a null base and the override range");
+
+    const noBaseWhole = envFor(PRESET, "src-nobase-whole", [{ chapter_start: 0, chapter_end: 999, kind: "dcs", org: "WholeOrg", repo: "whole_tn" }], NO_TN);
+    const nbw = await readSourceNotes(noBaseWhole, "ZEC", 4);
+    assert(nbw.ok && nbw.source === "WholeOrg/whole_tn" && nbw.notes.get("cd34") === "WHOLE four", "no project-wide tN: a whole-book override is read");
+    const nbwPlan = await noteSourcePlanForClient(noBaseWhole, "ZEC");
+    assert(nbwPlan?.base?.org === "WholeOrg" && nbwPlan.ranges.length === 0, "and the web plan's base is the whole-book override");
+
+    const authoringPlan = await noteSourcePlanForClient(envFor("en-unfoldingword", "src-auth-plan", []), "ZEC");
+    assert(authoringPlan === null, "an authoring project gets no plan");
+  } finally {
+    globalThis.fetch = realFetch;
     clearSourceNotesCache();
   }
 }

@@ -34,9 +34,11 @@ export interface McpSession {
   // and note templates a book references, read straight from the workspace's
   // D1 (packageRefs.ts says why). Read-only rows; the tool sends counts only.
   packageRefs: (book: string) => Promise<PackageRefRows>;
-  // The published English tN for a book, keyed by row id, read from the
-  // project's translationSource on Door43 (sourceNotes.ts). Never throws.
-  sourceNotes: (book: string) => Promise<SourceNotes>;
+  // The published English tN for one chapter of a book, keyed by row id, read
+  // on Door43 from the source that chapter's notes came from: a per-book or
+  // per-chapter override, else the project's translationSource (sourceNotes.ts).
+  // Never throws.
+  sourceNotes: (book: string, chapter: number) => Promise<SourceNotes>;
 }
 
 export type LinkClaim =
@@ -418,7 +420,7 @@ const chunkWork: ToolDef = {
     const from = start === -1 ? all.length : start;
     // The English source, only when there are tN rows to return. Its bytes
     // are part of each row before the budget check, so pages just get shorter.
-    const en = kind === "tn" && from < all.length ? await session.sourceNotes(book) : null;
+    const en = kind === "tn" && from < all.length ? await session.sourceNotes(book, chapter) : null;
     const rows: Record<string, unknown>[] = [];
     let bytes = 0;
     let i = from;
@@ -543,7 +545,8 @@ const getRow: ToolDef = {
     if (typeof id !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(id)) throw new ToolInputError("id is not a row id");
     const row = await apiGet(session, `/api/rows/${kind}/${encodeURIComponent(id)}?book=${book}`);
     if (kind === "tq") return projectRow(kind, row);
-    return withEnNote(projectRow(kind, row), id, () => session.sourceNotes(book));
+    // The row's own chapter: an override can give chapters different sources.
+    return withEnNote(projectRow(kind, row), id, () => session.sourceNotes(book, Number(row.chapter) || 0));
   },
 };
 

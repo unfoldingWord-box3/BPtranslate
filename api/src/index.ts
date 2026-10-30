@@ -543,7 +543,7 @@ export default {
           },
           // Read-only D1 exception to the route-handler rule; see packageRefs.ts.
           packageRefs: (book: string) => readPackageRefs(wsEnv, book),
-          sourceNotes: (book: string) => readSourceNotes(wsEnv, book),
+          sourceNotes: (book: string, chapter: number) => readSourceNotes(wsEnv, book, chapter),
         };
       };
       return handleMcp(request, {
