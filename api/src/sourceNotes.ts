@@ -27,7 +27,12 @@ import { getProjectConfig } from "./projectConfig.ts";
 import { isTranslationConfig } from "./workflowLayouts.ts";
 import { dcsRawUrl } from "./dcsSources.ts";
 import { parseTsv, refParts } from "./importParsers.ts";
-import { planBookNoteSources, sourceRefForChapter, type ResolvedSourceRange } from "./bookSource.ts";
+import {
+  planBookNoteSources,
+  sourceRefForChapter,
+  type BookSourceResource,
+  type ResolvedSourceRange,
+} from "./bookSource.ts";
 import type { RepoRef } from "./repoUrl.ts";
 
 export type SourceNotes =
@@ -100,16 +105,24 @@ export function clearSourceNotesCache(): void {
 // project has no project-wide English tN repo; a dcs override still applies
 // then, as it does on import. null for an authoring project. A D1 failure
 // throws; the route catches it.
+//
+// `resource` "tq" gives the same plan for the English source question
+// (useSourceQuestions, #695). Aquifer is tN-only: resolveRangeSource drops a
+// tQ Aquifer range, so a tQ plan only ever carries Door43 ranges.
 export type ClientNoteSourceRange = { chapter_start: number; chapter_end: number; org: string; repo: string };
 export interface ClientNoteSourcePlan {
   base: { org: string; repo: string } | null;
   ranges: ClientNoteSourceRange[];
 }
 
-export async function noteSourcePlanForClient(env: Env, book: string): Promise<ClientNoteSourcePlan | null> {
+export async function noteSourcePlanForClient(
+  env: Env,
+  book: string,
+  resource: BookSourceResource = "tn",
+): Promise<ClientNoteSourcePlan | null> {
   const cfg = await getProjectConfig(env);
   if (!isTranslationConfig(cfg)) return null;
-  const plan = await planBookNoteSources(env, cfg, book, "tn", true);
+  const plan = await planBookNoteSources(env, cfg, book, resource, true);
   return {
     base: plan.base ? { org: plan.base.owner, repo: plan.base.repo } : null,
     ranges: plan.ranges.flatMap((r): ClientNoteSourceRange[] =>

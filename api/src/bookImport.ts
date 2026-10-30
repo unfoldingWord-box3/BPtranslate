@@ -158,13 +158,14 @@ books.get("/:book/sources", requireAuth, async (c) => {
   // resolved here so the web app's Source panel follows the same rules as
   // import and the chat tools. A failure leaves it null; the overrides list
   // above still answers.
-  let tnNoteSources: ClientNoteSourcePlan | null = null;
-  try {
-    tnNoteSources = await noteSourcePlanForClient(c.env, book);
-  } catch (e) {
-    console.error("noteSourcePlanForClient failed", e instanceof Error ? e.message : String(e));
-  }
-  return c.json({ book, overrides, tnNoteSources });
+  // tqQuestionSources is the same for the English source question (#695).
+  const plan = (resource: "tn" | "tq") =>
+    noteSourcePlanForClient(c.env, book, resource).catch((e): ClientNoteSourcePlan | null => {
+      console.error("noteSourcePlanForClient failed", resource, e instanceof Error ? e.message : String(e));
+      return null;
+    });
+  const [tnNoteSources, tqQuestionSources] = await Promise.all([plan("tn"), plan("tq")]);
+  return c.json({ book, overrides, tnNoteSources, tqQuestionSources });
 });
 
 // Body:
