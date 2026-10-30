@@ -99,6 +99,8 @@ import { useBook } from "../../hooks/useBook";
 import { useChapter } from "../../hooks/useChapter";
 import { useProjectConfig, isTranslationProject } from "../../hooks/useProjectConfig";
 import { useSourceQuestions } from "../../hooks/useSourceQuestions";
+import { useSourcePlan } from "../../hooks/sourcePlans";
+import { chapterHasSource } from "../../lib/sourceNotePlan";
 import { useUnsavedGuard } from "../../hooks/useUnsavedGuard";
 import { resolveSourceRef } from "../../lib/sourceRef";
 import {
@@ -480,6 +482,9 @@ export default function TranslateQuestionsScreen({
     [projectConfig],
   );
   const sourceQuestions = useSourceQuestions(translationMode ? book : null, sourceProjection);
+  // Which chapters have a source at all: a Door43 override can give a chapter
+  // one when the project has no project-wide tQ repo (#697).
+  const sourcePlan = useSourcePlan(translationMode ? book : null, "tq", sourceProjection);
 
   const { status, data, refetch, applyLocalRowPatch, applyLocalRowReplacement } = useChapter(
     book,
@@ -1549,7 +1554,7 @@ export default function TranslateQuestionsScreen({
                 targetLabel={targetLabel}
                 sourceLangLabel={sourceLangLabel}
                 translationMode={translationMode}
-                hasSourceProjection={sourceProjection !== null}
+                hasSourceProjection={chapterHasSource(sourcePlan, row.chapter)}
                 chipKind={chip.kind}
                 chipLabel={chip.label}
                 hl={HL}
@@ -1579,7 +1584,7 @@ export default function TranslateQuestionsScreen({
                 targetLabel={targetLabel}
                 sourceLangLabel={sourceLangLabel}
                 translationMode={translationMode}
-                hasSourceProjection={sourceProjection !== null}
+                hasSourceProjection={chapterHasSource(sourcePlan, row.chapter)}
                 chipKind={chip.kind}
                 chipLabel={chip.label}
                 hl={HL}
