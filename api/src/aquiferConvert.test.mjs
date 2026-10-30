@@ -50,6 +50,13 @@ test("embeddedQuote pulls the first ltr(Greek)/rtl(Hebrew) span, NFC-trimmed", (
   assert.equal(embeddedQuote("<p>no span here</p>"), "");
 });
 
+test("aquiferRef skips index 00000000, stray other-book items in the v2026-10-14 release", () => {
+  assert.equal(aquiferRef(aq("1 कुरिन्थियों 1:1 (#1)", "00000000", "1CO 1:1", "")), null);
+  const { notes, report } = convertAquiferBook([aq("1 कुरिन्थियों 1:1 (#1)", "00000000", "1CO 1:1", "")], []);
+  assert.equal(notes.length, 0);
+  assert.equal(report.unmatched, 0);
+});
+
 test("aquiferRef maps book intro, chapter intro, verse, and range", () => {
   assert.deepEqual(aquiferRef({ index_reference: "08000000", associations: { passage: [{ start_ref_usfm: "RUT 0:1" }] } }), { ref: "front:intro", isIntro: true });
   assert.deepEqual(aquiferRef({ index_reference: "08Ruth000", associations: { passage: [{ start_ref_usfm: "RUT 2:1" }] } }), { ref: "2:intro", isIntro: true });
