@@ -154,6 +154,20 @@ test("bpt_edit_row on a tq row saves question and response", async () => {
   assert.equal(ok.data.state, "validated");
 });
 
+// #703: the chat's own write must read back as source chat, not null.
+test("after its own save the chat sees last_edit_source chat (edit and approve, tn and tq)", async () => {
+  const { call } = fresh();
+  const tnEdit = await call("bpt_edit_row", { kind: "tn", id: "ab12", version: 3, note: "corrected note" });
+  assert.equal(tnEdit.data.row.last_edit_source, "chat", JSON.stringify(tnEdit.data));
+  const tnOk = await call("bpt_approve", { kind: "tn", id: "ab12", version: 4, state: "edited" });
+  assert.equal(tnOk.data.row.last_edit_source, "chat", JSON.stringify(tnOk.data));
+
+  const tqEdit = await call("bpt_edit_row", { kind: "tq", id: "q001", version: 2, question: "new q?" });
+  assert.equal(tqEdit.data.row.last_edit_source, "chat", JSON.stringify(tqEdit.data));
+  const tqOk = await call("bpt_approve", { kind: "tq", id: "q001", version: 3, state: "edited" });
+  assert.equal(tqOk.data.row.last_edit_source, "chat", JSON.stringify(tqOk.data));
+});
+
 test("a stale version is a conflict carrying both texts, and nothing changes", async () => {
   const { call, tnRow, log } = fresh();
   // Someone else's edit lands first (here: the chat's own, at version 3 -> 4).
@@ -243,6 +257,12 @@ test("the web app's validate call (no If-Match) still works, with source NULL", 
   assert.equal(res.status, 200);
   assert.equal(tnRow("ab12").translation_state, "validated");
   assert.equal(sqlite.prepare(`SELECT source FROM edit_log`).get().source, null);
+  // Same row shape as a PATCH response (#703): latest_source is present, and
+  // NULL here because the web approval is the latest edit_log entry.
+  const body = await res.json();
+  assert.equal(body.translation_state, "validated");
+  assert.ok("latest_source" in body, JSON.stringify(body));
+  assert.equal(body.latest_source, null);
 });
 
 test("the chat door is closed to outside requests", async () => {
