@@ -26,7 +26,7 @@ import { books } from "./bookImport";
 import { populateReferencedArticles } from "./articlePopulate";
 import { templates } from "./templates";
 import { syncTemplates } from "./templateSync";
-import { attachAuth, chatWriteEnv, requireAuth, requireCsrf, mintDevToken, startDcsAuth, callbackDcsAuth, authMe, authLogout, refreshToken, updateLastLocation, currentUserId } from "./auth";
+import { attachAuth, chatConfirmMac, chatWriteEnv, requireAuth, requireCsrf, mintDevToken, startDcsAuth, callbackDcsAuth, authMe, authLogout, refreshToken, updateLastLocation, currentUserId } from "./auth";
 import { workspaceRoutes } from "./workspaceRoutes";
 import { handleMcp, isMcpPath } from "./mcp";
 import { chatLinkRoutes } from "./chatLinkRoutes";
@@ -557,6 +557,7 @@ export default {
           // Read-only D1 exception to the route-handler rule; see packageRefs.ts.
           packageRefs: (book: string) => readPackageRefs(wsEnv, book),
           sourceNotes: (book: string, chapter: number) => readSourceNotes(wsEnv, book, chapter),
+          confirmMac: (data: string) => chatConfirmMac(env, data),
         };
       };
       return handleMcp(request, {

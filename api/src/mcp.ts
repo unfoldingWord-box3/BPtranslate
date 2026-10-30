@@ -114,7 +114,7 @@ export async function dispatch(msg: unknown, ctx: ToolContext): Promise<unknown 
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: "bptranslate", version: "0.1.0" },
         instructions:
-          "BPtranslate language projects. Every tool except bpt_link_account needs the session_token that bpt_link_account returned for this user; the token decides which project is read. bpt_edit_row and bpt_approve save a reviewer's decision on one row, and need the version (bpt_approve: and the state) that row had when the reviewer was shown it.",
+          "BPtranslate language projects. Every tool except bpt_link_account needs the session_token that bpt_link_account returned for this user; the token decides which project is read. bpt_edit_row and bpt_approve save a reviewer's decision on one row, and need the version (bpt_approve: and the state) that row had when the reviewer was shown it. bpt_bulk_set_state moves the approved rows of a verse range back to needs review (never approves): preview first, show the reviewer the count, then confirm with the token.",
       });
     case "ping":
       return ok({});
