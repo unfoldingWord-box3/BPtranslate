@@ -64,6 +64,34 @@ export function noteSourceForChapter(plan: NoteSourcePlan, chapter: number): Rep
   return plan.base ? { org: plan.base.org, repo: plan.base.repo } : null;
 }
 
+// Whether a chapter's rows have an English source at all (#697): the flows
+// screens say "no source for this note" for a chapter that has one but lacks
+// the row, and "no source repo configured" only for a chapter that has none.
+// null plan (authoring project): no source.
+export function chapterHasSource(plan: NoteSourcePlan | null, chapter: number): boolean {
+  return plan !== null && noteSourceForChapter(plan, chapter) !== null;
+}
+
+// One resource's plan from a GET /api/books/:book/sources response. null is
+// the server's answer for an authoring project; an omitted field means the
+// server could not resolve the plan (#697), so this throws and the caller
+// treats it as a failed request.
+export function planFromBookSources(
+  res: { tnNoteSources?: NoteSourcePlan | null; tqQuestionSources?: NoteSourcePlan | null },
+  resource: "tn" | "tq",
+): NoteSourcePlan | null {
+  const plan = resource === "tn" ? res.tnNoteSources : res.tqQuestionSources;
+  if (plan === undefined) throw new Error(`no ${resource} source plan in the response`);
+  return plan;
+}
+
+// The plan to read by when the plan request failed (#697): the project-wide
+// file for every chapter, as before #691. Without a project-wide source there
+// is nothing to show.
+export function fallbackSourcePlan(projectWide: RepoSource | null): NoteSourcePlan | null {
+  return projectWide ? { base: { org: projectWide.org, repo: projectWide.repo }, ranges: [] } : null;
+}
+
 // Each Door43 repo the plan reads, once.
 export function planRepos(plan: NoteSourcePlan): RepoSource[] {
   const out = new Map<string, RepoSource>();

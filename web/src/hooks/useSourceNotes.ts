@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { mergeSourceNotes, parseSourceTsv, planRepos, repoKey, type SourceNoteMap } from "../lib/sourceNotePlan";
+import { fallbackSourcePlan, mergeSourceNotes, parseSourceTsv, planRepos, repoKey, type RepoSource, type SourceNoteMap } from "../lib/sourceNotePlan";
 import { fetchSourcePlan } from "./sourcePlans";
 
 export type { SourceNote, SourceNoteMap } from "../lib/sourceNotePlan";
@@ -21,7 +21,9 @@ export type { SourceNote, SourceNoteMap } from "../lib/sourceNotePlan";
 //
 // Degrades gracefully: a failed fetch or an id with no source row yields no
 // entry, and the card simply omits the source block. If the source plan cannot
-// be read, no notes show rather than a guess that could be another source's.
+// be read (request failed, or the server could not resolve it), the
+// project-wide file shows for every chapter, as before the per-chapter plan
+// (#697); an authoring project (null plan) shows none.
 
 const EMPTY: SourceNoteMap = new Map();
 
@@ -50,8 +52,9 @@ function fetchSourceTsv(org: string, repo: string, book: string): Promise<Source
   return pending;
 }
 
-async function loadSourceNotes(book: string): Promise<SourceNoteMap> {
-  const plan = await fetchSourcePlan(book, "tn");
+async function loadSourceNotes(book: string, projectWide: RepoSource | null): Promise<SourceNoteMap> {
+  // A plan that cannot be read falls back to the project-wide file (#697).
+  const plan = await fetchSourcePlan(book, "tn").catch(() => fallbackSourcePlan(projectWide));
   if (!plan) return EMPTY;
   const repos = planRepos(plan);
   const settled = await Promise.allSettled(repos.map((r) => fetchSourceTsv(r.org, r.repo, book)));
@@ -64,7 +67,7 @@ async function loadSourceNotes(book: string): Promise<SourceNoteMap> {
 
 // `book` is null outside translation mode, which short-circuits to an empty map
 // with no fetch. `source` is the project's translationSource projection
-// {org, repo}, only prefetched; null (no project-wide tN repo) still reads
+// {org, repo}: prefetched, and the fallback when the plan cannot be read; null (no project-wide tN repo) still reads
 // the plan, since a Door43 override applies without one. The server's plan
 // decides which repos are read.
 export function useSourceNotes(
@@ -86,7 +89,7 @@ export function useSourceNotes(
     // Start the project-wide file while the plan loads; almost every chapter
     // reads it, and the shared cache hands it to loadSourceNotes.
     if (org !== null && repo !== null) fetchSourceTsv(org, repo, book).catch(() => {});
-    loadSourceNotes(book)
+    loadSourceNotes(book, org !== null && repo !== null ? { org, repo } : null)
       .then((m) => {
         if (mounted) setMap(m);
       })
