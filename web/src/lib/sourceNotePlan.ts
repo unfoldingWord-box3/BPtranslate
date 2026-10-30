@@ -9,9 +9,11 @@
 // the validation and the own-repo no-op stay in one place. This file only
 // looks a chapter up in that plan and merges the fetched files. Same rule as
 // the chat tools' readSourceNotes: a source's notes count only for the
-// chapters that resolve to it, and an Aquifer chapter has no English note
-// (Aquifer text is not a Door43 tN TSV). Pure, so it runs under the
-// strip-types test runner.
+// chapters that resolve to it. Only Door43 (dcs) overrides change the source;
+// an Aquifer range reads the base, because import builds Aquifer rows on top
+// of the project's en_tn and matched rows keep en_tn's ids (the server leaves
+// Aquifer ranges out of the plan). Pure, so it runs under the strip-types
+// test runner.
 
 export interface SourceNote {
   note: string;
@@ -27,9 +29,11 @@ export interface RepoSource {
   repo: string;
 }
 
-export type NoteSourceRange =
-  | { chapter_start: number; chapter_end: number; kind: "dcs"; org: string; repo: string }
-  | { chapter_start: number; chapter_end: number; kind: "aquifer"; aqLang: string };
+// A Door43 override for a chapter range.
+export interface NoteSourceRange extends RepoSource {
+  chapter_start: number;
+  chapter_end: number;
+}
 
 // base: the source for chapters no range covers (a whole-book override, else
 // the project-wide translationSource).
@@ -37,11 +41,6 @@ export interface NoteSourcePlan {
   base: RepoSource | null;
   ranges: NoteSourceRange[];
 }
-
-export type ChapterNoteSource =
-  | { kind: "dcs"; org: string; repo: string }
-  | { kind: "aquifer"; aqLang: string }
-  | null;
 
 export function repoKey(r: RepoSource): string {
   return `${r.org}/${r.repo}`.toLowerCase();
@@ -54,23 +53,21 @@ export function refChapter(reference: string): number {
   return ch === "front" ? 0 : parseInt(ch, 10) || 0;
 }
 
-export function noteSourceForChapter(plan: NoteSourcePlan, chapter: number): ChapterNoteSource {
+export function noteSourceForChapter(plan: NoteSourcePlan, chapter: number): RepoSource | null {
   for (const r of plan.ranges) {
-    if (chapter >= r.chapter_start && chapter <= r.chapter_end) {
-      return r.kind === "dcs" ? { kind: "dcs", org: r.org, repo: r.repo } : { kind: "aquifer", aqLang: r.aqLang };
-    }
+    if (chapter >= r.chapter_start && chapter <= r.chapter_end) return { org: r.org, repo: r.repo };
   }
-  return plan.base ? { kind: "dcs", org: plan.base.org, repo: plan.base.repo } : null;
+  return plan.base ? { org: plan.base.org, repo: plan.base.repo } : null;
 }
 
-// Each Door43 repo the plan reads, once. Aquifer ranges fetch nothing.
+// Each Door43 repo the plan reads, once.
 export function planRepos(plan: NoteSourcePlan): RepoSource[] {
   const out = new Map<string, RepoSource>();
   const add = (r: RepoSource) => {
     if (!out.has(repoKey(r))) out.set(repoKey(r), { org: r.org, repo: r.repo });
   };
   if (plan.base) add(plan.base);
-  for (const r of plan.ranges) if (r.kind === "dcs") add(r);
+  for (const r of plan.ranges) add(r);
   return [...out.values()];
 }
 
@@ -114,7 +111,7 @@ export function mergeSourceNotes(plan: NoteSourcePlan, byRepo: Map<string, Sourc
     if (!notes) continue;
     for (const [id, sn] of notes) {
       const s = noteSourceForChapter(plan, refChapter(sn.reference));
-      if (s?.kind === "dcs" && repoKey(s) === key && !merged.has(id)) merged.set(id, sn);
+      if (s && repoKey(s) === key && !merged.has(id)) merged.set(id, sn);
     }
   }
   return merged;

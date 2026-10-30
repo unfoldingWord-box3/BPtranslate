@@ -24,7 +24,7 @@ export type { SourceNote, SourceNoteMap } from "../lib/sourceNotePlan";
 // source (book_source_overrides). The server sends which source each chapter
 // resolves to (GET /api/books/:book/sources → tnNoteSources), every source in
 // it is fetched, and each note comes from the source its own chapter resolves
-// to (lib/sourceNotePlan.ts). An Aquifer chapter has no English note here.
+// to (lib/sourceNotePlan.ts). An Aquifer range keeps the project-wide source.
 //
 // Degrades gracefully: a failed fetch or an id with no source row yields no
 // entry, and the card simply omits the source block. If the source plan cannot

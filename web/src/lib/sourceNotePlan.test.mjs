@@ -24,9 +24,8 @@ const THIRD = { org: "ThirdOrg", repo: "third_tn" };
 const plan = {
   base: EN,
   ranges: [
-    { chapter_start: 1, chapter_end: 3, kind: "dcs", ...OTHER },
-    { chapter_start: 5, chapter_end: 6, kind: "aquifer", aqLang: "arb" },
-    { chapter_start: 8, chapter_end: 9, kind: "dcs", ...THIRD },
+    { chapter_start: 1, chapter_end: 3, ...OTHER },
+    { chapter_start: 8, chapter_end: 9, ...THIRD },
   ],
 };
 
@@ -43,18 +42,20 @@ test("parseSourceTsv keeps the hook's old parsing: BOM, CRLF, header by content,
   assert.deepEqual(m.get("ab12"), { note: "Line one\nLine two", quote: "q", supportReference: "figs-x", reference: "1:1" });
 });
 
-test("noteSourceForChapter: a dcs range, an aquifer range, two ranges in one book, and the base", () => {
-  assert.deepEqual(noteSourceForChapter(plan, 2), { kind: "dcs", ...OTHER });
-  assert.deepEqual(noteSourceForChapter(plan, 5), { kind: "aquifer", aqLang: "arb" });
-  assert.deepEqual(noteSourceForChapter(plan, 8), { kind: "dcs", ...THIRD });
-  assert.deepEqual(noteSourceForChapter(plan, 4), { kind: "dcs", ...EN });
-  assert.deepEqual(noteSourceForChapter(plan, 0), { kind: "dcs", ...EN });
+// The server leaves Aquifer ranges out of the plan (they read the base), so
+// chapter 5 here stands for an Aquifer chapter.
+test("noteSourceForChapter: a dcs range, two ranges in one book, and the base", () => {
+  assert.deepEqual(noteSourceForChapter(plan, 2), OTHER);
+  assert.deepEqual(noteSourceForChapter(plan, 8), THIRD);
+  assert.deepEqual(noteSourceForChapter(plan, 4), EN);
+  assert.deepEqual(noteSourceForChapter(plan, 5), EN);
+  assert.deepEqual(noteSourceForChapter(plan, 0), EN);
   assert.equal(noteSourceForChapter({ base: null, ranges: [] }, 4), null);
 });
 
-test("planRepos lists each Door43 repo to fetch once (never an Aquifer range)", () => {
+test("planRepos lists each Door43 repo to fetch once", () => {
   assert.deepEqual(planRepos(plan).map(repoKey), [repoKey(EN), repoKey(OTHER), repoKey(THIRD)]);
-  assert.deepEqual(planRepos({ base: EN, ranges: [{ chapter_start: 1, chapter_end: 2, kind: "dcs", org: "unfoldingword", repo: "EN_TN" }] }).length, 1);
+  assert.deepEqual(planRepos({ base: EN, ranges: [{ chapter_start: 1, chapter_end: 2, org: "unfoldingword", repo: "EN_TN" }] }).length, 1);
 });
 
 test("mergeSourceNotes takes each chapter's note from the source that chapter resolves to", () => {
@@ -70,7 +71,7 @@ test("mergeSourceNotes takes each chapter's note from the source that chapter re
   assert.equal(m.get("gh78")?.note, "THIRD eight", "a second range resolves on its own");
   assert.equal(m.get("cd34")?.note, "EN four", "a chapter no override covers keeps the project-wide note");
   assert.equal(m.get("fr00")?.note, "EN front");
-  assert.equal(m.has("ef56"), false, "an Aquifer chapter gets no English note, not the project-wide one");
+  assert.equal(m.get("ef56")?.note, "EN five", "an Aquifer chapter (no dcs range) keeps the project-wide note");
   assert.equal(m.has("zz99"), false, "an override's rows outside its own chapters do not count");
 });
 

@@ -7,11 +7,14 @@
 // Per chapter (#691): a book or chapter range can take its tN from another
 // source (book_source_overrides, bookSource.ts). The chapter's source is
 // resolved the way import resolves it (planBookNoteSources): a dcs override
-// is read from its own org/repo, a whole-book override replaces the
-// project-wide source, and an Aquifer range has no English note here, since
-// its text is Aquifer JSON, not a Door43 tN TSV. A source's notes count only
-// for the chapters that resolve to it, so an id shared by two sources never
-// shows one source's note on the other's chapter. Same rule as
+// is read from its own org/repo, and a whole-book override replaces the
+// project-wide source. An Aquifer range keeps the base source: import builds
+// Aquifer rows on top of the project's en_tn (fetchAquiferRangeNotes in
+// bookImport.ts) and a matched row keeps en_tn's id, so the en_tn note with
+// that id is the English note it was matched to; an unmatched row has a
+// minted id and gets no note, as any id the source lacks. A source's notes
+// count only for the chapters that resolve to it, so an id shared by two
+// sources never shows one source's note on the other's chapter. Same rule as
 // web/src/lib/sourceNotePlan.ts.
 //
 // Never throws: a project in authoring mode, no tN source configured, a 404 or
@@ -24,7 +27,7 @@ import { getProjectConfig } from "./projectConfig.ts";
 import { isTranslationConfig } from "./workflowLayouts.ts";
 import { dcsRawUrl, resolveSourceRef } from "./dcsSources.ts";
 import { parseTsv, refParts } from "./importParsers.ts";
-import { planBookNoteSources, sourceRefForChapter, type ResolvedNoteSource, type ResolvedSourceRange } from "./bookSource.ts";
+import { planBookNoteSources, sourceRefForChapter, type ResolvedSourceRange } from "./bookSource.ts";
 import type { RepoRef } from "./repoUrl.ts";
 
 export type SourceNotes =
@@ -71,13 +74,15 @@ const MAX_ENTRIES = 16;
 type SourceRow = { chapter: number; note: string };
 const cache = new Map<string, { at: number; rows: Map<string, SourceRow> }>();
 
-// The source a chapter's notes were drafted from: its override range, else the
-// base (a whole-book override, else the project-wide translationSource).
+// The repo a chapter's English source notes are read from: its dcs override
+// range, else the base (a whole-book override, else the project-wide
+// translationSource). An Aquifer range reads the base (see the header).
 function sourceForChapter(
   plan: { base: RepoRef | null; ranges: ResolvedSourceRange[] },
   chapter: number,
-): ResolvedNoteSource | null {
-  return sourceRefForChapter(plan, chapter) ?? (plan.base ? { kind: "dcs", ref: plan.base } : null);
+): RepoRef | null {
+  const range = sourceRefForChapter(plan, chapter);
+  return range?.kind === "dcs" ? range.ref : plan.base;
 }
 
 const sameRepo = (a: RepoRef, b: RepoRef) =>
@@ -90,12 +95,11 @@ export function clearSourceNotesCache(): void {
 // The same per-chapter plan, for the web app's Source panel (useSourceNotes),
 // sent by GET /api/books/:book/sources so the browser does not re-implement
 // the override rules (validation, the own-repo no-op). Read it with
-// web/src/lib/sourceNotePlan.ts. null when the project has no English tN
-// source: an authoring project, or none set up. A D1 failure throws; the
-// route catches it.
-export type ClientNoteSourceRange =
-  | { chapter_start: number; chapter_end: number; kind: "dcs"; org: string; repo: string }
-  | { chapter_start: number; chapter_end: number; kind: "aquifer"; aqLang: string };
+// web/src/lib/sourceNotePlan.ts. Only dcs ranges are sent: an Aquifer range
+// reads the base, like any chapter no range covers. null when the project has
+// no English tN source: an authoring project, or none set up. A D1 failure
+// throws; the route catches it.
+export type ClientNoteSourceRange = { chapter_start: number; chapter_end: number; org: string; repo: string };
 export interface ClientNoteSourcePlan {
   base: { org: string; repo: string } | null;
   ranges: ClientNoteSourceRange[];
@@ -107,10 +111,10 @@ export async function noteSourcePlanForClient(env: Env, book: string): Promise<C
   const plan = await planBookNoteSources(env, cfg, book, "tn", true);
   return {
     base: plan.base ? { org: plan.base.owner, repo: plan.base.repo } : null,
-    ranges: plan.ranges.map((r): ClientNoteSourceRange =>
+    ranges: plan.ranges.flatMap((r): ClientNoteSourceRange[] =>
       r.source.kind === "dcs"
-        ? { chapter_start: r.chapter_start, chapter_end: r.chapter_end, kind: "dcs", org: r.source.ref.owner, repo: r.source.ref.repo }
-        : { chapter_start: r.chapter_start, chapter_end: r.chapter_end, kind: "aquifer", aqLang: r.source.aqLang },
+        ? [{ chapter_start: r.chapter_start, chapter_end: r.chapter_end, org: r.source.ref.owner, repo: r.source.ref.repo }]
+        : [],
     ),
   };
 }
@@ -129,15 +133,8 @@ export async function readSourceNotes(env: Env, book: string, chapter: number): 
     // translateFromSource=true: with no override, the base is the
     // project-wide translationSource, as before #691.
     const plan = await planBookNoteSources(env, cfg, book, "tn", true);
-    const src = sourceForChapter(plan, chapter);
-    if (!src) return { ok: false, reason: "This project has no English tN source repository set up." };
-    if (src.kind === "aquifer") {
-      return {
-        ok: false,
-        reason: `${book} ${chapter} takes its notes from Aquifer (${src.aqLang}), which is not a Door43 tN file, so there is no English note to compare with.`,
-      };
-    }
-    const ref = src.ref;
+    const ref = sourceForChapter(plan, chapter);
+    if (!ref) return { ok: false, reason: "This project has no English tN source repository set up." };
     const source = `${ref.owner}/${ref.repo}`;
     const file = `tn_${book}.tsv`;
     const url = dcsRawUrl(env, ref.owner, ref.repo, file);
@@ -145,7 +142,7 @@ export async function readSourceNotes(env: Env, book: string, chapter: number): 
       const notes = new Map<string, string>();
       for (const [id, r] of rows) {
         const s = sourceForChapter(plan, r.chapter);
-        if (s?.kind === "dcs" && sameRepo(s.ref, ref)) notes.set(id, r.note);
+        if (s && sameRepo(s, ref)) notes.set(id, r.note);
       }
       return { ok: true, source, notes };
     };

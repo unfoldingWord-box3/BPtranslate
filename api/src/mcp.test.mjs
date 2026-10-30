@@ -763,11 +763,15 @@ console.log("[sourceNotes] per-book / per-chapter tN source overrides (#691)");
     const four = await readSourceNotes(env, "ZEC", 4);
     assert(four.ok && four.source === "unfoldingWord/en_tn" && fetched.at(-1) === base, "a chapter no override covers reads the project-wide source");
     assert(four.notes.get("cd34") === "EN four" && four.notes.get("fr00") === "EN front", "with its own notes");
-    assert(!four.notes.has("ab12") && !four.notes.has("ef56") && !four.notes.has("gh78"), "but not for chapters an override takes over");
+    assert(!four.notes.has("ab12") && !four.notes.has("gh78"), "but not for chapters a Door43 override takes over");
 
     const before = fetched.length;
+    // Aquifer rows are built on the project's en_tn and matched ones keep its
+    // ids, so an Aquifer chapter reads the project-wide source.
     const five = await readSourceNotes(env, "ZEC", 5);
-    assert(!five.ok && /Aquifer/.test(five.reason) && /arb/.test(five.reason) && fetched.length === before, "an Aquifer range has no English note, says why, and fetches nothing");
+    assert(five.ok && five.source === "unfoldingWord/en_tn" && fetched.length === before, "an Aquifer range reads the project-wide source (from cache here)");
+    assert(five.notes.get("ef56") === "EN five", "a matched Aquifer row gets the en_tn note with its id");
+    assert(!five.notes.has("mint") && !five.notes.has("ab12"), "an unmatched (minted) id has no note, and an overridden chapter's id still does not answer");
 
     await readSourceNotes(env, "ZEC", 3);
     assert(fetched.length === before, "the cache is per resolved repo: chapter 3 reuses chapter 2's OtherOrg read");
