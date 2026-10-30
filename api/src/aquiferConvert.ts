@@ -110,6 +110,7 @@ export function embeddedQuote(html: string | undefined): string {
 //  - book intro (index BB000000)      -> "front:intro"
 //  - chapter intro (letters in index) -> "<ch>:intro"   (passage is "BOOK ch:1")
 //  - chapter intro (index BBCCC000)   -> "<ch>:intro"   (current releases)
+//  - verse 0 (Psalm title)            -> "<ch>:front" (en_tn's name for it)
 //  - verse / range                    -> "ch:v" or "ch:v-v2"
 export function aquiferRef(it: AquiferItem): { ref: string; isIntro: boolean } | null {
   const idx = it.index_reference || "";
@@ -144,6 +145,10 @@ export function aquiferRef(it: AquiferItem): { ref: string; isIntro: boolean } |
     const [ec, ev] = end.split(":");
     return { ref: sc === ec ? `${sc}:${sv}-${ev}` : start, isIntro: false };
   }
+  // Verse 0 is a Psalm title; en_tn files those under "<ch>:front". They carry a
+  // Hebrew quote, so they are verse-style notes (quote join), not intros.
+  const [sc0, sv0] = start.split(":");
+  if (sv0 === "0") return { ref: `${sc0}:front`, isIntro: false };
   return { ref: start, isIntro: false };
 }
 
@@ -289,7 +294,9 @@ export function convertAquiferBook(
     const note: AqNote = {
       ref: rr.ref,
       isIntro: rr.isIntro,
-      ord: ordinalOf(it.title),
+      // A Psalm title's (#N) counts the chapter intro as #1; its slot among the
+      // "<ch>:front" rows is N-1 (same offset as parseEnglishTitle).
+      ord: rr.ref.endsWith(":front") ? Math.max(1, (ordinalOf(it.title) ?? 2) - 1) : ordinalOf(it.title),
       quote: embeddedQuote(it.content),
       html: it.content || "",
       contentId: it.content_id != null ? String(it.content_id) : null,
