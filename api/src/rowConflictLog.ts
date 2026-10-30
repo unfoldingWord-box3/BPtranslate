@@ -1,4 +1,5 @@
-// Diagnostic record of a rejected row write (409 version_mismatch). See
+// Diagnostic record of a rejected row write (409 version_mismatch), including
+// a pinned validate whose version or state moved on (#701). See
 // migrations/0074_row_conflict_log.sql for why it exists and what each column
 // answers. Best-effort: a logging failure must never change the 409 the client
 // gets, so the insert runs under waitUntil and swallows its own errors.
@@ -7,9 +8,10 @@ export interface RowConflictInput {
   kind: string;
   rowId: string;
   book: string | null;
-  action: "patch" | "delete";
+  action: "patch" | "delete" | "validate";
   userId: number | null;
-  expectedVersion: number;
+  // null: a validate that pinned only the state, not the version.
+  expectedVersion: number | null;
   fields: string[];
   // The row as the 409 path re-read it (SELECT * or a narrower SELECT).
   current: Record<string, unknown> | null | undefined;

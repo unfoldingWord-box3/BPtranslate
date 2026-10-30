@@ -1071,10 +1071,38 @@ function coerceBitValue(raw: 0 | 1 | boolean): 0 | 1 {
 
 // expected: the version the caller saw (from If-Match); the state changes only
 // if the row is still at it. null = no check, which is what the web app sends.
+// expectedState: the translation_state the caller saw (validate body
+// expected_state); the state changes only if the row is still in it and, for
+// tn, not trashed. State flips never bump `version`, so a version pin alone
+// misses an un-approve or a trash that landed after the reviewer saw the row
+// (#701). null = no check, which is what the web app sends.
 // source: edit_log.source for the audit entry (editSource).
 interface StateWriteOpts {
   expected: number | null;
+  expectedState: TranslationStatePin | null;
   source: "chat" | null;
+}
+
+const TRANSLATION_STATES = ["ai_draft", "edited", "validated"] as const;
+type TranslationStatePin = (typeof TRANSLATION_STATES)[number];
+
+// The pin clauses for a state write, numbered from ?first, and their values in
+// the same order. Each statement binds exactly the parameters it references,
+// in every mode (D1 rejects an unreferenced ?N), so a clause and its value come
+// and go together. `trash`: the table has trashed_at (tn_rows; tq_rows has none).
+function statePins(opts: StateWriteOpts, first: number, trash: boolean): { sql: string; values: unknown[] } {
+  let n = first;
+  let sql = "";
+  const values: unknown[] = [];
+  if (opts.expected !== null) {
+    sql += ` AND version = ?${n++}`;
+    values.push(opts.expected);
+  }
+  if (opts.expectedState !== null) {
+    sql += ` AND translation_state = ?${n++}${trash ? " AND trashed_at IS NULL" : ""}`;
+    values.push(opts.expectedState);
+  }
+  return { sql, values };
 }
 
 // Set the translation_state on a target-language tN row (multilingual review
@@ -1091,13 +1119,12 @@ async function setTnTranslationState(
   book: string,
   userId: number | null,
   state: "validated" | "edited" | null,
-  opts: StateWriteOpts = { expected: null, source: null },
+  opts: StateWriteOpts = { expected: null, expectedState: null, source: null },
 ): Promise<TnRow | null> {
   const now = Math.floor(Date.now() / 1000);
   const action = state === "validated" ? "validate" : "unvalidate";
-  // Each statement binds exactly the parameters it references, in both modes.
-  const pinned = opts.expected === null ? [] : [opts.expected];
-  const versionClause = (n: number) => (opts.expected === null ? "" : ` AND version = ?${n}`);
+  const auditPins = statePins(opts, 6, true);
+  const updatePins = statePins(opts, 5, true);
   // Approval snapshots the now-published content into pre_draft_json (migration
   // 0049) — NOT NULL. A subsequent human content edit demotes 'validated' ->
   // 'edited' (see the demote CASE in the PATCH handler), and the export gate
@@ -1114,23 +1141,26 @@ async function setTnTranslationState(
   // pre-state-machine imported row) would stamp 'validated' and the nightly
   // context-repo export would then ship it as a validated few-shot example
   // even though it was never a reviewed AI draft. The audit INSERT carries the
-  // same guard so no edit_log entry is written when nothing changed.
-  const [updateRes] = await env.DB.batch([
-    env.DB
-      .prepare(
-        `UPDATE tn_rows
-           SET translation_state = ?1, updated_at = ?2${snapshotClause}
-         WHERE id = ?3 AND deleted_at IS NULL AND translation_state IS NOT NULL${bookClause(4)}${versionClause(5)}`,
-      )
-      .bind(state, now, id, book, ...pinned),
+  // same guard so no edit_log entry is written when nothing changed. It runs
+  // FIRST: its WHERE must see the row before the UPDATE, or a state pin (which
+  // the UPDATE itself changes) would never match and the approval would land
+  // with no audit entry.
+  const [, updateRes] = await env.DB.batch([
     env.DB
       .prepare(
         `INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action, source)
          SELECT 'tn', ?1, book, ?2, version, version, ?3, ?5
            FROM tn_rows
-          WHERE id = ?1 AND deleted_at IS NULL AND translation_state IS NOT NULL${bookClause(4)}${versionClause(6)}`,
+          WHERE id = ?1 AND deleted_at IS NULL AND translation_state IS NOT NULL${bookClause(4)}${auditPins.sql}`,
       )
-      .bind(id, userId ?? null, action, book, opts.source, ...pinned),
+      .bind(id, userId ?? null, action, book, opts.source, ...auditPins.values),
+    env.DB
+      .prepare(
+        `UPDATE tn_rows
+           SET translation_state = ?1, updated_at = ?2${snapshotClause}
+         WHERE id = ?3 AND deleted_at IS NULL AND translation_state IS NOT NULL${bookClause(4)}${updatePins.sql}`,
+      )
+      .bind(state, now, id, book, ...updatePins.values),
   ]);
   if (!updateRes.meta.changes) return null;
   return env.DB.prepare(`SELECT * FROM tn_rows WHERE id = ?1${bookClause(2)}`).bind(id, book).first<TnRow>();
@@ -1148,33 +1178,35 @@ async function setTqTranslationState(
   book: string,
   userId: number | null,
   state: "validated" | "edited" | null,
-  opts: StateWriteOpts = { expected: null, source: null },
+  opts: StateWriteOpts = { expected: null, expectedState: null, source: null },
 ): Promise<TqRow | null> {
   const now = Math.floor(Date.now() / 1000);
   const action = state === "validated" ? "validate" : "unvalidate";
-  // Each statement binds exactly the parameters it references, in both modes.
-  const pinned = opts.expected === null ? [] : [opts.expected];
-  const versionClause = (n: number) => (opts.expected === null ? "" : ` AND version = ?${n}`);
+  // tq_rows has no trashed_at: the state pin is the whole guard.
+  const auditPins = statePins(opts, 6, false);
+  const updatePins = statePins(opts, 5, false);
   // Approval snapshots the now-published content — see setTnTranslationState.
   const snapshotClause = state === "validated"
     ? ", pre_draft_json = json_object('question', question, 'response', response)"
     : "";
-  const [updateRes] = await env.DB.batch([
-    env.DB
-      .prepare(
-        `UPDATE tq_rows
-           SET translation_state = ?1, updated_at = ?2${snapshotClause}
-         WHERE id = ?3 AND deleted_at IS NULL AND translation_state IS NOT NULL${bookClause(4)}${versionClause(5)}`,
-      )
-      .bind(state, now, id, book, ...pinned),
+  // Audit INSERT first, so a state pin sees the row before the UPDATE changes
+  // it — see setTnTranslationState.
+  const [, updateRes] = await env.DB.batch([
     env.DB
       .prepare(
         `INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action, source)
          SELECT 'tq', ?1, book, ?2, version, version, ?3, ?5
            FROM tq_rows
-          WHERE id = ?1 AND deleted_at IS NULL AND translation_state IS NOT NULL${bookClause(4)}${versionClause(6)}`,
+          WHERE id = ?1 AND deleted_at IS NULL AND translation_state IS NOT NULL${bookClause(4)}${auditPins.sql}`,
       )
-      .bind(id, userId ?? null, action, book, opts.source, ...pinned),
+      .bind(id, userId ?? null, action, book, opts.source, ...auditPins.values),
+    env.DB
+      .prepare(
+        `UPDATE tq_rows
+           SET translation_state = ?1, updated_at = ?2${snapshotClause}
+         WHERE id = ?3 AND deleted_at IS NULL AND translation_state IS NOT NULL${bookClause(4)}${updatePins.sql}`,
+      )
+      .bind(state, now, id, book, ...updatePins.values),
   ]);
   if (!updateRes.meta.changes) return null;
   return env.DB.prepare(`SELECT * FROM tq_rows WHERE id = ?1${bookClause(2)}`).bind(id, book).first<TqRow>();
@@ -1307,24 +1339,49 @@ rows.post("/tn/:id/hint", requireEditor, async (c) => {
 
 // A state write that changed nothing: 409 version_mismatch (same body as the
 // PATCH) when the caller pinned a version and the live draft has moved on,
-// else 404 (gone, or not a translation draft) as before.
-async function stateWriteMiss(c: Context<{ Bindings: Env; Variables: { userId?: number } }>, kind: "tn" | "tq", id: string, book: string, expected: number | null) {
-  if (expected !== null) {
+// else 404 (gone, or not a translation draft) as before. A pinned state that
+// no longer matches (un-approved, or a tn row trashed, at the same version) is
+// the same 409: the row still exists, it just isn't what the reviewer saw.
+// Pinned misses are recorded in row_conflict_log (action 'validate').
+async function stateWriteMiss(c: Context<{ Bindings: Env; Variables: { userId?: number } }>, kind: "tn" | "tq", id: string, book: string, opts: StateWriteOpts) {
+  const { expected, expectedState } = opts;
+  if (expected !== null || expectedState !== null) {
     const fresh = await c.env.DB.prepare(`SELECT * FROM ${KIND_TO_TABLE[kind]} WHERE id = ?1${bookClause(2)}`)
       .bind(id, book)
-      .first<{ version: number; deleted_at: number | null; translation_state: string | null }>();
-    if (fresh && !fresh.deleted_at && fresh.translation_state !== null && fresh.version !== expected) {
-      return c.json({ error: "version_mismatch", current: fresh }, 409);
+      .first<{ version: number; deleted_at: number | null; translation_state: string | null; trashed_at?: number | null }>();
+    if (fresh && !fresh.deleted_at && fresh.translation_state !== null) {
+      const moved =
+        (expected !== null && fresh.version !== expected) ||
+        (expectedState !== null && (fresh.translation_state !== expectedState || (kind === "tn" && !!fresh.trashed_at)));
+      if (moved) {
+        logRowConflict(c, {
+          kind,
+          rowId: id,
+          book,
+          action: "validate",
+          userId: currentUserId(c),
+          expectedVersion: expected,
+          fields: ["translation_state"],
+          current: fresh,
+        });
+        return c.json({ error: "version_mismatch", current: fresh }, 409);
+      }
     }
   }
   return c.json({ error: "not_found" }, 404);
 }
 
+// The validate body: TnBitBody plus the state the reviewer saw. Validate-only,
+// so /preserve and /hint keep their exact shape.
+const ValidateBody = TnBitBody.extend({ expected_state: z.enum(TRANSLATION_STATES).optional() });
+
 // POST /api/rows/tn/:id/validate — the translation-mode "Approve" action.
-// Body: { value: 0 | 1 | boolean } (1 → validated, 0 → back to edited).
-// Optional If-Match: the version the reviewer saw; the state changes only if
-// the row is still at it (409 version_mismatch otherwise). The web app sends
-// none; the chat's bpt_approve always does.
+// Body: { value: 0 | 1 | boolean, expected_state? } (1 → validated, 0 → back
+// to edited). Optional If-Match: the version the reviewer saw; optional
+// expected_state: the translation_state they saw. The state changes only if the
+// row is still at both (and not trashed, when expected_state is sent); 409
+// version_mismatch otherwise. The web app sends neither; the chat's bpt_approve
+// always sends both (#701).
 // Non-version-bumping, idempotent. Approving (value=1) is refused (409
 // chapter_locked) while a translate run will write this note (#602). Marks a
 // reviewed AI draft as human-approved so the nightly context export can turn
@@ -1343,13 +1400,14 @@ rows.post("/tn/:id/validate", requireEditor, async (c) => {
   } catch {
     return c.json({ error: "invalid_json" }, 400);
   }
-  const parsed = TnBitBody.safeParse(body);
+  const parsed = ValidateBody.safeParse(body);
   if (!parsed.success) {
     return c.json({ error: "validation_failed", issues: parsed.error.issues }, 400);
   }
   // value=1 → validated; value=0 → 'edited' (un-approve keeps it in the
   // reviewed-but-not-validated state rather than pretending it's a fresh draft).
   const nextState = coerceBitValue(parsed.data.value) === 1 ? "validated" : "edited";
+  const pins: StateWriteOpts = { expected, expectedState: parsed.data.expected_state ?? null, source: editSource(c) };
   // Only approving is refused during a translate run: the apply would undo it.
   // Un-approve ("Revoke example") is let through — the apply resets the row to
   // ai_draft anyway, so refusing it protects nothing.
@@ -1357,8 +1415,8 @@ rows.post("/tn/:id/validate", requireEditor, async (c) => {
     const lock = await translateLockForTnId(c.env, id, book);
     if (lock) return c.json(lockedResponseBody(lock), 409);
   }
-  const updated = await setTnTranslationState(c.env, id, book, userId, nextState, { expected, source: editSource(c) });
-  if (!updated) return stateWriteMiss(c, "tn", id, book, expected);
+  const updated = await setTnTranslationState(c.env, id, book, userId, nextState, pins);
+  if (!updated) return stateWriteMiss(c, "tn", id, book, pins);
   c.executionCtx.waitUntil(
     broadcastChapter(c.env, updated.book, updated.chapter, { type: "row.upserted", kind: "tn", row: updated }),
   );
@@ -1366,8 +1424,9 @@ rows.post("/tn/:id/validate", requireEditor, async (c) => {
 });
 
 // POST /api/rows/tq/:id/validate — the translationQuestions "Approve" action,
-// the exact analogue of /tn/:id/validate. Body: { value: 0 | 1 | boolean }
-// (1 → validated, 0 → back to edited). Lock-exempt, non-version-bumping.
+// the exact analogue of /tn/:id/validate. Body: { value: 0 | 1 | boolean,
+// expected_state? } (1 → validated, 0 → back to edited); If-Match and
+// expected_state pin as there. Lock-exempt, non-version-bumping.
 rows.post("/tq/:id/validate", requireEditor, async (c) => {
   const id = c.req.param("id");
   const book = c.req.query("book");
@@ -1382,13 +1441,14 @@ rows.post("/tq/:id/validate", requireEditor, async (c) => {
   } catch {
     return c.json({ error: "invalid_json" }, 400);
   }
-  const parsed = TnBitBody.safeParse(body);
+  const parsed = ValidateBody.safeParse(body);
   if (!parsed.success) {
     return c.json({ error: "validation_failed", issues: parsed.error.issues }, 400);
   }
   const nextState = coerceBitValue(parsed.data.value) === 1 ? "validated" : "edited";
-  const updated = await setTqTranslationState(c.env, id, book, userId, nextState, { expected, source: editSource(c) });
-  if (!updated) return stateWriteMiss(c, "tq", id, book, expected);
+  const pins: StateWriteOpts = { expected, expectedState: parsed.data.expected_state ?? null, source: editSource(c) };
+  const updated = await setTqTranslationState(c.env, id, book, userId, nextState, pins);
+  if (!updated) return stateWriteMiss(c, "tq", id, book, pins);
   c.executionCtx.waitUntil(
     broadcastChapter(c.env, updated.book, updated.chapter, { type: "row.upserted", kind: "tq", row: updated }),
   );

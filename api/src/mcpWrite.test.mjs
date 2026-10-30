@@ -129,7 +129,7 @@ test("bpt_edit_row then bpt_approve: saved as the linked user, source chat, vers
   assert.equal(edit.data.row.note, "corrected note");
   assert.deepEqual(tnRow("ab12"), { note: "corrected note", version: 4, translation_state: "edited" });
 
-  const ok = await call("bpt_approve", { kind: "tn", id: "ab12", version: 4 });
+  const ok = await call("bpt_approve", { kind: "tn", id: "ab12", version: 4, state: "edited" });
   assert.equal(ok.isError, false, JSON.stringify(ok.data));
   assert.equal(ok.data.status, "applied");
   assert.equal(ok.data.version, 4, "approving does not change the version");
@@ -149,7 +149,7 @@ test("bpt_edit_row on a tq row saves question and response", async () => {
   assert.equal(r.data.version, 3);
   const row = sqlite.prepare(`SELECT question, response, translation_state FROM tq_rows WHERE id = 'q001'`).get();
   assert.deepEqual({ ...row }, { question: "new q?", response: "new a.", translation_state: "edited" });
-  const ok = await call("bpt_approve", { kind: "tq", id: "q001", version: 3 });
+  const ok = await call("bpt_approve", { kind: "tq", id: "q001", version: 3, state: "edited" });
   assert.equal(ok.data.status, "applied", JSON.stringify(ok.data));
   assert.equal(ok.data.state, "validated");
 });
@@ -168,7 +168,7 @@ test("a stale version is a conflict carrying both texts, and nothing changes", a
   assert.equal(stale.data.current.version, 4);
   assert.equal(tnRow("ab12").note, "the other edit");
 
-  const staleApprove = await call("bpt_approve", { kind: "tn", id: "ab12", version: 3 });
+  const staleApprove = await call("bpt_approve", { kind: "tn", id: "ab12", version: 3, state: "ai_draft" });
   assert.equal(staleApprove.data.status, "conflict");
   assert.equal(staleApprove.data.current.version, 4);
   assert.equal(staleApprove.data.your_text, undefined);
@@ -181,7 +181,7 @@ test("a viewer is refused and nothing is written", async () => {
   const e = await call("bpt_edit_row", { kind: "tn", id: "ab12", version: 3, note: "x" }, VIEWER);
   assert.equal(e.isError, true);
   assert.match(e.data.error, /cannot edit/);
-  const a = await call("bpt_approve", { kind: "tn", id: "ab12", version: 3 }, VIEWER);
+  const a = await call("bpt_approve", { kind: "tn", id: "ab12", version: 3, state: "ai_draft" }, VIEWER);
   assert.equal(a.isError, true);
   assert.deepEqual(tnRow("ab12"), { note: "draft note", version: 3, translation_state: "ai_draft" });
   assert.equal(log().length, 0);
@@ -192,13 +192,13 @@ test("unknown, trashed and not-a-draft rows get a clean error and no write", asy
   const unknown = await call("bpt_edit_row", { kind: "tn", id: "zz99", version: 1, note: "x" });
   assert.equal(unknown.isError, true);
   assert.match(unknown.data.error, /There is no tn row zz99/);
-  const unknownApprove = await call("bpt_approve", { kind: "tq", id: "zz99", version: 1 });
+  const unknownApprove = await call("bpt_approve", { kind: "tq", id: "zz99", version: 1, state: "ai_draft" });
   assert.equal(unknownApprove.isError, true);
 
   const trashed = await call("bpt_edit_row", { kind: "tn", id: "tr01", version: 3, note: "x" });
   assert.equal(trashed.isError, true);
   assert.match(trashed.data.error, /trash/);
-  const trashedApprove = await call("bpt_approve", { kind: "tn", id: "tr01", version: 3 });
+  const trashedApprove = await call("bpt_approve", { kind: "tn", id: "tr01", version: 3, state: "ai_draft" });
   assert.equal(trashedApprove.isError, true);
   assert.equal(sqlite.prepare(`SELECT trashed_at FROM tn_rows WHERE id = 'tr01'`).get().trashed_at, 500, "still trashed");
 
@@ -261,4 +261,131 @@ test("the chat door is closed to outside requests", async () => {
   const forged = await post({ ...env, CHAT_PRINCIPAL: { userId: 9, username: "reviewer", role: "editor" } });
   assert.equal(forged.status, 403);
   assert.equal(tnRow("ab12").translation_state, "ai_draft");
+});
+
+// ── Issue #701: approve pins the state the reviewer was shown ───────────────
+// State flips (approve, un-approve, trash) do not bump `version`, so a version
+// pin alone let a chat approve land on a row the web un-approved or trashed
+// after the reviewer saw it.
+
+// A signed-in web request as the web app sends it: cookie session, no pins.
+function webPost(env, ctx, path, body) {
+  const web = new Hono();
+  web.use("*", async (c, next) => {
+    c.set("userId", 9);
+    c.set("role", "editor");
+    await next();
+  });
+  web.route("/api/rows", rows);
+  return web.request(
+    path,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
+    env,
+    ctx,
+  );
+}
+
+const conflictLog = (sqlite) =>
+  sqlite
+    .prepare(`SELECT kind, row_id, action, user_id, expected_version, current_version, fields_json FROM row_conflict_log ORDER BY id`)
+    .all()
+    .map((r) => ({ ...r }));
+
+test("tn: the web un-approves after the chat showed the row; bpt_approve at the same version is a conflict and changes nothing", async () => {
+  const { env, ctx, call, tnRow, log, sqlite } = fresh();
+  // The web approves, the chat shows the row (v3, validated), the web un-approves (still v3).
+  assert.equal((await webPost(env, ctx, `/api/rows/tn/ab12/validate?book=${BOOK}`, { value: 1 })).status, 200);
+  const shown = await call("bpt_get_row", { kind: "tn", id: "ab12" });
+  assert.equal(shown.isError, false, JSON.stringify(shown.data));
+  assert.equal(shown.data.version, 3);
+  assert.equal(shown.data.state, "validated");
+  assert.equal((await webPost(env, ctx, `/api/rows/tn/ab12/validate?book=${BOOK}`, { value: 0 })).status, 200);
+  assert.deepEqual(tnRow("ab12"), { note: "draft note", version: 3, translation_state: "edited" });
+  const before = log().length;
+
+  const r = await call("bpt_approve", { kind: "tn", id: "ab12", version: shown.data.version, state: shown.data.state });
+  assert.equal(r.isError, false, JSON.stringify(r.data));
+  assert.equal(r.data.status, "conflict");
+  assert.equal(r.data.current.version, 3);
+  assert.equal(r.data.current.state, "edited");
+  assert.match(r.data.message, /current\.state/);
+  assert.equal(tnRow("ab12").translation_state, "edited", "not approved");
+  assert.equal(log().length, before, "no audit entry for the refused approve");
+  assert.deepEqual(conflictLog(sqlite), [
+    { kind: "tn", row_id: "ab12", action: "validate", user_id: 9, expected_version: 3, current_version: 3, fields_json: '["translation_state"]' },
+  ]);
+});
+
+test("tn: an ai_draft shown, then un-approved on the web (now edited), is a conflict", async () => {
+  const { env, ctx, call, tnRow } = fresh();
+  assert.equal((await webPost(env, ctx, `/api/rows/tn/ab12/validate?book=${BOOK}`, { value: 0 })).status, 200);
+  const r = await call("bpt_approve", { kind: "tn", id: "ab12", version: 3, state: "ai_draft" });
+  assert.equal(r.data.status, "conflict", JSON.stringify(r.data));
+  assert.equal(r.data.current.state, "edited");
+  assert.equal(tnRow("ab12").translation_state, "edited");
+});
+
+test("tq: a web un-approve after the chat showed the row is a conflict", async () => {
+  const { env, ctx, call, sqlite } = fresh();
+  assert.equal((await webPost(env, ctx, `/api/rows/tq/q001/validate?book=${BOOK}`, { value: 1 })).status, 200);
+  assert.equal((await webPost(env, ctx, `/api/rows/tq/q001/validate?book=${BOOK}`, { value: 0 })).status, 200);
+  const r = await call("bpt_approve", { kind: "tq", id: "q001", version: 2, state: "validated" });
+  assert.equal(r.data.status, "conflict", JSON.stringify(r.data));
+  assert.equal(r.data.current.state, "edited");
+  assert.equal(sqlite.prepare(`SELECT translation_state FROM tq_rows WHERE id = 'q001'`).get().translation_state, "edited");
+  const logged = conflictLog(sqlite);
+  assert.equal(logged.length, 1);
+  assert.equal(logged[0].kind, "tq");
+  assert.equal(logged[0].action, "validate");
+});
+
+test("a trash that lands after the chat read the row: the pinned validate answers conflict, not gone", async () => {
+  // writeTarget refuses a row that is already trashed when the tool reads it;
+  // this is the route-level guard for a trash between that read and the write.
+  const { app, env, ctx, sqlite, log } = fresh();
+  const principal = { userId: 9, username: "reviewer", role: "editor", linkId: 1 };
+  const res = await app.request(
+    `/api/rows/tn/tr01/validate?book=${BOOK}`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", "If-Match": "3" },
+      body: JSON.stringify({ value: 1, expected_state: "ai_draft" }),
+    },
+    chatWriteEnv(env, principal),
+    ctx,
+  );
+  assert.equal(res.status, 409);
+  const body = await res.json();
+  assert.equal(body.error, "version_mismatch");
+  assert.equal(body.current.trashed_at, 500);
+  assert.equal(sqlite.prepare(`SELECT translation_state FROM tn_rows WHERE id = 'tr01'`).get().translation_state, "ai_draft");
+  assert.equal(log().length, 0);
+  assert.equal(conflictLog(sqlite).length, 1);
+});
+
+test("the pinned happy path still approves and writes one validate audit entry", async () => {
+  const { call, tnRow, log, sqlite } = fresh();
+  const r = await call("bpt_approve", { kind: "tn", id: "ab12", version: 3, state: "ai_draft" });
+  assert.equal(r.data.status, "applied", JSON.stringify(r.data));
+  assert.equal(tnRow("ab12").translation_state, "validated");
+  assert.deepEqual(log(), [{ kind: "tn", row_key: "ab12", user_id: 9, action: "validate", source: "chat", prev_version: 3, new_version: 3 }]);
+  assert.equal(conflictLog(sqlite).length, 0);
+});
+
+test("bpt_approve requires the state the reviewer was shown", async () => {
+  const { call, tnRow } = fresh();
+  const missing = await call("bpt_approve", { kind: "tn", id: "ab12", version: 3 });
+  assert.equal(missing.isError, true);
+  assert.match(missing.data.error, /state/);
+  const bad = await call("bpt_approve", { kind: "tn", id: "ab12", version: 3, state: "approved" });
+  assert.equal(bad.isError, true);
+  assert.equal(tnRow("ab12").translation_state, "ai_draft");
+});
+
+test("the web app's unpinned validate is unchanged: it still flips a trashed row and logs no conflict", async () => {
+  const { env, ctx, sqlite } = fresh();
+  const res = await webPost(env, ctx, `/api/rows/tn/tr01/validate?book=${BOOK}`, { value: 1 });
+  assert.equal(res.status, 200);
+  assert.equal(sqlite.prepare(`SELECT translation_state FROM tn_rows WHERE id = 'tr01'`).get().translation_state, "validated");
+  assert.equal(conflictLog(sqlite).length, 0);
 });
