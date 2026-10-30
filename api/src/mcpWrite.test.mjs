@@ -9,7 +9,7 @@
 // these tests fail if the chat principal does not survive the middleware, and
 // prove an outside request cannot use the same door.
 
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { readdirSync, readFileSync } from "node:fs";
@@ -735,6 +735,42 @@ test("#707: a queue that rejects or throws still leaves the approve at 200 and v
     const r = await post("/api/templates/unit/validate?id=figs-ellipsis-02", "POST", { value: 1 });
     assert.equal(r.status, 200);
     assert.equal(tpl("figs-ellipsis-02").translation_state, "validated");
+  }
+});
+
+// ── Issue #716: two saves in the same second each start their own export ───
+// The id used to be second-precision only, so the second save's create was a
+// duplicate-id rejection the helper swallowed. If the first run had already
+// read D1, the second save missed the pack until the next export.
+
+test("#716: two approves in the same second each start an export with its own id", async () => {
+  const { env, ctx, queued } = fresh();
+  // Like Cloudflare Workflows: a repeated instance id is rejected.
+  const seen = new Set();
+  env.EXPORT_WORKFLOW.create = async (opts) => {
+    if (seen.has(opts.id)) throw new Error(`instance.already_exists: ${opts.id}`);
+    seen.add(opts.id);
+    queued.push(opts);
+    return { id: opts.id };
+  };
+  // Pin the clock so both saves land in the same second every run.
+  mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-10-30T12:00:00.250Z") });
+  try {
+    const post = webTemplates(env, ctx);
+    const un = await post("/api/templates/unit/validate?id=figs-ellipsis-02", "POST", { value: 0 });
+    assert.equal(un.status, 200);
+    const re = await post("/api/templates/unit/validate?id=figs-ellipsis-02", "POST", { value: 1 });
+    assert.equal(re.status, 200);
+  } finally {
+    mock.timers.reset();
+  }
+  assert.equal(queued.length, 2, JSON.stringify(queued));
+  assert.notEqual(queued[0].id, queued[1].id);
+  for (const q of queued) {
+    assert.ok(q.id.startsWith(`context-save-${env.WORKSPACE_SLUG}-2026-10-30T12-00-00`), q.id);
+    assert.match(q.id, /^[a-zA-Z0-9_][a-zA-Z0-9-_]*$/); // Workflows' instance-id rule
+    assert.ok(q.id.length <= 100, q.id);
+    assert.deepEqual(q.params, { contextOnly: true, workspace: env.WORKSPACE_SLUG });
   }
 });
 
