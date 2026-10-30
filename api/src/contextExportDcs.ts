@@ -2,7 +2,7 @@
 // Expected-parent CAS + retry so manual and nightly exports can't publish a
 // SHA that does not represent the rendered D1 snapshot they just produced.
 
-import { commitFilesToDcs, type DcsCommitConfig } from "./export.ts";
+import { commitFilesToDcs, type DcsBatchCommitResult, type DcsCommitConfig } from "./export.ts";
 import { stalePackPaths, type ContextFile } from "./contextExportLib.ts";
 
 export type ContextDcsConfig = {
@@ -71,9 +71,22 @@ export async function commitContextPackToMaster(
   // Pack-managed files omitted from this render have an empty D1 source —
   // delete any stale copy in the same commit (never touches runs/, candidates/
   // or README.md; see PACK_MANAGED_PATHS).
-  const result = await commitFilesToDcs(dcsCfg, files, message, {
-    deletePaths: stalePackPaths(files),
-  });
+  let result: DcsBatchCommitResult;
+  try {
+    result = await commitFilesToDcs(dcsCfg, files, message, {
+      deletePaths: stalePackPaths(files),
+    });
+  } catch (e) {
+    // #712: Door43 refuses the commit when master moved after our tip read
+    // ("cannot lock ref 'refs/heads/master': is at X but expected Y"). That is
+    // the same race as the CAS checks here, so report it as one and let the
+    // workflow re-render and retry. Any other 4xx (permissions) stays fatal.
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.startsWith("dcs_batch_commit_failed: POST 4") && msg.includes("cannot lock ref")) {
+      throw new Error(`context_cas_conflict:ref_lock:${msg.slice(0, 300)}`);
+    }
+    throw e;
+  }
 
   if (!result.changed) {
     // Byte-identical to tip — the trustworthy SHA is the current tip.
