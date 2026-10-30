@@ -3,10 +3,10 @@
 // the notes for a verse range, and link the chat to their BPtranslate account
 // (chatLinks.ts). Every tool but bpt_link_account takes the session_token,
 // because the link decides which workspace is read (issue #676). Reads go
-// through readerFrom; writes (bpt_edit_row, bpt_approve: issue #670 part a) go
-// through principalFrom, so every write carries a real editor, and run the
-// same PATCH / validate routes the web app uses, as that user, pinned to the
-// version the reviewer was shown.
+// through readerFrom; writes (bpt_edit_row, bpt_approve: issue #670 part a;
+// bpt_bulk_set_state: part c) go through principalFrom, so every write carries
+// a real editor, and run the same PATCH / validate routes the web app uses, as
+// that user, pinned to the version the reviewer was shown.
 //
 // Each tool reads through the SAME route handlers the web app uses (`getJson`
 // runs the Hono app in-process), so chat and web never disagree about counts
@@ -44,6 +44,9 @@ export interface McpSession {
   // per-chapter override, else the project's translationSource (sourceNotes.ts).
   // Never throws.
   sourceNotes: (book: string, chapter: number) => Promise<SourceNotes>;
+  // HMAC of a bpt_bulk_set_state confirm token body under a server secret
+  // (auth.ts chatConfirmMac); null when the secret is not configured.
+  confirmMac: (data: string) => Promise<string | null>;
 }
 
 export type LinkClaim =
@@ -888,5 +891,255 @@ const approve: ToolDef = {
   },
 };
 
-export const TOOLS: ToolDef[] = [whoami, linkAccount, listBooks, packageStatus, chunkWork, getRow, chunkList, editRow, approve];
+// ── Range un-approve (issue #670 part c) ────────────────────────────────────
+// Moves the approved (validated) rows of a verse range back to edited, which
+// the web app shows as needing review. It never approves (Benjamin, 2026-10-30:
+// approval stays with bpt_approve, on rows the reviewer was shown). Two calls:
+// a dry run that changes nothing and returns a confirm token signed over the
+// exact id:version list it found, then a confirm that un-approves just those
+// rows through the per-row validate route (value 0), each pinned to its version
+// and to 'validated', so a row that changed in between is left alone. Not the
+// admin review-state sweep (reviewState.ts): that is admin-only, chapter-wide,
+// lifts the draft guard and can approve.
+
+// One chapter per call and at most this many rows to change. A confirm makes
+// one in-process validate call per row (measured in mcpWrite.test.mjs: a D1
+// batch and a row re-read, plus a Durable Object broadcast), so a full confirm
+// stays well under the Worker's ~1000-subrequest budget.
+export const BULK_ROW_CAP = 50;
+const CONFIRM_TTL_SECONDS = 10 * 60;
+
+// What a confirm token binds: the link and workspace it was issued to (from
+// the session, never an argument), the arguments, the rows the dry run found
+// as sorted [id, version, updated_at], and its expiry (unix seconds).
+// updated_at is there because approve and un-approve never bump the version
+// but do set updated_at (rows.ts setTnTranslationState): without it, a web
+// re-approval after the preview (or after an earlier confirm of the same
+// token) looks exactly like the row the reviewer agreed to un-approve.
+interface BulkTokenBody {
+  ws: string;
+  link: number;
+  book: string;
+  kind: "tn" | "tq";
+  chapter: number;
+  vs: number;
+  ve: number | null;
+  r: [string, number, number][];
+  exp: number;
+}
+
+const toB64url = (s: string) =>
+  btoa(String.fromCharCode(...utf8.encode(s))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const fromB64url = (s: string) =>
+  new TextDecoder().decode(Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), (ch) => ch.charCodeAt(0)));
+
+// Constant-time for equal lengths, as mcp.ts sameToken.
+function sameMac(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+async function signedMac(session: McpSession, body: string): Promise<string> {
+  const mac = await session.confirmMac(body);
+  if (!mac) throw new Error("bpt_bulk_set_state: no signing key configured");
+  return mac;
+}
+
+const NOT_CHANGED = "Nothing was changed.";
+
+// The confirm token's body, or a refusal saying why. A token is good only for
+// the link it was issued to and exactly the arguments of its dry run.
+async function openToken(raw: unknown, session: McpSession, want: Omit<BulkTokenBody, "r" | "exp" | "ws" | "link">) {
+  const bad = (why: string): never => {
+    throw new ToolInputError(`${why} Run the preview again (call without confirm_token) and show the reviewer the new count. ${NOT_CHANGED}`);
+  };
+  if (typeof raw !== "string") return bad("confirm_token must be the text the preview returned.");
+  const [body, mac, extra] = raw.split(".");
+  if (!body || !mac || extra !== undefined || !sameMac(mac, await signedMac(session, body))) {
+    return bad("That confirm_token is not one this tool issued.");
+  }
+  const t = JSON.parse(fromB64url(body)) as BulkTokenBody;
+  if (t.exp <= Math.floor(Date.now() / 1000)) return bad("That confirm_token has expired (they last 10 minutes).");
+  const same =
+    t.ws === session.workspace.slug && t.link === session.principal.linkId && t.book === want.book &&
+    t.kind === want.kind && t.chapter === want.chapter && t.vs === want.vs && t.ve === want.ve;
+  if (!same) return bad("That confirm_token was issued for a different preview (another book, kind, chapter, verse range or chat link).");
+  return t;
+}
+
+const SKIP_REASONS = {
+  trashed: "in the trash",
+  not_a_draft: "not a translation draft (this project writes it directly), so it has no approval to remove",
+  ai_draft: "an AI draft that was never approved: it already needs review",
+  edited: "not approved: it already needs review",
+  changed_just_now: "approved, but changed a moment ago: preview again in a few seconds to include it",
+} as const;
+// BT Servant drops a tool result over 32 KB, and with it the confirm token, so
+// each skip reason lists only its first few ids (count has them all).
+const SKIP_ID_CAP = 20;
+
+const bulkSetState: ToolDef = {
+  name: "bpt_bulk_set_state",
+  description:
+    "Move the approved translation notes (kind tn) or questions (kind tq) of a verse range in one chapter back to needs review (state edited), for when a reviewer wants a stretch looked at again. It NEVER approves anything: to approve, use bpt_approve on each row the reviewer has read. Always two calls. 1) Call without confirm_token: a preview that changes nothing and returns would_change (how many approved rows would go back to needs review), their ids and versions, the rows it would skip and why (AI drafts and edited rows already need review; trashed rows and rows that are not translation drafts are left alone; an approved row changed a moment ago is left out until a new preview a few seconds later), each reason with its count and at most the first 20 ids, and a confirm_token. Tell the reviewer the count and get a clear yes. 2) Call again with exactly the same book, kind, chapter, verse_start and verse_end plus confirm_token: only the rows in the preview change. A row that changed since the preview (edited, approved or un-approved by someone, or already un-approved by an earlier confirm of this same preview) is left as it is and listed in not_changed with its current state and version, so calling confirm twice is safe. remaining counts rows in the range that are approved after the call (approved or changed since the preview): run a new preview to include them. remaining is null when that count could not be read; the rows listed as applied were still changed. The token lasts 10 minutes and works only for this user's link and the same arguments; otherwise nothing changes. At most " +
+    `${BULK_ROW_CAP} approved rows per call; a bigger range is refused, so narrow verse_start/verse_end. Requires edit access.`,
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      book: { type: "string", description: "3-letter book code, e.g. TIT" },
+      kind: { type: "string", enum: ["tn", "tq"] },
+      chapter: { type: "integer", minimum: 0 },
+      verse_start: { type: "integer", minimum: 0, description: "First verse; omit for the whole chapter" },
+      verse_end: { type: "integer", minimum: 0, description: "Last verse, inclusive" },
+      confirm_token: { type: "string", description: "The confirm_token from the preview, once the reviewer said yes. Omit for the preview." },
+    },
+    required: ["session_token", "book", "kind", "chapter"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const session = await principalFrom(args, ctx);
+    const book = bookArg(args);
+    if (args.kind !== "tn" && args.kind !== "tq") throw new ToolInputError('kind must be "tn" or "tq"');
+    const kind: "tn" | "tq" = args.kind;
+    const chapter = intArg(args, "chapter", { min: 0, required: true })!;
+    const vs = intArg(args, "verse_start", { min: 0 }) ?? 0;
+    const ve = intArg(args, "verse_end", { min: 0 }) ?? null;
+    if (ve !== null && ve < vs) throw new ToolInputError("verse_end is before verse_start");
+    const scope = { book, kind, chapter, verse_start: vs, verse_end: ve };
+    // The chapter's rows in the range, as the web app reads them.
+    const inRange = async () => {
+      const body = await apiGet(session, `/api/chapters/${book}/${chapter}`);
+      return ((body[kind] as Record<string, unknown>[] | undefined) ?? []).filter((r) => {
+        const v = Number(r.verse);
+        return v >= vs && (ve === null || v <= ve);
+      });
+    };
+    const approvedLive = (r: Record<string, unknown>) => r.translation_state === "validated" && !r.trashed_at;
+
+    if (args.confirm_token === undefined || args.confirm_token === null || args.confirm_token === "") {
+      // updated_at has 1-second resolution. A row last written in this second
+      // (or later, if the clock that wrote it runs ahead) is left out of the
+      // token: a web un-approve and re-approve later in this same second would
+      // reproduce its updated_at, and the confirm would take the newer approval
+      // for the one previewed. Every token row is older than the preview, so
+      // any later state flip changes its updated_at.
+      const nowSec = Math.floor(Date.now() / 1000);
+      const justNow = (x: Record<string, unknown>) => Number(x.updated_at) >= nowSec;
+      const rows = await inRange();
+      const change = rows.filter((x) => approvedLive(x) && !justNow(x));
+      if (change.length > BULK_ROW_CAP) {
+        throw new ToolInputError(
+          `This range has ${change.length} approved ${kind} rows; this tool changes at most ${BULK_ROW_CAP} at once. Narrow verse_start/verse_end and preview again. ${NOT_CHANGED}`,
+        );
+      }
+      const skipped = new Map<keyof typeof SKIP_REASONS, string[]>();
+      for (const r of rows) {
+        if (approvedLive(r) && !justNow(r)) continue;
+        const reason = approvedLive(r)
+          ? "changed_just_now"
+          : r.trashed_at ? "trashed" : r.translation_state == null ? "not_a_draft" : r.translation_state === "ai_draft" ? "ai_draft" : "edited";
+        skipped.set(reason, [...(skipped.get(reason) ?? []), String(r.id)]);
+      }
+      const r = change
+        .map((x): [string, number, number] => [String(x.id), Number(x.version), Number(x.updated_at)])
+        .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+      const preview = {
+        status: "preview",
+        ...scope,
+        would_change: r.length,
+        rows: change.map((x) => ({ id: x.id, ref: `${x.book} ${x.ref_raw ?? `${x.chapter}:${x.verse}`}`, version: x.version })),
+        skipped: [...skipped].map(([reason, ids]) => ({
+          reason,
+          why: SKIP_REASONS[reason],
+          count: ids.length,
+          ids: ids.slice(0, SKIP_ID_CAP),
+          ...(ids.length > SKIP_ID_CAP ? { more_ids_not_listed: ids.length - SKIP_ID_CAP } : {}),
+        })),
+      };
+      if (r.length === 0) {
+        return { ...preview, message: `No approved ${kind} rows in this range, so there is nothing to move back to needs review. ${NOT_CHANGED}` };
+      }
+      const exp = Math.floor(Date.now() / 1000) + CONFIRM_TTL_SECONDS;
+      const t: BulkTokenBody = { ws: session.workspace.slug, link: session.principal.linkId, book, kind, chapter, vs, ve, r, exp };
+      const body = toB64url(JSON.stringify(t));
+      return {
+        ...preview,
+        confirm_token: `${body}.${await signedMac(session, body)}`,
+        expires_at: new Date(exp * 1000).toISOString(),
+        message: `${NOT_CHANGED} Tell the reviewer that ${r.length} approved ${kind} rows would go back to needs review, and call again with confirm_token only if they say yes.`,
+      };
+    }
+
+    const t = await openToken(args.confirm_token, session, { book, kind, chapter, vs, ve });
+    const appliedIds: string[] = [];
+    const notChanged: Record<string, unknown>[] = [];
+    const changed = (id: string, cur: Record<string, unknown>) =>
+      notChanged.push({
+        id,
+        reason: "changed_since_preview",
+        why: "changed since the preview, by someone else or by an earlier confirm of this same preview",
+        current_state: cur.translation_state ?? null,
+        current_version: cur.version,
+        trashed: cur.trashed_at ? true : undefined,
+      });
+    // Read the rows fresh and send a write only for those still exactly as the
+    // preview saw them, updated_at included (see BulkTokenBody). The validate
+    // itself pins version and state; what remains open is a web un-approve
+    // plus re-approve landing between this read and that row's write.
+    const now = new Map((await inRange()).map((x) => [String(x.id), x]));
+    for (const [id, version, updatedAt] of t.r) {
+      const cur = now.get(id);
+      if (!cur) {
+        notChanged.push({ id, reason: "gone" });
+        continue;
+      }
+      if (!approvedLive(cur) || Number(cur.version) !== version || Number(cur.updated_at) !== updatedAt) {
+        changed(id, cur);
+        continue;
+      }
+      // value 0 only: this loop has no way to approve.
+      const { status, body } = await session.send(
+        "POST",
+        `/api/rows/${kind}/${encodeURIComponent(id)}/validate?book=${book}`,
+        { value: 0, expected_state: "validated" },
+        version,
+      );
+      const b = (body ?? {}) as Record<string, unknown>;
+      if (status === 200) appliedIds.push(id);
+      else if (status === 409 && b.error === "version_mismatch") changed(id, (b.current ?? {}) as Record<string, unknown>);
+      else notChanged.push({ id, reason: status === 404 ? "gone" : `refused_${status}` });
+    }
+    // The rows are already changed by now, so a failed count must not turn the
+    // whole result into an error.
+    let remaining: number | null = null;
+    try {
+      remaining = (await inRange()).filter(approvedLive).length;
+    } catch (e) {
+      console.error("bpt_bulk_set_state: remaining count failed", e instanceof Error ? (e.stack ?? e.message) : String(e));
+    }
+    return {
+      status: "done",
+      ...scope,
+      applied: appliedIds.length,
+      applied_ids: appliedIds,
+      not_changed: notChanged,
+      remaining,
+      message:
+        `${appliedIds.length} ${kind} rows went back to needs review.` +
+        (notChanged.length
+          ? ` ${notChanged.length} were left as they are: changed since the preview (by someone else, or by an earlier confirm of this same preview) or gone.`
+          : "") +
+        (remaining === null
+          ? " How many rows in this range are approved now could not be read; preview again to see."
+          : remaining
+            ? ` ${remaining} rows in this range are approved now; preview again to include them.`
+            : ""),
+    };
+  },
+};
+
+export const TOOLS: ToolDef[] = [whoami, linkAccount, listBooks, packageStatus, chunkWork, getRow, chunkList, editRow, approve, bulkSetState];
 

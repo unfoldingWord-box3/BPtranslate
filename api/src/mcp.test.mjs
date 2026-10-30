@@ -313,9 +313,13 @@ console.log("[jsonrpc] envelope");
   const names = list.body.result.tools.map((t) => t.name);
   assert(names.every((n) => n.startsWith("bpt_")), "every tool is bpt_-prefixed");
   assert(list.body.result.tools.every((t) => t.inputSchema?.type === "object"), "every tool has an object inputSchema");
-  // The only writes are the one-row review tools (issue #670 part a).
+  // The only writes are the one-row review tools (issue #670 part a) and the
+  // range un-approve (part c).
   const writes = names.filter((n) => /edit|approve|draft|export|bulk|state/.test(n)).sort();
-  assert(JSON.stringify(writes) === JSON.stringify(["bpt_approve", "bpt_edit_row"]), "the only write tools are bpt_edit_row and bpt_approve");
+  assert(
+    JSON.stringify(writes) === JSON.stringify(["bpt_approve", "bpt_bulk_set_state", "bpt_edit_row"]),
+    "the only write tools are bpt_edit_row, bpt_approve and bpt_bulk_set_state",
+  );
   const needsToken = list.body.result.tools.filter((t) => t.name !== "bpt_link_account");
   assert(needsToken.every((t) => t.inputSchema.required?.includes("session_token")), "every tool but link_account requires session_token");
   assert(names.includes("bpt_chunks"), "tools/list includes bpt_chunks");
