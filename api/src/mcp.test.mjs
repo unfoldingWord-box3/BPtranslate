@@ -71,6 +71,23 @@ const calls = [];
 // Mutable so a test can trash a row between two page requests.
 let nearRow = null;
 let ch1 = Array.from({ length: 30 }, (_v, i) => tnRow(i, 1 + Math.floor(i / 3)));
+// TIT 15, shaped like live TIT 1 (#676): 65 notes, a verse-0 intro, some rows
+// with no sort_order, 11 figs-metaphor, 1 figs-metonymy, 15 with no tA link.
+// Served in the route's order: verse, sort_order NULLS LAST, id.
+const TA = "rc://*/ta/man/translate/";
+const ch15 = [
+  { ...tnRow(1500, 0), ref_raw: "1:intro", sort_order: null, support_reference: null },
+  ...Array.from({ length: 64 }, (_v, i) => ({
+    ...tnRow(1501 + i, 1 + Math.floor(i / 4)),
+    trashed_at: null,
+    sort_order: i % 5 === 0 ? null : i,
+    support_reference:
+      i < 11 ? `${TA}figs-metaphor` : i === 11 ? `${TA}figs-metonymy` : i < 26 ? (i % 2 ? null : "") : `${TA}figs-explicit`,
+  })),
+].sort((a, b) =>
+  a.verse - b.verse ||
+  (a.sort_order === b.sort_order ? 0 : a.sort_order === null ? 1 : b.sort_order === null ? -1 : a.sort_order - b.sort_order) ||
+  (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 // Stands in for the routes, per workspace: mltest holds only OBA.
 async function apiFor(ws, path) {
       calls.push({ ws: ws.slug, path });
@@ -139,6 +156,7 @@ async function apiFor(ws, path) {
         // A note that is over the budget on its own once JSON-escaped.
         return { status: 200, body: { tn: [tnRow(950, 1, ROW_TEXT_CAP, "\u0001")], tq: [] } };
       }
+      if (path === "/api/chapters/TIT/15") return { status: 200, body: { tn: ch15, tq: [tqRow(1599, 1)] } };
       if (path.startsWith("/api/rows/tn/r5?")) return { status: 200, body: tnRow(5, 2) };
       // A long own note in a 3-byte script (Ethiopic): 12,000 bytes.
       if (path.startsWith("/api/rows/tn/r961?")) return { status: 200, body: tnRow(961, 1, 4000, "ሀ") };
@@ -481,6 +499,67 @@ console.log("[tools] chunk paging");
 
   const backwards = await call("bpt_chunk_work", { book: "TIT", chapter: 1, kind: "tn", verse_start: 5, verse_end: 1 });
   assert(backwards.isError, "verse_end before verse_start -> isError");
+}
+
+// Pages through bpt_chunk_work until next_cursor is null; returns every row.
+async function pageAll(args) {
+  const rows = [];
+  let cursor;
+  let total;
+  for (let n = 0; n < 200; n++) {
+    const page = await call("bpt_chunk_work", { ...args, ...(cursor ? { cursor } : {}) });
+    if (page.isError) throw new Error(page.data.error);
+    total = page.data.total;
+    rows.push(...page.data.rows);
+    if (page.data.next_cursor === null) return { rows, total };
+    cursor = page.data.next_cursor;
+  }
+  throw new Error("paging never ended");
+}
+
+console.log("[tools] chunk paging covers every row (#676 F2: '64 of 65')");
+for (const limit of [1, 3, 7, 10, 50]) {
+  const { rows, total } = await pageAll({ book: "TIT", chapter: 15, kind: "tn", limit });
+  const ids = rows.map((r) => r.id);
+  assert(total === 65 && ids.length === 65 && new Set(ids).size === 65, `limit ${limit}: all 65 ids, each exactly once`);
+  assert(ids.includes("r1500") && rows.find((r) => r.id === "r1500").verse === 0, `limit ${limit}: the verse-0 intro note is included`);
+}
+
+console.log("[tools] chunk_work support_reference filter");
+{
+  const all = await call("bpt_chunk_work", { book: "TIT", chapter: 15, kind: "tn", limit: 50 });
+  const by = Object.fromEntries(all.data.rows.map((r) => [r.id, r]));
+  assert(by.r1501.ta === "figs-metaphor" && by.r1501.support_reference === `${TA}figs-metaphor`, "ta is the short name; support_reference is unchanged");
+  assert(by.r1500.ta === null && by.r1513.ta === null && by.r1514.ta === null, "ta is null with no support_reference (null or empty)");
+  assert(all.data.support_reference === undefined, "no filter, no support_reference echoed");
+
+  for (const q of ["figs-metaphor", "metaphor", "Metaphor", `${TA}figs-metaphor`, "rc://en/ta/man/translate/FIGS-METAPHOR"]) {
+    const r = await call("bpt_chunk_work", { book: "TIT", chapter: 15, kind: "tn", support_reference: q, limit: 50 });
+    assert(!r.isError && r.data.total === 11 && r.data.rows.every((x) => x.ta === "figs-metaphor"), `"${q}" finds the 11 metaphor notes`);
+  }
+  const meto = await call("bpt_chunk_work", { book: "TIT", chapter: 15, kind: "tn", support_reference: "metonymy" });
+  assert(meto.data.total === 1 && meto.data.rows[0].id === "r1512" && meto.data.next_cursor === null, "metonymy finds its one note");
+  const none = await call("bpt_chunk_work", { book: "TIT", chapter: 15, kind: "tn", support_reference: "figs-hyperbole" });
+  assert(!none.isError && none.data.total === 0 && none.data.next_cursor === null, "an article with no notes -> total 0");
+  assert(/No notes in this range use the tA article "figs-hyperbole"/.test(none.data.note), "a filter with no matches says so in note");
+  const slash = await call("bpt_chunk_work", { book: "TIT", chapter: 15, kind: "tn", support_reference: `${TA}figs-metaphor/` });
+  assert(slash.data.total === 11, "a trailing slash on the rc:// link is tolerated");
+  const noPrefixOnly = await call("bpt_chunk_work", { book: "TIT", chapter: 15, kind: "tn", support_reference: "figs" });
+  assert(noPrefixOnly.data.total === 0, "a partial name does not match");
+
+  const paged = await pageAll({ book: "TIT", chapter: 15, kind: "tn", support_reference: "metaphor", limit: 3 });
+  assert(paged.total === 11 && paged.rows.length === 11 && new Set(paged.rows.map((r) => r.id)).size === 11, "paging under the filter: total and pages count only matches");
+  const first = await call("bpt_chunk_work", { book: "TIT", chapter: 15, kind: "tn", support_reference: "metaphor", limit: 3 });
+  assert(first.data.returned === 3 && first.data.next_cursor !== null && first.data.support_reference === "metaphor", "a filtered page has a cursor and echoes the filter");
+  const ranged = await call("bpt_chunk_work", { book: "TIT", chapter: 15, kind: "tn", support_reference: "metaphor", verse_start: 1, verse_end: 1 });
+  assert(ranged.data.total === 4, "the filter combines with the verse range");
+
+  const tq = await call("bpt_chunk_work", { book: "TIT", chapter: 15, kind: "tq", support_reference: "metaphor" });
+  assert(tq.isError && /only applies to kind tn/.test(tq.data.error), "support_reference with kind tq -> isError");
+  for (const bad of ["", "   ", 5]) {
+    const r = await call("bpt_chunk_work", { book: "TIT", chapter: 15, kind: "tn", support_reference: bad });
+    assert(r.isError, `support_reference ${JSON.stringify(bad)} -> isError`);
+  }
 }
 
 console.log("[tools] English source notes");
