@@ -424,7 +424,9 @@ const chunkWork: ToolDef = {
     let ta: string | null = null;
     if (args.support_reference !== undefined && args.support_reference !== null) {
       if (kind !== "tn") throw new ToolInputError("support_reference only applies to kind tn");
-      ta = typeof args.support_reference === "string" ? shortSupport(args.support_reference).toLowerCase() : "";
+      ta = typeof args.support_reference === "string"
+        ? shortSupport(args.support_reference.trim().replace(/\/+$/, "")).toLowerCase()
+        : "";
       if (!ta) throw new ToolInputError('support_reference must be a tA article name like "figs-metaphor"');
     }
 
@@ -461,7 +463,11 @@ const chunkWork: ToolDef = {
       bytes += size;
     }
     let note: string | null = null;
-    if (en && !en.ok) note = `en_note is null on every row: ${en.reason}`;
+    // So "no such notes" is not read as a failed English source, and a
+    // misspelled article name is not read as an answer.
+    if (ta !== null && all.length === 0) {
+      note = `No notes in this range use the tA article "${ta}". If that name may be misspelled, check the ta field of the chapter's rows.`;
+    } else if (en && !en.ok) note = `en_note is null on every row: ${en.reason}`;
     else if (en?.ok) {
       // A row whose en_note was dropped to fit the page is not "missing".
       const missing = rows.filter((r) => r.en_note === null && !r.en_truncated).length;

@@ -541,6 +541,9 @@ console.log("[tools] chunk_work support_reference filter");
   assert(meto.data.total === 1 && meto.data.rows[0].id === "r1512" && meto.data.next_cursor === null, "metonymy finds its one note");
   const none = await call("bpt_chunk_work", { book: "TIT", chapter: 15, kind: "tn", support_reference: "figs-hyperbole" });
   assert(!none.isError && none.data.total === 0 && none.data.next_cursor === null, "an article with no notes -> total 0");
+  assert(/No notes in this range use the tA article "figs-hyperbole"/.test(none.data.note), "a filter with no matches says so in note");
+  const slash = await call("bpt_chunk_work", { book: "TIT", chapter: 15, kind: "tn", support_reference: `${TA}figs-metaphor/` });
+  assert(slash.data.total === 11, "a trailing slash on the rc:// link is tolerated");
   const noPrefixOnly = await call("bpt_chunk_work", { book: "TIT", chapter: 15, kind: "tn", support_reference: "figs" });
   assert(noPrefixOnly.data.total === 0, "a partial name does not match");
 
