@@ -84,15 +84,21 @@ export type TemplateForRender = {
   template_id: string;
 };
 
-// The D1 reads a context pack renders from. Kept in one loader so the export
-// can re-read after fetching master's tip and compare (#712): a pack commits
-// only if D1, read after the tip fetch, still matches what was rendered.
-export type ContextPackInputs = {
+// The D1 reads a context pack renders from (#712). The export re-reads the
+// saved-and-queued part (prefs, terms, templates: every save of these queues a
+// context export) after fetching master's tip, and renders again if it moved,
+// so an older overlapping run can't publish a pack that misses a newer save.
+// Validated tN/tQ example rows queue no export and are not re-checked: they
+// reach the pack on the next export, as before.
+export type QueuedContextInputs = {
   prefs: TranslationPrefsForRender;
   terms: TermImport[];
+  templates: TemplateForRender[];
+};
+
+export type ContextPackInputs = QueuedContextInputs & {
   tnRows: ValidatedTnRow[];
   tqRows: ValidatedTqRow[];
-  templates: TemplateForRender[];
 };
 
 type InputsDb = {
@@ -102,7 +108,7 @@ type InputsDb = {
   };
 };
 
-export async function loadContextPackInputs(db: InputsDb): Promise<ContextPackInputs> {
+export async function loadQueuedContextInputs(db: InputsDb): Promise<QueuedContextInputs> {
   const prefsRow = await db.prepare(
     `SELECT audience, purpose, register, script_notes, instructions_md, common_issues_md
        FROM translation_prefs WHERE id = 1`,
@@ -122,11 +128,6 @@ export async function loadContextPackInputs(db: InputsDb): Promise<ContextPackIn
        ORDER BY concept_id, source_term, status`,
   ).all<TermImport>();
 
-  // Selectors carry the `admin_bulk_state IS NULL` rule that keeps
-  // bulk-approved rows out of the few-shot gold (see the SQL above).
-  const tnRs = await db.prepare(VALIDATED_TN_EXAMPLES_SQL).all<ValidatedTnRow>();
-  const tqRs = await db.prepare(VALIDATED_TQ_EXAMPLES_SQL).all<ValidatedTqRow>();
-
   const templateRs = await db.prepare(
     `SELECT template_id, support_ref, sheet_order, type, target_md
        FROM template_units
@@ -137,33 +138,23 @@ export async function loadContextPackInputs(db: InputsDb): Promise<ContextPackIn
       ORDER BY support_ref, sheet_order, template_id`,
   ).all<TemplateForRender>();
 
-  return {
-    prefs,
-    terms: termRs.results ?? [],
-    tnRows: tnRs.results ?? [],
-    tqRows: tqRs.results ?? [],
-    templates: templateRs.results ?? [],
-  };
+  return { prefs, terms: termRs.results ?? [], templates: templateRs.results ?? [] };
 }
 
-// Order-insensitive for the example rows, whose SQL has no ORDER BY.
-function rowsKey(rows: readonly unknown[]): string[] {
-  return rows.map((r) => JSON.stringify(r)).sort();
+export async function loadContextPackInputs(db: InputsDb): Promise<ContextPackInputs> {
+  const queued = await loadQueuedContextInputs(db);
+  // Selectors carry the `admin_bulk_state IS NULL` rule that keeps
+  // bulk-approved rows out of the few-shot gold (see the SQL above).
+  const tnRs = await db.prepare(VALIDATED_TN_EXAMPLES_SQL).all<ValidatedTnRow>();
+  const tqRs = await db.prepare(VALIDATED_TQ_EXAMPLES_SQL).all<ValidatedTqRow>();
+  return { ...queued, tnRows: tnRs.results ?? [], tqRows: tqRs.results ?? [] };
 }
 
-export function sameContextPackInputs(a: ContextPackInputs, b: ContextPackInputs): boolean {
-  const key = (x: ContextPackInputs) =>
-    JSON.stringify([x.prefs, x.terms, x.templates, rowsKey(x.tnRows), rowsKey(x.tqRows)]);
+// Terms can tie on their ORDER BY keys, so compare them as a sorted set.
+export function sameQueuedContextInputs(a: QueuedContextInputs, b: QueuedContextInputs): boolean {
+  const key = (x: QueuedContextInputs) =>
+    JSON.stringify([x.prefs, x.templates, x.terms.map((t) => JSON.stringify(t)).sort()]);
   return key(a) === key(b);
-}
-
-// True when the validated tN/tQ example rows differ, so the EN source maps
-// fetched for them must be fetched again.
-export function exampleRowsChanged(a: ContextPackInputs, b: ContextPackInputs): boolean {
-  return (
-    JSON.stringify([rowsKey(a.tnRows), rowsKey(a.tqRows)]) !==
-    JSON.stringify([rowsKey(b.tnRows), rowsKey(b.tqRows)])
-  );
 }
 
 /**

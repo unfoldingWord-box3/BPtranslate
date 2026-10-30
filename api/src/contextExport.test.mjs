@@ -18,8 +18,8 @@ import {
   VALIDATED_TN_EXAMPLES_SQL,
   VALIDATED_TQ_EXAMPLES_SQL,
   loadContextPackInputs,
-  sameContextPackInputs,
-  exampleRowsChanged,
+  loadQueuedContextInputs,
+  sameQueuedContextInputs,
 } from "./contextExport.ts";
 import {
   contextShrinkRefused,
@@ -722,21 +722,21 @@ console.log("contextExport — D1 inputs re-read sees a newer approval");
   const before = await loadContextPackInputs(db);
   assert(before.templates.map((t) => t.template_id).join() === "figs-a-01", "only validated sheet templates with wording load");
   assert(before.tnRows.length === 2 && before.prefs.register === "default", "validated tN rows and default prefs load");
-  assert(sameContextPackInputs(before, await loadContextPackInputs(db)), "an unchanged re-read matches");
+  assert(sameQueuedContextInputs(before, await loadQueuedContextInputs(db)), "an unchanged re-read matches");
+
+  sqlite.prepare(`UPDATE tn_rows SET translation_state = 'validated' WHERE id = 'aa03'`).run();
   assert(
-    sameContextPackInputs(before, { ...before, tnRows: [...before.tnRows].reverse() }),
-    "example row order does not count as a change",
+    sameQueuedContextInputs(before, await loadQueuedContextInputs(db)),
+    "a tN approval (which queues no export) does not force a re-render",
   );
 
   sqlite.prepare(`UPDATE template_units SET translation_state = 'validated' WHERE template_id = 'figs-b-01'`).run();
-  const afterApprove = await loadContextPackInputs(db);
-  assert(!sameContextPackInputs(before, afterApprove), "a newer template approval is seen as a change");
-  assert(!exampleRowsChanged(before, afterApprove), "a template approval needs no EN source refetch");
+  const afterApprove = await loadQueuedContextInputs(db);
+  assert(!sameQueuedContextInputs(before, afterApprove), "a newer template approval is seen as a change");
 
-  sqlite.prepare(`UPDATE tn_rows SET translation_state = 'validated' WHERE id = 'aa03'`).run();
-  const afterRow = await loadContextPackInputs(db);
-  assert(!sameContextPackInputs(afterApprove, afterRow), "a newer tN approval is seen as a change");
-  assert(exampleRowsChanged(afterApprove, afterRow), "a tN approval needs the EN sources refetched");
+  const swapped = { ...afterApprove, terms: [{ concept_id: "c", source_term: "s", target_term: "b" }, { concept_id: "c", source_term: "s", target_term: "a" }] };
+  const swappedBack = { ...afterApprove, terms: [...swapped.terms].reverse() };
+  assert(sameQueuedContextInputs(swapped, swappedBack), "terms tied on their sort keys compare equal in either order");
 }
 
 console.log("ALL contextExport tests passed");

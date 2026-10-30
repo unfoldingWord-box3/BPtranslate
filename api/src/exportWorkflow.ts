@@ -93,8 +93,8 @@ import {
   contextRepoOwner,
   contextRepoName,
   loadContextPackInputs,
-  sameContextPackInputs,
-  exampleRowsChanged,
+  loadQueuedContextInputs,
+  sameQueuedContextInputs,
 } from "./contextExport.ts";
 import { contextShrinkRefused, shrinkDetailCode, hasSemanticContent } from "./contextExportLib.ts";
 import { fetchEnSourceMaps } from "./contextSourceFetch.ts";
@@ -576,11 +576,11 @@ export class ExportWorkflow extends WorkflowEntrypoint<Env, ExportParams> {
       return empty("failed", "not_a_gl_project");
     }
 
-    // Load prefs / terms / validated rows / templates from D1. Re-read after
-    // each tip fetch below (#712), so `let`.
+    // Load prefs / terms / validated rows / templates from D1. Prefs, terms
+    // and templates are re-read after each tip fetch below (#712), so `let`.
     let inputs = await loadContextPackInputs(this.env.DB);
 
-    let sourceFetch = await fetchEnSourceMaps(this.env, cfg, inputs.tnRows, inputs.tqRows);
+    const sourceFetch = await fetchEnSourceMaps(this.env, cfg, inputs.tnRows, inputs.tqRows);
     // A resource whose translationSource repo was left blank in Setup has NO
     // upstream source: fetchEnSourceMaps SKIPS it (empty map) and still fetches
     // the sourced resources, returning ok with `skipped`. That must NOT fail the
@@ -766,19 +766,14 @@ export class ExportWorkflow extends WorkflowEntrypoint<Env, ExportParams> {
         }
 
         // #712: an overlapping run (another save's export) may have read D1
-        // later and committed already. Re-read D1 now that the tip is fixed:
-        // if it still matches the render, every commit already in the tip read
-        // no newer data, and any commit after this point fails our CAS. If D1
-        // moved, render again from the new read rather than publish a pack
-        // that misses the newer change.
-        const fresh = await loadContextPackInputs(this.env.DB);
-        if (!sameContextPackInputs(fresh, inputs)) {
-          if (exampleRowsChanged(fresh, inputs)) {
-            const refetched = await fetchEnSourceMaps(this.env, cfg, fresh.tnRows, fresh.tqRows);
-            if (!refetched.ok) throw new Error(refetched.reason);
-            sourceFetch = refetched;
-          }
-          inputs = fresh;
+        // later and committed already. Re-read the saved-and-queued inputs now
+        // that the tip is fixed: if they still match the render, every commit
+        // already in the tip read no newer save, and a commit after this point
+        // fails our CAS. If they moved, render again from the new read rather
+        // than publish a pack that misses the newer save.
+        const fresh = await loadQueuedContextInputs(this.env.DB);
+        if (!sameQueuedContextInputs(fresh, inputs)) {
+          inputs = { ...inputs, ...fresh };
           lastReason = "d1_changed_during_export";
           console.warn("context pack inputs changed during export; re-rendering", { attempt });
           continue;
@@ -844,6 +839,7 @@ export class ExportWorkflow extends WorkflowEntrypoint<Env, ExportParams> {
       status: "failed",
       failureReason: lastReason ?? "cas_retries_exhausted",
     });
+    await this.recordSnapshot("CONTEXT", "ctx", null, null, 0, `error:${lastReason ?? "cas_retries_exhausted"}`);
     return empty("failed", lastReason ?? "cas_retries_exhausted");
   }
 
