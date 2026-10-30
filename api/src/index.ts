@@ -26,7 +26,7 @@ import { books } from "./bookImport";
 import { populateReferencedArticles } from "./articlePopulate";
 import { templates } from "./templates";
 import { syncTemplates } from "./templateSync";
-import { attachAuth, requireAuth, requireCsrf, mintDevToken, startDcsAuth, callbackDcsAuth, authMe, authLogout, refreshToken, updateLastLocation, currentUserId } from "./auth";
+import { attachAuth, chatWriteEnv, requireAuth, requireCsrf, mintDevToken, startDcsAuth, callbackDcsAuth, authMe, authLogout, refreshToken, updateLastLocation, currentUserId } from "./auth";
 import { workspaceRoutes } from "./workspaceRoutes";
 import { handleMcp, isMcpPath } from "./mcp";
 import { chatLinkRoutes } from "./chatLinkRoutes";
@@ -119,6 +119,9 @@ export interface Env {
   // mcp.ts), 32+ characters, one for every workspace. Unset = the endpoint
   // answers 401 to everyone.
   MCP_SERVICE_TOKEN?: string;
+  // Never configured. Set only on the env of an in-process write from a chat
+  // tool (chatWriteEnv in auth.ts), and trusted only when auth.ts minted it.
+  CHAT_PRINCIPAL?: object;
   // Second binding to the SAME database as DB — holds org-independent state
   // (accounts, sessions, lexicon, alignment frequencies, UI-string overrides)
   // so switching workspaces doesn't log a user out or blank their lexicon.
@@ -529,16 +532,26 @@ export default {
         const ws = await resolveWorkspaceFresh(env, link.workspaceSlug);
         if (ws.slug !== link.workspaceSlug) return null;
         const wsEnv = workspaceEnv(env, ws);
+        const principal = {
+          userId: link.userId,
+          username: link.username,
+          role: await chatRoleFor(wsEnv, link.username),
+          linkId: link.linkId,
+        };
         return {
           workspace: { slug: ws.slug, label: ws.label, org: ws.org },
-          principal: {
-            userId: link.userId,
-            username: link.username,
-            role: await chatRoleFor(wsEnv, link.username),
-            linkId: link.linkId,
-          },
+          principal,
           getJson: async (path: string) => {
             const res = await app.fetch(new Request(new URL(path, request.url)), wsEnv, ctx);
+            return { status: res.status, body: await res.json().catch(() => null) };
+          },
+          // Writes run as the linked user: the principal rides a per-call env
+          // clone (chatWriteEnv), never the env the reads use.
+          send: async (method: string, path: string, body: unknown, ifMatch?: number) => {
+            const headers: Record<string, string> = { "Content-Type": "application/json" };
+            if (ifMatch !== undefined) headers["If-Match"] = String(ifMatch);
+            const req = new Request(new URL(path, request.url), { method, headers, body: JSON.stringify(body) });
+            const res = await app.fetch(req, chatWriteEnv(wsEnv, principal), ctx);
             return { status: res.status, body: await res.json().catch(() => null) };
           },
           // Read-only D1 exception to the route-handler rule; see packageRefs.ts.

@@ -31,3 +31,10 @@ AI_KEY_WRAPPING_KEY=
 # to the public dev worker, where a registrable DCS username must not be a
 # super-admin. .dev.vars is read only by `wrangler dev`, never deployed.
 SUPER_ADMINS=dev
+
+# Bearer for the chat MCP endpoint (POST /api/mcp, api/src/mcp.ts), 32+ chars.
+# Unset, the endpoint answers 401. The placeholder lets the local Playwright
+# chat race test (tests/concurrency/chat-edit-race.spec.ts) run. In production
+# set with:
+#   wrangler secret put MCP_SERVICE_TOKEN
+MCP_SERVICE_TOKEN=dev-only-mcp-bearer-replace-with-32-plus-chars
