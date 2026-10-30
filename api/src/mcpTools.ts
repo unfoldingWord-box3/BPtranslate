@@ -773,12 +773,15 @@ function writeRefusal(kind: "tn" | "tq", id: string, status: number, body: unkno
   throw new Error(`BPtranslate write for ${kind} ${id} returned ${status}`);
 }
 
-function conflict(kind: "tn" | "tq", yours: Record<string, unknown> | null, current: Record<string, unknown>, what: string) {
+// retryWith: what to call again with. An approval pins the state too, and a
+// state change leaves the version as it was, so retrying with only the new
+// version would conflict again.
+function conflict(kind: "tn" | "tq", yours: Record<string, unknown> | null, current: Record<string, unknown>, what: string, retryWith = "current.version") {
   return {
     status: "conflict",
     message:
       `Someone changed this ${kind} row after the reviewer saw it, so ${what} was NOT saved. ` +
-      "Show the reviewer the current text and ask what they want; to go ahead, call again with current.version.",
+      `Show the reviewer the current text and ask what they want; to go ahead, call again with ${retryWith}.`,
     ...(yours ? { your_text: yours } : {}),
     current: projectRow(kind, current),
   };
@@ -832,10 +835,13 @@ const editRow: ToolDef = {
   },
 };
 
+// The translation states a draft row can be in (rows.ts TRANSLATION_STATES).
+const APPROVE_STATES = ["ai_draft", "edited", "validated"] as const;
+
 const approve: ToolDef = {
   name: "bpt_approve",
   description:
-    "Approve one translation note (tn) or question (tq) that the reviewer was shown and accepted, marking it validated. Only for a row the reviewer has actually read in this conversation: never approve rows they were not shown. Pass the version the reviewer was shown (after bpt_edit_row, the version it returned); the row is approved only if it is still at that version. Returns status applied (approving does not change the version), or status conflict when the row changed since, with current (the text and version now): nothing was approved, so show the reviewer the current text first. Errors (not found, in the trash, not an AI draft, an AI run holding the chapter, read-only user) change nothing. Requires edit access.",
+    "Approve one translation note (tn) or question (tq) that the reviewer was shown and accepted, marking it validated. Only for a row the reviewer has actually read in this conversation: never approve rows they were not shown. Pass the version and state exactly as the reviewer was shown them (after bpt_edit_row, the version and state it returned); the row is approved only if it is still at that version and in that state. Returns status applied (approving does not change the version), or status conflict when the row changed since (its text, or its state: someone approved, un-approved or trashed it), with current (the text, version and state now): nothing was approved, so show the reviewer the current row first. Errors (not found, in the trash, not an AI draft, an AI run holding the chapter, read-only user) change nothing. Requires edit access.",
   inputSchema: {
     type: "object",
     properties: {
@@ -844,8 +850,13 @@ const approve: ToolDef = {
       kind: { type: "string", enum: ["tn", "tq"] },
       id: { type: "string", description: "Row id from bpt_chunk_work or bpt_get_row" },
       version: VERSION_SCHEMA,
+      state: {
+        type: "string",
+        enum: APPROVE_STATES,
+        description: "The row's state exactly as bpt_chunk_work or bpt_get_row showed it to the reviewer.",
+      },
     },
-    required: ["session_token", "book", "kind", "id", "version"],
+    required: ["session_token", "book", "kind", "id", "version", "state"],
     additionalProperties: false,
   },
   run: async (args, ctx) => {
@@ -856,10 +867,21 @@ const approve: ToolDef = {
         `${t.kind} row ${t.id} is not a translation draft (this project writes its notes directly), so there is nothing to approve. Nothing was changed.`,
       );
     }
-    const { status, body } = await t.session.send("POST", `${t.path}/validate?book=${t.book}`, { value: 1 }, t.version);
+    // Required (#701): state flips never bump the version, so the version alone
+    // misses an un-approve or trash that landed after the reviewer saw the row.
+    const state = args.state;
+    if (typeof state !== "string" || !(APPROVE_STATES as readonly string[]).includes(state)) {
+      throw new ToolInputError(`state is required: the row's state as the reviewer was shown it (${APPROVE_STATES.join(", ")})`);
+    }
+    const { status, body } = await t.session.send(
+      "POST",
+      `${t.path}/validate?book=${t.book}`,
+      { value: 1, expected_state: state },
+      t.version,
+    );
     const b = (body ?? {}) as Record<string, unknown>;
     if (status === 409 && b.error === "version_mismatch") {
-      return conflict(t.kind, null, b.current as Record<string, unknown>, "the approval");
+      return conflict(t.kind, null, b.current as Record<string, unknown>, "the approval", "current.version and current.state");
     }
     if (status !== 200) writeRefusal(t.kind, t.id, status, body);
     return applied(t.kind, b);
