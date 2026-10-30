@@ -104,7 +104,15 @@ function fresh({ preset = "ar-bsoj" } = {}) {
   app.route("/api/templates", templates);
   app.route("/api/project-config", projectConfig);
 
-  const env = { DB: makeDb(sqlite), WORKSPACE_SLUG: `t${++slugCounter}` };
+  // Records each context export the routes queue (#707).
+  const queued = [];
+  const EXPORT_WORKFLOW = {
+    async create(opts) {
+      queued.push(opts);
+      return { id: opts.id };
+    },
+  };
+  const env = { DB: makeDb(sqlite), WORKSPACE_SLUG: `t${++slugCounter}`, EXPORT_WORKFLOW };
   const ctx = {
     waitUntil(p) {
       if (p && typeof p.catch === "function") p.catch(() => {});
@@ -148,7 +156,7 @@ function fresh({ preset = "ar-bsoj" } = {}) {
       .prepare(`SELECT row_key, user_id, action, source FROM edit_log WHERE kind = 'template' ORDER BY id`)
       .all()
       .map((r) => ({ ...r }));
-  return { app, env, ctx, call, tnRow, log, sqlite, tpl, tplLog };
+  return { app, env, ctx, call, tnRow, log, sqlite, tpl, tplLog, queued };
 }
 
 test("bpt_edit_row then bpt_approve: saved as the linked user, source chat, version-pinned", async () => {
@@ -650,4 +658,82 @@ test("bpt_templates_for_row: ten long translated variants leave out their Englis
   const tooBig = await call("bpt_templates_for_row", { id: "el01" });
   assert.equal(tooBig.isError, true);
   assert.match(tooBig.data.error, /too long/);
+});
+
+// ── Issue #707: approving a template queues the context export ──────────────
+
+function assertOneContextExport(queued, env) {
+  assert.equal(queued.length, 1, JSON.stringify(queued));
+  assert.ok(queued[0].id.startsWith(`context-save-${env.WORKSPACE_SLUG}-`), queued[0].id);
+  assert.deepEqual(queued[0].params, { contextOnly: true, workspace: env.WORKSPACE_SLUG });
+}
+
+function webTemplates(env, ctx) {
+  const web = new Hono();
+  web.use("*", async (c, next) => {
+    c.set("userId", 9);
+    c.set("role", "editor");
+    await next();
+  });
+  web.route("/api/templates", templates);
+  return (path, method, body, headers = {}) =>
+    web.request(path, { method, headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) }, env, ctx);
+}
+
+test("#707: a chat template approve queues one context export; the edit before it queues none", async () => {
+  const { call, env, queued } = fresh();
+  const edit = await call("bpt_edit_template", { template_id: "figs-ellipsis-01", version: 1, text: NEW_WORDING });
+  assert.equal(edit.data.status, "applied", JSON.stringify(edit.data));
+  assert.equal(queued.length, 0);
+  const ok = await call("bpt_approve_template", { template_id: "figs-ellipsis-01", version: 2 });
+  assert.equal(ok.data.status, "applied", JSON.stringify(ok.data));
+  assertOneContextExport(queued, env);
+});
+
+test("#707: a web approve and a web un-approve each queue one context export; a web PATCH queues none", async () => {
+  const { env, ctx, queued, tpl } = fresh();
+  const post = webTemplates(env, ctx);
+  const p = await post("/api/templates/unit?id=figs-ellipsis-01", "PATCH", { target_md: "web text SPEAKER [text]" }, { "If-Match": "1" });
+  assert.equal(p.status, 200);
+  assert.equal(queued.length, 0);
+  const un = await post("/api/templates/unit/validate?id=figs-ellipsis-02", "POST", { value: 0 });
+  assert.equal(un.status, 200);
+  assert.equal(tpl("figs-ellipsis-02").translation_state, "edited");
+  assertOneContextExport(queued, env);
+  queued.length = 0;
+  const ap = await post("/api/templates/unit/validate?id=figs-ellipsis-01", "POST", { value: 1 });
+  assert.equal(ap.status, 200);
+  assert.equal(tpl("figs-ellipsis-01").translation_state, "validated");
+  assertOneContextExport(queued, env);
+});
+
+test("#707: a stale (409) or untranslated (404) approve queues nothing", async () => {
+  const { call, env, ctx, queued } = fresh();
+  const stale = await call("bpt_approve_template", { template_id: "figs-ellipsis-02", version: 1 });
+  assert.equal(stale.data.status, "conflict", JSON.stringify(stale.data));
+  const none = await call("bpt_approve_template", { template_id: "figs-ellipsis-01", version: 1 });
+  assert.equal(none.isError, true, JSON.stringify(none.data));
+  const post = webTemplates(env, ctx);
+  const missing = await post("/api/templates/unit/validate?id=figs-ellipsis-01", "POST", { value: 1 });
+  assert.equal(missing.status, 404);
+  assert.equal(queued.length, 0);
+});
+
+test("#707: a queue that rejects or throws still leaves the approve at 200 and validated", async () => {
+  for (const create of [
+    async () => {
+      throw new Error("instance already exists");
+    },
+    () => {
+      throw new Error("binding unavailable");
+    },
+  ]) {
+    const { env, ctx, tpl } = fresh();
+    env.EXPORT_WORKFLOW.create = create;
+    const post = webTemplates(env, ctx);
+    await post("/api/templates/unit/validate?id=figs-ellipsis-02", "POST", { value: 0 });
+    const r = await post("/api/templates/unit/validate?id=figs-ellipsis-02", "POST", { value: 1 });
+    assert.equal(r.status, 200);
+    assert.equal(tpl("figs-ellipsis-02").translation_state, "validated");
+  }
 });

@@ -1097,7 +1097,7 @@ const templatesForRow: ToolDef = {
       row_id: id,
       support_reference: slug,
       note:
-        "AI drafts read only the feeds_drafts template (none: drafts get no template for this yet). Approved wording on a template above it in this list takes its place. Drafts see a change after the next context export, which does not run when a template is approved: it runs nightly on production and when the project's preferences or terms are saved.",
+        "AI drafts read only the feeds_drafts template (none: drafts get no template for this yet). Approved wording on a template above it in this list takes its place. Approving a template starts the context export, so new AI drafts use the wording once it finishes, usually within a few minutes.",
       templates,
     };
   },
