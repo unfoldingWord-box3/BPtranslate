@@ -310,13 +310,20 @@ templates.post("/unit/draft", requireEditor, async (c) => {
   return c.json(updated);
 });
 
-const ValidateBody = z.object({ value: z.union([z.literal(0), z.literal(1), z.boolean()]) });
+const ValidateBody = z.object({
+  value: z.union([z.literal(0), z.literal(1), z.boolean()]),
+  expected_state: z.enum(["ai_draft", "edited", "validated"]).optional(),
+});
 
 // POST /api/templates/unit/validate?id=... — the "Approve" action. value=1 ->
 // validated; value=0 -> edited. Non-version-bumping; guarded on
 // translation_state IS NOT NULL; audit source=NULL (human approval), 'chat' when
-// a chat reviewer approved. Optional If-Match pins the version the caller saw
-// (the chat tools send it; the web app does not): a moved version is a 409.
+// a chat reviewer approved. Optional If-Match pins the version the caller saw;
+// optional body expected_state pins the translation_state they saw. State flips
+// never bump `version`, so the version alone misses an un-approve that landed
+// after the reviewer saw the template (#708, the #701 gap for templates). The
+// chat's bpt_approve_template sends both; the web app sends neither. A pinned
+// miss is a 409 version_mismatch with current.
 templates.post("/unit/validate", requireEditor, async (c) => {
   const id = c.req.query("id");
   if (!id) return c.json({ error: "id_required" }, 400);
@@ -342,36 +349,58 @@ templates.post("/unit/validate", requireEditor, async (c) => {
     ? ", pre_draft_json = json_object('target_md', target_md)"
     : "";
   const source = editSource(c);
-  const [updateRes] = await c.env.DB.batch([
-    c.env.DB
-      .prepare(
-        `UPDATE template_units SET translation_state = ?1, updated_at = ?2${snapshotClause}
-          WHERE template_id = ?3 AND deleted_at IS NULL AND translation_state IS NOT NULL${
-            expected !== null ? " AND version = ?4" : ""
-          }`,
-      )
-      .bind(...(expected !== null ? [state, now, id, expected] : [state, now, id])),
+  const expectedState = parsed.data.expected_state ?? null;
+  // The pin clauses numbered from ?first, with their values in the same order.
+  // Each statement binds exactly the parameters it references (D1 rejects an
+  // unreferenced ?N), so a clause and its value come and go together.
+  const pins = (first: number) => {
+    let n = first;
+    let sql = "";
+    const values: unknown[] = [];
+    if (expected !== null) {
+      sql += ` AND version = ?${n++}`;
+      values.push(expected);
+    }
+    if (expectedState !== null) {
+      sql += ` AND translation_state = ?${n++}`;
+      values.push(expectedState);
+    }
+    return { sql, values };
+  };
+  const auditPins = pins(5);
+  const updatePins = pins(4);
+  // The audit INSERT runs FIRST: its WHERE must see the row before the UPDATE,
+  // or a state pin (which the UPDATE itself changes) would never match and the
+  // approval would land with no audit entry. A batch is one transaction.
+  const [, updateRes] = await c.env.DB.batch([
     c.env.DB
       .prepare(
         `INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action, source)
          SELECT 'template', ?1, NULL, ?2, version, version, ?3, ?4
            FROM template_units
-          WHERE template_id = ?1 AND deleted_at IS NULL AND translation_state IS NOT NULL${
-            expected !== null ? " AND version = ?5" : ""
-          }`,
+          WHERE template_id = ?1 AND deleted_at IS NULL AND translation_state IS NOT NULL${auditPins.sql}`,
       )
-      .bind(...(expected !== null ? [id, userId ?? null, action, source, expected] : [id, userId ?? null, action, source])),
+      .bind(id, userId ?? null, action, source, ...auditPins.values),
+    c.env.DB
+      .prepare(
+        `UPDATE template_units SET translation_state = ?1, updated_at = ?2${snapshotClause}
+          WHERE template_id = ?3 AND deleted_at IS NULL AND translation_state IS NOT NULL${updatePins.sql}`,
+      )
+      .bind(state, now, id, ...updatePins.values),
   ]);
   if (!updateRes.meta.changes) {
-    if (expected !== null) {
+    if (expected !== null || expectedState !== null) {
       const cur = await c.env.DB.prepare(
         `SELECT * FROM template_units WHERE template_id = ?1 AND deleted_at IS NULL`,
       )
         .bind(id)
         .first<TemplateUnit>();
-      if (cur && cur.translation_state !== null && cur.version !== expected) {
-        return c.json({ error: "version_mismatch", current: cur }, 409);
-      }
+      const moved =
+        !!cur &&
+        cur.translation_state !== null &&
+        ((expected !== null && cur.version !== expected) ||
+          (expectedState !== null && cur.translation_state !== expectedState));
+      if (moved) return c.json({ error: "version_mismatch", current: cur }, 409);
     }
     return c.json({ error: "not_found" }, 404);
   }

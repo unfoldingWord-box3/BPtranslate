@@ -494,7 +494,7 @@ test("edit then approve a template: applied, version-pinned, audited as chat", a
   assert.equal(edit.data.version, 2);
   assert.equal(edit.data.state, "edited");
   assert.equal(edit.data.template.target_md, NEW_WORDING);
-  const ok = await call("bpt_approve_template", { template_id: "figs-ellipsis-01", version: 2 });
+  const ok = await call("bpt_approve_template", { template_id: "figs-ellipsis-01", version: 2, state: "edited" });
   assert.equal(ok.isError, false, JSON.stringify(ok.data));
   assert.equal(ok.data.status, "applied");
   assert.equal(ok.data.version, 2);
@@ -521,7 +521,7 @@ test("template: a stale version is a conflict and changes nothing", async () => 
   assert.equal(stale.data.current.version, 2);
   assert.deepEqual(tpl("figs-ellipsis-01"), { target_md: NEW_WORDING, translation_state: "edited", version: 2 });
 
-  const staleApprove = await call("bpt_approve_template", { template_id: "figs-ellipsis-01", version: 1 });
+  const staleApprove = await call("bpt_approve_template", { template_id: "figs-ellipsis-01", version: 1, state: "edited" });
   assert.equal(staleApprove.data.status, "conflict", JSON.stringify(staleApprove.data));
   assert.equal(staleApprove.data.your_text, undefined);
   assert.equal(staleApprove.data.current.version, 2);
@@ -548,7 +548,7 @@ test("template tools: a viewer is refused and nothing is written", async () => {
   const { call, tpl, tplLog } = fresh();
   const a = await call("bpt_templates_for_row", { id: "el01" }, VIEWER);
   const b = await call("bpt_edit_template", { template_id: "figs-ellipsis-01", version: 1, text: NEW_WORDING }, VIEWER);
-  const c = await call("bpt_approve_template", { template_id: "figs-ellipsis-02", version: 2 }, VIEWER);
+  const c = await call("bpt_approve_template", { template_id: "figs-ellipsis-02", version: 2, state: "validated" }, VIEWER);
   for (const r of [a, b, c]) {
     assert.equal(r.isError, true);
     assert.match(r.data.error, /cannot edit/);
@@ -570,7 +570,7 @@ test("template tools: an authoring project is refused", async () => {
 
 test("template approve: nothing to approve before any wording is saved", async () => {
   const { call, tpl, tplLog } = fresh();
-  const r = await call("bpt_approve_template", { template_id: "figs-ellipsis-01", version: 1 });
+  const r = await call("bpt_approve_template", { template_id: "figs-ellipsis-01", version: 1, state: "edited" });
   assert.equal(r.isError, true);
   assert.match(r.data.error, /nothing to approve/);
   assert.deepEqual(tpl("figs-ellipsis-01"), { target_md: null, translation_state: null, version: 1 });
@@ -685,7 +685,7 @@ test("#707: a chat template approve queues one context export; the edit before i
   const edit = await call("bpt_edit_template", { template_id: "figs-ellipsis-01", version: 1, text: NEW_WORDING });
   assert.equal(edit.data.status, "applied", JSON.stringify(edit.data));
   assert.equal(queued.length, 0);
-  const ok = await call("bpt_approve_template", { template_id: "figs-ellipsis-01", version: 2 });
+  const ok = await call("bpt_approve_template", { template_id: "figs-ellipsis-01", version: 2, state: "edited" });
   assert.equal(ok.data.status, "applied", JSON.stringify(ok.data));
   assertOneContextExport(queued, env);
 });
@@ -709,9 +709,9 @@ test("#707: a web approve and a web un-approve each queue one context export; a 
 
 test("#707: a stale (409) or untranslated (404) approve queues nothing", async () => {
   const { call, env, ctx, queued } = fresh();
-  const stale = await call("bpt_approve_template", { template_id: "figs-ellipsis-02", version: 1 });
+  const stale = await call("bpt_approve_template", { template_id: "figs-ellipsis-02", version: 1, state: "validated" });
   assert.equal(stale.data.status, "conflict", JSON.stringify(stale.data));
-  const none = await call("bpt_approve_template", { template_id: "figs-ellipsis-01", version: 1 });
+  const none = await call("bpt_approve_template", { template_id: "figs-ellipsis-01", version: 1, state: "edited" });
   assert.equal(none.isError, true, JSON.stringify(none.data));
   const post = webTemplates(env, ctx);
   const missing = await post("/api/templates/unit/validate?id=figs-ellipsis-01", "POST", { value: 1 });
@@ -736,4 +736,99 @@ test("#707: a queue that rejects or throws still leaves the approve at 200 and v
     assert.equal(r.status, 200);
     assert.equal(tpl("figs-ellipsis-02").translation_state, "validated");
   }
+});
+
+// ── Issue #708: template approve pins the state the reviewer was shown ──────
+// Template state flips (approve, un-approve) do not bump `version`, so a
+// version pin alone let a chat approve land on a template the web un-approved
+// after the reviewer saw it (the #701 gap, for templates).
+
+// A chat (pinned) validate call straight to the route, as the tool sends it.
+async function chatTemplateValidate(app, env, ctx, id, body, ifMatch) {
+  const principal = { userId: 9, username: "reviewer", role: "editor", linkId: 1 };
+  const headers = { "content-type": "application/json" };
+  if (ifMatch !== undefined) headers["If-Match"] = String(ifMatch);
+  const res = await app.request(
+    `/api/templates/unit/validate?id=${id}`,
+    { method: "POST", headers, body: JSON.stringify(body) },
+    chatWriteEnv(env, principal),
+    ctx,
+  );
+  return { status: res.status, body: await res.json() };
+}
+
+test("#708: the web un-approves after the chat showed the template; bpt_approve_template at the same version is a conflict and changes nothing", async () => {
+  const { env, ctx, call, tpl, tplLog, queued } = fresh();
+  // The chat shows -02 (v2, validated), then the web un-approves it (still v2).
+  const shown = await call("bpt_templates_for_row", { id: "el01" });
+  const t = shown.data.templates.find((x) => x.template_id === "figs-ellipsis-02");
+  assert.deepEqual({ version: t.version, state: t.state }, { version: 2, state: "validated" });
+  const un = await webTemplates(env, ctx)("/api/templates/unit/validate?id=figs-ellipsis-02", "POST", { value: 0 });
+  assert.equal(un.status, 200);
+  assert.deepEqual(tpl("figs-ellipsis-02"), { target_md: "second target [text]", translation_state: "edited", version: 2 });
+  const logBefore = tplLog().length;
+  queued.length = 0;
+
+  const r = await call("bpt_approve_template", { template_id: "figs-ellipsis-02", version: t.version, state: t.state });
+  assert.equal(r.isError, false, JSON.stringify(r.data));
+  assert.equal(r.data.status, "conflict");
+  assert.equal(r.data.current.version, 2);
+  assert.equal(r.data.current.state, "edited");
+  assert.match(r.data.message, /current\.state/);
+  assert.equal(tpl("figs-ellipsis-02").translation_state, "edited", "not approved");
+  assert.equal(tplLog().length, logBefore, "no audit entry for the refused approve");
+  assert.equal(queued.length, 0, "no context export for the refused approve");
+});
+
+test("#708: a pinned validate whose state moved (version unchanged) answers 409 with current, and writes nothing", async () => {
+  const { app, env, ctx, tpl, tplLog, queued } = fresh();
+  await webTemplates(env, ctx)("/api/templates/unit/validate?id=figs-ellipsis-02", "POST", { value: 0 });
+  const logBefore = tplLog().length;
+  queued.length = 0;
+  for (const ifMatch of [2, undefined]) {
+    const r = await chatTemplateValidate(app, env, ctx, "figs-ellipsis-02", { value: 1, expected_state: "validated" }, ifMatch);
+    assert.equal(r.status, 409, `If-Match ${ifMatch}: ${JSON.stringify(r.body)}`);
+    assert.equal(r.body.error, "version_mismatch");
+    assert.equal(r.body.current.translation_state, "edited");
+    assert.equal(r.body.current.version, 2);
+  }
+  assert.equal(tpl("figs-ellipsis-02").translation_state, "edited");
+  assert.equal(tplLog().length, logBefore);
+  assert.equal(queued.length, 0);
+});
+
+test("#708: a pinned validate whose state still matches applies and writes one validate audit entry", async () => {
+  const { app, env, ctx, tpl, tplLog, queued } = fresh();
+  await webTemplates(env, ctx)("/api/templates/unit/validate?id=figs-ellipsis-02", "POST", { value: 0 });
+  const logBefore = tplLog().length;
+  queued.length = 0;
+  const r = await chatTemplateValidate(app, env, ctx, "figs-ellipsis-02", { value: 1, expected_state: "edited" }, 2);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.translation_state, "validated");
+  assert.deepEqual(tpl("figs-ellipsis-02"), { target_md: "second target [text]", translation_state: "validated", version: 2 });
+  assert.deepEqual(tplLog().slice(logBefore), [{ row_key: "figs-ellipsis-02", user_id: 9, action: "validate", source: "chat" }]);
+  assertOneContextExport(queued, env);
+});
+
+test("#708: an expected_state outside the state set is a 400 and changes nothing", async () => {
+  const { app, env, ctx, tpl, tplLog } = fresh();
+  const r = await chatTemplateValidate(app, env, ctx, "figs-ellipsis-02", { value: 0, expected_state: "approved" }, 2);
+  assert.equal(r.status, 400);
+  assert.equal(r.body.error, "validation_failed");
+  assert.equal(tpl("figs-ellipsis-02").translation_state, "validated");
+  assert.equal(tplLog().length, 0);
+});
+
+test("#708: bpt_approve_template requires the state the reviewer was shown", async () => {
+  const { call, tpl, tplLog } = fresh();
+  await call("bpt_edit_template", { template_id: "figs-ellipsis-01", version: 1, text: NEW_WORDING });
+  const before = tplLog().length;
+  const missing = await call("bpt_approve_template", { template_id: "figs-ellipsis-01", version: 2 });
+  assert.equal(missing.isError, true);
+  assert.match(missing.data.error, /state is required/);
+  const bad = await call("bpt_approve_template", { template_id: "figs-ellipsis-01", version: 2, state: "approved" });
+  assert.equal(bad.isError, true);
+  assert.match(bad.data.error, /state is required/);
+  assert.equal(tpl("figs-ellipsis-01").translation_state, "edited");
+  assert.equal(tplLog().length, before);
 });

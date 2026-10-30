@@ -1002,12 +1002,14 @@ function templateRefusal(id: string, status: number, body: unknown): never {
   throw new Error(`BPtranslate write for template ${id} returned ${status}`);
 }
 
-function templateConflict(yours: string | null, current: Record<string, unknown>, what: string) {
+// retryWith: what to call again with. An approval pins the state too, and a
+// state change leaves the version as it was (see conflict).
+function templateConflict(yours: string | null, current: Record<string, unknown>, what: string, retryWith = "current.version") {
   return {
     status: "conflict",
     message:
       `Someone changed this template after the reviewer saw it, so ${what} was NOT ${yours === null ? "made" : "saved"}. ` +
-      `Show the reviewer the current wording and ask; to go ahead, call again with current.version.`,
+      `Show the reviewer the current wording and ask; to go ahead, call again with ${retryWith}.`,
     ...(yours !== null ? { your_text: yours } : {}),
     current: projectTemplate(current),
   };
@@ -1116,7 +1118,7 @@ const TEMPLATE_ID_SCHEMA = { type: "string", description: "template_id from bpt_
 const editTemplate: ToolDef = {
   name: "bpt_edit_template",
   description:
-    "Save new wording for one note template, replacing its target_md whole. Pass the version the reviewer was shown; it is saved only if the template is still at that version. Every placeholder in the template (see bpt_templates_for_row) must stay exactly as written, or nothing is saved. Returns status applied with the new version and state (state becomes edited, so it needs approving: pass the NEW version to bpt_approve_template), or status conflict when someone changed the template since, with your_text and current: nothing was saved, so show the reviewer the current wording and ask. Errors change nothing. Requires edit access.",
+    "Save new wording for one note template, replacing its target_md whole. Pass the version the reviewer was shown; it is saved only if the template is still at that version. Every placeholder in the template (see bpt_templates_for_row) must stay exactly as written, or nothing is saved. Returns status applied with the new version and state (state becomes edited, so it needs approving: pass the NEW version and state to bpt_approve_template), or status conflict when someone changed the template since, with your_text and current: nothing was saved, so show the reviewer the current wording and ask. Errors change nothing. Requires edit access.",
   inputSchema: {
     type: "object",
     properties: {
@@ -1155,21 +1157,32 @@ const editTemplate: ToolDef = {
 const approveTemplate: ToolDef = {
   name: "bpt_approve_template",
   description:
-    "Approve the wording of one note template that the reviewer was shown and accepted, marking it validated. Only for wording the reviewer has actually read in this conversation. Pass the version bpt_edit_template returned (approving does not change the version). Returns status applied, or status conflict when the template changed since: nothing was approved, so show the reviewer the current wording first. A template with no translation yet cannot be approved. Errors change nothing. Requires edit access.",
+    "Approve the wording of one note template that the reviewer was shown and accepted, marking it validated. Only for wording the reviewer has actually read in this conversation. Pass the version and state exactly as the reviewer was shown them (after bpt_edit_template, the version and state it returned; approving does not change the version); the template is approved only if it is still at that version and in that state. Returns status applied, or status conflict when the template changed since (its wording, or its state: someone approved or un-approved it), with current (the wording, version and state now): nothing was approved, so show the reviewer the current wording first. A template with no translation yet cannot be approved. Errors change nothing. Requires edit access.",
   inputSchema: {
     type: "object",
     properties: {
       session_token: SESSION_TOKEN_SCHEMA,
       template_id: TEMPLATE_ID_SCHEMA,
       version: { type: "integer", minimum: 1, description: "The template's version exactly as bpt_edit_template returned it." },
+      state: {
+        type: "string",
+        enum: APPROVE_STATES,
+        description: "The template's state exactly as bpt_templates_for_row or bpt_edit_template showed it to the reviewer.",
+      },
     },
-    required: ["session_token", "template_id", "version"],
+    required: ["session_token", "template_id", "version", "state"],
     additionalProperties: false,
   },
   run: async (args, ctx) => {
     const t = await templateWriteTarget(args, ctx);
+    // Required (#708): state flips never bump the version, so the version alone
+    // misses an un-approve that landed after the reviewer saw the template.
+    const state = args.state;
+    if (typeof state !== "string" || !(APPROVE_STATES as readonly string[]).includes(state)) {
+      throw new ToolInputError(`state is required: the template's state as the reviewer was shown it (${APPROVE_STATES.join(", ")})`);
+    }
     const unit = await getTemplate(t.session, t.id, true);
-    if (unit.version !== t.version) return templateConflict(null, unit, "the approval");
+    if (unit.version !== t.version) return templateConflict(null, unit, "the approval", "current.version and current.state");
     if (unit.translation_state == null) {
       throw new ToolInputError(
         `${t.id} has no translation yet, so there is nothing to approve. Save wording with bpt_edit_template first. Nothing was changed.`,
@@ -1178,12 +1191,12 @@ const approveTemplate: ToolDef = {
     const { status, body } = await t.session.send(
       "POST",
       `/api/templates/unit/validate?id=${encodeURIComponent(t.id)}`,
-      { value: 1 },
+      { value: 1, expected_state: state },
       t.version,
     );
     const b = (body ?? {}) as Record<string, unknown>;
     if (status === 409 && b.error === "version_mismatch") {
-      return templateConflict(null, b.current as Record<string, unknown>, "the approval");
+      return templateConflict(null, b.current as Record<string, unknown>, "the approval", "current.version and current.state");
     }
     if (status !== 200) templateRefusal(t.id, status, body);
     return templateApplied(b);
