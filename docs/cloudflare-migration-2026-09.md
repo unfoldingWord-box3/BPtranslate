@@ -160,9 +160,10 @@ Notes:
 
 - `JWT_SIGNING_KEY` should be fresh per worker. It only signs our own sessions,
   so a new key just means everyone signs in again.
-- `DCS_SERVICE_TOKEN` is what lets a worker write to the real DCS org. The
-  currently deployed dev worker has one. Leave it unset on the new dev worker if
-  you would rather dev exports fail closed as `no_service_token`.
+- `DCS_SERVICE_TOKEN` is what lets a worker write to the real DCS org. Left
+  unset, exports fail closed as `no_service_token`. `bptranslate-dev` got one on
+  2026-10-30 (#714), because without it a context export never publishes and an
+  approved note template never reaches AI drafts.
 - Confirm what landed with `npx wrangler secret list` and
   `npx wrangler secret list --env production`. Names are listed, values are not.
 

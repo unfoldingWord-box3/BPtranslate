@@ -217,9 +217,12 @@ Highlights that bite repeatedly:
   `SUPER_ADMINS` is empty in wrangler.toml's default env (local dev sets `SUPER_ADMINS=dev` in
   `api/.dev.vars` instead, which never deploys — existing checkouts/worktrees must add that line
   or workspace switching to mltest and the `/api/workspaces/pool` routes silently 403 locally);
-  `DCS_SERVICE_TOKEN` is intentionally absent from the dev worker's secrets so exports fail
-  closed (`no_service_token`) rather than writing to the real `BibleEditorService` DCS org
-  (`DCS_EXPORT_OWNER` is the same in both envs). Known consequence: the pool routes are
+  `DCS_SERVICE_TOKEN` **is** set on the dev worker since 2026-10-30 (#714, a `BibleEditorService`
+  token with `write:repository`): context exports publish the pack to Door43, which is what lets
+  an approved template reach AI drafts (#707). Before that it was deliberately absent so dev
+  exports failed closed as `no_service_token`; the trade accepted is that a manual export from
+  the public dev app now writes real Door43 repos (`DCS_EXPORT_OWNER` is the same in both envs;
+  the dev worker still has no crons). Known consequence of the empty `SUPER_ADMINS`: the pool routes are
   super-admin-only, so on the *deployed* dev worker they 403 for everyone — pool flows are
   local-dev-only until that's revisited (#81/#182). One accepted risk, decided 2026-08-17
   (PR #180 review, issue #182): `ALLOWED_ORIGINS=""` on the dev worker falls back to localhost
