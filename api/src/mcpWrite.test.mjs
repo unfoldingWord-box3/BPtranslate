@@ -612,3 +612,42 @@ test("template validate: an unparseable If-Match is a 400", async () => {
   assert.equal((await res.json()).error, "invalid_if_match");
   assert.equal(tpl("figs-ellipsis-02").translation_state, "validated");
 });
+
+// #702 review: bracketed caps slots, free-text ids, stale edits, size.
+test("templatePlaceholders: a bracketed or bold caps slot keeps its brackets", () => {
+  const r = templatePlaceholders("Here [SPEAKER] uses **WORD**. Alternate translation: [ALT]");
+  assert.deepEqual(r.placeholders, ["[SPEAKER]", "SPEAKER", "**WORD**", "WORD", "[ALT]", "ALT"]);
+  assert.deepEqual(missingPlaceholders(r.placeholders, "SPEAKER WORD ALT"), ["[SPEAKER]", "**WORD**", "[ALT]"]);
+});
+
+test("template edit: a stale version with a dropped slot is a conflict, not a placeholder error; free-text ids work", async () => {
+  const { call, sqlite, tpl } = fresh();
+  sqlite.prepare(
+    `INSERT INTO template_units (template_id, support_ref, sheet_order, type, source_md, source_hash, origin, version)
+     VALUES ('This could mean-01', 'translate-tcm', 1, '', 'This could mean: (1) [text]', 'h', 'sheet', 1)`,
+  ).run();
+  const ok = await call("bpt_edit_template", { template_id: "This could mean-01", version: 1, text: "Two meanings: (1) [text]" });
+  assert.equal(ok.data.status, "applied", JSON.stringify(ok.data));
+  const stale = await call("bpt_edit_template", { template_id: "This could mean-01", version: 1, text: "no slot" });
+  assert.equal(stale.isError, false, JSON.stringify(stale.data));
+  assert.equal(stale.data.status, "conflict");
+  assert.equal(tpl("This could mean-01").target_md, "Two meanings: (1) [text]");
+});
+
+test("bpt_templates_for_row: ten long translated variants leave out their English, and too much is refused", async () => {
+  const { call, sqlite } = fresh();
+  const ins = sqlite.prepare(
+    `INSERT INTO template_units (template_id, support_ref, sheet_order, type, source_md, source_hash, origin, target_md, translation_state, version)
+     VALUES (?, 'figs-ellipsis', ?, '', ?, 'h', 'sheet', ?, 'edited', 2)`,
+  );
+  for (let i = 0; i < 10; i++) ins.run(`big-${i}`, 100 + i, "SPEAKER ".repeat(150) + "[text]", "ك".repeat(900) + " SPEAKER [text]");
+  const r = await call("bpt_templates_for_row", { id: "el01" });
+  assert.equal(r.isError, false, JSON.stringify(r.data).slice(0, 300));
+  const big = r.data.templates.filter((t) => t.template_id.startsWith("big-"));
+  assert.equal(big.length, 10);
+  assert.ok(big.every((t) => t.source_md === null && t.source_left_out === true && t.placeholders.includes("[text]")));
+  sqlite.prepare(`UPDATE template_units SET target_md = ? WHERE template_id LIKE 'big-%'`).run("ك".repeat(3000) + " SPEAKER [text]");
+  const tooBig = await call("bpt_templates_for_row", { id: "el01" });
+  assert.equal(tooBig.isError, true);
+  assert.match(tooBig.data.error, /too long/);
+});

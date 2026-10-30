@@ -922,7 +922,10 @@ const SPAN = /\[[^\]\n]*\]|\*\*[^*\n]+\*\*/g;
 // only when its inner text is a slot name; any other span is example text a
 // translation may translate (surveyed across the pilot's 194 templates).
 function isSlotName(inner: string): boolean {
-  return /^(text|word)\d*$/i.test(inner) || inner.includes("_") || /^[A-Za-z]+\d+$/.test(inner);
+  return (
+    /^(text|word)\d*$/i.test(inner) || inner.includes("_") || /^[A-Za-z]+\d+$/.test(inner) ||
+    /^[A-Z][A-Z0-9]{2,}$/.test(inner)
+  );
 }
 
 export function templatePlaceholders(sourceMd: string): { placeholders: string[]; examples: string[] } {
@@ -972,7 +975,11 @@ async function templateSession(args: Record<string, unknown>, ctx: ToolContext):
 
 function templateIdArg(args: Record<string, unknown>): string {
   const id = args.template_id;
-  if (typeof id !== "string" || !/^[A-Za-z0-9_.:-]{1,128}$/.test(id)) throw new ToolInputError("template_id is not a template id");
+  // The sheet's ids are free text ("This could mean-01"); the id only travels
+  // URL-encoded, so refuse just empty, overlong and control characters.
+  if (typeof id !== "string" || !id.trim() || id.length > 200 || /[\u0000-\u001f\u007f]/.test(id)) {
+    throw new ToolInputError("template_id is not a template id");
+  }
   return id;
 }
 
@@ -1068,11 +1075,23 @@ const templatesForRow: ToolDef = {
     const feeder = out.find(
       (o) => o.origin === "sheet" && o.unit.translation_state === "validated" && String(o.unit.target_md ?? "").trim(),
     )?.unit.template_id;
-    const templates = out.map((o) => ({
+    let templates: Record<string, unknown>[] = out.map((o) => ({
       ...projectTemplate(o.unit),
       feeds_drafts: o.unit.template_id === feeder,
       ...templatePlaceholders(String(o.unit.source_md ?? "")),
     }));
+    // A support reference can have ten variants; with translated wording in a
+    // two-byte script that can pass the chat's 32 KB cap (GET_ROW_BYTE_BUDGET).
+    // Leave out the English of translated ones first (their placeholders stay
+    // listed), then refuse rather than send a cut-off result.
+    if (getRowBytes({ templates }) > GET_ROW_BYTE_BUDGET - 1_000) {
+      templates = templates.map((t) => (t.target_md ? { ...t, source_md: null, source_left_out: true } : t));
+      if (getRowBytes({ templates }) > GET_ROW_BYTE_BUDGET - 1_000) {
+        throw new ToolInputError(
+          `The ${units.length} templates for ${slug} are too long to send in one chat message. Edit them in the BPtranslate web app (Note Templates).`,
+        );
+      }
+    }
     return {
       book,
       row_id: id,
@@ -1115,7 +1134,9 @@ const editTemplate: ToolDef = {
     // An empty PATCH leaves the state NULL, and the approve would then fail.
     if (typeof text !== "string" || !text.trim()) throw new ToolInputError("text is required: the whole new wording");
     const unit = await getTemplate(t.session, t.id, true);
-    const missing = missingPlaceholders(templatePlaceholders(String(unit.source_md ?? "")).placeholders, text);
+    // A template that moved on since the reviewer saw it is a conflict, not a
+    // placeholder error about wording they never saw: the PATCH answers it.
+    const missing = unit.version !== t.version ? [] : missingPlaceholders(templatePlaceholders(String(unit.source_md ?? "")).placeholders, text);
     if (missing.length > 0) {
       throw new ToolInputError(
         `Not saved: the new wording drops ${missing.join(", ")}. These are filled in when a note is drafted, so keep each exactly as written. Nothing was changed.`,
@@ -1148,6 +1169,7 @@ const approveTemplate: ToolDef = {
   run: async (args, ctx) => {
     const t = await templateWriteTarget(args, ctx);
     const unit = await getTemplate(t.session, t.id, true);
+    if (unit.version !== t.version) return templateConflict(null, unit, "the approval");
     if (unit.translation_state == null) {
       throw new ToolInputError(
         `${t.id} has no translation yet, so there is nothing to approve. Save wording with bpt_edit_template first. Nothing was changed.`,
