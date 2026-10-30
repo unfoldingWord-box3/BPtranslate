@@ -707,7 +707,7 @@ console.log("[sourceNotes] Door43 read, cache and degradation");
 
 console.log("[sourceNotes] per-book / per-chapter tN source overrides (#691)");
 {
-  const { readSourceNotes, clearSourceNotesCache, noteSourcePlanForClient } = await import("./sourceNotes.ts");
+  const { readSourceNotes, clearSourceNotesCache, noteSourcePlanForClient, bookSourcePlansForClient } = await import("./sourceNotes.ts");
   const { clearProjectConfigCache } = await import("./projectConfig.ts");
   const HEADER = "Reference\tID\tTags\tSupportReference\tQuote\tOccurrence\tNote\n";
   const tsv = (rows) => HEADER + rows.map(([ref, id, note]) => `${ref}\t${id}\t\t\tq\t1\t${note}`).join("\n") + "\n";
@@ -861,6 +861,36 @@ console.log("[sourceNotes] per-book / per-chapter tN source overrides (#691)");
       "tq",
     );
     assert(tqWhole?.base?.org === "ru_gl" && tqWhole.ranges.length === 0, "a whole-book tQ override is the base");
+
+    // #697: GET /api/books/:book/sources must let the web app tell "could not
+    // resolve the plan" (field omitted, so it falls back to the project-wide
+    // file and does not cache it) from "authoring project, no source" (null).
+    const ok = await bookSourcePlansForClient(byResource("src-both", []), "ZEC");
+    assert(ok.tnNoteSources?.base?.repo === "en_tn" && ok.tqQuestionSources?.base?.repo === "en_tq", "both plans resolve");
+    const authoring = await bookSourcePlansForClient(envFor("en-unfoldingword", "src-both-auth", []), "ZEC");
+    assert(authoring.tnNoteSources === null && authoring.tqQuestionSources === null, "an authoring project gets explicit nulls");
+    const authoringJson = JSON.parse(JSON.stringify(authoring));
+    assert("tnNoteSources" in authoringJson && "tqQuestionSources" in authoringJson, "and the nulls survive JSON");
+    const brokenD1 = {
+      WORKSPACE_SLUG: "src-both-broken",
+      DCS_BASE_URL: "https://door43.test",
+      DB: {
+        prepare: (sql) =>
+          /book_source_overrides/.test(sql)
+            ? { bind: () => ({ all: async () => { throw new Error("D1_ERROR: transient"); } }) }
+            : { first: async () => ({ preset: PRESET, overrides_json: null }) },
+      },
+    };
+    const realError = console.error;
+    console.error = () => {};
+    let failed;
+    try {
+      failed = await bookSourcePlansForClient(brokenD1, "ZEC");
+    } finally {
+      console.error = realError;
+    }
+    const failedJson = JSON.parse(JSON.stringify(failed));
+    assert(!("tnNoteSources" in failedJson) && !("tqQuestionSources" in failedJson), "a resolution failure omits the field instead of sending null");
   } finally {
     globalThis.fetch = realFetch;
     clearSourceNotesCache();
