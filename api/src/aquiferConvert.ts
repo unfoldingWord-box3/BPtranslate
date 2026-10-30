@@ -109,6 +109,7 @@ export function embeddedQuote(html: string | undefined): string {
 // Reference of an Aquifer item, in en_tn Reference notation.
 //  - book intro (index BB000000)      -> "front:intro"
 //  - chapter intro (letters in index) -> "<ch>:intro"   (passage is "BOOK ch:1")
+//  - chapter intro (index BBCCC000)   -> "<ch>:intro"   (current releases)
 //  - verse / range                    -> "ch:v" or "ch:v-v2"
 export function aquiferRef(it: AquiferItem): { ref: string; isIntro: boolean } | null {
   const idx = it.index_reference || "";
@@ -122,6 +123,14 @@ export function aquiferRef(it: AquiferItem): { ref: string; isIntro: boolean } |
   if (/[A-Za-z]/.test(idx)) {
     const ch = start.split(":")[0];
     return ch ? { ref: `${ch}:intro`, isIntro: true } : null;
+  }
+  // Current releases index a chapter intro as BBCCC000 (e.g. "08001000"), but so
+  // does an English Psalm-title note ("Psalms 3:0 (#2)", passage "PSA 3:0"), so a
+  // numbered title ("#N") stays a verse note. The chapter comes from the index:
+  // the passage is unreliable here ("RUT 1:1", "PSA 1:0", even "JDG 1:3").
+  const intro = /^\d{2}(\d{3})000$/.exec(idx);
+  if (intro && Number(intro[1]) > 0 && ordinalOf(it.title) === null) {
+    return { ref: `${Number(intro[1])}:intro`, isIntro: true };
   }
   if (!start) return null;
   const end = endUsfm.includes(" ") ? endUsfm.split(" ", 2)[1] : "";

@@ -58,6 +58,40 @@ test("aquiferRef maps book intro, chapter intro, verse, and range", () => {
   assert.deepEqual(aquiferRef({ index_reference: "64001006-64001007", associations: { passage: [{ start_ref_usfm: "3JN 1:6", end_ref_usfm: "3JN 1:7" }] } }), { ref: "1:6-7", isIntro: false });
 });
 
+test("aquiferRef reads digits-only BBCCC000 as a chapter intro, from the index not the passage", () => {
+  // Real v2026-10-14 shapes: hin RUT (passage 1:1), eng GEN (passage 1:0), arb/hin JDG (passage 1:3).
+  assert.deepEqual(aquiferRef(aq("रूत - अध्याय 1 परिचय", "08001000", "RUT 1:1", "")), { ref: "1:intro", isIntro: true });
+  assert.deepEqual(aquiferRef(aq("Genesis - Chapter 12 Introduction", "01012000", "GEN 12:0", "")), { ref: "12:intro", isIntro: true });
+  assert.deepEqual(aquiferRef(aq("न्यायियों - अध्याय 1 परिचय", "07001000", "JDG 1:3", "")), { ref: "1:intro", isIntro: true });
+  // An English Psalm-title note shares the index but carries "#N": still a verse note.
+  assert.deepEqual(aquiferRef(aq("Psalms 3:0 (#2)", "19003000", "PSA 3:0", "")), { ref: "3:0", isIntro: false });
+  // Without a title (the issue's example) it is an intro.
+  assert.deepEqual(aquiferRef({ index_reference: "08001000", associations: { passage: [{ start_ref_usfm: "RUT 1:1" }] } }), { ref: "1:intro", isIntro: true });
+});
+
+test("chapter intros indexed BBCCC000 leave the 1:1 notes on their own rows", () => {
+  const enRows = [
+    en("1:intro", "i1", "", "", "0", "# en ch1 intro"),
+    en("2:intro", "i2", "", "", "0", "# en ch2 intro"),
+    en("1:1", "v11", "rc://*/ta/man/translate/figs-explicit", "ὁ πρεσβύτερος", "1", "The elder..."),
+  ];
+  const items = [
+    aq("रूत - अध्याय 1 परिचय", "08001000", "RUT 1:1", "<h1>अध्याय 1</h1>"),
+    aq("रूत - अध्याय 2 परिचय", "08002000", "RUT 2:1", "<h1>अध्याय 2</h1>"),
+    aq("रूत 1:1 (#1)", "08001001", "RUT 1:1", noteHtml("ὁ πρεσβύτερος", "ltr", "प्राचीन", "यूहन्ना मानता है...")),
+  ];
+  const { notes, report } = convertAquiferBook(items, enRows);
+  assert.equal(notes.find((n) => n.enId === "i1").joinMethod, "intro");
+  assert.equal(notes.find((n) => n.enId === "i2").joinMethod, "intro");
+  const v = notes.find((n) => n.enId === "v11");
+  assert.equal(v.joinMethod, "quote");
+  assert.equal(v.reviewReason, null);
+  assert.equal(notes.length, 3);
+  assert.equal(report.matchedIntro, 2);
+  assert.equal(report.unmatched, 0);
+  assert.equal(report.flagged, 0);
+});
+
 test("htmlToMarkdown strips leading quote + trailing See-link, keeps prose", () => {
   const md = htmlToMarkdown(noteHtml("ὁ πρεσβύτερος", "ltr", "the elder", "John assumes Gaius knows who he is."));
   assert.ok(!md.includes("πρεσβύτερος"), "orig-language quote paragraph removed");
