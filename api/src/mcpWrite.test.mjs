@@ -584,6 +584,49 @@ test("a plain replay of a confirm applies nothing and says why", async () => {
   assert.equal(sqlite.prepare(`SELECT COUNT(*) AS n FROM row_conflict_log`).get().n, 0, "skipped before the write, so no conflict entries either");
 });
 
+// Codex C1: updated_at has 1-second resolution, so a row written in the
+// preview's own second could be flipped twice later that second and still
+// match. The preview leaves such rows out of the token.
+test("the preview leaves out an approved row written in its own second, and keeps one a second older", async (t) => {
+  const { call, sqlite } = fresh();
+  const nowSec = 2_000_000_000;
+  t.mock.method(Date, "now", () => nowSec * 1000 + 500);
+  const tn = sqlite.prepare(
+    `INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, note, version, translation_state, updated_at) VALUES (?, ?, 4, 1, '4:1', 'n', 1, 'validated', ?)`,
+  );
+  tn.run("jn01", BOOK, nowSec);
+  tn.run("jn02", BOOK, nowSec - 1);
+  tn.run("jn03", BOOK, nowSec + 5); // a clock that wrote it ran ahead
+  const r = await call("bpt_bulk_set_state", { kind: "tn", chapter: 4 });
+  assert.equal(r.isError, false, JSON.stringify(r.data));
+  assert.equal(r.data.would_change, 1);
+  assert.deepEqual(r.data.rows.map((x) => x.id), ["jn02"]);
+  assert.deepEqual(r.data.skipped, [
+    { reason: "changed_just_now", why: r.data.skipped[0].why, count: 2, ids: ["jn01", "jn03"] },
+  ]);
+  assert.match(r.data.skipped[0].why, /preview again/);
+  const payload = JSON.parse(Buffer.from(r.data.confirm_token.split(".")[0], "base64url").toString("utf8"));
+  assert.deepEqual(payload.r.map((x) => x[0]), ["jn02"], "only the older row is in the token");
+});
+
+// Codex C2: BT Servant drops a result over 32 KB, token and all.
+test("the preview lists at most 20 ids per skip reason, with the full count", async () => {
+  const { call, sqlite } = fresh();
+  const tn = sqlite.prepare(
+    `INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, note, version, translation_state, updated_at) VALUES (?, ?, 5, 1, '5:1', 'n', 1, ?, 1000)`,
+  );
+  for (let i = 0; i < 25; i++) tn.run(`d${String(i).padStart(3, "0")}`, BOOK, "ai_draft");
+  tn.run("v001", BOOK, "validated");
+  const r = await call("bpt_bulk_set_state", { kind: "tn", chapter: 5 });
+  assert.equal(r.isError, false, JSON.stringify(r.data));
+  const ai = r.data.skipped.find((s) => s.reason === "ai_draft");
+  assert.equal(ai.count, 25);
+  assert.equal(ai.ids.length, 20);
+  assert.equal(ai.ids[0], "d000");
+  assert.equal(ai.more_ids_not_listed, 5);
+  assert.equal(typeof r.data.confirm_token, "string");
+});
+
 // Review A2: the rows are already changed when the closing count runs.
 test("a failed closing count still returns what the confirm changed, with remaining null", async () => {
   const { call, sqlite, sessions } = fresh();
@@ -671,7 +714,7 @@ test("a viewer-role link is refused, for the preview and the confirm", async () 
 test("a range with more approved rows than the cap is refused by the dry run", async () => {
   const { call, sqlite } = fresh();
   const tn = sqlite.prepare(
-    `INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, note, version, translation_state) VALUES (?, ?, 3, ?, ?, 'n', 1, 'validated')`,
+    `INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, note, version, translation_state, updated_at) VALUES (?, ?, 3, ?, ?, 'n', 1, 'validated', 1000)`,
   );
   for (let i = 0; i < 51; i++) tn.run(`c${String(i).padStart(3, "0")}`, BOOK, 1 + Math.floor(i / 10), `3:${1 + Math.floor(i / 10)}`);
   const over = await call("bpt_bulk_set_state", { kind: "tn", chapter: 3 });
