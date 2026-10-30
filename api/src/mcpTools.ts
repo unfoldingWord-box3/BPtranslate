@@ -11,8 +11,8 @@
 // or which rows are live. Two deliberate exceptions: (1) the article and
 // template counts in bpt_package_status come from session.packageRefs, a
 // read-only D1 query (packageRefs.ts), because those list routes are
-// editor-only and the in-process call carries no user; (2) bpt_chunk_work's
-// en_note comes from session.sourceNotes (sourceNotes.ts), an anonymous
+// editor-only and the in-process call carries no user; (2) the en_note of
+// bpt_chunk_work and bpt_get_row comes from session.sourceNotes (sourceNotes.ts), an anonymous
 // Door43 read of the same English tN file the web app's browser fetches.
 // Tool names carry the bpt_ prefix because BT Servant
 // pools every registered server's tools into one namespace.
@@ -103,6 +103,12 @@ interface ToolDef {
 // blow the page on its own; bpt_get_row returns it whole.
 export const PAGE_BYTE_BUDGET = 24_000;
 export const ROW_TEXT_CAP = 6_000;
+// bpt_get_row returns one row, uncapped, so it has the whole budget to itself.
+// Unlike a page, it is measured as it travels (getRowBytes): mcp.ts puts
+// JSON.stringify(result) into content[0].text and then JSON-encodes the
+// envelope again, so every quote and backslash costs double on the wire. The
+// 2,000 bytes under the 32 KB cap cover the rest of the envelope.
+export const GET_ROW_BYTE_BUDGET = 30_000;
 const utf8 = new TextEncoder();
 export const byteLength = (v: unknown) => utf8.encode(JSON.stringify(v)).length;
 export const MAX_PAGE_ROWS = 25;
@@ -307,22 +313,28 @@ function projectRow(kind: "tn" | "tq", r: Record<string, unknown>, cap?: number)
 // must fit the budget on its own: a 6,000-character note in a 3-byte script
 // plus a 6,000-character English note, after JSON escaping, can pass BT
 // Servant's 32 KB cap. Shorten en_note (never the row's own note) to the
-// longest prefix that fits, or drop it to null; either way en_truncated.
-function fitEnNote(row: Record<string, unknown>): Record<string, unknown> {
+// longest prefix that keeps the object within `budget` bytes as `measure`
+// counts them, or drop it to null; either way en_truncated. bpt_get_row uses
+// it on its whole result, measured on the wire.
+function fitEnNote(
+  row: Record<string, unknown>,
+  budget: number,
+  measure: (v: unknown) => number = byteLength,
+): Record<string, unknown> {
   const en = row.en_note;
-  if (typeof en !== "string" || byteLength(row) <= PAGE_BYTE_BUDGET) return row;
+  if (typeof en !== "string" || measure(row) <= budget) return row;
   const withLen = (n: number) => {
     let text = en.slice(0, n);
     // Do not end on half of a surrogate pair.
     if (/[\uD800-\uDBFF]$/.test(text)) text = text.slice(0, -1);
     return { ...row, en_note: text, en_truncated: true };
   };
-  if (byteLength(withLen(0)) > PAGE_BYTE_BUDGET) return { ...row, en_note: null, en_truncated: true };
+  if (measure(withLen(0)) > budget) return { ...row, en_note: null, en_truncated: true };
   let lo = 0;
   let hi = en.length;
   while (lo < hi) {
     const mid = Math.ceil((lo + hi) / 2);
-    if (byteLength(withLen(mid)) <= PAGE_BYTE_BUDGET) lo = mid;
+    if (measure(withLen(mid)) <= budget) lo = mid;
     else hi = mid - 1;
   }
   return withLen(lo);
@@ -366,7 +378,7 @@ function parseCursor(raw: unknown): SortKey | null {
 const chunkWork: ToolDef = {
   name: "bpt_chunk_work",
   description:
-    "The translation notes (kind tn) or questions (kind tq) for a verse range in one chapter, with each row's id, current text, state (ai_draft, validated, ...) and version. Each tn row also has en_note: the published English note it was translated from, for comparison (null when the English source has no note with that id or could not be read; the top-level note says why). Results are paged: if next_cursor is not null, call again with it to get the rest. Never claim a chunk is complete until next_cursor is null. A row marked truncated has long text cut; read it whole with bpt_get_row. en_truncated means the English note was cut, or left out (null) to keep the page under the size limit.",
+    "The translation notes (kind tn) or questions (kind tq) for a verse range in one chapter, with each row's id, current text, state (ai_draft, validated, ...) and version. Each tn row also has en_note: the published English note it was translated from, for comparison (null when the English source has no note with that id or could not be read; the top-level note says why). Results are paged: if next_cursor is not null, call again with it to get the rest. Never claim a chunk is complete until next_cursor is null. A row marked truncated has long text cut; read it whole with bpt_get_row. en_truncated means the English note was cut, or left out (null) to keep the page under the size limit; bpt_get_row returns as much of it as fits in one response, and sets en_truncated again if it still had to cut.",
   inputSchema: {
     type: "object",
     properties: {
@@ -415,7 +427,7 @@ const chunkWork: ToolDef = {
       if (en) {
         const text = en.ok ? en.notes.get(String(all[i].id)) : undefined;
         const cut = text === undefined ? null : capText(text, ROW_TEXT_CAP);
-        row = fitEnNote({ ...row, en_note: cut ? cut.text : null, en_truncated: cut?.cut || undefined });
+        row = fitEnNote({ ...row, en_note: cut ? cut.text : null, en_truncated: cut?.cut || undefined }, PAGE_BYTE_BUDGET);
       }
       const size = byteLength(row);
       // Always return at least one row, or the cursor would never move.
@@ -447,9 +459,70 @@ const chunkWork: ToolDef = {
   },
 };
 
+// bpt_get_row's size, measured as the result travels (see GET_ROW_BYTE_BUDGET).
+const getRowBytes = (v: unknown) => byteLength(JSON.stringify(v));
+
+// bpt_get_row's English fields for a tn row. The row's own text is returned
+// whole (this tool's promise, and the place chunk_work's `truncated` sends a
+// reviewer). The invariant: adding the English fields never pushes the result
+// over GET_ROW_BYTE_BUDGET, on any path. Each path builds its full answer and
+// then falls back, in order, until one fits: en_note cut to the longest prefix
+// that fits; en_note null; the shortest status; only `en_note: null,
+// en_truncated: true`; and last the bare row with no English fields at all.
+// A row already over the budget on its own is returned bare, with no English
+// fields and no source read: the budget sits 2,000 bytes under BT Servant's
+// real 32 KB cap, so such a row may still be deliverable, and any byte added
+// could tip it over. The explanation is en_note_status, not `note` as
+// chunk_work's page has, because a tn row's `note` is its own text.
+async function withEnNote(
+  row: Record<string, unknown>,
+  id: string,
+  sourceNotes: () => Promise<SourceNotes>,
+): Promise<Record<string, unknown>> {
+  const fits = (r: Record<string, unknown>) => getRowBytes(r) <= GET_ROW_BYTE_BUDGET;
+  if (!fits(row)) return row;
+  const leftOut = { ...row, en_note: null, en_truncated: true };
+  const en = await sourceNotes();
+  let full: Record<string, unknown>;
+  let short: Record<string, unknown>;
+  if (!en.ok) {
+    full = { ...row, en_note: null, en_source: null, en_note_status: `en_note is null: ${en.reason}` };
+    short = { ...row, en_note: null, en_source: null, en_note_status: "English source unreadable." };
+  } else {
+    const text = en.notes.get(id);
+    if (text === undefined) {
+      full = {
+        ...row,
+        en_note: null,
+        en_source: en.source,
+        en_note_status: `${en.source} has no English note with the same id (added in this project, or the id changed), so en_note is null.`,
+      };
+      short = { ...row, en_note: null, en_source: en.source, en_note_status: "No English note with this id." };
+    } else {
+      // The whole note with no status first; only a note that does not fit
+      // whole is cut, with the status that says so counted in.
+      const whole: Record<string, unknown> = { ...row, en_note: text, en_source: en.source, en_note_status: null };
+      const fitted = fits(whole) ? whole : fitEnNote({
+        ...whole,
+        en_note_status: `en_note was cut to keep this response under the chat's 32 KB limit; the whole English note is row ${id} in ${en.source}.`,
+      }, GET_ROW_BYTE_BUDGET, getRowBytes);
+      if (!fitted.en_truncated) full = whole;
+      else if (fitted.en_note === null) {
+        full = {
+          ...fitted,
+          en_note_status: `en_note was left out because this note's own text fills the chat's 32 KB limit; the English note is row ${id} in ${en.source}.`,
+        };
+      } else full = fitted;
+      short = { ...row, en_note: null, en_source: en.source, en_truncated: true, en_note_status: "Left out for size." };
+    }
+  }
+  return [full, short, leftOut].find(fits) ?? row;
+}
+
 const getRow: ToolDef = {
   name: "bpt_get_row",
-  description: "One translation note (tn) or question (tq) by id, with its full current text, state and version.",
+  description:
+    "One translation note (tn) or question (tq) by id, with its full current text, state and version. A tn row also has en_note: the published English note it was translated from (en_source names where), for comparison, as much of it as fits in one response. en_note is null when the English source has no note with that id, or when the English source could not be read. When the response would pass the size limit, en_note is cut or left out (null) and en_truncated is true. en_note_status says why when there is room for it. A note whose own text already fills the size limit comes back with no English fields at all.",
   inputSchema: {
     type: "object",
     properties: {
@@ -469,7 +542,8 @@ const getRow: ToolDef = {
     const id = args.id;
     if (typeof id !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(id)) throw new ToolInputError("id is not a row id");
     const row = await apiGet(session, `/api/rows/${kind}/${encodeURIComponent(id)}?book=${book}`);
-    return projectRow(kind, row);
+    if (kind === "tq") return projectRow(kind, row);
+    return withEnNote(projectRow(kind, row), id, () => session.sourceNotes(book));
   },
 };
 

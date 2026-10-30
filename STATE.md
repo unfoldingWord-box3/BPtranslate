@@ -79,7 +79,7 @@ Highlights that bite repeatedly:
   app sees. Two exceptions (#671): `session.packageRefs` (`api/src/packageRefs.ts`) reads D1 directly for
   `bpt_package_status`'s tW/tA/template counts, because the article and template routes are editor-only and
   the in-process call carries no user (SELECTs only, counts only, never text); and `session.sourceNotes`
-  (`api/src/sourceNotes.ts`) fetches the English tN TSV for `bpt_chunk_work`'s `en_note` from Door43
+  (`api/src/sourceNotes.ts`) fetches the English tN TSV for the `en_note` of `bpt_chunk_work` and `bpt_get_row` from Door43
   anonymously, the same data the web app's browser fetch shows (never with the DCS service token). Links: one-time code from the web app (any signed-in user, viewers included), 30-day token,
   hash-only storage, role re-read from the link's workspace on every call and capped at editor. Reads go
   through `readerFrom()` and write tools must call `principalFrom()` (editor only) in `mcpTools.ts`; never
