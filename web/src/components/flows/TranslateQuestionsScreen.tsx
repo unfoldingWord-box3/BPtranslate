@@ -475,8 +475,9 @@ export default function TranslateQuestionsScreen({
   // The English source question/answer live in the PUBLISHED source repo, not in
   // D1: in a translation-mode workspace the row's OWN question/response ARE the
   // target being drafted (useSourceQuestions.ts:3-7; ResourceColumn.tsx:376-380
-  // wires it exactly this way). Null projection = no tQ source configured → the
-  // source lines degrade to a plain statement rather than echoing the target.
+  // wires it exactly this way). Null projection = no project-wide tQ source;
+  // with no English question the source lines degrade to a plain statement
+  // rather than echoing the target, worded per chapter (sourcePlan below).
   const sourceProjection = useMemo(
     () => resolveSourceRef(projectConfig?.translationSource, "tq"),
     [projectConfig],

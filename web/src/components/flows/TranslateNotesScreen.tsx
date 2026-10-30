@@ -328,9 +328,9 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   // The English source note lives in the PUBLISHED source repo, not in D1: in a
   // translation-mode workspace the row's own `note` IS the target being drafted
   // (useSourceNotes.ts:4-7 says this for the tQ twin, and ResourceColumn.tsx:326-338
-  // wires the tN case exactly this way). Null projection = no tN source
-  // configured → the English card degrades to a plain statement rather than
-  // showing the target text twice.
+  // wires the tN case exactly this way). Null projection = no project-wide tN
+  // source; with no English note the card degrades to a plain statement rather
+  // than showing the target text twice, worded per chapter (sourcePlan below).
   const sourceProjection = useMemo(
     () => resolveSourceRef(projectConfig?.translationSource, "tn"),
     [projectConfig],
