@@ -75,6 +75,9 @@ async function apiFor(ws, path) {
       calls.push({ ws: ws.slug, path });
       if (ws.slug === "mltest") {
         if (path === "/api/books") return { status: 200, body: { books: [{ book: "OBA", imported_at: 1 }] } };
+        if (path === "/api/chapters/OBA") return { status: 200, body: { book: "OBA", chapters: [
+          { chapter: 1, verses: 21, tn: 30, tq: 8, twl: 50, tnValidated: 0, tqValidated: 0, versesDone: 0 },
+        ] } };
         return { status: 404, body: { error: "not_found" } };
       }
       if (path === "/api/books") return { status: 200, body: { books: [{ book: "TIT", imported_at: 1 }] } };
@@ -120,6 +123,21 @@ async function apiFor(ws, path) {
           tq: [tqRow(603, 0), tqRow(604, 3)],
         } };
       }
+      if (path === "/api/chapters/TIT/11") {
+        return { status: 200, body: { tn: [tnRow(700, 1), tnRow(701, 1), tnRow(702, 2)], tq: [tqRow(703, 1)] } };
+      }
+      if (path === "/api/chapters/TIT/12") {
+        // Arabic notes with long English sources: both count toward the budget.
+        return { status: 200, body: { tn: Array.from({ length: 25 }, (_v, i) => tnRow(i + 800, 1, 1500, "ع")), tq: [] } };
+      }
+      if (path === "/api/chapters/TIT/13") {
+        // One full-length note in a 3-byte script (Ethiopic), then a short one.
+        return { status: 200, body: { tn: [tnRow(900, 1, ROW_TEXT_CAP, "ሀ"), tnRow(901, 2)], tq: [] } };
+      }
+      if (path === "/api/chapters/TIT/14") {
+        // A note that is over the budget on its own once JSON-escaped.
+        return { status: 200, body: { tn: [tnRow(950, 1, ROW_TEXT_CAP, "\u0001")], tq: [] } };
+      }
       if (path.startsWith("/api/rows/tn/r5")) return { status: 200, body: tnRow(5, 2) };
       return { status: 404, body: { error: "not_found" } };
 }
@@ -132,10 +150,67 @@ const LINKS = {
   [VIEWER_TOKEN]: { ws: BSOJ, principal: { userId: 3, username: "cy", role: null, linkId: 11 } },
   [GONE_TOKEN]: { ws: null, principal: { userId: 1, username: "ada", role: "editor", linkId: 12 } },
 };
+// Raw reference rows for bpt_package_status, per workspace (packageRefs.ts).
+// bsoj translates; mltest is an authoring project, so nothing is read.
+// TIT references tW kt/god (one part, validated), kt/faith (ai_draft) and
+// other/paul (not loaded yet); tA figs-metaphor (title validated, body edited),
+// figs-explicit (no translated part) and figs-aside (not loaded). Its notes
+// use figs-metaphor as an rc:// link and figs-explicit bare; the templates
+// table stores bare slugs (one with a stray rc:// form, normalized too).
+const TIT_REFS = {
+  translation: true,
+  referenced: [
+    { resource: "tw", article_id: "kt/god" },
+    { resource: "tw", article_id: "kt/faith" },
+    { resource: "tw", article_id: "other/paul" },
+    { resource: "ta", article_id: "translate/figs-metaphor" },
+    { resource: "ta", article_id: "translate/figs-explicit" },
+    { resource: "ta", article_id: "translate/figs-aside" },
+  ],
+  articleUnits: [
+    { resource: "tw", article_id: "kt/god", translation_state: "validated" },
+    { resource: "tw", article_id: "kt/faith", translation_state: "ai_draft" },
+    { resource: "tw", article_id: "kt/love", translation_state: "validated" }, // not referenced
+    { resource: "ta", article_id: "translate/figs-metaphor", translation_state: "edited" },
+    { resource: "ta", article_id: "translate/figs-metaphor", translation_state: "validated" },
+    { resource: "ta", article_id: "translate/figs-metaphor", translation_state: null },
+    { resource: "ta", article_id: "translate/figs-explicit", translation_state: null },
+  ],
+  supportRefs: ["rc://*/ta/man/translate/figs-metaphor", "figs-explicit", "rc://*/ta/man/translate/figs-hyperbole"],
+  templateUnits: [
+    { support_ref: "figs-metaphor", translation_state: "validated" },
+    { support_ref: "figs-metaphor", translation_state: "ai_draft" },
+    { support_ref: "rc://*/ta/man/translate/figs-explicit", translation_state: null },
+    { support_ref: "figs-simile", translation_state: "validated" }, // not used by TIT
+  ],
+};
+const refCalls = [];
+let refsFail = false;
+async function refsFor(ws, book) {
+  refCalls.push({ ws: ws.slug, book });
+  if (refsFail) throw new Error("D1 down");
+  if (ws.slug === "mltest") return { translation: false, referenced: [], articleUnits: [], supportRefs: [], templateUnits: [] };
+  return book === "TIT" ? TIT_REFS : { ...TIT_REFS, referenced: [], supportRefs: [] };
+}
+// The English source notes for bpt_chunk_work's en_note (sourceNotes.ts).
+// Unreadable by default, so the paging tests above run without one; a test
+// swaps in a map.
+const NO_SOURCE = { ok: false, reason: "stub: no English source" };
+let srcStub = NO_SOURCE;
+const srcCalls = [];
 function sessionFor(token) {
   const l = LINKS[token];
   if (!l || !l.ws) return null;
-  return { workspace: l.ws, principal: l.principal, getJson: (path) => apiFor(l.ws, path) };
+  return {
+    workspace: l.ws,
+    principal: l.principal,
+    getJson: (path) => apiFor(l.ws, path),
+    packageRefs: (book) => refsFor(l.ws, book),
+    sourceNotes: async (book) => {
+      srcCalls.push({ ws: l.ws.slug, book });
+      return srcStub;
+    },
+  };
 }
 function deps(overrides = {}) {
   return {
@@ -276,6 +351,43 @@ console.log("[tools] reads");
   assert(missing.isError, "missing row -> isError");
 }
 
+console.log("[tools] package references");
+{
+  refCalls.length = 0;
+  const { data, isError } = await call("bpt_package_status", { book: "TIT" });
+  const r = data.references;
+  assert(!isError && r && refCalls.at(-1).ws === "bsoj" && refCalls.at(-1).book === "TIT", "package status reads the book's references in the link's workspace");
+  assert(r.tw.referenced === 3 && r.tw.loaded === 2, "tW: three referenced, two loaded (an unreferenced article is not counted)");
+  assert(r.tw.by_state.validated === 1 && r.tw.by_state.ai_draft === 1 && r.tw.by_state.not_started === 0, "tW states counted per article");
+  assert(r.ta.referenced === 3 && r.ta.loaded === 2, "tA: a three-part article counts once");
+  assert(r.ta.by_state.edited === 1 && r.ta.by_state.not_started === 1 && r.ta.by_state.validated === 0, "tA parts roll up like the article rail (an edited part beats a validated one)");
+  assert(r.templates.support_references === 3 && r.templates.with_templates === 2, "templates: rc:// and bare support references both match bare template slugs");
+  assert(r.templates.templates === 3 && r.templates.by_state.validated === 1 && r.templates.by_state.ai_draft === 1 && r.templates.by_state.not_started === 1, "every template for a used reference is counted by state");
+  assert(!JSON.stringify(r).includes("kt/god"), "counts only: no article ids are returned");
+
+  const authoring = await call("bpt_package_status", { book: "OBA" }, { token: ML_TOKEN });
+  assert(!authoring.isError && authoring.data.totals.tn === 30, "an authoring project still gets its chapter counts");
+  assert(authoring.data.references === null && /authoring/.test(authoring.data.references_note), "an authoring project gets no article counts, and a note saying why");
+
+  refsFail = true;
+  const realError = console.error;
+  const logged = [];
+  console.error = (...a) => logged.push(a.join(" "));
+  let broken;
+  try {
+    broken = await call("bpt_package_status", { book: "TIT" });
+  } finally {
+    console.error = realError;
+    refsFail = false;
+  }
+  assert(!broken.isError && broken.data.totals.tn === 43 && broken.data.chapters.length === 2, "a failed reference read still returns the chapter counts");
+  assert(broken.data.references === null && /could not be read/.test(broken.data.references_note), "and says the article counts could not be read");
+  assert(logged.some((l) => /D1 down/.test(l)), "the failure is logged");
+  const { summarizePackageRefs } = await import("./packageRefs.ts");
+  const empty = summarizePackageRefs({ translation: true, referenced: [], articleUnits: [], supportRefs: [], templateUnits: [] });
+  assert(empty.tw.referenced === 0 && empty.templates.templates === 0, "a book with no references counts zero");
+}
+
 console.log("[tools] account link");
 {
   const linked = await call("bpt_whoami", {});
@@ -361,6 +473,129 @@ console.log("[tools] chunk paging");
 
   const backwards = await call("bpt_chunk_work", { book: "TIT", chapter: 1, kind: "tn", verse_start: 5, verse_end: 1 });
   assert(backwards.isError, "verse_end before verse_start -> isError");
+}
+
+console.log("[tools] English source notes");
+{
+  const longEn = "e".repeat(ROW_TEXT_CAP + 500);
+  srcStub = { ok: true, source: "unfoldingWord/en_tn", notes: new Map([["r700", "English\\nnote"], ["r701", longEn]]) };
+  srcCalls.length = 0;
+  const { data, isError } = await call("bpt_chunk_work", { book: "TIT", chapter: 11, kind: "tn" });
+  const by = Object.fromEntries(data.rows.map((r) => [r.id, r]));
+  assert(!isError && srcCalls.length === 1 && srcCalls[0].book === "TIT" && srcCalls[0].ws === "bsoj", "the English source is read once, for the link's workspace and book");
+  assert(by.r700.en_note === "English\\nnote" && by.r700.en_truncated === undefined, "en_note is the English note with the same id, in the stored form");
+  assert(by.r701.en_note.length === ROW_TEXT_CAP && by.r701.en_truncated === true, "a long English note is cut and marked en_truncated");
+  assert(by.r702.en_note === null, "a note with no English row gets en_note null");
+  assert(data.en_source === "unfoldingWord/en_tn" && /1 of these notes/.test(data.note), "the page names the source and says how many had no match");
+
+  srcCalls.length = 0;
+  const tq = await call("bpt_chunk_work", { book: "TIT", chapter: 11, kind: "tq" });
+  assert(srcCalls.length === 0 && tq.data.rows[0].en_note === undefined && tq.data.en_source === undefined, "questions get no en_note and no source read");
+  const none = await call("bpt_chunk_work", { book: "TIT", chapter: 11, kind: "tn", verse_start: 9 });
+  assert(none.data.returned === 0 && srcCalls.length === 0, "no rows, no source read");
+
+  srcStub = { ok: false, reason: "Could not read the English notes tn_TIT.tsv from unfoldingWord/en_tn (HTTP 503)." };
+  const down = await call("bpt_chunk_work", { book: "TIT", chapter: 11, kind: "tn" });
+  assert(!down.isError && down.data.returned === 3, "an unreadable source never fails the tool");
+  assert(down.data.rows.every((r) => r.en_note === null) && /HTTP 503/.test(down.data.note) && down.data.en_source === null, "every en_note is null and the note says why");
+
+  srcStub = { ok: true, source: "unfoldingWord/en_tn", notes: new Map(Array.from({ length: 25 }, (_v, i) => [`r${800 + i}`, "E".repeat(1500)])) };
+  const arabic = await call("bpt_chunk_work", { book: "TIT", chapter: 12, kind: "tn", limit: 25 });
+  assert(arabic.data.next_cursor !== null && arabic.data.rows.every((r) => r.en_note.length === 1500), "Arabic notes with English sources page early");
+  assert(byteLength(arabic.data) < PAGE_BYTE_BUDGET + 2000, `the page with en_note stays under the byte budget (${byteLength(arabic.data)} bytes)`);
+
+  // The first row is always admitted, so it must fit on its own: a 6,000-char
+  // 3-byte-script note plus a 6,000-char English note full of quotes (two
+  // bytes each once JSON-escaped) is ~30 KB before fitting.
+  srcStub = { ok: true, source: "unfoldingWord/en_tn", notes: new Map([["r900", '"'.repeat(ROW_TEXT_CAP)], ["r901", "short"]]) };
+  const wide = await call("bpt_chunk_work", { book: "TIT", chapter: 13, kind: "tn", limit: 25 });
+  const first = wide.data.rows[0];
+  assert(first.id === "r900" && first.note.length === ROW_TEXT_CAP, "the row's own note is left whole");
+  assert(first.en_truncated === true && first.en_note.length > 0 && first.en_note.length < ROW_TEXT_CAP, "en_note is shortened to fit and marked en_truncated");
+  assert(byteLength(first) <= PAGE_BYTE_BUDGET, `the first row fits the budget on its own (${byteLength(first)} bytes)`);
+  assert(byteLength(wide.data) < PAGE_BYTE_BUDGET + 2000 && byteLength(wide.data) < 32000, `the page stays under budget plus envelope and under 32 KB (${byteLength(wide.data)} bytes)`);
+  assert(!/no English note/.test(wide.data.note ?? ""), "a shortened en_note is not reported as missing");
+
+  srcStub = { ok: true, source: "unfoldingWord/en_tn", notes: new Map([["r950", "English"]]) };
+  const over = await call("bpt_chunk_work", { book: "TIT", chapter: 14, kind: "tn" });
+  assert(over.data.rows[0].en_note === null && over.data.rows[0].en_truncated === true, "a row over budget on its own note drops en_note to null, marked en_truncated");
+  assert(over.data.rows[0].note.length === ROW_TEXT_CAP, "and still keeps its own note");
+  srcStub = NO_SOURCE;
+}
+
+console.log("[sourceNotes] Door43 read, cache and degradation");
+{
+  const { readSourceNotes, clearSourceNotesCache } = await import("./sourceNotes.ts");
+  const { clearProjectConfigCache } = await import("./projectConfig.ts");
+  const envFor = (preset, slug) => ({
+    WORKSPACE_SLUG: slug,
+    DCS_BASE_URL: "https://door43.test",
+    DB: { prepare: () => ({ first: async () => ({ preset, overrides_json: null }) }) },
+  });
+  const realFetch = globalThis.fetch;
+  const fetched = [];
+  const inits = [];
+  let reply = () => new Response("﻿Reference\tID\tTags\tSupportReference\tQuote\tOccurrence\tNote\n1:1\tab12\t\t\tq\t1\tLine one\\nLine two\r\n1:2\tcd34\t\t\tq\t1\tSecond\n", { status: 200 });
+  globalThis.fetch = async (url, init) => {
+    fetched.push(String(url));
+    inits.push(init);
+    return reply();
+  };
+  const realTimeout = AbortSignal.timeout;
+  try {
+    clearSourceNotesCache();
+    clearProjectConfigCache();
+    // The service token is set, as in production; it must not be sent.
+    const ml = { ...envFor("en-bible-editor-ml-test", "src-ml"), DCS_SERVICE_TOKEN: "secret-service-token" };
+    const a = await readSourceNotes(ml, "TIT");
+    assert(a.ok && a.source === "unfoldingWord/en_tn" && fetched[0] === "https://door43.test/unfoldingWord/en_tn/raw/branch/master/tn_TIT.tsv", "reads tn_<BOOK>.tsv from the project's tN source");
+    const headers = new Headers(inits[0]?.headers);
+    assert(!headers.has("authorization") && !JSON.stringify(inits[0] ?? {}).includes("secret-service-token"), "the fetch is anonymous: no Authorization header, like the web app's");
+    assert(inits[0]?.signal instanceof AbortSignal, "the fetch carries a timeout signal");
+    assert(a.notes.get("ab12") === "Line one\\nLine two" && a.notes.get("cd34") === "Second" && a.notes.size === 2, "parses past a BOM and CRLF, keyed by ID, \\n escapes kept");
+    await readSourceNotes(ml, "TIT");
+    assert(fetched.length === 1, "a second read inside the TTL is served from cache");
+
+    reply = () => new Response("nope", { status: 404 });
+    const missing = await readSourceNotes(ml, "OBA");
+    assert(!missing.ok && /no such file, or the repository is not public/.test(missing.reason), "404 -> not ok; the reason allows for a private repo");
+    await readSourceNotes(ml, "OBA");
+    assert(fetched.length === 3, "a failure is not cached");
+
+    globalThis.fetch = async () => {
+      throw new Error("offline");
+    };
+    const offline = await readSourceNotes(ml, "JUD");
+    assert(!offline.ok && /network error/.test(offline.reason), "network failure -> not ok, never throws");
+
+    // A Door43 that never answers: the real abort path, with the 8 s timeout
+    // shortened so the test is quick.
+    AbortSignal.timeout = () => realTimeout.call(AbortSignal, 20);
+    globalThis.fetch = (_url, init) =>
+      new Promise((_resolve, reject) => init.signal.addEventListener("abort", () => reject(init.signal.reason)));
+    // Node unrefs AbortSignal.timeout's timer; hold the loop open meanwhile.
+    const keepAlive = setTimeout(() => {}, 5_000);
+    const hung = await readSourceNotes(ml, "MAL");
+    clearTimeout(keepAlive);
+    assert(!hung.ok && /did not answer in time/.test(hung.reason), "a hanging fetch times out -> not ok, with a reason");
+    AbortSignal.timeout = realTimeout;
+    globalThis.fetch = async () => {
+      throw new DOMException("aborted", "AbortError");
+    };
+    const aborted = await readSourceNotes(ml, "HAG");
+    assert(!aborted.ok && /did not answer in time/.test(aborted.reason), "an AbortError -> the same timeout reason");
+
+    const authoring = await readSourceNotes(envFor("en-unfoldingword", "src-en"), "TIT");
+    assert(!authoring.ok && /English/.test(authoring.reason), "an authoring project has no separate source");
+
+    const broken = { WORKSPACE_SLUG: "src-broken", DB: { prepare: () => { throw new Error("db down"); } } };
+    const r = await readSourceNotes(broken, "TIT");
+    assert(typeof r.ok === "boolean", "a config read failure still returns a result");
+  } finally {
+    globalThis.fetch = realFetch;
+    AbortSignal.timeout = realTimeout;
+    clearSourceNotesCache();
+  }
 }
 
 console.log("[tools] chunks");

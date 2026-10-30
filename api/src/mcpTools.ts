@@ -8,7 +8,13 @@
 //
 // Each tool reads through the SAME route handlers the web app uses (`getJson`
 // runs the Hono app in-process), so chat and web never disagree about counts
-// or which rows are live. Tool names carry the bpt_ prefix because BT Servant
+// or which rows are live. Two deliberate exceptions: (1) the article and
+// template counts in bpt_package_status come from session.packageRefs, a
+// read-only D1 query (packageRefs.ts), because those list routes are
+// editor-only and the in-process call carries no user; (2) bpt_chunk_work's
+// en_note comes from session.sourceNotes (sourceNotes.ts), an anonymous
+// Door43 read of the same English tN file the web app's browser fetches.
+// Tool names carry the bpt_ prefix because BT Servant
 // pools every registered server's tools into one namespace.
 
 export interface McpWorkspace {
@@ -24,6 +30,13 @@ export interface McpSession {
   // GET a path on this Worker's own API, in-process, against the session's
   // workspace env. Returns the parsed JSON body and the HTTP status.
   getJson: (path: string) => Promise<{ status: number; body: unknown }>;
+  // The one read that does NOT go through a route handler: the tW/tA articles
+  // and note templates a book references, read straight from the workspace's
+  // D1 (packageRefs.ts says why). Read-only rows; the tool sends counts only.
+  packageRefs: (book: string) => Promise<PackageRefRows>;
+  // The published English tN for a book, keyed by row id, read from the
+  // project's translationSource on Door43 (sourceNotes.ts). Never throws.
+  sourceNotes: (book: string) => Promise<SourceNotes>;
 }
 
 export type LinkClaim =
@@ -37,6 +50,8 @@ export interface ToolContext {
 
 import type { ChatPrincipal } from "./chatLinks.ts";
 import { isTsMilestone } from "./tsMilestone.ts";
+import { summarizePackageRefs, type PackageRefRows } from "./packageRefs.ts";
+import type { SourceNotes } from "./sourceNotes.ts";
 
 export class ToolInputError extends Error {}
 
@@ -199,7 +214,7 @@ const listBooks: ToolDef = {
 const packageStatus: ToolDef = {
   name: "bpt_package_status",
   description:
-    "What a book still needs: per chapter, how many translation notes (tN) and translation questions (tQ) exist and how many are approved, and how many verses are marked done. Use before suggesting where to start.",
+    "What a book still needs: per chapter, how many translation notes (tN) and translation questions (tQ) exist and how many are approved, and how many verses are marked done. Also, for the whole book, the translationWords (tW) articles its word links (TWL) point to or its notes link in their text, the translationAcademy (tA) articles its notes cite (support reference or a link in the note text), and the note templates for the support references its notes use, each counted by state (not_started, ai_draft, edited, validated). An article counted as referenced but not loaded has not been fetched into the project yet. Use before suggesting where to start.",
   inputSchema: {
     type: "object",
     properties: {
@@ -235,7 +250,28 @@ const packageStatus: ToolDef = {
         tqApproved: c.tqValidated,
       };
     });
-    return { book, totals, chapters: rows };
+    // The reference counts are extra: if they cannot be read, the chapter
+    // counts still go back, with a note instead of the counts.
+    let references: ReturnType<typeof summarizePackageRefs> | null = null;
+    let referencesNote: string | undefined;
+    try {
+      const refs = await session.packageRefs(book);
+      if (refs.translation) references = summarizePackageRefs(refs);
+      else {
+        referencesNote =
+          "This project writes its notes in English (authoring mode), so tW/tA articles and note templates are not translated here.";
+      }
+    } catch (e) {
+      console.error("bpt_package_status: reading article/template counts failed", e instanceof Error ? (e.stack ?? e.message) : String(e));
+      referencesNote = "The tW/tA article and note template counts could not be read just now; the chapter counts above are complete.";
+    }
+    return {
+      book,
+      totals,
+      chapters: rows,
+      references,
+      ...(referencesNote ? { references_note: referencesNote } : {}),
+    };
   },
 };
 
@@ -265,6 +301,31 @@ function projectRow(kind: "tn" | "tq", r: Record<string, unknown>, cap?: number)
   const q = capText(r.question, cap);
   const a = capText(r.response, cap);
   return { ...common, question: q.text, response: a.text, truncated: q.cut || a.cut || undefined };
+}
+
+// The first row of a page is always admitted (so the cursor moves), so one row
+// must fit the budget on its own: a 6,000-character note in a 3-byte script
+// plus a 6,000-character English note, after JSON escaping, can pass BT
+// Servant's 32 KB cap. Shorten en_note (never the row's own note) to the
+// longest prefix that fits, or drop it to null; either way en_truncated.
+function fitEnNote(row: Record<string, unknown>): Record<string, unknown> {
+  const en = row.en_note;
+  if (typeof en !== "string" || byteLength(row) <= PAGE_BYTE_BUDGET) return row;
+  const withLen = (n: number) => {
+    let text = en.slice(0, n);
+    // Do not end on half of a surrogate pair.
+    if (/[\uD800-\uDBFF]$/.test(text)) text = text.slice(0, -1);
+    return { ...row, en_note: text, en_truncated: true };
+  };
+  if (byteLength(withLen(0)) > PAGE_BYTE_BUDGET) return { ...row, en_note: null, en_truncated: true };
+  let lo = 0;
+  let hi = en.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (byteLength(withLen(mid)) <= PAGE_BYTE_BUDGET) lo = mid;
+    else hi = mid - 1;
+  }
+  return withLen(lo);
 }
 
 // Keyset cursor: the sort key of the last row returned, in the order
@@ -305,7 +366,7 @@ function parseCursor(raw: unknown): SortKey | null {
 const chunkWork: ToolDef = {
   name: "bpt_chunk_work",
   description:
-    "The translation notes (kind tn) or questions (kind tq) for a verse range in one chapter, with each row's id, current text, state (ai_draft, validated, ...) and version. Results are paged: if next_cursor is not null, call again with it to get the rest. Never claim a chunk is complete until next_cursor is null. A row marked truncated has long text cut; read it whole with bpt_get_row.",
+    "The translation notes (kind tn) or questions (kind tq) for a verse range in one chapter, with each row's id, current text, state (ai_draft, validated, ...) and version. Each tn row also has en_note: the published English note it was translated from, for comparison (null when the English source has no note with that id or could not be read; the top-level note says why). Results are paged: if next_cursor is not null, call again with it to get the rest. Never claim a chunk is complete until next_cursor is null. A row marked truncated has long text cut; read it whole with bpt_get_row. en_truncated means the English note was cut, or left out (null) to keep the page under the size limit.",
   inputSchema: {
     type: "object",
     properties: {
@@ -343,16 +404,33 @@ const chunkWork: ToolDef = {
 
     const start = cursor ? all.findIndex((r) => afterKey(sortKey(r), cursor)) : 0;
     const from = start === -1 ? all.length : start;
-    const rows: ReturnType<typeof projectRow>[] = [];
+    // The English source, only when there are tN rows to return. Its bytes
+    // are part of each row before the budget check, so pages just get shorter.
+    const en = kind === "tn" && from < all.length ? await session.sourceNotes(book) : null;
+    const rows: Record<string, unknown>[] = [];
     let bytes = 0;
     let i = from;
     for (; i < all.length && rows.length < limit; i++) {
-      const row = projectRow(kind, all[i], ROW_TEXT_CAP);
+      let row: Record<string, unknown> = projectRow(kind, all[i], ROW_TEXT_CAP);
+      if (en) {
+        const text = en.ok ? en.notes.get(String(all[i].id)) : undefined;
+        const cut = text === undefined ? null : capText(text, ROW_TEXT_CAP);
+        row = fitEnNote({ ...row, en_note: cut ? cut.text : null, en_truncated: cut?.cut || undefined });
+      }
       const size = byteLength(row);
       // Always return at least one row, or the cursor would never move.
       if (rows.length > 0 && bytes + size > PAGE_BYTE_BUDGET) break;
       rows.push(row);
       bytes += size;
+    }
+    let note: string | null = null;
+    if (en && !en.ok) note = `en_note is null on every row: ${en.reason}`;
+    else if (en?.ok) {
+      // A row whose en_note was dropped to fit the page is not "missing".
+      const missing = rows.filter((r) => r.en_note === null && !r.en_truncated).length;
+      if (missing > 0) {
+        note = `${missing} of these notes have no English note with the same id in ${en.source} (added in this project, or the id changed), so their en_note is null.`;
+      }
     }
     return {
       book,
@@ -363,6 +441,7 @@ const chunkWork: ToolDef = {
       total: all.length,
       returned: rows.length,
       next_cursor: i < all.length ? JSON.stringify(sortKey(all[i - 1])) : null,
+      ...(kind === "tn" ? { en_source: en?.ok ? en.source : null, note } : {}),
       rows,
     };
   },

@@ -377,7 +377,9 @@ function recordStateStmt(
 
 // ── Ref collection ──────────────────────────────────────────────────────────
 
-async function collectReferenced(env: Env, book?: string): Promise<ReferencedPath[]> {
+// Exported for the chat MCP package status (packageRefs.ts), which counts the
+// same references this population step fetches.
+export async function collectReferenced(env: Env, book?: string): Promise<ReferencedPath[]> {
   const bookClause = book ? " AND book = ?1" : "";
   const bind = (stmt: D1PreparedStatement) => (book ? stmt.bind(book) : stmt);
 
