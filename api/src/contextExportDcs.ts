@@ -71,9 +71,21 @@ export async function commitContextPackToMaster(
   // Pack-managed files omitted from this render have an empty D1 source —
   // delete any stale copy in the same commit (never touches runs/, candidates/
   // or README.md; see PACK_MANAGED_PATHS).
-  const result = await commitFilesToDcs(dcsCfg, files, message, {
-    deletePaths: stalePackPaths(files),
-  });
+  let result;
+  try {
+    result = await commitFilesToDcs(dcsCfg, files, message, {
+      deletePaths: stalePackPaths(files),
+    });
+  } catch (e) {
+    // Another export moved master after our tip check: Door43 refuses the ref
+    // update with a 403 "cannot lock ref". Same race as the checks above, so
+    // let the workflow re-render and retry (#712).
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.startsWith("dcs_batch_commit_failed") && msg.includes("cannot lock ref")) {
+      throw new Error(`context_cas_conflict:ref_lock:${msg}`);
+    }
+    throw e;
+  }
 
   if (!result.changed) {
     // Byte-identical to tip — the trustworthy SHA is the current tip.
