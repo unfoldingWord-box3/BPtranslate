@@ -2159,8 +2159,9 @@ export class ExportWorkflow extends WorkflowEntrypoint<Env, ExportParams> {
   }
 
   // Human contributors to one resource of one book, in first-edit order.
-  // Drives the export branch name. `source IS NULL` excludes AI-pipeline edits
-  // (the only non-null source today is 'ai_pipeline'; see migration 0010).
+  // Drives the export branch name. The source filter keeps human edits: NULL
+  // (web app) and 'chat' (a chat reviewer, mcpTools.ts), and drops AI-pipeline
+  // and reimport writes (see migration 0010).
   //
   //   tn/tq/twl → edit_log.kind matches the resource directly.
   //   ult/ust   → kind='verse'; the bible version lives in the last segment of
@@ -2173,7 +2174,7 @@ export class ExportWorkflow extends WorkflowEntrypoint<Env, ExportParams> {
     const sql = isBible
       ? `SELECT u.dcs_username AS username, MIN(e.created_at) AS first_at
            FROM edit_log e JOIN users u ON u.id = e.user_id
-          WHERE e.kind = 'verse' AND e.book = ?1 AND e.source IS NULL
+          WHERE e.kind = 'verse' AND e.book = ?1 AND (e.source IS NULL OR e.source = 'chat')
             AND e.row_key LIKE ?2
             AND e.created_at > COALESCE(
               (SELECT committed_at FROM export_snapshots
@@ -2185,7 +2186,7 @@ export class ExportWorkflow extends WorkflowEntrypoint<Env, ExportParams> {
           ORDER BY first_at ASC, u.dcs_username ASC`
       : `SELECT u.dcs_username AS username, MIN(e.created_at) AS first_at
            FROM edit_log e JOIN users u ON u.id = e.user_id
-          WHERE e.kind = ?1 AND e.book = ?2 AND e.source IS NULL
+          WHERE e.kind = ?1 AND e.book = ?2 AND (e.source IS NULL OR e.source = 'chat')
             AND e.created_at > COALESCE(
               (SELECT committed_at FROM export_snapshots
                 WHERE book = ?2 AND resource = ?1 AND commit_sha IS NOT NULL
