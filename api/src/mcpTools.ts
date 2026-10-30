@@ -974,12 +974,16 @@ const SKIP_REASONS = {
   not_a_draft: "not a translation draft (this project writes it directly), so it has no approval to remove",
   ai_draft: "an AI draft that was never approved: it already needs review",
   edited: "not approved: it already needs review",
+  changed_just_now: "approved, but changed a moment ago: preview again in a few seconds to include it",
 } as const;
+// BT Servant drops a tool result over 32 KB, and with it the confirm token, so
+// each skip reason lists only its first few ids (count has them all).
+const SKIP_ID_CAP = 20;
 
 const bulkSetState: ToolDef = {
   name: "bpt_bulk_set_state",
   description:
-    "Move the approved translation notes (kind tn) or questions (kind tq) of a verse range in one chapter back to needs review (state edited), for when a reviewer wants a stretch looked at again. It NEVER approves anything: to approve, use bpt_approve on each row the reviewer has read. Always two calls. 1) Call without confirm_token: a preview that changes nothing and returns would_change (how many approved rows would go back to needs review), their ids and versions, the rows it would skip and why (AI drafts and edited rows already need review; trashed rows and rows that are not translation drafts are left alone), and a confirm_token. Tell the reviewer the count and get a clear yes. 2) Call again with exactly the same book, kind, chapter, verse_start and verse_end plus confirm_token: only the rows in the preview change. A row that changed since the preview (edited, approved or un-approved by someone, or already un-approved by an earlier confirm of this same preview) is left as it is and listed in not_changed with its current state and version, so calling confirm twice is safe. remaining counts rows in the range that are approved after the call (approved or changed since the preview): run a new preview to include them. remaining is null when that count could not be read; the rows listed as applied were still changed. The token lasts 10 minutes and works only for this user's link and the same arguments; otherwise nothing changes. At most " +
+    "Move the approved translation notes (kind tn) or questions (kind tq) of a verse range in one chapter back to needs review (state edited), for when a reviewer wants a stretch looked at again. It NEVER approves anything: to approve, use bpt_approve on each row the reviewer has read. Always two calls. 1) Call without confirm_token: a preview that changes nothing and returns would_change (how many approved rows would go back to needs review), their ids and versions, the rows it would skip and why (AI drafts and edited rows already need review; trashed rows and rows that are not translation drafts are left alone; an approved row changed a moment ago is left out until a new preview a few seconds later), each reason with its count and at most the first 20 ids, and a confirm_token. Tell the reviewer the count and get a clear yes. 2) Call again with exactly the same book, kind, chapter, verse_start and verse_end plus confirm_token: only the rows in the preview change. A row that changed since the preview (edited, approved or un-approved by someone, or already un-approved by an earlier confirm of this same preview) is left as it is and listed in not_changed with its current state and version, so calling confirm twice is safe. remaining counts rows in the range that are approved after the call (approved or changed since the preview): run a new preview to include them. remaining is null when that count could not be read; the rows listed as applied were still changed. The token lasts 10 minutes and works only for this user's link and the same arguments; otherwise nothing changes. At most " +
     `${BULK_ROW_CAP} approved rows per call; a bigger range is refused, so narrow verse_start/verse_end. Requires edit access.`,
   inputSchema: {
     type: "object",
@@ -1016,8 +1020,16 @@ const bulkSetState: ToolDef = {
     const approvedLive = (r: Record<string, unknown>) => r.translation_state === "validated" && !r.trashed_at;
 
     if (args.confirm_token === undefined || args.confirm_token === null || args.confirm_token === "") {
+      // updated_at has 1-second resolution. A row last written in this second
+      // (or later, if the clock that wrote it runs ahead) is left out of the
+      // token: a web un-approve and re-approve later in this same second would
+      // reproduce its updated_at, and the confirm would take the newer approval
+      // for the one previewed. Every token row is older than the preview, so
+      // any later state flip changes its updated_at.
+      const nowSec = Math.floor(Date.now() / 1000);
+      const justNow = (x: Record<string, unknown>) => Number(x.updated_at) >= nowSec;
       const rows = await inRange();
-      const change = rows.filter(approvedLive);
+      const change = rows.filter((x) => approvedLive(x) && !justNow(x));
       if (change.length > BULK_ROW_CAP) {
         throw new ToolInputError(
           `This range has ${change.length} approved ${kind} rows; this tool changes at most ${BULK_ROW_CAP} at once. Narrow verse_start/verse_end and preview again. ${NOT_CHANGED}`,
@@ -1025,8 +1037,10 @@ const bulkSetState: ToolDef = {
       }
       const skipped = new Map<keyof typeof SKIP_REASONS, string[]>();
       for (const r of rows) {
-        if (approvedLive(r)) continue;
-        const reason = r.trashed_at ? "trashed" : r.translation_state == null ? "not_a_draft" : r.translation_state === "ai_draft" ? "ai_draft" : "edited";
+        if (approvedLive(r) && !justNow(r)) continue;
+        const reason = approvedLive(r)
+          ? "changed_just_now"
+          : r.trashed_at ? "trashed" : r.translation_state == null ? "not_a_draft" : r.translation_state === "ai_draft" ? "ai_draft" : "edited";
         skipped.set(reason, [...(skipped.get(reason) ?? []), String(r.id)]);
       }
       const r = change
@@ -1037,7 +1051,13 @@ const bulkSetState: ToolDef = {
         ...scope,
         would_change: r.length,
         rows: change.map((x) => ({ id: x.id, ref: `${x.book} ${x.ref_raw ?? `${x.chapter}:${x.verse}`}`, version: x.version })),
-        skipped: [...skipped].map(([reason, ids]) => ({ reason, why: SKIP_REASONS[reason], count: ids.length, ids })),
+        skipped: [...skipped].map(([reason, ids]) => ({
+          reason,
+          why: SKIP_REASONS[reason],
+          count: ids.length,
+          ids: ids.slice(0, SKIP_ID_CAP),
+          ...(ids.length > SKIP_ID_CAP ? { more_ids_not_listed: ids.length - SKIP_ID_CAP } : {}),
+        })),
       };
       if (r.length === 0) {
         return { ...preview, message: `No approved ${kind} rows in this range, so there is nothing to move back to needs review. ${NOT_CHANGED}` };
