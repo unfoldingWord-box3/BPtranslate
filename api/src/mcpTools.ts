@@ -52,7 +52,7 @@ export interface ToolContext {
 
 import type { ChatPrincipal } from "./chatLinks.ts";
 import { isTsMilestone } from "./tsMilestone.ts";
-import { summarizePackageRefs, type PackageRefRows } from "./packageRefs.ts";
+import { shortSupport, summarizePackageRefs, type PackageRefRows } from "./packageRefs.ts";
 import type { SourceNotes } from "./sourceNotes.ts";
 
 export class ToolInputError extends Error {}
@@ -304,7 +304,14 @@ function projectRow(kind: "tn" | "tq", r: Record<string, unknown>, cap?: number)
   };
   if (kind === "tn") {
     const note = capText(r.note, cap);
-    return { ...common, support_reference: r.support_reference ?? null, note: note.text, truncated: note.cut || undefined };
+    const sr = typeof r.support_reference === "string" && r.support_reference.trim() ? r.support_reference : null;
+    return {
+      ...common,
+      support_reference: r.support_reference ?? null,
+      ta: sr ? shortSupport(sr) : null,
+      note: note.text,
+      truncated: note.cut || undefined,
+    };
   }
   const q = capText(r.question, cap);
   const a = capText(r.response, cap);
@@ -380,7 +387,7 @@ function parseCursor(raw: unknown): SortKey | null {
 const chunkWork: ToolDef = {
   name: "bpt_chunk_work",
   description:
-    "The translation notes (kind tn) or questions (kind tq) for a verse range in one chapter, with each row's id, current text, state (ai_draft, validated, ...) and version. Each tn row also has en_note: the published English note it was translated from, for comparison (null when the English source has no note with that id or could not be read; the top-level note says why). Results are paged: if next_cursor is not null, call again with it to get the rest. Never claim a chunk is complete until next_cursor is null. A row marked truncated has long text cut; read it whole with bpt_get_row. en_truncated means the English note was cut, or left out (null) to keep the page under the size limit; bpt_get_row returns as much of it as fits in one response, and sets en_truncated again if it still had to cut.",
+    "The translation notes (kind tn) or questions (kind tq) for a verse range in one chapter, with each row's id, current text, state (ai_draft, validated, ...) and version. Each tn row also has en_note: the published English note it was translated from, for comparison (null when the English source has no note with that id or could not be read; the top-level note says why). Results are paged: if next_cursor is not null, call again with it to get the rest. Never claim a chunk is complete until next_cursor is null. Each tn row's ta is the short tA article name of its support_reference (e.g. figs-metaphor). To find the notes for one figure of speech or tA article, pass support_reference (e.g. \"figs-metonymy\", \"metonymy\" or the full rc:// link) instead of reading every page; total and paging then count only the matching notes. A row marked truncated has long text cut; read it whole with bpt_get_row. en_truncated means the English note was cut, or left out (null) to keep the page under the size limit; bpt_get_row returns as much of it as fits in one response, and sets en_truncated again if it still had to cut.",
   inputSchema: {
     type: "object",
     properties: {
@@ -391,6 +398,10 @@ const chunkWork: ToolDef = {
       verse_start: { type: "integer", minimum: 0, description: "First verse; omit for the whole chapter" },
       verse_end: { type: "integer", minimum: 0, description: "Last verse, inclusive" },
       include_trashed: { type: "boolean", description: "Include notes a reviewer trashed (default false)" },
+      support_reference: {
+        type: "string",
+        description: 'tn only: return just the notes for this tA article, e.g. "figs-metaphor", "metaphor" or "rc://*/ta/man/translate/figs-metaphor" (case-insensitive)',
+      },
       cursor: { type: "string", description: "next_cursor from the previous page" },
       limit: { type: "integer", minimum: 1, maximum: MAX_PAGE_ROWS },
     },
@@ -408,11 +419,23 @@ const chunkWork: ToolDef = {
     if (ve < vs) throw new ToolInputError("verse_end is before verse_start");
     const limit = Math.min(intArg(args, "limit", { min: 1 }) ?? DEFAULT_PAGE_ROWS, MAX_PAGE_ROWS);
     const cursor = parseCursor(args.cursor);
+    // The tA filter matches on the last path segment, so the short name, the
+    // full rc:// link and a bare name without "figs-" find the same notes.
+    let ta: string | null = null;
+    if (args.support_reference !== undefined && args.support_reference !== null) {
+      if (kind !== "tn") throw new ToolInputError("support_reference only applies to kind tn");
+      ta = typeof args.support_reference === "string" ? shortSupport(args.support_reference).toLowerCase() : "";
+      if (!ta) throw new ToolInputError('support_reference must be a tA article name like "figs-metaphor"');
+    }
 
     const body = await apiGet(session, `/api/chapters/${book}/${chapter}`);
     const all = ((body[kind] as Record<string, unknown>[] | undefined) ?? []).filter((r) => {
       const v = Number(r.verse);
       if (v < vs || v > ve) return false;
+      if (ta !== null) {
+        const sr = typeof r.support_reference === "string" ? shortSupport(r.support_reference).toLowerCase() : "";
+        if (sr !== ta && sr !== `figs-${ta}`) return false;
+      }
       return args.include_trashed === true || !r.trashed_at;
     });
 
@@ -452,6 +475,7 @@ const chunkWork: ToolDef = {
       kind,
       verse_start: vs,
       verse_end: ve === Number.MAX_SAFE_INTEGER ? null : ve,
+      ...(ta !== null ? { support_reference: ta } : {}),
       total: all.length,
       returned: rows.length,
       next_cursor: i < all.length ? JSON.stringify(sortKey(all[i - 1])) : null,
