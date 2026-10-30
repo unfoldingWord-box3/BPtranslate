@@ -84,6 +84,88 @@ export type TemplateForRender = {
   template_id: string;
 };
 
+// The D1 reads a context pack renders from. Kept in one loader so the export
+// can re-read after fetching master's tip and compare (#712): a pack commits
+// only if D1, read after the tip fetch, still matches what was rendered.
+export type ContextPackInputs = {
+  prefs: TranslationPrefsForRender;
+  terms: TermImport[];
+  tnRows: ValidatedTnRow[];
+  tqRows: ValidatedTqRow[];
+  templates: TemplateForRender[];
+};
+
+type InputsDb = {
+  prepare(sql: string): {
+    first<T>(): Promise<T | null>;
+    all<T>(): Promise<{ results?: T[] }>;
+  };
+};
+
+export async function loadContextPackInputs(db: InputsDb): Promise<ContextPackInputs> {
+  const prefsRow = await db.prepare(
+    `SELECT audience, purpose, register, script_notes, instructions_md, common_issues_md
+       FROM translation_prefs WHERE id = 1`,
+  ).first<TranslationPrefsForRender>();
+  const prefs: TranslationPrefsForRender = prefsRow ?? {
+    audience: null,
+    purpose: null,
+    register: "default",
+    script_notes: null,
+    instructions_md: null,
+    common_issues_md: null,
+  };
+
+  const termRs = await db.prepare(
+    `SELECT concept_id, source_term, target_term, status, replacement, comment, tw_link
+       FROM terminology WHERE deleted_at IS NULL
+       ORDER BY concept_id, source_term, status`,
+  ).all<TermImport>();
+
+  // Selectors carry the `admin_bulk_state IS NULL` rule that keeps
+  // bulk-approved rows out of the few-shot gold (see the SQL above).
+  const tnRs = await db.prepare(VALIDATED_TN_EXAMPLES_SQL).all<ValidatedTnRow>();
+  const tqRs = await db.prepare(VALIDATED_TQ_EXAMPLES_SQL).all<ValidatedTqRow>();
+
+  const templateRs = await db.prepare(
+    `SELECT template_id, support_ref, sheet_order, type, target_md
+       FROM template_units
+      WHERE translation_state = 'validated'
+        AND deleted_at IS NULL
+        AND origin = 'sheet'
+        AND target_md IS NOT NULL AND TRIM(target_md) <> ''
+      ORDER BY support_ref, sheet_order, template_id`,
+  ).all<TemplateForRender>();
+
+  return {
+    prefs,
+    terms: termRs.results ?? [],
+    tnRows: tnRs.results ?? [],
+    tqRows: tqRs.results ?? [],
+    templates: templateRs.results ?? [],
+  };
+}
+
+// Order-insensitive for the example rows, whose SQL has no ORDER BY.
+function rowsKey(rows: readonly unknown[]): string[] {
+  return rows.map((r) => JSON.stringify(r)).sort();
+}
+
+export function sameContextPackInputs(a: ContextPackInputs, b: ContextPackInputs): boolean {
+  const key = (x: ContextPackInputs) =>
+    JSON.stringify([x.prefs, x.terms, x.templates, rowsKey(x.tnRows), rowsKey(x.tqRows)]);
+  return key(a) === key(b);
+}
+
+// True when the validated tN/tQ example rows differ, so the EN source maps
+// fetched for them must be fetched again.
+export function exampleRowsChanged(a: ContextPackInputs, b: ContextPackInputs): boolean {
+  return (
+    JSON.stringify([rowsKey(a.tnRows), rowsKey(a.tqRows)]) !==
+    JSON.stringify([rowsKey(b.tnRows), rowsKey(b.tqRows)])
+  );
+}
+
 /**
  * Composite key for EN source maps. tN/tQ row IDs are only unique per book
  * (migration 0015 composite PK), so keying by bare `id` would let identical
