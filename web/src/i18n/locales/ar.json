@@ -941,6 +941,8 @@
   },
   "pipeline": {
     "aiButton": "AI",
+    "startAiRun": "بدء تشغيل بالذكاء الاصطناعي",
+    "moreActions": "إجراءات أخرى",
     "generateUltUst": "توليد ULT + UST",
     "writeTranslationNotes": "كتابة ملاحظات الترجمة",
     "writeTranslationQuestions": "كتابة أسئلة الترجمة",

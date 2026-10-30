@@ -139,6 +139,7 @@ import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import CheckIcon from "@mui/icons-material/Check";
 
+import { FlowAiRunAction } from "./FlowAiRunAction";
 import { LockBanner } from "./FlowBanners";
 import { FlowStatusChip, type FlowStatusKind } from "./FlowStatusChip";
 import {
@@ -255,7 +256,7 @@ export default function TranslateScriptureScreen({
   const targetLabel = projectConfig?.languageName || t("flowScripture.target");
   const canEditRole = role === "admin" || role === "editor";
 
-  const { status, data, applyLocalVerse, applyLocalVerseStatus } = useChapter(book, chapter);
+  const { status, data, refetch, applyLocalVerse, applyLocalVerseStatus } = useChapter(book, chapter);
   const { summary } = useBook(book, true);
   const chapterCount = summary ? realChapters(summary).length : null;
 
@@ -1219,6 +1220,15 @@ export default function TranslateScriptureScreen({
                   ? t("flowScripture.ofTotal", { n: total, total })
                   : t("flowScripture.verseOfTotal", { n: Math.min(cursor + 1, total), total })}
               </Typography>
+              {/* AI run for this chapter (#481): top bar on tablet+, "more"
+                  menu on phone; nothing for viewers. */}
+              <FlowAiRunAction
+                book={book}
+                chapter={chapter}
+                role={role}
+                phone={!isTabletUp}
+                onImported={refetch}
+              />
               {/* compact prev/next — the same cursor and disabled logic as the
                   bottom buttons (goPrev/goNext), also disabled on the done view
                   where the bottom pair doesn't render. */}
