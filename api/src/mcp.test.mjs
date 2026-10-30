@@ -138,7 +138,12 @@ async function apiFor(ws, path) {
         // A note that is over the budget on its own once JSON-escaped.
         return { status: 200, body: { tn: [tnRow(950, 1, ROW_TEXT_CAP, "\u0001")], tq: [] } };
       }
-      if (path.startsWith("/api/rows/tn/r5")) return { status: 200, body: tnRow(5, 2) };
+      if (path.startsWith("/api/rows/tn/r5?")) return { status: 200, body: tnRow(5, 2) };
+      // A long own note in a 3-byte script (Ethiopic): 12,000 bytes.
+      if (path.startsWith("/api/rows/tn/r961?")) return { status: 200, body: tnRow(961, 1, 4000, "ሀ") };
+      // Over the budget on its own once JSON-escaped (six bytes a character).
+      if (path.startsWith("/api/rows/tn/r962?")) return { status: 200, body: tnRow(962, 1, 6000, "\u0001") };
+      if (path.startsWith("/api/rows/tq/q703?")) return { status: 200, body: tqRow(703, 1) };
       return { status: 404, body: { error: "not_found" } };
 }
 
@@ -520,6 +525,50 @@ console.log("[tools] English source notes");
   const over = await call("bpt_chunk_work", { book: "TIT", chapter: 14, kind: "tn" });
   assert(over.data.rows[0].en_note === null && over.data.rows[0].en_truncated === true, "a row over budget on its own note drops en_note to null, marked en_truncated");
   assert(over.data.rows[0].note.length === ROW_TEXT_CAP, "and still keeps its own note");
+  srcStub = NO_SOURCE;
+}
+
+console.log("[tools] bpt_get_row English source note");
+{
+  // Longer than chunk_work's cap: get_row is where a reviewer reads it whole.
+  const longEn = "e".repeat(ROW_TEXT_CAP + 500);
+  srcStub = { ok: true, source: "unfoldingWord/en_tn", notes: new Map([["r5", longEn]]) };
+  srcCalls.length = 0;
+  const full = await call("bpt_get_row", { book: "TIT", kind: "tn", id: "r5" });
+  assert(!full.isError && srcCalls.length === 1 && srcCalls[0].ws === "bsoj" && srcCalls[0].book === "TIT", "get_row reads the English source once, for the link's workspace and book");
+  assert(full.data.en_note === longEn && full.data.en_truncated === undefined, "get_row returns the whole English note, past ROW_TEXT_CAP");
+  assert(full.data.en_source === "unfoldingWord/en_tn" && full.data.en_note_status === null, "get_row names the source and has nothing to explain");
+  assert(full.data.note === "n".repeat(40) && full.data.id === "r5", "the row's own note is untouched by the English fields");
+
+  srcStub = { ok: true, source: "unfoldingWord/en_tn", notes: new Map([["r6", "other"]]) };
+  const unmatched = await call("bpt_get_row", { book: "TIT", kind: "tn", id: "r5" });
+  assert(unmatched.data.en_note === null && /no English note with the same id/.test(unmatched.data.en_note_status), "an id with no English row gets en_note null and a status saying why");
+  assert(unmatched.data.en_source === "unfoldingWord/en_tn", "and still names the source it looked in");
+
+  srcStub = { ok: false, reason: "Could not read the English notes tn_TIT.tsv from unfoldingWord/en_tn (HTTP 503)." };
+  const down = await call("bpt_get_row", { book: "TIT", kind: "tn", id: "r5" });
+  assert(!down.isError && down.data.id === "r5", "an unreadable source never fails get_row");
+  assert(down.data.en_note === null && down.data.en_source === null && /HTTP 503/.test(down.data.en_note_status), "source down: en_note null, en_source null, the status says why");
+
+  srcCalls.length = 0;
+  const tq = await call("bpt_get_row", { book: "TIT", kind: "tq", id: "q703" });
+  assert(!tq.isError && tq.data.id === "q703", "get_row reads a question");
+  assert(srcCalls.length === 0 && tq.data.en_note === undefined && tq.data.en_source === undefined && tq.data.en_note_status === undefined, "questions get no English fields and no source read");
+
+  // A pathological English note: 100,000 quotes, two bytes each once
+  // JSON-escaped, next to a long own note in a 3-byte script.
+  srcStub = { ok: true, source: "unfoldingWord/en_tn", notes: new Map([["r961", '"'.repeat(100_000)]]) };
+  const huge = await call("bpt_get_row", { book: "TIT", kind: "tn", id: "r961" });
+  assert(!huge.isError && huge.data.note.length === 4000, "the row's own note is left whole");
+  assert(huge.data.en_truncated === true && huge.data.en_note.length > 0 && huge.data.en_note.length < 100_000, "a huge English note is cut and marked en_truncated");
+  assert(/cut/.test(huge.data.en_note_status) && /32 KB/.test(huge.data.en_note_status), "the status says the English note was cut for the size limit");
+  assert(byteLength(huge.data) < 32000, `the get_row response stays under 32,000 bytes (${byteLength(huge.data)} bytes)`);
+
+  // Own note over the budget on its own: en_note goes, the own note stays.
+  srcStub = { ok: true, source: "unfoldingWord/en_tn", notes: new Map([["r962", "English"]]) };
+  const over = await call("bpt_get_row", { book: "TIT", kind: "tn", id: "r962" });
+  assert(over.data.en_note === null && over.data.en_truncated === true && over.data.note.length === 6000, "a row over budget on its own note gets en_note null, marked en_truncated, own note whole");
+  assert(/left out/.test(over.data.en_note_status), "the status says the English note was left out");
   srcStub = NO_SOURCE;
 }
 
