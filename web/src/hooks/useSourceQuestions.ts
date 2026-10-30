@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { mergeSourceNotes, parseSourceQuestionTsv, planRepos, repoKey, type SourceQuestionMap } from "../lib/sourceNotePlan";
-import { fetchSourcePlan } from "./sourcePlans";
+import { fallbackSourcePlan, mergeSourceNotes, parseSourceQuestionTsv, planRepos, repoKey, type NoteSourcePlan, type SourceQuestionMap } from "../lib/sourceNotePlan";
+import { watchSourcePlan } from "./sourcePlans";
 
 export type { SourceQuestion, SourceQuestionMap } from "../lib/sourceNotePlan";
 
@@ -20,7 +20,10 @@ export type { SourceQuestion, SourceQuestionMap } from "../lib/sourceNotePlan";
 //
 // Degrades gracefully: a failed fetch or an id with no source row yields no
 // entry, and the card simply omits the source block. If the source plan cannot
-// be read, no questions show rather than a guess that could be another source's.
+// be read (request failed, or the server could not resolve it), the
+// project-wide file shows for every chapter, as before the per-chapter plan
+// (#697) until a background retry reads the plan; an authoring project (null
+// plan) shows none.
 
 const EMPTY: SourceQuestionMap = new Map();
 
@@ -49,8 +52,7 @@ function fetchSourceQuestions(org: string, repo: string, book: string): Promise<
   return pending;
 }
 
-async function loadSourceQuestions(book: string): Promise<SourceQuestionMap> {
-  const plan = await fetchSourcePlan(book, "tq");
+async function loadSourceQuestions(book: string, plan: NoteSourcePlan | null): Promise<SourceQuestionMap> {
   if (!plan) return EMPTY;
   const repos = planRepos(plan);
   const settled = await Promise.allSettled(repos.map((r) => fetchSourceQuestions(r.org, r.repo, book)));
@@ -63,7 +65,7 @@ async function loadSourceQuestions(book: string): Promise<SourceQuestionMap> {
 
 // `book` is null outside translation mode, which short-circuits to an empty map
 // with no fetch. `source` is the project's translationSource projection
-// {org, repo}, only prefetched; null (no project-wide tQ repo) still reads
+// {org, repo}: prefetched, and the fallback when the plan cannot be read; null (no project-wide tQ repo) still reads
 // the plan, since a Door43 override applies without one. The server's plan
 // decides which repos are read.
 export function useSourceQuestions(
@@ -85,15 +87,24 @@ export function useSourceQuestions(
     // Start the project-wide file while the plan loads; almost every chapter
     // reads it, and the shared cache hands it to loadSourceQuestions.
     if (org !== null && repo !== null) fetchSourceQuestions(org, repo, book).catch(() => {});
-    loadSourceQuestions(book)
-      .then((m) => {
-        if (mounted) setMap(m);
-      })
-      .catch(() => {
-        if (mounted) setMap(EMPTY);
-      });
+    // A plan that cannot be read falls back to the project-wide file now and
+    // is retried in the background; a later success replaces the fallback
+    // (#697). `seq` keeps a slow earlier load from overwriting a newer one.
+    const projectWide = org !== null && repo !== null ? { org, repo } : null;
+    let seq = 0;
+    const stop = watchSourcePlan(book, "tq", (plan) => {
+      const mine = ++seq;
+      loadSourceQuestions(book, plan === undefined ? fallbackSourcePlan(projectWide) : plan)
+        .then((m) => {
+          if (mounted && mine === seq) setMap(m);
+        })
+        .catch(() => {
+          if (mounted && mine === seq) setMap(EMPTY);
+        });
+    });
     return () => {
       mounted = false;
+      stop();
     };
   }, [book, org, repo]);
   return map;

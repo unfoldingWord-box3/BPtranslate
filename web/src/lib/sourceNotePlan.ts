@@ -64,6 +64,85 @@ export function noteSourceForChapter(plan: NoteSourcePlan, chapter: number): Rep
   return plan.base ? { org: plan.base.org, repo: plan.base.repo } : null;
 }
 
+// Whether a chapter's rows have an English source at all (#697): the flows
+// screens say "no source for this note" for a chapter that has one but lacks
+// the row, and "no source repo configured" only for a chapter that has none.
+// null plan (authoring project): no source.
+export function chapterHasSource(plan: NoteSourcePlan | null, chapter: number): boolean {
+  return plan !== null && noteSourceForChapter(plan, chapter) !== null;
+}
+
+// One resource's plan from a GET /api/books/:book/sources response. null is
+// the server's answer for an authoring project; an omitted field means the
+// server could not resolve the plan (#697), so this throws and the caller
+// treats it as a failed request.
+export function planFromBookSources(
+  res: { tnNoteSources?: NoteSourcePlan | null; tqQuestionSources?: NoteSourcePlan | null },
+  resource: "tn" | "tq",
+): NoteSourcePlan | null {
+  const plan = resource === "tn" ? res.tnNoteSources : res.tqQuestionSources;
+  if (plan === undefined) throw new Error(`no ${resource} source plan in the response`);
+  return plan;
+}
+
+// The plan to read by when the plan request failed (#697): the project-wide
+// file for every chapter, as before #691. Without a project-wide source there
+// is nothing to show.
+export function fallbackSourcePlan(projectWide: RepoSource | null): NoteSourcePlan | null {
+  return projectWide ? { base: { org: projectWide.org, repo: projectWide.repo }, ranges: [] } : null;
+}
+
+// After a failed plan request the Source panel shows the fallback, then asks
+// again after each of these delays, so a screen left open switches to the
+// real per-chapter plan once the server recovers (#697).
+export const PLAN_RETRY_DELAYS_MS: readonly number[] = [15_000, 60_000, 180_000];
+
+export interface RetryTimers {
+  set: (fn: () => void, ms: number) => unknown;
+  clear: (handle: unknown) => void;
+}
+
+const realTimers: RetryTimers = {
+  set: (fn, ms) => setTimeout(fn, ms),
+  clear: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+};
+
+// Runs `load` and hands its value to `onResult`. On failure it reports
+// undefined (use the fallback) the first time only, then tries again after
+// each delay in turn, stopping at the first success. The returned function
+// cancels the pending retry and drops any result still in flight.
+export function loadWithRetry<T>(
+  load: () => Promise<T>,
+  onResult: (value: T | undefined) => void,
+  delays: readonly number[] = PLAN_RETRY_DELAYS_MS,
+  timers: RetryTimers = realTimers,
+): () => void {
+  let cancelled = false;
+  let handle: unknown = null;
+  const attempt = (i: number) => {
+    load().then(
+      (value) => {
+        if (!cancelled) onResult(value);
+      },
+      () => {
+        if (cancelled) return;
+        if (i === 0) onResult(undefined);
+        if (i < delays.length) {
+          handle = timers.set(() => {
+            handle = null;
+            attempt(i + 1);
+          }, delays[i]);
+        }
+      },
+    );
+  };
+  attempt(0);
+  return () => {
+    cancelled = true;
+    if (handle !== null) timers.clear(handle);
+  };
+}
+
 // Each Door43 repo the plan reads, once.
 export function planRepos(plan: NoteSourcePlan): RepoSource[] {
   const out = new Map<string, RepoSource>();

@@ -1854,8 +1854,9 @@ export const api = {
   // come back as (chapter_start=0, chapter_end=999); range rows carry their real
   // bounds. Readable by any authenticated user; the PUT below is admin-only.
   // tnNoteSources: which source each chapter's English tN source note is read
-  // from (#691; lib/sourceNotePlan.ts). null when the project has no English
-  // tN source, or the server could not resolve it. tqQuestionSources: the same
+  // from (#691; lib/sourceNotePlan.ts). null for an authoring project (no
+  // English source); left out when the server could not resolve it (#697,
+  // read through planFromBookSources). tqQuestionSources: the same
   // for the English tQ source question (#695).
   getBookSources: (book: string) =>
     request<{

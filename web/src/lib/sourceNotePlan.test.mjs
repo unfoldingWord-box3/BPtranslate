@@ -7,8 +7,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  chapterHasSource,
+  fallbackSourcePlan,
+  loadWithRetry,
+  PLAN_RETRY_DELAYS_MS,
   mergeSourceNotes,
   noteSourceForChapter,
+  planFromBookSources,
   parseSourceQuestionTsv,
   parseSourceTsv,
   planRepos,
@@ -144,4 +149,118 @@ test("tQ: a whole-book override (sent as the base) replaces the project-wide fil
   const m = mergeSourceNotes(whole, new Map([[repoKey(RU_TQ), parseSourceQuestionTsv(qtsv([["1:1", "ab12", "RU one"], ["9:1", "gh78", "RU nine"]]))]]));
   assert.equal(m.get("ab12")?.question, "RU one");
   assert.equal(m.get("gh78")?.question, "RU nine");
+});
+
+// #697: when the plan request fails, the Source panel falls back to the
+// project-wide file for every chapter (the behavior before #691), instead of
+// showing nothing. A resolved null plan (authoring project) is not a failure.
+test("planFromBookSources: a plan, an explicit null, and an omitted field (server failure)", () => {
+  assert.deepEqual(planFromBookSources({ tnNoteSources: plan, tqQuestionSources: null }, "tn"), plan);
+  assert.equal(planFromBookSources({ tnNoteSources: plan, tqQuestionSources: null }, "tq"), null, "explicit null: authoring project, no source");
+  assert.throws(() => planFromBookSources({ tqQuestionSources: null }, "tn"), "an omitted tN plan is a failure, not 'no source'");
+  assert.throws(() => planFromBookSources({ tnNoteSources: plan }, "tq"), "an omitted tQ plan is a failure");
+});
+
+test("fallbackSourcePlan: the project-wide file for every chapter, or nothing without one", () => {
+  const fb = fallbackSourcePlan(EN);
+  assert.deepEqual(fb, { base: EN, ranges: [] });
+  assert.equal(fallbackSourcePlan(null), null);
+  // Merged through the same path the hooks use: every note in the project-wide
+  // file shows, whatever its chapter (pre-#691 behavior).
+  const baseMap = parseSourceTsv(tsv([["front:intro", "fr00", "EN front"], ["2:1", "ab12", "EN two"], ["8:1", "gh78", "EN eight"]]));
+  const m = mergeSourceNotes(fb, new Map([[repoKey(EN), baseMap]]));
+  assert.deepEqual([...m.keys()].sort(), ["ab12", "fr00", "gh78"]);
+});
+
+test("chapterHasSource: per chapter from the plan, not from the project-wide source", () => {
+  const noBase = { base: null, ranges: [{ chapter_start: 1, chapter_end: 2, ...OTHER }] };
+  assert.equal(chapterHasSource(noBase, 1), true, "no project-wide source, but an override covers chapter 1");
+  assert.equal(chapterHasSource(noBase, 2), true);
+  assert.equal(chapterHasSource(noBase, 3), false, "a chapter no override covers has no source");
+  assert.equal(chapterHasSource(plan, 4), true, "the base covers the rest");
+  assert.equal(chapterHasSource(null, 1), false, "no plan: no source");
+});
+
+// #697 review: after a failed plan request the hooks show the fallback, then
+// retry in the background so a mounted screen switches to the real
+// per-chapter plan once the server recovers.
+function fakeTimers() {
+  const pending = [];
+  return {
+    pending,
+    set: (fn, ms) => {
+      const h = { fn, ms, cleared: false };
+      pending.push(h);
+      return h;
+    },
+    clear: (h) => {
+      h.cleared = true;
+    },
+    // Fire the oldest live timer.
+    fire() {
+      const h = pending.find((x) => !x.cleared && !x.fired);
+      if (!h) return false;
+      h.fired = true;
+      h.fn();
+      return true;
+    },
+  };
+}
+const flush = () => new Promise((r) => setImmediate(r));
+
+test("loadWithRetry: a failure reports the fallback once, retries on the schedule, and stops at the first success", async () => {
+  const timers = fakeTimers();
+  const outcomes = [false, false, true];
+  let calls = 0;
+  const load = () => (outcomes[calls++] ? Promise.resolve(plan) : Promise.reject(new Error("500")));
+  const results = [];
+  loadWithRetry(load, (v) => results.push(v), [15_000, 60_000, 180_000], timers);
+  await flush();
+  assert.deepEqual(results, [undefined], "first failure: fall back now");
+  assert.deepEqual(timers.pending.map((h) => h.ms), [15_000]);
+  timers.fire();
+  await flush();
+  assert.deepEqual(results, [undefined], "a second failure does not report again");
+  assert.deepEqual(timers.pending.map((h) => h.ms), [15_000, 60_000]);
+  timers.fire();
+  await flush();
+  assert.deepEqual(results, [undefined, plan], "the retry that succeeds hands over the real plan");
+  assert.equal(calls, 3);
+  assert.equal(timers.fire(), false, "nothing more is scheduled");
+});
+
+test("loadWithRetry: gives up after the last delay; a success first time never schedules", async () => {
+  const timers = fakeTimers();
+  let calls = 0;
+  loadWithRetry(() => (calls++, Promise.reject(new Error("down"))), () => {}, [1, 2], timers);
+  await flush();
+  while (timers.fire()) await flush();
+  assert.equal(calls, 3, "the first try plus one per delay");
+
+  const t2 = fakeTimers();
+  const results = [];
+  loadWithRetry(() => Promise.resolve(null), (v) => results.push(v), [1], t2);
+  await flush();
+  assert.deepEqual(results, [null], "an authoring project's null plan is a success, not a failure");
+  assert.equal(t2.pending.length, 0);
+  assert.ok(PLAN_RETRY_DELAYS_MS.length > 0 && PLAN_RETRY_DELAYS_MS.length <= 4, "a few attempts, bounded");
+});
+
+test("loadWithRetry: cancel stops the pending retry and drops a late result", async () => {
+  const timers = fakeTimers();
+  let calls = 0;
+  const results = [];
+  const cancel = loadWithRetry(() => (calls++, Promise.reject(new Error("500"))), (v) => results.push(v), [15_000], timers);
+  await flush();
+  cancel();
+  assert.equal(timers.pending[0].cleared, true, "the scheduled retry is cleared");
+  assert.equal(calls, 1);
+
+  let resolveLate;
+  const late = [];
+  const cancel2 = loadWithRetry(() => new Promise((r) => { resolveLate = r; }), (v) => late.push(v), [1], fakeTimers());
+  cancel2();
+  resolveLate(plan);
+  await flush();
+  assert.deepEqual(late, [], "a load that lands after cancel is ignored");
 });

@@ -134,6 +134,8 @@ import { useBook } from "../../hooks/useBook";
 import { useChapter } from "../../hooks/useChapter";
 import { useProjectConfig, isTranslationProject } from "../../hooks/useProjectConfig";
 import { useSourceNotes } from "../../hooks/useSourceNotes";
+import { useSourcePlan } from "../../hooks/sourcePlans";
+import { chapterHasSource } from "../../lib/sourceNotePlan";
 import { useSourceScripture } from "../../hooks/useSourceScripture";
 import { useLexicon } from "../../hooks/useLexicon";
 import { buildQuoteFromSelection, quotePickUnchanged, selectionFromQuote } from "../../lib/quoteBuilder";
@@ -326,14 +328,17 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   // The English source note lives in the PUBLISHED source repo, not in D1: in a
   // translation-mode workspace the row's own `note` IS the target being drafted
   // (useSourceNotes.ts:4-7 says this for the tQ twin, and ResourceColumn.tsx:326-338
-  // wires the tN case exactly this way). Null projection = no tN source
-  // configured → the English card degrades to a plain statement rather than
-  // showing the target text twice.
+  // wires the tN case exactly this way). Null projection = no project-wide tN
+  // source; with no English note the card degrades to a plain statement rather
+  // than showing the target text twice, worded per chapter (sourcePlan below).
   const sourceProjection = useMemo(
     () => resolveSourceRef(projectConfig?.translationSource, "tn"),
     [projectConfig],
   );
   const sourceNotes = useSourceNotes(translationMode ? book : null, sourceProjection);
+  // Which chapters have a source at all: a Door43 override can give a chapter
+  // one when the project has no project-wide tN repo (#697).
+  const sourcePlan = useSourcePlan(translationMode ? book : null, "tn", sourceProjection);
 
   // The published source-language literal bible (translationSource `lit`, e.g.
   // unfoldingWord/en_ult) as an optional third read-only lane (issue #430). A
@@ -2209,7 +2214,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
               ) : (
                 <Typography variant="body2" color="text.secondary">
                   {translationMode
-                    ? sourceProjection
+                    ? chapterHasSource(sourcePlan, row.chapter)
                       ? t("flowTranslate.noSourceForNote")
                       : t("flowTranslate.noSourceRepo")
                     : t("flowTranslate.authoringWorkspace")}

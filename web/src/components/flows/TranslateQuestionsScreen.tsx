@@ -99,6 +99,8 @@ import { useBook } from "../../hooks/useBook";
 import { useChapter } from "../../hooks/useChapter";
 import { useProjectConfig, isTranslationProject } from "../../hooks/useProjectConfig";
 import { useSourceQuestions } from "../../hooks/useSourceQuestions";
+import { useSourcePlan } from "../../hooks/sourcePlans";
+import { chapterHasSource } from "../../lib/sourceNotePlan";
 import { useUnsavedGuard } from "../../hooks/useUnsavedGuard";
 import { resolveSourceRef } from "../../lib/sourceRef";
 import {
@@ -473,13 +475,17 @@ export default function TranslateQuestionsScreen({
   // The English source question/answer live in the PUBLISHED source repo, not in
   // D1: in a translation-mode workspace the row's OWN question/response ARE the
   // target being drafted (useSourceQuestions.ts:3-7; ResourceColumn.tsx:376-380
-  // wires it exactly this way). Null projection = no tQ source configured → the
-  // source lines degrade to a plain statement rather than echoing the target.
+  // wires it exactly this way). Null projection = no project-wide tQ source;
+  // with no English question the source lines degrade to a plain statement
+  // rather than echoing the target, worded per chapter (sourcePlan below).
   const sourceProjection = useMemo(
     () => resolveSourceRef(projectConfig?.translationSource, "tq"),
     [projectConfig],
   );
   const sourceQuestions = useSourceQuestions(translationMode ? book : null, sourceProjection);
+  // Which chapters have a source at all: a Door43 override can give a chapter
+  // one when the project has no project-wide tQ repo (#697).
+  const sourcePlan = useSourcePlan(translationMode ? book : null, "tq", sourceProjection);
 
   const { status, data, refetch, applyLocalRowPatch, applyLocalRowReplacement } = useChapter(
     book,
@@ -1549,7 +1555,7 @@ export default function TranslateQuestionsScreen({
                 targetLabel={targetLabel}
                 sourceLangLabel={sourceLangLabel}
                 translationMode={translationMode}
-                hasSourceProjection={sourceProjection !== null}
+                hasSourceProjection={chapterHasSource(sourcePlan, row.chapter)}
                 chipKind={chip.kind}
                 chipLabel={chip.label}
                 hl={HL}
@@ -1579,7 +1585,7 @@ export default function TranslateQuestionsScreen({
                 targetLabel={targetLabel}
                 sourceLangLabel={sourceLangLabel}
                 translationMode={translationMode}
-                hasSourceProjection={sourceProjection !== null}
+                hasSourceProjection={chapterHasSource(sourcePlan, row.chapter)}
                 chipKind={chip.kind}
                 chipLabel={chip.label}
                 hl={HL}
