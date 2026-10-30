@@ -14,6 +14,10 @@
 // of the project's en_tn and matched rows keep en_tn's ids (the server leaves
 // Aquifer ranges out of the plan). Pure, so it runs under the strip-types
 // test runner.
+//
+// The English source question beside a tQ row (hooks/useSourceQuestions.ts)
+// uses the same plan shape and merge, from tqQuestionSources (#695). Aquifer
+// is tN-only, so a tQ plan only ever carries Door43 ranges.
 
 export interface SourceNote {
   note: string;
@@ -99,12 +103,46 @@ export function parseSourceTsv(text: string): SourceNoteMap {
   return map;
 }
 
-// One id → note map for the whole book: each note from the source its own
-// chapter resolves to. `byRepo` is keyed by repoKey; a repo that failed to
-// load is simply absent, and its chapters show no note (never another
-// source's).
-export function mergeSourceNotes(plan: NoteSourcePlan, byRepo: Map<string, SourceNoteMap>): SourceNoteMap {
-  const merged: SourceNoteMap = new Map();
+export interface SourceQuestion {
+  question: string;
+  response: string;
+  quote: string;
+  reference: string;
+}
+
+export type SourceQuestionMap = Map<string, SourceQuestion>;
+
+// tQ TSV columns: Reference \t ID \t Tags \t Quote \t Occurrence \t Question \t Response
+// Same rules as parseSourceTsv above (BOM, CRLF, header skipped by content).
+export function parseSourceQuestionTsv(text: string): SourceQuestionMap {
+  const map: SourceQuestionMap = new Map();
+  const lines = text.replace(/^﻿/, "").split(/\r?\n/);
+  for (const line of lines) {
+    if (!line) continue;
+    const cols = line.split("\t");
+    if (cols.length < 7) continue;
+    const [reference, id, , quote, , question, response] = cols;
+    if (id === "ID") continue;
+    if (!id) continue;
+    map.set(id, {
+      question: (question ?? "").replace(/\\n/g, "\n"),
+      response: (response ?? "").replace(/\\n/g, "\n"),
+      quote: quote ?? "",
+      reference: reference ?? "",
+    });
+  }
+  return map;
+}
+
+// One id → row map for the whole book: each row (a tN note or a tQ question)
+// from the source its own chapter resolves to. `byRepo` is keyed by repoKey; a
+// repo that failed to load is simply absent, and its chapters show nothing
+// (never another source's row).
+export function mergeSourceNotes<T extends { reference: string }>(
+  plan: NoteSourcePlan,
+  byRepo: Map<string, Map<string, T>>,
+): Map<string, T> {
+  const merged = new Map<string, T>();
   for (const repo of planRepos(plan)) {
     const key = repoKey(repo);
     const notes = byRepo.get(key);

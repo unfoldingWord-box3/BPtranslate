@@ -1855,9 +1855,15 @@ export const api = {
   // bounds. Readable by any authenticated user; the PUT below is admin-only.
   // tnNoteSources: which source each chapter's English tN source note is read
   // from (#691; lib/sourceNotePlan.ts). null when the project has no English
-  // tN source, or the server could not resolve it.
+  // tN source, or the server could not resolve it. tqQuestionSources: the same
+  // for the English tQ source question (#695).
   getBookSources: (book: string) =>
-    request<{ book: string; overrides: BookSourceOverride[]; tnNoteSources?: NoteSourcePlan | null }>(
+    request<{
+      book: string;
+      overrides: BookSourceOverride[];
+      tnNoteSources?: NoteSourcePlan | null;
+      tqQuestionSources?: NoteSourcePlan | null;
+    }>(
       `/api/books/${encodeURIComponent(book)}/sources`,
     ),
 

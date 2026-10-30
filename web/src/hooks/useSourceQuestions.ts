@@ -1,4 +1,8 @@
 import { useEffect, useState } from "react";
+import { mergeSourceNotes, parseSourceQuestionTsv, planRepos, repoKey, type SourceQuestionMap } from "../lib/sourceNotePlan";
+import { fetchSourcePlan } from "./sourcePlans";
+
+export type { SourceQuestion, SourceQuestionMap } from "../lib/sourceNotePlan";
 
 // The published source-language tQ (e.g. unfoldingWord/en_tq) for a book, keyed
 // by row ID — the tQ analogue of useSourceNotes. In a gateway-language project
@@ -8,45 +12,20 @@ import { useEffect, useState } from "react";
 // and match by id. Door43 serves raw TSV with permissive CORS and the prod CSP
 // already allows git.door43.org.
 //
+// Per chapter (#695, the tQ twin of #691): a book or chapter range can take its
+// tQ from another Door43 source (book_source_overrides). The server sends which
+// source each chapter resolves to (GET /api/books/:book/sources →
+// tqQuestionSources), every source in it is fetched, and each question comes
+// from the source its own chapter resolves to (lib/sourceNotePlan.ts).
+//
 // Degrades gracefully: a failed fetch or an id with no source row yields no
-// entry, and the card simply omits the source block.
-
-export interface SourceQuestion {
-  question: string;
-  response: string;
-  quote: string;
-  reference: string;
-}
-
-export type SourceQuestionMap = Map<string, SourceQuestion>;
+// entry, and the card simply omits the source block. If the source plan cannot
+// be read, no questions show rather than a guess that could be another source's.
 
 const EMPTY: SourceQuestionMap = new Map();
 
 function rawUrl(org: string, repo: string, book: string): string {
   return `https://git.door43.org/${org}/${repo}/raw/branch/master/tq_${book.toUpperCase()}.tsv`;
-}
-
-// tQ TSV columns: Reference \t ID \t Tags \t Quote \t Occurrence \t Question \t Response
-function parseTsv(text: string): SourceQuestionMap {
-  const map: SourceQuestionMap = new Map();
-  // Strip a leading UTF-8 BOM and split on \r?\n (see useSourceNotes for why).
-  const lines = text.replace(/^﻿/, "").split(/\r?\n/);
-  for (const line of lines) {
-    if (!line) continue;
-    const cols = line.split("\t");
-    if (cols.length < 7) continue;
-    const [reference, id, , quote, , question, response] = cols;
-    // Skip the header by CONTENT, not position. Real row IDs are 4-char slugs.
-    if (id === "ID") continue;
-    if (!id) continue;
-    map.set(id, {
-      question: (question ?? "").replace(/\\n/g, "\n"),
-      response: (response ?? "").replace(/\\n/g, "\n"),
-      quote: quote ?? "",
-      reference: reference ?? "",
-    });
-  }
-  return map;
 }
 
 const cache = new Map<string, Promise<SourceQuestionMap>>();
@@ -60,7 +39,7 @@ function fetchSourceQuestions(org: string, repo: string, book: string): Promise<
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.text();
       })
-      .then(parseTsv)
+      .then(parseSourceQuestionTsv)
       .catch((err) => {
         cache.delete(url); // don't cache failures — allow retry
         throw err;
@@ -70,8 +49,23 @@ function fetchSourceQuestions(org: string, repo: string, book: string): Promise<
   return pending;
 }
 
-// `source` is the project's translationSource projection {org, repo}; null (the
-// English root project) short-circuits to an empty map, so no fetch fires.
+async function loadSourceQuestions(book: string): Promise<SourceQuestionMap> {
+  const plan = await fetchSourcePlan(book, "tq");
+  if (!plan) return EMPTY;
+  const repos = planRepos(plan);
+  const settled = await Promise.allSettled(repos.map((r) => fetchSourceQuestions(r.org, r.repo, book)));
+  const byRepo = new Map<string, SourceQuestionMap>();
+  settled.forEach((s, i) => {
+    if (s.status === "fulfilled") byRepo.set(repoKey(repos[i]), s.value);
+  });
+  return mergeSourceNotes(plan, byRepo);
+}
+
+// `book` is null outside translation mode, which short-circuits to an empty map
+// with no fetch. `source` is the project's translationSource projection
+// {org, repo}, only prefetched; null (no project-wide tQ repo) still reads
+// the plan, since a Door43 override applies without one. The server's plan
+// decides which repos are read.
 export function useSourceQuestions(
   book: string | null | undefined,
   source: { org: string; repo: string } | null,
@@ -82,13 +76,16 @@ export function useSourceQuestions(
   const org = source?.org ?? null;
   const repo = source?.repo ?? null;
   useEffect(() => {
-    if (!book || org === null || repo === null) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- clear the map when the book or source goes away. Deriving EMPTY in render instead would let the previous book's questions reappear when a source comes back, until its fetch lands.
+    if (!book) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- clear the map when the book goes away. Deriving EMPTY in render instead would let the previous book's questions reappear when a book comes back, until its fetch lands.
       setMap(EMPTY);
       return;
     }
     let mounted = true;
-    fetchSourceQuestions(org, repo, book)
+    // Start the project-wide file while the plan loads; almost every chapter
+    // reads it, and the shared cache hands it to loadSourceQuestions.
+    if (org !== null && repo !== null) fetchSourceQuestions(org, repo, book).catch(() => {});
+    loadSourceQuestions(book)
       .then((m) => {
         if (mounted) setMap(m);
       })

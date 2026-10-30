@@ -9,6 +9,7 @@ import test from "node:test";
 import {
   mergeSourceNotes,
   noteSourceForChapter,
+  parseSourceQuestionTsv,
   parseSourceTsv,
   planRepos,
   refChapter,
@@ -101,4 +102,46 @@ test("no project-wide tN repo, whole-book override: the server sends it as the b
   const whole = { base: OTHER, ranges: [] };
   assert.deepEqual(noteSourceForChapter(whole, 7), OTHER);
   assert.deepEqual(planRepos(whole).map(repoKey), [repoKey(OTHER)]);
+});
+
+// ── tQ (issue #695) ────────────────────────────────────────────────────────
+// The English source question beside a tQ row follows the tQ source plan the
+// same way (GET /api/books/:book/sources → tqQuestionSources). Aquifer is
+// tN-only, so a tQ plan only ever carries Door43 ranges.
+const Q_HEADER = "Reference\tID\tTags\tQuote\tOccurrence\tQuestion\tResponse\n";
+const qtsv = (rows) => Q_HEADER + rows.map(([ref, id, q]) => `${ref}\t${id}\t\t\t0\t${q}\tA: ${q}`).join("\n") + "\n";
+const EN_TQ = { org: "unfoldingWord", repo: "en_tq" };
+const RU_TQ = { org: "ru_gl", repo: "ru_tq" };
+
+test("parseSourceQuestionTsv keeps the hook's old parsing: BOM, CRLF, header by content, \\n unescaped", () => {
+  const m = parseSourceQuestionTsv("﻿" + Q_HEADER + "1:1\tab12\t\tq\t0\tWho?\\nWhy?\tHim.\\nBecause.\r\n");
+  assert.equal(m.size, 1);
+  assert.deepEqual(m.get("ab12"), { question: "Who?\nWhy?", response: "Him.\nBecause.", quote: "q", reference: "1:1" });
+});
+
+test("tQ: a dcs chapter range shows the override's question for its chapters only", () => {
+  const tqPlan = { base: EN_TQ, ranges: [{ chapter_start: 1, chapter_end: 2, ...RU_TQ }] };
+  const byRepo = new Map([
+    [repoKey(EN_TQ), parseSourceQuestionTsv(qtsv([["1:1", "ab12", "EN one"], ["5:1", "cd34", "EN five"]]))],
+    [repoKey(RU_TQ), parseSourceQuestionTsv(qtsv([["1:1", "ab12", "RU one"], ["2:3", "ef56", "RU two"], ["5:1", "cd34", "RU five"]]))],
+  ]);
+  const m = mergeSourceNotes(tqPlan, byRepo);
+  assert.equal(m.get("ab12")?.question, "RU one", "an overridden chapter shows the override's question");
+  assert.equal(m.get("ab12")?.response, "A: RU one");
+  assert.equal(m.get("ef56")?.question, "RU two");
+  assert.equal(m.get("cd34")?.question, "EN five", "a chapter no override covers keeps the project-wide question");
+});
+
+test("tQ: no override is the project-wide file unchanged", () => {
+  const baseMap = parseSourceQuestionTsv(qtsv([["1:1", "ab12", "one"], ["2:1", "cd34", "two"]]));
+  const m = mergeSourceNotes({ base: EN_TQ, ranges: [] }, new Map([[repoKey(EN_TQ), baseMap]]));
+  assert.deepEqual([...m.entries()], [...baseMap.entries()]);
+});
+
+test("tQ: a whole-book override (sent as the base) replaces the project-wide file", () => {
+  const whole = { base: RU_TQ, ranges: [] };
+  assert.deepEqual(planRepos(whole).map(repoKey), [repoKey(RU_TQ)], "only the override is fetched");
+  const m = mergeSourceNotes(whole, new Map([[repoKey(RU_TQ), parseSourceQuestionTsv(qtsv([["1:1", "ab12", "RU one"], ["9:1", "gh78", "RU nine"]]))]]));
+  assert.equal(m.get("ab12")?.question, "RU one");
+  assert.equal(m.get("gh78")?.question, "RU nine");
 });

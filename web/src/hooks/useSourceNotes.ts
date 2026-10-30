@@ -1,13 +1,6 @@
 import { useEffect, useState } from "react";
-import { api } from "../sync/api";
-import {
-  mergeSourceNotes,
-  parseSourceTsv,
-  planRepos,
-  repoKey,
-  type NoteSourcePlan,
-  type SourceNoteMap,
-} from "../lib/sourceNotePlan";
+import { mergeSourceNotes, parseSourceTsv, planRepos, repoKey, type SourceNoteMap } from "../lib/sourceNotePlan";
+import { fetchSourcePlan } from "./sourcePlans";
 
 export type { SourceNote, SourceNoteMap } from "../lib/sourceNotePlan";
 
@@ -57,29 +50,8 @@ function fetchSourceTsv(org: string, repo: string, book: string): Promise<Source
   return pending;
 }
 
-// The three Source-panel components mount together, so share one plan
-// request per book. Short-lived, so an admin's override change shows soon;
-// failures are not kept.
-const PLAN_TTL_MS = 60_000;
-const planCache = new Map<string, { at: number; pending: Promise<NoteSourcePlan | null> }>();
-
-function fetchPlan(book: string): Promise<NoteSourcePlan | null> {
-  const key = book.toUpperCase();
-  const hit = planCache.get(key);
-  if (hit && Date.now() - hit.at < PLAN_TTL_MS) return hit.pending;
-  const pending = api
-    .getBookSources(key)
-    .then((r) => r.tnNoteSources ?? null)
-    .catch((err) => {
-      planCache.delete(key);
-      throw err;
-    });
-  planCache.set(key, { at: Date.now(), pending });
-  return pending;
-}
-
 async function loadSourceNotes(book: string): Promise<SourceNoteMap> {
-  const plan = await fetchPlan(book);
+  const plan = await fetchSourcePlan(book, "tn");
   if (!plan) return EMPTY;
   const repos = planRepos(plan);
   const settled = await Promise.allSettled(repos.map((r) => fetchSourceTsv(r.org, r.repo, book)));
