@@ -910,8 +910,12 @@ export const BULK_ROW_CAP = 50;
 const CONFIRM_TTL_SECONDS = 10 * 60;
 
 // What a confirm token binds: the link and workspace it was issued to (from
-// the session, never an argument), the arguments, the sorted id:version list
-// the dry run found, and its expiry (unix seconds).
+// the session, never an argument), the arguments, the rows the dry run found
+// as sorted [id, version, updated_at], and its expiry (unix seconds).
+// updated_at is there because approve and un-approve never bump the version
+// but do set updated_at (rows.ts setTnTranslationState): without it, a web
+// re-approval after the preview (or after an earlier confirm of the same
+// token) looks exactly like the row the reviewer agreed to un-approve.
 interface BulkTokenBody {
   ws: string;
   link: number;
@@ -920,7 +924,7 @@ interface BulkTokenBody {
   chapter: number;
   vs: number;
   ve: number | null;
-  r: [string, number][];
+  r: [string, number, number][];
   exp: number;
 }
 
@@ -975,7 +979,7 @@ const SKIP_REASONS = {
 const bulkSetState: ToolDef = {
   name: "bpt_bulk_set_state",
   description:
-    "Move the approved translation notes (kind tn) or questions (kind tq) of a verse range in one chapter back to needs review (state edited), for when a reviewer wants a stretch looked at again. It NEVER approves anything: to approve, use bpt_approve on each row the reviewer has read. Always two calls. 1) Call without confirm_token: a preview that changes nothing and returns would_change (how many approved rows would go back to needs review), their ids and versions, the rows it would skip and why (AI drafts and edited rows already need review; trashed rows and rows that are not translation drafts are left alone), and a confirm_token. Tell the reviewer the count and get a clear yes. 2) Call again with exactly the same book, kind, chapter, verse_start and verse_end plus confirm_token: only the rows in the preview change. A row someone changed since the preview is left as it is and listed in not_changed with its current state and version. remaining counts rows in the range that are approved after the call (approved or changed since the preview): run a new preview to include them. The token lasts 10 minutes and works only for this user's link and the same arguments; otherwise nothing changes. At most " +
+    "Move the approved translation notes (kind tn) or questions (kind tq) of a verse range in one chapter back to needs review (state edited), for when a reviewer wants a stretch looked at again. It NEVER approves anything: to approve, use bpt_approve on each row the reviewer has read. Always two calls. 1) Call without confirm_token: a preview that changes nothing and returns would_change (how many approved rows would go back to needs review), their ids and versions, the rows it would skip and why (AI drafts and edited rows already need review; trashed rows and rows that are not translation drafts are left alone), and a confirm_token. Tell the reviewer the count and get a clear yes. 2) Call again with exactly the same book, kind, chapter, verse_start and verse_end plus confirm_token: only the rows in the preview change. A row that changed since the preview (edited, approved or un-approved by someone, or already un-approved by an earlier confirm of this same preview) is left as it is and listed in not_changed with its current state and version, so calling confirm twice is safe. remaining counts rows in the range that are approved after the call (approved or changed since the preview): run a new preview to include them. remaining is null when that count could not be read; the rows listed as applied were still changed. The token lasts 10 minutes and works only for this user's link and the same arguments; otherwise nothing changes. At most " +
     `${BULK_ROW_CAP} approved rows per call; a bigger range is refused, so narrow verse_start/verse_end. Requires edit access.`,
   inputSchema: {
     type: "object",
@@ -1025,7 +1029,9 @@ const bulkSetState: ToolDef = {
         const reason = r.trashed_at ? "trashed" : r.translation_state == null ? "not_a_draft" : r.translation_state === "ai_draft" ? "ai_draft" : "edited";
         skipped.set(reason, [...(skipped.get(reason) ?? []), String(r.id)]);
       }
-      const r: [string, number][] = change.map((x) => [String(x.id), Number(x.version)] as [string, number]).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+      const r = change
+        .map((x): [string, number, number] => [String(x.id), Number(x.version), Number(x.updated_at)])
+        .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
       const preview = {
         status: "preview",
         ...scope,
@@ -1050,7 +1056,30 @@ const bulkSetState: ToolDef = {
     const t = await openToken(args.confirm_token, session, { book, kind, chapter, vs, ve });
     const appliedIds: string[] = [];
     const notChanged: Record<string, unknown>[] = [];
-    for (const [id, version] of t.r) {
+    const changed = (id: string, cur: Record<string, unknown>) =>
+      notChanged.push({
+        id,
+        reason: "changed_since_preview",
+        why: "changed since the preview, by someone else or by an earlier confirm of this same preview",
+        current_state: cur.translation_state ?? null,
+        current_version: cur.version,
+        trashed: cur.trashed_at ? true : undefined,
+      });
+    // Read the rows fresh and send a write only for those still exactly as the
+    // preview saw them, updated_at included (see BulkTokenBody). The validate
+    // itself pins version and state; what remains open is a web un-approve
+    // plus re-approve landing between this read and that row's write.
+    const now = new Map((await inRange()).map((x) => [String(x.id), x]));
+    for (const [id, version, updatedAt] of t.r) {
+      const cur = now.get(id);
+      if (!cur) {
+        notChanged.push({ id, reason: "gone" });
+        continue;
+      }
+      if (!approvedLive(cur) || Number(cur.version) !== version || Number(cur.updated_at) !== updatedAt) {
+        changed(id, cur);
+        continue;
+      }
       // value 0 only: this loop has no way to approve.
       const { status, body } = await session.send(
         "POST",
@@ -1060,18 +1089,17 @@ const bulkSetState: ToolDef = {
       );
       const b = (body ?? {}) as Record<string, unknown>;
       if (status === 200) appliedIds.push(id);
-      else if (status === 409 && b.error === "version_mismatch") {
-        const cur = (b.current ?? {}) as Record<string, unknown>;
-        notChanged.push({
-          id,
-          reason: "changed_since_preview",
-          current_state: cur.translation_state ?? null,
-          current_version: cur.version,
-          trashed: cur.trashed_at ? true : undefined,
-        });
-      } else notChanged.push({ id, reason: status === 404 ? "gone" : `refused_${status}` });
+      else if (status === 409 && b.error === "version_mismatch") changed(id, (b.current ?? {}) as Record<string, unknown>);
+      else notChanged.push({ id, reason: status === 404 ? "gone" : `refused_${status}` });
     }
-    const remaining = (await inRange()).filter(approvedLive).length;
+    // The rows are already changed by now, so a failed count must not turn the
+    // whole result into an error.
+    let remaining: number | null = null;
+    try {
+      remaining = (await inRange()).filter(approvedLive).length;
+    } catch (e) {
+      console.error("bpt_bulk_set_state: remaining count failed", e instanceof Error ? (e.stack ?? e.message) : String(e));
+    }
     return {
       status: "done",
       ...scope,
@@ -1081,8 +1109,14 @@ const bulkSetState: ToolDef = {
       remaining,
       message:
         `${appliedIds.length} ${kind} rows went back to needs review.` +
-        (notChanged.length ? ` ${notChanged.length} changed since the preview or could not be changed, and were left as they are.` : "") +
-        (remaining ? ` ${remaining} rows in this range are approved now; preview again to include them.` : ""),
+        (notChanged.length
+          ? ` ${notChanged.length} were left as they are: changed since the preview (by someone else, or by an earlier confirm of this same preview) or gone.`
+          : "") +
+        (remaining === null
+          ? " How many rows in this range are approved now could not be read; preview again to see."
+          : remaining
+            ? ` ${remaining} rows in this range are approved now; preview again to include them.`
+            : ""),
     };
   },
 };
