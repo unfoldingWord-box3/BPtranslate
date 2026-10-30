@@ -79,7 +79,7 @@ export async function readSourceNotes(env: Env, book: string): Promise<SourceNot
       const why = res.timedOut
         ? "Door43 did not answer in time"
         : res.status === 404
-          ? "it has no such file"
+          ? "it has no such file, or the repository is not public"
           : res.truncated
             ? "the download was cut short"
             : res.status

@@ -8,10 +8,13 @@
 //
 // Each tool reads through the SAME route handlers the web app uses (`getJson`
 // runs the Hono app in-process), so chat and web never disagree about counts
-// or which rows are live. One deliberate exception: the article and template
-// counts in bpt_package_status come from session.packageRefs, a read-only D1
-// query (packageRefs.ts), because those list routes are editor-only and the
-// in-process call carries no user. Tool names carry the bpt_ prefix because BT Servant
+// or which rows are live. Two deliberate exceptions: (1) the article and
+// template counts in bpt_package_status come from session.packageRefs, a
+// read-only D1 query (packageRefs.ts), because those list routes are
+// editor-only and the in-process call carries no user; (2) bpt_chunk_work's
+// en_note comes from session.sourceNotes (sourceNotes.ts), an anonymous
+// Door43 read of the same English tN file the web app's browser fetches.
+// Tool names carry the bpt_ prefix because BT Servant
 // pools every registered server's tools into one namespace.
 
 export interface McpWorkspace {
@@ -300,6 +303,31 @@ function projectRow(kind: "tn" | "tq", r: Record<string, unknown>, cap?: number)
   return { ...common, question: q.text, response: a.text, truncated: q.cut || a.cut || undefined };
 }
 
+// The first row of a page is always admitted (so the cursor moves), so one row
+// must fit the budget on its own: a 6,000-character note in a 3-byte script
+// plus a 6,000-character English note, after JSON escaping, can pass BT
+// Servant's 32 KB cap. Shorten en_note (never the row's own note) to the
+// longest prefix that fits, or drop it to null; either way en_truncated.
+function fitEnNote(row: Record<string, unknown>): Record<string, unknown> {
+  const en = row.en_note;
+  if (typeof en !== "string" || byteLength(row) <= PAGE_BYTE_BUDGET) return row;
+  const withLen = (n: number) => {
+    let text = en.slice(0, n);
+    // Do not end on half of a surrogate pair.
+    if (/[\uD800-\uDBFF]$/.test(text)) text = text.slice(0, -1);
+    return { ...row, en_note: text, en_truncated: true };
+  };
+  if (byteLength(withLen(0)) > PAGE_BYTE_BUDGET) return { ...row, en_note: null, en_truncated: true };
+  let lo = 0;
+  let hi = en.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (byteLength(withLen(mid)) <= PAGE_BYTE_BUDGET) lo = mid;
+    else hi = mid - 1;
+  }
+  return withLen(lo);
+}
+
 // Keyset cursor: the sort key of the last row returned, in the order
 // chapters.ts serves rows (verse, sort_order NULLS LAST, id). A row trashed,
 // deleted or added before the cursor between pages cannot shift the next page
@@ -338,7 +366,7 @@ function parseCursor(raw: unknown): SortKey | null {
 const chunkWork: ToolDef = {
   name: "bpt_chunk_work",
   description:
-    "The translation notes (kind tn) or questions (kind tq) for a verse range in one chapter, with each row's id, current text, state (ai_draft, validated, ...) and version. Each tn row also has en_note: the published English note it was translated from, for comparison (null when the English source has no note with that id or could not be read; the top-level note says why). Results are paged: if next_cursor is not null, call again with it to get the rest. Never claim a chunk is complete until next_cursor is null. A row marked truncated has long text cut; read it whole with bpt_get_row. en_truncated means the English note was cut.",
+    "The translation notes (kind tn) or questions (kind tq) for a verse range in one chapter, with each row's id, current text, state (ai_draft, validated, ...) and version. Each tn row also has en_note: the published English note it was translated from, for comparison (null when the English source has no note with that id or could not be read; the top-level note says why). Results are paged: if next_cursor is not null, call again with it to get the rest. Never claim a chunk is complete until next_cursor is null. A row marked truncated has long text cut; read it whole with bpt_get_row. en_truncated means the English note was cut, or left out (null) to keep the page under the size limit.",
   inputSchema: {
     type: "object",
     properties: {
@@ -387,7 +415,7 @@ const chunkWork: ToolDef = {
       if (en) {
         const text = en.ok ? en.notes.get(String(all[i].id)) : undefined;
         const cut = text === undefined ? null : capText(text, ROW_TEXT_CAP);
-        row = { ...row, en_note: cut ? cut.text : null, en_truncated: cut?.cut || undefined };
+        row = fitEnNote({ ...row, en_note: cut ? cut.text : null, en_truncated: cut?.cut || undefined });
       }
       const size = byteLength(row);
       // Always return at least one row, or the cursor would never move.
@@ -398,7 +426,8 @@ const chunkWork: ToolDef = {
     let note: string | null = null;
     if (en && !en.ok) note = `en_note is null on every row: ${en.reason}`;
     else if (en?.ok) {
-      const missing = rows.filter((r) => r.en_note === null).length;
+      // A row whose en_note was dropped to fit the page is not "missing".
+      const missing = rows.filter((r) => r.en_note === null && !r.en_truncated).length;
       if (missing > 0) {
         note = `${missing} of these notes have no English note with the same id in ${en.source} (added in this project, or the id changed), so their en_note is null.`;
       }

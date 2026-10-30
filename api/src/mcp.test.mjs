@@ -130,6 +130,14 @@ async function apiFor(ws, path) {
         // Arabic notes with long English sources: both count toward the budget.
         return { status: 200, body: { tn: Array.from({ length: 25 }, (_v, i) => tnRow(i + 800, 1, 1500, "ع")), tq: [] } };
       }
+      if (path === "/api/chapters/TIT/13") {
+        // One full-length note in a 3-byte script (Ethiopic), then a short one.
+        return { status: 200, body: { tn: [tnRow(900, 1, ROW_TEXT_CAP, "ሀ"), tnRow(901, 2)], tq: [] } };
+      }
+      if (path === "/api/chapters/TIT/14") {
+        // A note that is over the budget on its own once JSON-escaped.
+        return { status: 200, body: { tn: [tnRow(950, 1, ROW_TEXT_CAP, "\u0001")], tq: [] } };
+      }
       if (path.startsWith("/api/rows/tn/r5")) return { status: 200, body: tnRow(5, 2) };
       return { status: 404, body: { error: "not_found" } };
 }
@@ -495,6 +503,23 @@ console.log("[tools] English source notes");
   const arabic = await call("bpt_chunk_work", { book: "TIT", chapter: 12, kind: "tn", limit: 25 });
   assert(arabic.data.next_cursor !== null && arabic.data.rows.every((r) => r.en_note.length === 1500), "Arabic notes with English sources page early");
   assert(byteLength(arabic.data) < PAGE_BYTE_BUDGET + 2000, `the page with en_note stays under the byte budget (${byteLength(arabic.data)} bytes)`);
+
+  // The first row is always admitted, so it must fit on its own: a 6,000-char
+  // 3-byte-script note plus a 6,000-char English note full of quotes (two
+  // bytes each once JSON-escaped) is ~30 KB before fitting.
+  srcStub = { ok: true, source: "unfoldingWord/en_tn", notes: new Map([["r900", '"'.repeat(ROW_TEXT_CAP)], ["r901", "short"]]) };
+  const wide = await call("bpt_chunk_work", { book: "TIT", chapter: 13, kind: "tn", limit: 25 });
+  const first = wide.data.rows[0];
+  assert(first.id === "r900" && first.note.length === ROW_TEXT_CAP, "the row's own note is left whole");
+  assert(first.en_truncated === true && first.en_note.length > 0 && first.en_note.length < ROW_TEXT_CAP, "en_note is shortened to fit and marked en_truncated");
+  assert(byteLength(first) <= PAGE_BYTE_BUDGET, `the first row fits the budget on its own (${byteLength(first)} bytes)`);
+  assert(byteLength(wide.data) < PAGE_BYTE_BUDGET + 2000 && byteLength(wide.data) < 32000, `the page stays under budget plus envelope and under 32 KB (${byteLength(wide.data)} bytes)`);
+  assert(!/no English note/.test(wide.data.note ?? ""), "a shortened en_note is not reported as missing");
+
+  srcStub = { ok: true, source: "unfoldingWord/en_tn", notes: new Map([["r950", "English"]]) };
+  const over = await call("bpt_chunk_work", { book: "TIT", chapter: 14, kind: "tn" });
+  assert(over.data.rows[0].en_note === null && over.data.rows[0].en_truncated === true, "a row over budget on its own note drops en_note to null, marked en_truncated");
+  assert(over.data.rows[0].note.length === ROW_TEXT_CAP, "and still keeps its own note");
   srcStub = NO_SOURCE;
 }
 
@@ -533,7 +558,7 @@ console.log("[sourceNotes] Door43 read, cache and degradation");
 
     reply = () => new Response("nope", { status: 404 });
     const missing = await readSourceNotes(ml, "OBA");
-    assert(!missing.ok && /no such file/.test(missing.reason), "404 -> not ok, with a reason");
+    assert(!missing.ok && /no such file, or the repository is not public/.test(missing.reason), "404 -> not ok; the reason allows for a private repo");
     await readSourceNotes(ml, "OBA");
     assert(fetched.length === 3, "a failure is not cached");
 
