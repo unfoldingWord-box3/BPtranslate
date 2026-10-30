@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { fallbackSourcePlan, mergeSourceNotes, parseSourceTsv, planRepos, repoKey, type RepoSource, type SourceNoteMap } from "../lib/sourceNotePlan";
-import { fetchSourcePlan } from "./sourcePlans";
+import { fallbackSourcePlan, mergeSourceNotes, parseSourceTsv, planRepos, repoKey, type NoteSourcePlan, type SourceNoteMap } from "../lib/sourceNotePlan";
+import { watchSourcePlan } from "./sourcePlans";
 
 export type { SourceNote, SourceNoteMap } from "../lib/sourceNotePlan";
 
@@ -23,7 +23,8 @@ export type { SourceNote, SourceNoteMap } from "../lib/sourceNotePlan";
 // entry, and the card simply omits the source block. If the source plan cannot
 // be read (request failed, or the server could not resolve it), the
 // project-wide file shows for every chapter, as before the per-chapter plan
-// (#697); an authoring project (null plan) shows none.
+// (#697) until a background retry reads the plan; an authoring project (null
+// plan) shows none.
 
 const EMPTY: SourceNoteMap = new Map();
 
@@ -52,9 +53,7 @@ function fetchSourceTsv(org: string, repo: string, book: string): Promise<Source
   return pending;
 }
 
-async function loadSourceNotes(book: string, projectWide: RepoSource | null): Promise<SourceNoteMap> {
-  // A plan that cannot be read falls back to the project-wide file (#697).
-  const plan = await fetchSourcePlan(book, "tn").catch(() => fallbackSourcePlan(projectWide));
+async function loadSourceNotes(book: string, plan: NoteSourcePlan | null): Promise<SourceNoteMap> {
   if (!plan) return EMPTY;
   const repos = planRepos(plan);
   const settled = await Promise.allSettled(repos.map((r) => fetchSourceTsv(r.org, r.repo, book)));
@@ -89,15 +88,24 @@ export function useSourceNotes(
     // Start the project-wide file while the plan loads; almost every chapter
     // reads it, and the shared cache hands it to loadSourceNotes.
     if (org !== null && repo !== null) fetchSourceTsv(org, repo, book).catch(() => {});
-    loadSourceNotes(book, org !== null && repo !== null ? { org, repo } : null)
-      .then((m) => {
-        if (mounted) setMap(m);
-      })
-      .catch(() => {
-        if (mounted) setMap(EMPTY);
-      });
+    // A plan that cannot be read falls back to the project-wide file now and
+    // is retried in the background; a later success replaces the fallback
+    // (#697). `seq` keeps a slow earlier load from overwriting a newer one.
+    const projectWide = org !== null && repo !== null ? { org, repo } : null;
+    let seq = 0;
+    const stop = watchSourcePlan(book, "tn", (plan) => {
+      const mine = ++seq;
+      loadSourceNotes(book, plan === undefined ? fallbackSourcePlan(projectWide) : plan)
+        .then((m) => {
+          if (mounted && mine === seq) setMap(m);
+        })
+        .catch(() => {
+          if (mounted && mine === seq) setMap(EMPTY);
+        });
+    });
     return () => {
       mounted = false;
+      stop();
     };
   }, [book, org, repo]);
   return map;

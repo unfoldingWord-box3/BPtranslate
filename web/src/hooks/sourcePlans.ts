@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../sync/api";
-import { fallbackSourcePlan, planFromBookSources, type NoteSourcePlan, type RepoSource } from "../lib/sourceNotePlan";
+import { fallbackSourcePlan, loadWithRetry, planFromBookSources, type NoteSourcePlan, type RepoSource } from "../lib/sourceNotePlan";
 
 // Which Door43 source each chapter's English source note (tN, #691) or source
 // question (tQ, #695) is read from: GET /api/books/:book/sources sends both
@@ -43,6 +43,18 @@ export function fetchSourcePlan(book: string, resource: "tn" | "tq"): Promise<No
   return fetchBookSources(book).then((r) => planFromBookSources(r, resource));
 }
 
+// Hands `onPlan` the book's plan; undefined when it cannot be read, which
+// means "show the fallback". A failed read is retried in the background
+// (PLAN_RETRY_DELAYS_MS), and a later success arrives as a second call (#697).
+// Returns the cancel, for an effect's cleanup.
+export function watchSourcePlan(
+  book: string,
+  resource: "tn" | "tq",
+  onPlan: (plan: NoteSourcePlan | null | undefined) => void,
+): () => void {
+  return loadWithRetry(() => fetchSourcePlan(book, resource), onPlan);
+}
+
 // The plan the Source panel reads by, with the failure fallback applied: the
 // fetched plan, or the project-wide file for every chapter while it loads or
 // when it cannot be read (#697). For the flows screens' empty-state wording
@@ -58,17 +70,7 @@ export function useSourcePlan(
   const [fetched, setFetched] = useState<{ book: string; plan: NoteSourcePlan | null } | null>(null);
   useEffect(() => {
     if (!book) return;
-    let mounted = true;
-    fetchSourcePlan(book, resource)
-      .then((plan) => {
-        if (mounted) setFetched({ book, plan });
-      })
-      .catch(() => {
-        if (mounted) setFetched(null);
-      });
-    return () => {
-      mounted = false;
-    };
+    return watchSourcePlan(book, resource, (plan) => setFetched(plan === undefined ? null : { book, plan }));
   }, [book, resource]);
   if (!book) return null;
   if (fetched && fetched.book === book) return fetched.plan;
