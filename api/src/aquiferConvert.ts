@@ -115,6 +115,11 @@ export function aquiferRef(it: AquiferItem): { ref: string; isIntro: boolean } |
   const passage = it.associations?.passage?.[0];
   const startUsfm = passage?.start_ref_usfm || "";
   const endUsfm = passage?.end_ref_usfm || "";
+  // The v2026-10-14 release carries stray items from other books under index
+  // "00000000" (hin GEN has 1,224 First Corinthians notes). No book is 00, so
+  // they belong to no import here; without this they would match the book-intro
+  // test below and be minted into the book's front matter.
+  if (idx === "00000000") return null;
   if (/^\d{2}000000$/.test(idx)) return { ref: "front:intro", isIntro: true };
   const start = startUsfm.includes(" ") ? startUsfm.split(" ", 2)[1] : "";
   // Chapter intros carry a NON-NUMERIC index (e.g. "08Ruth000"); a verse RANGE
