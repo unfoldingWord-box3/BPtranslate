@@ -65,7 +65,7 @@
 //                            05:30 cron, api/src/index.ts:388). Behind a confirm
 //                            dialog. Double-submit within the same second collides
 //                            into the server's 409 workflow_create_failed
-//                            (deterministic workflowRunId, exports.ts:18-20).
+//                            (deterministic workflowRunId, contextExportQueue.ts).
 //   * Check run status     → GET /api/exports/instance/:id (api/src/exports.ts:114)
 //                            — only valid for the id just returned by /run;
 //                            export_snapshots rows don't store instance ids
