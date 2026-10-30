@@ -18,10 +18,13 @@ import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 
 import { rows } from "./rows.ts";
+import { templates } from "./templates.ts";
+import { projectConfig } from "./projectConfigRoutes.ts";
 import { attachAuth, chatWriteEnv, requireCsrf } from "./auth.ts";
 import { requireWorkspaceMatch } from "./workspaces.ts";
 import { blockViewerWrites } from "./viewerGuard.ts";
 import { dispatch } from "./mcp.ts";
+import { templatePlaceholders } from "./mcpTools.ts";
 
 function makeDb(sqlite) {
   const mk = (sql, args) => ({
@@ -52,7 +55,14 @@ const BOOK = "TIT";
 const EDITOR = "e".repeat(40);
 const VIEWER = "v".repeat(40);
 
-function fresh() {
+// getProjectConfig caches per WORKSPACE_SLUG, so each fresh() gets its own.
+let slugCounter = 0;
+
+const SPEAKER_SRC =
+  "SPEAKER is leaving out some of the words that in many languages a sentence would need in order to be complete. You can supply these words from the context if that would be clearer in your language. Alternate translation: [text]";
+const METAPHOR_SRC = "David is speaking of Yahweh as if he were a high **rock** ... Alternate translation: [Yahweh is like a rock to me]";
+
+function fresh({ preset = "ar-bsoj" } = {}) {
   const sqlite = new DatabaseSync(":memory:");
   const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations");
   for (const f of readdirSync(dir).filter((f) => f.endsWith(".sql")).sort()) {
@@ -67,6 +77,18 @@ function fresh() {
   tn.run("ab12", BOOK, 1, "1:1", "draft note", "ai_draft", null);
   tn.run("tr01", BOOK, 2, "1:2", "trashed note", "ai_draft", 500);
   tn.run("en01", BOOK, 3, "1:3", "english note", null, null);
+  tn.run("el01", BOOK, 4, "1:4", "ellipsis note", "ai_draft", null);
+  sqlite.prepare(`UPDATE tn_rows SET support_reference = 'rc://*/ta/man/translate/figs-ellipsis' WHERE id = 'el01'`).run();
+  sqlite.prepare(`INSERT INTO template_sync_state (id, last_synced_at, last_result_json) VALUES (1, unixepoch(), '{}')`).run();
+  sqlite.prepare(`INSERT INTO project_config (id, preset, updated_at) VALUES (1, ?, unixepoch())`).run(preset);
+  const unit = sqlite.prepare(
+    `INSERT INTO template_units (template_id, support_ref, sheet_order, type, source_md, source_hash, origin, target_md, translation_state, version)
+     VALUES (?, ?, ?, ?, ?, 'h', ?, ?, ?, ?)`,
+  );
+  unit.run("figs-ellipsis-01", "figs-ellipsis", 10, "", SPEAKER_SRC, "sheet", null, null, 1);
+  unit.run("figs-ellipsis-02", "figs-ellipsis", 11, "second", "Second wording. [text]", "sheet", "second target [text]", "validated", 2);
+  unit.run("builtin-ellipsis", "figs-ellipsis", 1, null, "Built-in wording", "builtin", null, null, 1);
+  unit.run("figs-metaphor-02", "figs-metaphor", 12, "", METAPHOR_SRC, "sheet", null, null, 1);
   sqlite.prepare(
     `INSERT INTO tq_rows (id, book, chapter, verse, ref_raw, question, response, version, translation_state)
      VALUES ('q001', ?, 1, 1, '1:1', 'old q?', 'old a.', 2, 'ai_draft')`,
@@ -79,8 +101,10 @@ function fresh() {
   app.use("*", requireCsrf);
   app.use("/api/*", blockViewerWrites);
   app.route("/api/rows", rows);
+  app.route("/api/templates", templates);
+  app.route("/api/project-config", projectConfig);
 
-  const env = { DB: makeDb(sqlite) };
+  const env = { DB: makeDb(sqlite), WORKSPACE_SLUG: `t${++slugCounter}` };
   const ctx = {
     waitUntil(p) {
       if (p && typeof p.catch === "function") p.catch(() => {});
@@ -94,9 +118,12 @@ function fresh() {
     getJson: async (path) => asJson(await app.request(path, {}, env, ctx)),
     // As index.ts sends it.
     send: async (method, path, body, ifMatch) => {
-      const headers = { "Content-Type": "application/json" };
+      const headers = {};
+      if (body !== undefined) headers["Content-Type"] = "application/json";
       if (ifMatch !== undefined) headers["If-Match"] = String(ifMatch);
-      return asJson(await app.request(path, { method, headers, body: JSON.stringify(body) }, chatWriteEnv(env, principal), ctx));
+      return asJson(
+        await app.request(path, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) }, chatWriteEnv(env, principal), ctx),
+      );
     },
     packageRefs: async () => ({}),
     sourceNotes: async () => ({ ok: false, reason: "test" }),
@@ -115,7 +142,13 @@ function fresh() {
   };
   const tnRow = (id) => ({ ...sqlite.prepare(`SELECT note, version, translation_state FROM tn_rows WHERE id = ?`).get(id) });
   const log = () => sqlite.prepare(`SELECT kind, row_key, user_id, action, source, prev_version, new_version FROM edit_log ORDER BY id`).all().map((r) => ({ ...r }));
-  return { app, env, ctx, call, tnRow, log, sqlite };
+  const tpl = (id) => ({ ...sqlite.prepare(`SELECT target_md, translation_state, version FROM template_units WHERE template_id = ?`).get(id) });
+  const tplLog = () =>
+    sqlite
+      .prepare(`SELECT row_key, user_id, action, source FROM edit_log WHERE kind = 'template' ORDER BY id`)
+      .all()
+      .map((r) => ({ ...r }));
+  return { app, env, ctx, call, tnRow, log, sqlite, tpl, tplLog };
 }
 
 test("bpt_edit_row then bpt_approve: saved as the linked user, source chat, version-pinned", async () => {
@@ -408,4 +441,167 @@ test("the web app's unpinned validate is unchanged: it still flips a trashed row
   assert.equal(res.status, 200);
   assert.equal(sqlite.prepare(`SELECT translation_state FROM tn_rows WHERE id = 'tr01'`).get().translation_state, "validated");
   assert.equal(conflictLog(sqlite).length, 0);
+});
+
+// ── Issue #702: chat tools that update note templates ───────────────────────
+
+const NEW_WORDING = "Kelmat maḥdhūfa. Alternate translation: [text] SPEAKER";
+
+test("bpt_templates_for_row: candidates in export order, drafts fed by the first sheet one only", async () => {
+  const { call } = fresh();
+  const r = await call("bpt_templates_for_row", { id: "el01" });
+  assert.equal(r.isError, false, JSON.stringify(r.data));
+  assert.equal(r.data.support_reference, "figs-ellipsis");
+  assert.ok(r.data.note);
+  assert.deepEqual(r.data.templates.map((t) => t.template_id), ["builtin-ellipsis", "figs-ellipsis-01", "figs-ellipsis-02"]);
+  assert.deepEqual(r.data.templates.map((t) => t.feeds_drafts), [false, true, false]);
+  const t1 = r.data.templates[1];
+  assert.equal(t1.target_md, null);
+  assert.equal(t1.state, null);
+  assert.equal(t1.version, 1);
+  assert.deepEqual(t1.placeholders, ["SPEAKER", "[text]"]);
+  assert.equal(t1.pre_draft_json, undefined);
+});
+
+test("templatePlaceholders: slots versus example text", () => {
+  const m = templatePlaceholders(METAPHOR_SRC);
+  assert.deepEqual(m.placeholders, []);
+  assert.deepEqual(m.examples, ["**rock**", "[Yahweh is like a rock to me]"]);
+  const r = templatePlaceholders("ULT and UST show **text** then [idiomatic_example_text] and WORD1, WORDS, [passed away], [word2], [Name2]");
+  assert.deepEqual(r.placeholders, ["**text**", "[idiomatic_example_text]", "WORD1", "WORDS", "[word2]", "[Name2]"]);
+  for (const want of ["**text**", "[idiomatic_example_text]", "WORD1", "[word2]", "[Name2]"]) assert.ok(r.placeholders.includes(want), want);
+  assert.ok(!r.placeholders.includes("ULT") && !r.placeholders.includes("UST"));
+  assert.deepEqual(r.examples, ["[passed away]"]);
+});
+
+test("edit then approve a template: applied, version-pinned, audited as chat", async () => {
+  const { call, tpl, tplLog } = fresh();
+  const edit = await call("bpt_edit_template", { template_id: "figs-ellipsis-01", version: 1, text: NEW_WORDING });
+  assert.equal(edit.isError, false, JSON.stringify(edit.data));
+  assert.equal(edit.data.status, "applied");
+  assert.equal(edit.data.version, 2);
+  assert.equal(edit.data.state, "edited");
+  assert.equal(edit.data.template.target_md, NEW_WORDING);
+  const ok = await call("bpt_approve_template", { template_id: "figs-ellipsis-01", version: 2 });
+  assert.equal(ok.isError, false, JSON.stringify(ok.data));
+  assert.equal(ok.data.status, "applied");
+  assert.equal(ok.data.version, 2);
+  assert.equal(ok.data.state, "validated");
+  assert.deepEqual(tpl("figs-ellipsis-01"), { target_md: NEW_WORDING, translation_state: "validated", version: 2 });
+  assert.deepEqual(tplLog(), [
+    { row_key: "figs-ellipsis-01", user_id: 9, action: "update", source: "chat" },
+    { row_key: "figs-ellipsis-01", user_id: 9, action: "validate", source: "chat" },
+  ]);
+});
+
+test("template: a stale version is a conflict and changes nothing", async () => {
+  const { call, tpl, tplLog } = fresh();
+  await call("bpt_edit_template", { template_id: "figs-ellipsis-01", version: 1, text: NEW_WORDING });
+  const before = tplLog().length;
+  const stale = await call("bpt_edit_template", { template_id: "figs-ellipsis-01", version: 1, text: "SPEAKER [text] other" });
+  assert.equal(stale.isError, false);
+  assert.equal(stale.data.status, "conflict");
+  assert.equal(stale.data.your_text, "SPEAKER [text] other");
+  assert.equal(stale.data.current.target_md, NEW_WORDING);
+  assert.equal(stale.data.current.version, 2);
+  assert.deepEqual(tpl("figs-ellipsis-01"), { target_md: NEW_WORDING, translation_state: "edited", version: 2 });
+
+  const staleApprove = await call("bpt_approve_template", { template_id: "figs-ellipsis-01", version: 1 });
+  assert.equal(staleApprove.data.status, "conflict", JSON.stringify(staleApprove.data));
+  assert.equal(staleApprove.data.your_text, undefined);
+  assert.equal(staleApprove.data.current.version, 2);
+  assert.equal(tpl("figs-ellipsis-01").translation_state, "edited");
+  assert.equal(tplLog().length, before, "no audit entry for either refused write");
+});
+
+test("template edit: a dropped placeholder or empty text is refused and nothing is written", async () => {
+  const { call, tpl, tplLog } = fresh();
+  const dropped = await call("bpt_edit_template", { template_id: "figs-ellipsis-01", version: 1, text: "SPEAKERS only, no slot" });
+  assert.equal(dropped.isError, true);
+  assert.match(dropped.data.error, /\[text\]/);
+  assert.match(dropped.data.error, /SPEAKER/);
+  for (const text of ["", "   \n"]) {
+    const empty = await call("bpt_edit_template", { template_id: "figs-ellipsis-01", version: 1, text });
+    assert.equal(empty.isError, true);
+    assert.match(empty.data.error, /text is required/);
+  }
+  assert.deepEqual(tpl("figs-ellipsis-01"), { target_md: null, translation_state: null, version: 1 });
+  assert.equal(tplLog().length, 0);
+});
+
+test("template tools: a viewer is refused and nothing is written", async () => {
+  const { call, tpl, tplLog } = fresh();
+  const a = await call("bpt_templates_for_row", { id: "el01" }, VIEWER);
+  const b = await call("bpt_edit_template", { template_id: "figs-ellipsis-01", version: 1, text: NEW_WORDING }, VIEWER);
+  const c = await call("bpt_approve_template", { template_id: "figs-ellipsis-02", version: 2 }, VIEWER);
+  for (const r of [a, b, c]) {
+    assert.equal(r.isError, true);
+    assert.match(r.data.error, /cannot edit/);
+  }
+  assert.deepEqual(tpl("figs-ellipsis-01"), { target_md: null, translation_state: null, version: 1 });
+  assert.equal(tplLog().length, 0);
+});
+
+test("template tools: an authoring project is refused", async () => {
+  const { call, tplLog } = fresh({ preset: "en-unfoldingword" });
+  const a = await call("bpt_templates_for_row", { id: "el01" });
+  assert.equal(a.isError, true);
+  assert.match(a.data.error, /authoring mode/);
+  const b = await call("bpt_edit_template", { template_id: "figs-ellipsis-01", version: 1, text: NEW_WORDING });
+  assert.equal(b.isError, true);
+  assert.match(b.data.error, /authoring mode/);
+  assert.equal(tplLog().length, 0);
+});
+
+test("template approve: nothing to approve before any wording is saved", async () => {
+  const { call, tpl, tplLog } = fresh();
+  const r = await call("bpt_approve_template", { template_id: "figs-ellipsis-01", version: 1 });
+  assert.equal(r.isError, true);
+  assert.match(r.data.error, /nothing to approve/);
+  assert.deepEqual(tpl("figs-ellipsis-01"), { target_md: null, translation_state: null, version: 1 });
+  assert.equal(tplLog().length, 0);
+});
+
+test("bpt_templates_for_row: a tn row with no support reference is a clean error", async () => {
+  const { call } = fresh();
+  const r = await call("bpt_templates_for_row", { id: "ab12" });
+  assert.equal(r.isError, true);
+  assert.match(r.data.error, /no support reference/);
+});
+
+test("the web app's template validate and patch (no pins) are unchanged: source NULL", async () => {
+  const { env, ctx, tpl, tplLog } = fresh();
+  const web = new Hono();
+  web.use("*", async (c, next) => {
+    c.set("userId", 9);
+    c.set("role", "editor");
+    await next();
+  });
+  web.route("/api/templates", templates);
+  const post = (path, method, body, headers = {}) =>
+    web.request(path, { method, headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) }, env, ctx);
+
+  const v = await post("/api/templates/unit/validate?id=figs-ellipsis-02", "POST", { value: 0 });
+  assert.equal(v.status, 200);
+  assert.equal(tpl("figs-ellipsis-02").translation_state, "edited");
+  const p = await post("/api/templates/unit?id=figs-ellipsis-01", "PATCH", { target_md: "web text SPEAKER [text]" }, { "If-Match": "1" });
+  assert.equal(p.status, 200);
+  assert.deepEqual(tplLog(), [
+    { row_key: "figs-ellipsis-02", user_id: 9, action: "unvalidate", source: null },
+    { row_key: "figs-ellipsis-01", user_id: 9, action: "update", source: null },
+  ]);
+});
+
+test("template validate: an unparseable If-Match is a 400", async () => {
+  const { app, env, ctx, tpl } = fresh();
+  const principal = { userId: 9, username: "reviewer", role: "editor", linkId: 1 };
+  const res = await app.request(
+    "/api/templates/unit/validate?id=figs-ellipsis-02",
+    { method: "POST", headers: { "content-type": "application/json", "If-Match": "abc" }, body: JSON.stringify({ value: 1 }) },
+    chatWriteEnv(env, principal),
+    ctx,
+  );
+  assert.equal(res.status, 400);
+  assert.equal((await res.json()).error, "invalid_if_match");
+  assert.equal(tpl("figs-ellipsis-02").translation_state, "validated");
 });
