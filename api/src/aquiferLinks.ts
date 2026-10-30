@@ -20,8 +20,12 @@ export type EnglishLink = { engContentId: string; engTitle: string };
 export function parseEnglishTitle(title: string | undefined): { ref: string; ordinal: number } | null {
   const m = /(\d+):(\d+)(?:\s*[-–]\s*(\d+))?\s*\(#\s*(\d+)\s*\)/.exec(title || "");
   if (!m) return null;
+  const ordinal = parseInt(m[4], 10);
+  // "Psalms 3:0 (#2)" is a Psalm title: en_tn's "<ch>:front" rows. Its (#N) counts
+  // the chapter introduction as #1, so the N-th front row is (#N+1).
+  if (m[2] === "0" && !m[3]) return ordinal > 1 ? { ref: `${m[1]}:front`, ordinal: ordinal - 1 } : null;
   const ref = m[3] ? `${m[1]}:${m[2]}-${m[3]}` : `${m[1]}:${m[2]}`;
-  return { ref, ordinal: parseInt(m[4], 10) };
+  return { ref, ordinal };
 }
 
 // Incremental scanner for { ..., "article_metadata": { "<id>": {entry}, ... } }.
