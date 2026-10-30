@@ -1163,7 +1163,9 @@ async function setTnTranslationState(
       .bind(state, now, id, book, ...updatePins.values),
   ]);
   if (!updateRes.meta.changes) return null;
-  return env.DB.prepare(`SELECT * FROM tn_rows WHERE id = ?1${bookClause(2)}`).bind(id, book).first<TnRow>();
+  // With latest_source, like a PATCH response: the chat reads it back as its
+  // own 'chat' source (#703), and the web gets the same row shape.
+  return (await selectRowWithLatestSource(env, "tn", id, book)) as TnRow | null;
 }
 
 // Set the translation_state on a target-language tQ row — the exact analogue of
@@ -1209,7 +1211,8 @@ async function setTqTranslationState(
       .bind(state, now, id, book, ...updatePins.values),
   ]);
   if (!updateRes.meta.changes) return null;
-  return env.DB.prepare(`SELECT * FROM tq_rows WHERE id = ?1${bookClause(2)}`).bind(id, book).first<TqRow>();
+  // With latest_source — see setTnTranslationState.
+  return (await selectRowWithLatestSource(env, "tq", id, book)) as TqRow | null;
 }
 
 // Flip the visible "trash" state on a tn row. Like setTnBit (preserve/hint),
