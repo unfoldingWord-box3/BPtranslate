@@ -6,7 +6,10 @@
 // through readerFrom; writes (bpt_edit_row, bpt_approve: issue #670 part a) go
 // through principalFrom, so every write carries a real editor, and run the
 // same PATCH / validate routes the web app uses, as that user, pinned to the
-// version the reviewer was shown.
+// version the reviewer was shown. The template tools (bpt_templates_for_row,
+// bpt_edit_template, bpt_approve_template) do the same for note templates; their
+// reads go through send("GET") as the linked user, because the template routes
+// are editor-only and getJson carries no user.
 //
 // Each tool reads through the SAME route handlers the web app uses (`getJson`
 // runs the Hono app in-process), so chat and web never disagree about counts
@@ -33,8 +36,9 @@ export interface McpSession {
   // workspace env. Returns the parsed JSON body and the HTTP status.
   getJson: (path: string) => Promise<{ status: number; body: unknown }>;
   // Send a write to this Worker's own API, in-process, as this session's user
-  // (auth.ts chatWriteEnv), with If-Match when given. Same return shape.
-  send: (method: string, path: string, body: unknown, ifMatch?: number) => Promise<{ status: number; body: unknown }>;
+  // (auth.ts chatWriteEnv), with If-Match when given. Same return shape. A
+  // body of undefined sends no body and no Content-Type (a read as the user).
+  send: (method: string, path: string, body?: unknown, ifMatch?: number) => Promise<{ status: number; body: unknown }>;
   // The one read that does NOT go through a route handler: the tW/tA articles
   // and note templates a book references, read straight from the workspace's
   // D1 (packageRefs.ts says why). Read-only rows; the tool sends counts only.
@@ -59,6 +63,8 @@ import type { ChatPrincipal } from "./chatLinks.ts";
 import { isTsMilestone } from "./tsMilestone.ts";
 import { shortSupport, summarizePackageRefs, type PackageRefRows } from "./packageRefs.ts";
 import type { SourceNotes } from "./sourceNotes.ts";
+import { isTranslationConfig } from "./workflowLayouts.ts";
+import type { ProjectConfig } from "./projectConfig.ts";
 
 export class ToolInputError extends Error {}
 
@@ -888,5 +894,304 @@ const approve: ToolDef = {
   },
 };
 
-export const TOOLS: ToolDef[] = [whoami, linkAccount, listBooks, packageStatus, chunkWork, getRow, chunkList, editRow, approve];
+// ── Note templates (issue #702) ─────────────────────────────────────────────
+// A reviewer who fixes a note and states a general rule can have the bot
+// rewrite the matching template. Template rows are not tn/tq row-shaped, so
+// these are small twins of projectRow / conflict / applied / writeTarget.
+
+// What the tools show of a template_units row; nothing else leaves the Worker.
+function projectTemplate(u: Record<string, unknown>) {
+  return {
+    template_id: u.template_id,
+    support_reference: shortSupport(String(u.support_ref ?? "")),
+    type: (u.type as string | null) || null,
+    source_md: u.source_md,
+    target_md: (u.target_md as string | null) ?? null,
+    state: (u.translation_state as string | null) ?? null,
+    version: u.version,
+  };
+}
+
+// ALL-CAPS slot names, 3+ chars, standing alone. ULT and UST are the names of
+// the English source texts, which a language may rename, so they are not slots.
+const CAPS_SLOT = /(?<![\p{L}\p{N}_])[A-Z][A-Z0-9_]{2,}(?![\p{L}\p{N}_])/gu;
+const NOT_SLOTS = new Set(["ULT", "UST"]);
+const SPAN = /\[[^\]\n]*\]|\*\*[^*\n]+\*\*/g;
+
+// A [...] or **...** span is a slot (filled in when drafting, kept verbatim)
+// only when its inner text is a slot name; any other span is example text a
+// translation may translate (surveyed across the pilot's 194 templates).
+function isSlotName(inner: string): boolean {
+  return (
+    /^(text|word)\d*$/i.test(inner) || inner.includes("_") || /^[A-Za-z]+\d+$/.test(inner) ||
+    /^[A-Z][A-Z0-9]{2,}$/.test(inner)
+  );
+}
+
+export function templatePlaceholders(sourceMd: string): { placeholders: string[]; examples: string[] } {
+  const found: { at: number; text: string; slot: boolean }[] = [];
+  for (const m of sourceMd.matchAll(CAPS_SLOT)) {
+    if (!NOT_SLOTS.has(m[0])) found.push({ at: m.index!, text: m[0], slot: true });
+  }
+  for (const m of sourceMd.matchAll(SPAN)) {
+    const inner = m[0].startsWith("[") ? m[0].slice(1, -1) : m[0].slice(2, -2);
+    found.push({ at: m.index!, text: m[0], slot: isSlotName(inner.trim()) });
+  }
+  found.sort((a, b) => a.at - b.at);
+  const placeholders: string[] = [];
+  const examples: string[] = [];
+  for (const f of found) {
+    const list = f.slot ? placeholders : examples;
+    if (!list.includes(f.text)) list.push(f.text);
+  }
+  return { placeholders, examples };
+}
+
+export function missingPlaceholders(placeholders: string[], text: string): string[] {
+  return placeholders.filter((p) => {
+    if (!/^[A-Z]/.test(p)) return !text.includes(p);
+    // ASCII boundaries: a target language may join a letter to the slot
+    // (Arabic writes "and SPEAKER" as one word, وSPEAKER), which still keeps it.
+    const bare = new RegExp(`(?<![A-Za-z0-9_])${p}(?![A-Za-z0-9_])`);
+    return !bare.test(text);
+  });
+}
+
+// An editor of a translation project, nothing else: an authoring project's
+// templates are the English source, not changed from chat.
+async function templateSession(args: Record<string, unknown>, ctx: ToolContext): Promise<McpSession> {
+  const session = await principalFrom(args, ctx);
+  // send, not getJson: this route wants a signed-in user, and getJson has none.
+  const { status, body } = await session.send("GET", "/api/project-config");
+  if (status !== 200) throw new Error(`BPtranslate API /api/project-config returned ${status}`);
+  const config = (body as { config?: ProjectConfig } | null)?.config;
+  if (!config || !isTranslationConfig(config)) {
+    throw new ToolInputError(
+      "This project writes its notes in English (authoring mode). Its note templates are the English source and are not changed from chat.",
+    );
+  }
+  return session;
+}
+
+function templateIdArg(args: Record<string, unknown>): string {
+  const id = args.template_id;
+  // The sheet's ids are free text ("This could mean-01"); the id only travels
+  // URL-encoded, so refuse just empty, overlong and control characters.
+  if (typeof id !== "string" || !id.trim() || id.length > 200 || /[\u0000-\u001f\u007f]/.test(id)) {
+    throw new ToolInputError("template_id is not a template id");
+  }
+  return id;
+}
+
+// The template as it is now. Not found is refused here, before anything is sent.
+async function getTemplate(session: McpSession, id: string, write: boolean): Promise<Record<string, unknown>> {
+  const { status, body } = await session.send("GET", `/api/templates/unit?id=${encodeURIComponent(id)}`);
+  if (status === 200) return body as Record<string, unknown>;
+  const tail = write ? " Nothing was changed." : "";
+  if (status === 404) throw new ToolInputError(`There is no note template ${id} in this project.${tail}`);
+  if (status === 403) throw new ToolInputError(`This user cannot edit in this project.${tail}`);
+  throw new Error(`BPtranslate API /api/templates/unit returned ${status}`);
+}
+
+// The answers a template write gives that are neither a success nor a conflict.
+function templateRefusal(id: string, status: number, body: unknown): never {
+  const b = (body ?? {}) as Record<string, unknown>;
+  if (status === 404) throw new ToolInputError(`There is no note template ${id} in this project. Nothing was changed.`);
+  if (status === 403) throw new ToolInputError("This user cannot edit in this project. Nothing was changed.");
+  if (status === 400) throw new ToolInputError(`BPtranslate refused the change (${String(b.error ?? "invalid")}). Nothing was changed.`);
+  throw new Error(`BPtranslate write for template ${id} returned ${status}`);
+}
+
+function templateConflict(yours: string | null, current: Record<string, unknown>, what: string) {
+  return {
+    status: "conflict",
+    message:
+      `Someone changed this template after the reviewer saw it, so ${what} was NOT ${yours === null ? "made" : "saved"}. ` +
+      `Show the reviewer the current wording and ask; to go ahead, call again with current.version.`,
+    ...(yours !== null ? { your_text: yours } : {}),
+    current: projectTemplate(current),
+  };
+}
+
+function templateApplied(u: Record<string, unknown>) {
+  return { status: "applied", version: u.version, state: u.translation_state ?? null, template: projectTemplate(u) };
+}
+
+interface TemplateListUnit {
+  template_id: string;
+  support_ref: string;
+  sheet_order: number | null;
+  origin: string;
+}
+
+const templatesForRow: ToolDef = {
+  name: "bpt_templates_for_row",
+  description:
+    "The note templates behind one translation note (tn): call this when the reviewer corrects a note AND says the wording should change for all such notes, for future drafts, or in the template. Returns every template for the note's support reference, each with template_id, source_md (the English), target_md (this project's wording; null means not translated yet, so start from source_md, written in the project's language), state, version, and placeholders (slots filled in when a note is drafted: keep every one exactly as written) and examples (sample text a translation may translate). Templates come in the order the drafter reads them; feeds_drafts marks the one AI drafts read now (the first approved one), and approving wording on a template above it makes that one the template drafts read. Then use bpt_edit_template and bpt_approve_template. Requires edit access; not available in an English-authoring project.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      book: { type: "string", description: "3-letter book code, e.g. TIT" },
+      id: { type: "string", description: "The tn row id from bpt_chunk_work or bpt_get_row" },
+    },
+    required: ["session_token", "book", "id"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const session = await templateSession(args, ctx);
+    const book = bookArg(args);
+    const id = args.id;
+    if (typeof id !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(id)) throw new ToolInputError("id is not a row id");
+    const { status, body } = await session.getJson(`/api/rows/tn/${encodeURIComponent(id)}?book=${book}`);
+    if (status === 404) throw new ToolInputError(`There is no tn row ${id} in ${book} in this project.`);
+    if (status !== 200) throw new Error(`BPtranslate API /api/rows/tn/${id} returned ${status}`);
+    const sr = String((body as Record<string, unknown>).support_reference ?? "").trim();
+    if (!sr) throw new ToolInputError(`tn row ${id} has no support reference, so no note template applies to it.`);
+    const slug = shortSupport(sr);
+
+    const list = await session.send("GET", "/api/templates");
+    if (list.status === 403) throw new ToolInputError("This user cannot edit in this project.");
+    if (list.status !== 200) throw new Error(`BPtranslate API /api/templates returned ${list.status}`);
+    const units = ((list.body as { units?: TemplateListUnit[] } | null)?.units ?? []).filter(
+      (u) => shortSupport(u.support_ref).toLowerCase() === slug.toLowerCase(),
+    );
+    if (units.length === 0) throw new ToolInputError(`This project has no note templates for ${slug}.`);
+    // The order the context export reads them in (exportWorkflow.ts ORDER BY
+    // sheet_order, template_id): SQLite puts NULL first and compares ids as bytes.
+    units.sort(
+      (a, b) =>
+        (a.sheet_order ?? -Infinity) - (b.sheet_order ?? -Infinity) ||
+        (a.template_id < b.template_id ? -1 : a.template_id > b.template_id ? 1 : 0),
+    );
+
+    const out = [];
+    for (const u of units) {
+      const full = await getTemplate(session, u.template_id, false);
+      out.push({ unit: full, origin: u.origin });
+    }
+    // The one the export sends the drafter: the first sheet template that is
+    // approved and has wording (exportWorkflow.ts, contextExport.ts renderTemplatesTsv).
+    const feeder = out.find(
+      (o) => o.origin === "sheet" && o.unit.translation_state === "validated" && String(o.unit.target_md ?? "").trim(),
+    )?.unit.template_id;
+    let templates: Record<string, unknown>[] = out.map((o) => ({
+      ...projectTemplate(o.unit),
+      feeds_drafts: o.unit.template_id === feeder,
+      ...templatePlaceholders(String(o.unit.source_md ?? "")),
+    }));
+    // A support reference can have ten variants; with translated wording in a
+    // two-byte script that can pass the chat's 32 KB cap (GET_ROW_BYTE_BUDGET).
+    // Leave out the English of translated ones first (their placeholders stay
+    // listed), then refuse rather than send a cut-off result.
+    if (getRowBytes({ templates }) > GET_ROW_BYTE_BUDGET - 1_000) {
+      templates = templates.map((t) => (t.target_md ? { ...t, source_md: null, source_left_out: true } : t));
+      if (getRowBytes({ templates }) > GET_ROW_BYTE_BUDGET - 1_000) {
+        throw new ToolInputError(
+          `The ${units.length} templates for ${slug} are too long to send in one chat message. Edit them in the BPtranslate web app (Note Templates).`,
+        );
+      }
+    }
+    return {
+      book,
+      row_id: id,
+      support_reference: slug,
+      note:
+        "AI drafts read only the feeds_drafts template (none: drafts get no template for this yet). Approved wording on a template above it in this list takes its place. Drafts see a change after the next context export, which does not run when a template is approved: it runs nightly on production and when the project's preferences or terms are saved.",
+      templates,
+    };
+  },
+};
+
+// The arguments both template writes take, and the template as it is now.
+async function templateWriteTarget(args: Record<string, unknown>, ctx: ToolContext) {
+  const session = await templateSession(args, ctx);
+  const id = templateIdArg(args);
+  const version = intArg(args, "version", { min: 1, required: true })!;
+  return { session, id, version, path: `/api/templates/unit?id=${encodeURIComponent(id)}` };
+}
+
+const TEMPLATE_ID_SCHEMA = { type: "string", description: "template_id from bpt_templates_for_row" };
+
+const editTemplate: ToolDef = {
+  name: "bpt_edit_template",
+  description:
+    "Save new wording for one note template, replacing its target_md whole. Pass the version the reviewer was shown; it is saved only if the template is still at that version. Every placeholder in the template (see bpt_templates_for_row) must stay exactly as written, or nothing is saved. Returns status applied with the new version and state (state becomes edited, so it needs approving: pass the NEW version to bpt_approve_template), or status conflict when someone changed the template since, with your_text and current: nothing was saved, so show the reviewer the current wording and ask. Errors change nothing. Requires edit access.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      template_id: TEMPLATE_ID_SCHEMA,
+      version: { type: "integer", minimum: 1, description: "The template's version exactly as bpt_templates_for_row showed it to the reviewer." },
+      text: { type: "string", description: "The whole new wording of the template" },
+    },
+    required: ["session_token", "template_id", "version", "text"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const t = await templateWriteTarget(args, ctx);
+    const text = args.text;
+    // An empty PATCH leaves the state NULL, and the approve would then fail.
+    if (typeof text !== "string" || !text.trim()) throw new ToolInputError("text is required: the whole new wording");
+    const unit = await getTemplate(t.session, t.id, true);
+    // A template that moved on since the reviewer saw it is a conflict, not a
+    // placeholder error about wording they never saw: the PATCH answers it.
+    const missing = unit.version !== t.version ? [] : missingPlaceholders(templatePlaceholders(String(unit.source_md ?? "")).placeholders, text);
+    if (missing.length > 0) {
+      throw new ToolInputError(
+        `Not saved: the new wording drops ${missing.join(", ")}. These are filled in when a note is drafted, so keep each exactly as written. Nothing was changed.`,
+      );
+    }
+    const { status, body } = await t.session.send("PATCH", t.path, { target_md: text }, t.version);
+    const b = (body ?? {}) as Record<string, unknown>;
+    if (status === 409 && b.error === "version_mismatch") {
+      return templateConflict(text, b.current as Record<string, unknown>, "the new wording");
+    }
+    if (status !== 200) templateRefusal(t.id, status, body);
+    return templateApplied(b);
+  },
+};
+
+const approveTemplate: ToolDef = {
+  name: "bpt_approve_template",
+  description:
+    "Approve the wording of one note template that the reviewer was shown and accepted, marking it validated. Only for wording the reviewer has actually read in this conversation. Pass the version bpt_edit_template returned (approving does not change the version). Returns status applied, or status conflict when the template changed since: nothing was approved, so show the reviewer the current wording first. A template with no translation yet cannot be approved. Errors change nothing. Requires edit access.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      template_id: TEMPLATE_ID_SCHEMA,
+      version: { type: "integer", minimum: 1, description: "The template's version exactly as bpt_edit_template returned it." },
+    },
+    required: ["session_token", "template_id", "version"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const t = await templateWriteTarget(args, ctx);
+    const unit = await getTemplate(t.session, t.id, true);
+    if (unit.version !== t.version) return templateConflict(null, unit, "the approval");
+    if (unit.translation_state == null) {
+      throw new ToolInputError(
+        `${t.id} has no translation yet, so there is nothing to approve. Save wording with bpt_edit_template first. Nothing was changed.`,
+      );
+    }
+    const { status, body } = await t.session.send(
+      "POST",
+      `/api/templates/unit/validate?id=${encodeURIComponent(t.id)}`,
+      { value: 1 },
+      t.version,
+    );
+    const b = (body ?? {}) as Record<string, unknown>;
+    if (status === 409 && b.error === "version_mismatch") {
+      return templateConflict(null, b.current as Record<string, unknown>, "the approval");
+    }
+    if (status !== 200) templateRefusal(t.id, status, body);
+    return templateApplied(b);
+  },
+};
+
+export const TOOLS: ToolDef[] = [
+  whoami, linkAccount, listBooks, packageStatus, chunkWork, getRow, chunkList, editRow, approve,
+  templatesForRow, editTemplate, approveTemplate,
+];
 

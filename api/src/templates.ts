@@ -7,7 +7,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { Env } from "./index";
 import type { TemplateUnit } from "./types";
-import { currentUserId, requireEditor, requireAdmin } from "./auth.ts";
+import { currentUserId, editSource, requireEditor, requireAdmin } from "./auth.ts";
 import { syncTemplates, ensureTemplatesPopulated } from "./templateSync.ts";
 import { getProjectConfig } from "./projectConfig.ts";
 import { nextPreDraftJson } from "./preDraftSnapshot.ts";
@@ -117,10 +117,10 @@ templates.patch("/unit", requireEditor, async (c) => {
         // Audit gated on the CAS having won (changes() in the same batch).
         // payload_json carries the full patch so /unit/history can replay it.
         `INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action, source, payload_json)
-         SELECT 'template', ?1, NULL, ?2, ?3, ?3 + 1, 'update', NULL, ?4
+         SELECT 'template', ?1, NULL, ?2, ?3, ?3 + 1, 'update', ?5, ?4
           WHERE (SELECT changes()) > 0`,
       )
-      .bind(id, userId ?? null, expected, JSON.stringify({ target_md: parsed.data.target_md })),
+      .bind(id, userId ?? null, expected, JSON.stringify({ target_md: parsed.data.target_md }), editSource(c)),
   ]);
 
   if (!updateRes.meta.changes) {
@@ -313,10 +313,15 @@ const ValidateBody = z.object({ value: z.union([z.literal(0), z.literal(1), z.bo
 
 // POST /api/templates/unit/validate?id=... — the "Approve" action. value=1 ->
 // validated; value=0 -> edited. Non-version-bumping; guarded on
-// translation_state IS NOT NULL; audit source=NULL (human approval).
+// translation_state IS NOT NULL; audit source=NULL (human approval), 'chat' when
+// a chat reviewer approved. Optional If-Match pins the version the caller saw
+// (the chat tools send it; the web app does not): a moved version is a 409.
 templates.post("/unit/validate", requireEditor, async (c) => {
   const id = c.req.query("id");
   if (!id) return c.json({ error: "id_required" }, 400);
+  const ifMatch = c.req.header("if-match");
+  const expected = parseIfMatch(ifMatch);
+  if (ifMatch !== undefined && expected === null) return c.json({ error: "invalid_if_match" }, 400);
   let body: unknown;
   try {
     body = await c.req.json();
@@ -335,23 +340,40 @@ templates.post("/unit/validate", requireEditor, async (c) => {
   const snapshotClause = state === "validated"
     ? ", pre_draft_json = json_object('target_md', target_md)"
     : "";
+  const source = editSource(c);
   const [updateRes] = await c.env.DB.batch([
     c.env.DB
       .prepare(
         `UPDATE template_units SET translation_state = ?1, updated_at = ?2${snapshotClause}
-          WHERE template_id = ?3 AND deleted_at IS NULL AND translation_state IS NOT NULL`,
+          WHERE template_id = ?3 AND deleted_at IS NULL AND translation_state IS NOT NULL${
+            expected !== null ? " AND version = ?4" : ""
+          }`,
       )
-      .bind(state, now, id),
+      .bind(...(expected !== null ? [state, now, id, expected] : [state, now, id])),
     c.env.DB
       .prepare(
         `INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action, source)
-         SELECT 'template', ?1, NULL, ?2, version, version, ?3, NULL
+         SELECT 'template', ?1, NULL, ?2, version, version, ?3, ?4
            FROM template_units
-          WHERE template_id = ?1 AND deleted_at IS NULL AND translation_state IS NOT NULL`,
+          WHERE template_id = ?1 AND deleted_at IS NULL AND translation_state IS NOT NULL${
+            expected !== null ? " AND version = ?5" : ""
+          }`,
       )
-      .bind(id, userId ?? null, action),
+      .bind(...(expected !== null ? [id, userId ?? null, action, source, expected] : [id, userId ?? null, action, source])),
   ]);
-  if (!updateRes.meta.changes) return c.json({ error: "not_found" }, 404);
+  if (!updateRes.meta.changes) {
+    if (expected !== null) {
+      const cur = await c.env.DB.prepare(
+        `SELECT * FROM template_units WHERE template_id = ?1 AND deleted_at IS NULL`,
+      )
+        .bind(id)
+        .first<TemplateUnit>();
+      if (cur && cur.translation_state !== null && cur.version !== expected) {
+        return c.json({ error: "version_mismatch", current: cur }, 409);
+      }
+    }
+    return c.json({ error: "not_found" }, 404);
+  }
   const updated = await c.env.DB.prepare(`SELECT * FROM template_units WHERE template_id = ?1`)
     .bind(id)
     .first<TemplateUnit>();
