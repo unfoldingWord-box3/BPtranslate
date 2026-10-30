@@ -18,22 +18,28 @@ import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 
 import { rows } from "./rows.ts";
-import { attachAuth, chatWriteEnv, requireCsrf } from "./auth.ts";
+import { chapters } from "./chapters.ts";
+import { attachAuth, chatConfirmMac, chatWriteEnv, requireCsrf } from "./auth.ts";
 import { requireWorkspaceMatch } from "./workspaces.ts";
 import { blockViewerWrites } from "./viewerGuard.ts";
 import { dispatch } from "./mcp.ts";
 
-function makeDb(sqlite) {
+// counter.calls counts D1 round trips (a batch counts once, as on D1), so a
+// test can measure what one chat write costs.
+function makeDb(sqlite, counter = { calls: 0 }) {
   const mk = (sql, args) => ({
     bind: (...a) => mk(sql, a),
     all() {
+      counter.calls++;
       return { results: sqlite.prepare(sql).all(...args), success: true };
     },
     first() {
+      counter.calls++;
       const r = sqlite.prepare(sql).all(...args);
       return r.length ? r[0] : null;
     },
     run() {
+      counter.calls++;
       const r = sqlite.prepare(sql).run(...args);
       return { success: true, meta: { changes: Number(r.changes), last_row_id: Number(r.lastInsertRowid) } };
     },
@@ -41,8 +47,10 @@ function makeDb(sqlite) {
   return {
     prepare: (sql) => mk(sql, []),
     async batch(stmts) {
+      const before = counter.calls;
       const out = [];
       for (const s of stmts) out.push(s.run());
+      counter.calls = before + 1;
       return out;
     },
   };
@@ -51,6 +59,8 @@ function makeDb(sqlite) {
 const BOOK = "TIT";
 const EDITOR = "e".repeat(40);
 const VIEWER = "v".repeat(40);
+// The same reviewer's second chat link (another chat, or a re-link).
+const EDITOR2 = "f".repeat(40);
 
 function fresh() {
   const sqlite = new DatabaseSync(":memory:");
@@ -79,8 +89,10 @@ function fresh() {
   app.use("*", requireCsrf);
   app.use("/api/*", blockViewerWrites);
   app.route("/api/rows", rows);
+  app.route("/api/chapters", chapters);
 
-  const env = { DB: makeDb(sqlite) };
+  const d1 = { calls: 0 };
+  const env = { DB: makeDb(sqlite, d1), JWT_SIGNING_KEY: "test-signing-key" };
   const ctx = {
     waitUntil(p) {
       if (p && typeof p.catch === "function") p.catch(() => {});
@@ -100,10 +112,12 @@ function fresh() {
     },
     packageRefs: async () => ({}),
     sourceNotes: async () => ({ ok: false, reason: "test" }),
+    confirmMac: (data) => chatConfirmMac(env, data),
   });
   const sessions = {
     [EDITOR]: sessionFor({ userId: 9, username: "reviewer", role: "editor", linkId: 1 }),
     [VIEWER]: sessionFor({ userId: 10, username: "reader", role: null, linkId: 2 }),
+    [EDITOR2]: sessionFor({ userId: 9, username: "reviewer", role: "editor", linkId: 3 }),
   };
   const toolCtx = { session: async (t) => sessions[t] ?? null, claimLink: async () => ({ ok: false }) };
   const call = async (name, args, token = EDITOR) => {
@@ -115,7 +129,7 @@ function fresh() {
   };
   const tnRow = (id) => ({ ...sqlite.prepare(`SELECT note, version, translation_state FROM tn_rows WHERE id = ?`).get(id) });
   const log = () => sqlite.prepare(`SELECT kind, row_key, user_id, action, source, prev_version, new_version FROM edit_log ORDER BY id`).all().map((r) => ({ ...r }));
-  return { app, env, ctx, call, tnRow, log, sqlite };
+  return { app, env, ctx, call, tnRow, log, sqlite, d1, sessions };
 }
 
 test("bpt_edit_row then bpt_approve: saved as the linked user, source chat, version-pinned", async () => {
@@ -408,4 +422,217 @@ test("the web app's unpinned validate is unchanged: it still flips a trashed row
   assert.equal(res.status, 200);
   assert.equal(sqlite.prepare(`SELECT translation_state FROM tn_rows WHERE id = 'tr01'`).get().translation_state, "validated");
   assert.equal(conflictLog(sqlite).length, 0);
+});
+
+// ── Issue #670 part (c): bpt_bulk_set_state ─────────────────────────────────
+// Moves the approved notes of a verse range back to "needs review" (edited),
+// never the other way. A dry run (no confirm_token) changes nothing and
+// returns a signed token over the exact id:version list it found; the confirm
+// un-approves only those rows, each pinned to its version and to 'validated'.
+
+// Chapter 2 of TIT: one row in each state the range action meets.
+function seedBulk(sqlite) {
+  const tn = sqlite.prepare(
+    `INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, note, sort_order, version, translation_state, trashed_at)
+     VALUES (?, ?, 2, ?, ?, ?, 10, ?, ?, ?)`,
+  );
+  tn.run("b001", BOOK, 1, "2:1", "approved one", 5, "validated", null);
+  tn.run("b002", BOOK, 1, "2:1", "ai draft", 2, "ai_draft", null);
+  tn.run("b003", BOOK, 2, "2:2", "edited", 4, "edited", null);
+  tn.run("b004", BOOK, 2, "2:2", "approved two", 7, "validated", null);
+  tn.run("b005", BOOK, 3, "2:3", "approved but trashed", 1, "validated", 900);
+  tn.run("b006", BOOK, 3, "2:3", "english note", 1, null, null);
+  tn.run("b007", BOOK, 4, "2:4", "approved, outside the range", 1, "validated", null);
+  const tq = sqlite.prepare(
+    `INSERT INTO tq_rows (id, book, chapter, verse, ref_raw, question, response, version, translation_state)
+     VALUES (?, ?, 2, ?, ?, 'q?', 'a.', ?, ?)`,
+  );
+  tq.run("qb01", BOOK, 1, "2:1", 2, "validated");
+  tq.run("qb02", BOOK, 1, "2:1", 1, "ai_draft");
+}
+
+const RANGE = { kind: "tn", chapter: 2, verse_start: 1, verse_end: 3 };
+const states = (sqlite, table = "tn_rows") =>
+  Object.fromEntries(
+    sqlite.prepare(`SELECT id, translation_state FROM ${table} WHERE chapter = 2 ORDER BY id`).all().map((r) => [r.id, r.translation_state]),
+  );
+const BEFORE = { b001: "validated", b002: "ai_draft", b003: "edited", b004: "validated", b005: "validated", b006: null, b007: "validated" };
+
+test("bulk dry run changes nothing and reports what would change and what is skipped", async () => {
+  const { call, sqlite, log } = fresh();
+  seedBulk(sqlite);
+  const r = await call("bpt_bulk_set_state", RANGE);
+  assert.equal(r.isError, false, JSON.stringify(r.data));
+  assert.equal(r.data.status, "preview");
+  assert.equal(r.data.would_change, 2);
+  assert.deepEqual(r.data.rows.map((x) => [x.id, x.version]), [["b001", 5], ["b004", 7]]);
+  const skipped = Object.fromEntries(r.data.skipped.map((s) => [s.reason, s.ids]));
+  assert.deepEqual(skipped, { ai_draft: ["b002"], edited: ["b003"], trashed: ["b005"], not_a_draft: ["b006"] });
+  assert.equal(typeof r.data.confirm_token, "string");
+  assert.deepEqual(states(sqlite), BEFORE, "nothing changed");
+  assert.equal(log().length, 0);
+});
+
+test("bulk confirm un-approves only the validated rows, as the linked user with source chat", async () => {
+  const { call, sqlite, log } = fresh();
+  seedBulk(sqlite);
+  const dry = await call("bpt_bulk_set_state", RANGE);
+  const r = await call("bpt_bulk_set_state", { ...RANGE, confirm_token: dry.data.confirm_token });
+  assert.equal(r.isError, false, JSON.stringify(r.data));
+  assert.equal(r.data.status, "done");
+  assert.equal(r.data.applied, 2);
+  assert.deepEqual(r.data.applied_ids, ["b001", "b004"]);
+  assert.deepEqual(r.data.not_changed, []);
+  assert.equal(r.data.remaining, 0);
+  assert.deepEqual(states(sqlite), { ...BEFORE, b001: "edited", b004: "edited" });
+  const versions = sqlite.prepare(`SELECT id, version FROM tn_rows WHERE id IN ('b001','b004') ORDER BY id`).all().map((x) => x.version);
+  assert.deepEqual(versions, [5, 7], "a state flip does not bump the version");
+  assert.deepEqual(log(), [
+    { kind: "tn", row_key: "b001", user_id: 9, action: "unvalidate", source: "chat", prev_version: 5, new_version: 5 },
+    { kind: "tn", row_key: "b004", user_id: 9, action: "unvalidate", source: "chat", prev_version: 7, new_version: 7 },
+  ]);
+  // tq works the same way.
+  const tqDry = await call("bpt_bulk_set_state", { kind: "tq", chapter: 2 });
+  assert.equal(tqDry.data.would_change, 1, JSON.stringify(tqDry.data));
+  const tq = await call("bpt_bulk_set_state", { kind: "tq", chapter: 2, confirm_token: tqDry.data.confirm_token });
+  assert.equal(tq.data.applied, 1, JSON.stringify(tq.data));
+  assert.deepEqual(states(sqlite, "tq_rows"), { qb01: "edited", qb02: "ai_draft" });
+});
+
+test("a row edited or re-stated between dry run and confirm is not changed; the others still apply", async () => {
+  const { env, ctx, call, sqlite } = fresh();
+  seedBulk(sqlite);
+  const dry = await call("bpt_bulk_set_state", { kind: "tn", chapter: 2 });
+  assert.equal(dry.data.would_change, 3, JSON.stringify(dry.data)); // b001, b004, b007
+  // After the preview: b001 is edited in the chat (version 5 -> 6) and approved
+  // again on the web, so it is validated but at a new version; b004 is
+  // un-approved on the web (same version, state edited).
+  await call("bpt_edit_row", { kind: "tn", id: "b001", version: 5, note: "changed" });
+  assert.equal((await webPost(env, ctx, `/api/rows/tn/b001/validate?book=${BOOK}`, { value: 1 })).status, 200);
+  assert.equal((await webPost(env, ctx, `/api/rows/tn/b004/validate?book=${BOOK}`, { value: 0 })).status, 200);
+
+  const r = await call("bpt_bulk_set_state", { kind: "tn", chapter: 2, confirm_token: dry.data.confirm_token });
+  assert.equal(r.isError, false, JSON.stringify(r.data));
+  assert.deepEqual(r.data.applied_ids, ["b007"]);
+  const nc = Object.fromEntries(r.data.not_changed.map((x) => [x.id, x]));
+  assert.equal(nc.b001.reason, "changed_since_preview");
+  assert.equal(nc.b001.current_version, 6);
+  assert.equal(nc.b001.current_state, "validated");
+  assert.equal(nc.b004.reason, "changed_since_preview");
+  assert.equal(nc.b004.current_state, "edited");
+  assert.equal(r.data.remaining, 1, "b001 is approved again at a new version: a new preview would include it");
+  assert.equal(sqlite.prepare(`SELECT translation_state FROM tn_rows WHERE id = 'b001'`).get().translation_state, "validated", "the newer approval stands");
+  assert.equal(sqlite.prepare(`SELECT translation_state FROM tn_rows WHERE id = 'b007'`).get().translation_state, "edited");
+});
+
+test("tampered, expired, other-link and different-argument tokens are refused and change nothing", async (t) => {
+  const { call, sqlite, log } = fresh();
+  seedBulk(sqlite);
+  const dry = await call("bpt_bulk_set_state", RANGE);
+  const token = dry.data.confirm_token;
+  const refused = async (args, tok = EDITOR) => {
+    const r = await call("bpt_bulk_set_state", args, tok);
+    assert.equal(r.isError, true, JSON.stringify(r.data));
+    assert.match(r.data.error, /Nothing was changed/);
+    return r.data.error;
+  };
+
+  // Tampered: the row list rewritten to add the ai_draft row, the old signature kept.
+  const [body, mac] = token.split(".");
+  const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+  payload.r.push(["b002", 2]);
+  const forged = `${Buffer.from(JSON.stringify(payload)).toString("base64url")}.${mac}`;
+  await refused({ ...RANGE, confirm_token: forged });
+  await refused({ ...RANGE, confirm_token: `${body}.${mac.slice(0, -2)}${mac.endsWith("AA") ? "BB" : "AA"}` });
+  await refused({ ...RANGE, confirm_token: "not-a-token" });
+
+  // Different arguments from the preview.
+  await refused({ ...RANGE, verse_end: 4, confirm_token: token });
+  await refused({ ...RANGE, kind: "tq", confirm_token: token });
+  await refused({ ...RANGE, chapter: 1, confirm_token: token });
+  // The same reviewer's other chat link.
+  await refused({ ...RANGE, confirm_token: token }, EDITOR2);
+
+  // Expired: ten minutes and a bit later.
+  const real = Date.now();
+  t.mock.method(Date, "now", () => real + 11 * 60_000);
+  assert.match(await refused({ ...RANGE, confirm_token: token }), /expired/);
+  t.mock.restoreAll();
+
+  assert.deepEqual(states(sqlite), BEFORE);
+  assert.equal(log().length, 0);
+  // The genuine token, with the same arguments, still works.
+  const ok = await call("bpt_bulk_set_state", { ...RANGE, confirm_token: token });
+  assert.equal(ok.data.applied, 2, JSON.stringify(ok.data));
+});
+
+test("an omitted verse_end and the same arguments spelled differently are not a mismatch", async () => {
+  const { call, sqlite } = fresh();
+  seedBulk(sqlite);
+  const dry = await call("bpt_bulk_set_state", { kind: "tn", chapter: 2, verse_start: "1" });
+  const r = await call("bpt_bulk_set_state", { kind: "tn", chapter: "2", verse_start: 1, confirm_token: dry.data.confirm_token });
+  assert.equal(r.isError, false, JSON.stringify(r.data));
+  assert.equal(r.data.applied, 3);
+});
+
+test("a viewer-role link is refused, for the preview and the confirm", async () => {
+  const { call, sqlite, log } = fresh();
+  seedBulk(sqlite);
+  const v = await call("bpt_bulk_set_state", RANGE, VIEWER);
+  assert.equal(v.isError, true);
+  assert.match(v.data.error, /cannot edit/);
+  const dry = await call("bpt_bulk_set_state", RANGE);
+  const c = await call("bpt_bulk_set_state", { ...RANGE, confirm_token: dry.data.confirm_token }, VIEWER);
+  assert.equal(c.isError, true);
+  assert.deepEqual(states(sqlite), BEFORE);
+  assert.equal(log().length, 0);
+});
+
+test("a range with more approved rows than the cap is refused by the dry run", async () => {
+  const { call, sqlite } = fresh();
+  const tn = sqlite.prepare(
+    `INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, note, version, translation_state) VALUES (?, ?, 3, ?, ?, 'n', 1, 'validated')`,
+  );
+  for (let i = 0; i < 51; i++) tn.run(`c${String(i).padStart(3, "0")}`, BOOK, 1 + Math.floor(i / 10), `3:${1 + Math.floor(i / 10)}`);
+  const over = await call("bpt_bulk_set_state", { kind: "tn", chapter: 3 });
+  assert.equal(over.isError, true, JSON.stringify(over.data));
+  assert.match(over.data.error, /51 approved .* at most 50/);
+  assert.equal(sqlite.prepare(`SELECT COUNT(*) AS n FROM tn_rows WHERE translation_state = 'validated'`).get().n, 51);
+  const narrower = await call("bpt_bulk_set_state", { kind: "tn", chapter: 3, verse_start: 1, verse_end: 5 });
+  assert.equal(narrower.data.would_change, 50, JSON.stringify(narrower.data));
+});
+
+test("bulk never approves: only unvalidate entries, and no row becomes validated", async () => {
+  const { call, sqlite, log } = fresh();
+  seedBulk(sqlite);
+  // Extra arguments a model might add are not a way to approve.
+  const dry = await call("bpt_bulk_set_state", { kind: "tn", chapter: 2, value: 1, state: "validated" });
+  const r = await call("bpt_bulk_set_state", { kind: "tn", chapter: 2, value: 1, state: "validated", confirm_token: dry.data.confirm_token });
+  assert.equal(r.isError, false, JSON.stringify(r.data));
+  for (const [id, s] of Object.entries(states(sqlite))) {
+    if (s === "validated") assert.equal(id, "b005", `${id} is validated; only the trashed b005 (skipped) may stay so`);
+  }
+  assert.ok(log().length > 0);
+  assert.ok(log().every((e) => e.action === "unvalidate"), JSON.stringify(log()));
+  // A preview with no approved rows offers nothing to confirm.
+  const none = await call("bpt_bulk_set_state", { kind: "tn", chapter: 2, verse_start: 1, verse_end: 2 });
+  assert.equal(none.data.would_change, 0);
+  assert.equal(none.data.confirm_token, undefined);
+});
+
+test("a bulk confirm costs a bounded number of D1 calls per row", async () => {
+  const { call, sqlite, d1, sessions } = fresh();
+  seedBulk(sqlite);
+  const dry = await call("bpt_bulk_set_state", RANGE);
+  let before = d1.calls;
+  await sessions[EDITOR].getJson(`/api/chapters/${BOOK}/2`);
+  const chapterRead = d1.calls - before;
+  before = d1.calls;
+  const r = await call("bpt_bulk_set_state", { ...RANGE, confirm_token: dry.data.confirm_token });
+  assert.equal(r.data.applied, 2);
+  const perRow = (d1.calls - before - chapterRead) / 2;
+  console.log(`bulk confirm: ${perRow} D1 calls per row, ${chapterRead} for the closing chapter read`);
+  // At the 50-row cap, plus one Durable Object broadcast per row, a confirm
+  // must stay far under the Worker's ~1000 subrequest budget.
+  assert.ok((perRow + 1) * 50 + chapterRead < 500, `per row ${perRow}, chapter read ${chapterRead}`);
 });
