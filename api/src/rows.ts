@@ -1095,7 +1095,9 @@ async function setTnTranslationState(
 ): Promise<TnRow | null> {
   const now = Math.floor(Date.now() / 1000);
   const action = state === "validated" ? "validate" : "unvalidate";
-  const versionClause = opts.expected === null ? "" : " AND version = ?5";
+  // Each statement binds exactly the parameters it references, in both modes.
+  const pinned = opts.expected === null ? [] : [opts.expected];
+  const versionClause = (n: number) => (opts.expected === null ? "" : ` AND version = ?${n}`);
   // Approval snapshots the now-published content into pre_draft_json (migration
   // 0049) — NOT NULL. A subsequent human content edit demotes 'validated' ->
   // 'edited' (see the demote CASE in the PATCH handler), and the export gate
@@ -1118,17 +1120,17 @@ async function setTnTranslationState(
       .prepare(
         `UPDATE tn_rows
            SET translation_state = ?1, updated_at = ?2${snapshotClause}
-         WHERE id = ?3 AND deleted_at IS NULL AND translation_state IS NOT NULL${bookClause(4)}${versionClause}`,
+         WHERE id = ?3 AND deleted_at IS NULL AND translation_state IS NOT NULL${bookClause(4)}${versionClause(5)}`,
       )
-      .bind(state, now, id, book, ...(opts.expected === null ? [] : [opts.expected])),
+      .bind(state, now, id, book, ...pinned),
     env.DB
       .prepare(
         `INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action, source)
-         SELECT 'tn', ?1, book, ?2, version, version, ?3, ?6
+         SELECT 'tn', ?1, book, ?2, version, version, ?3, ?5
            FROM tn_rows
-          WHERE id = ?1 AND deleted_at IS NULL AND translation_state IS NOT NULL${bookClause(4)}${versionClause}`,
+          WHERE id = ?1 AND deleted_at IS NULL AND translation_state IS NOT NULL${bookClause(4)}${versionClause(6)}`,
       )
-      .bind(id, userId ?? null, action, book, opts.expected, opts.source),
+      .bind(id, userId ?? null, action, book, opts.source, ...pinned),
   ]);
   if (!updateRes.meta.changes) return null;
   return env.DB.prepare(`SELECT * FROM tn_rows WHERE id = ?1${bookClause(2)}`).bind(id, book).first<TnRow>();
@@ -1150,7 +1152,9 @@ async function setTqTranslationState(
 ): Promise<TqRow | null> {
   const now = Math.floor(Date.now() / 1000);
   const action = state === "validated" ? "validate" : "unvalidate";
-  const versionClause = opts.expected === null ? "" : " AND version = ?5";
+  // Each statement binds exactly the parameters it references, in both modes.
+  const pinned = opts.expected === null ? [] : [opts.expected];
+  const versionClause = (n: number) => (opts.expected === null ? "" : ` AND version = ?${n}`);
   // Approval snapshots the now-published content — see setTnTranslationState.
   const snapshotClause = state === "validated"
     ? ", pre_draft_json = json_object('question', question, 'response', response)"
@@ -1160,17 +1164,17 @@ async function setTqTranslationState(
       .prepare(
         `UPDATE tq_rows
            SET translation_state = ?1, updated_at = ?2${snapshotClause}
-         WHERE id = ?3 AND deleted_at IS NULL AND translation_state IS NOT NULL${bookClause(4)}${versionClause}`,
+         WHERE id = ?3 AND deleted_at IS NULL AND translation_state IS NOT NULL${bookClause(4)}${versionClause(5)}`,
       )
-      .bind(state, now, id, book, ...(opts.expected === null ? [] : [opts.expected])),
+      .bind(state, now, id, book, ...pinned),
     env.DB
       .prepare(
         `INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action, source)
-         SELECT 'tq', ?1, book, ?2, version, version, ?3, ?6
+         SELECT 'tq', ?1, book, ?2, version, version, ?3, ?5
            FROM tq_rows
-          WHERE id = ?1 AND deleted_at IS NULL AND translation_state IS NOT NULL${bookClause(4)}${versionClause}`,
+          WHERE id = ?1 AND deleted_at IS NULL AND translation_state IS NOT NULL${bookClause(4)}${versionClause(6)}`,
       )
-      .bind(id, userId ?? null, action, book, opts.expected, opts.source),
+      .bind(id, userId ?? null, action, book, opts.source, ...pinned),
   ]);
   if (!updateRes.meta.changes) return null;
   return env.DB.prepare(`SELECT * FROM tq_rows WHERE id = ?1${bookClause(2)}`).bind(id, book).first<TqRow>();
