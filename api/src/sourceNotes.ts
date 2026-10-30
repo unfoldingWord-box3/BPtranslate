@@ -104,7 +104,7 @@ export function clearSourceNotesCache(): void {
 // reads the base, like any chapter no range covers. base is null when the
 // project has no project-wide English tN repo; a dcs override still applies
 // then, as it does on import. null for an authoring project. A D1 failure
-// throws; the route catches it.
+// throws; bookSourcePlansForClient below catches it.
 //
 // `resource` "tq" gives the same plan for the English source question
 // (useSourceQuestions, #695). Aquifer is tN-only: resolveRangeSource drops a
@@ -131,6 +131,23 @@ export async function noteSourcePlanForClient(
         : [],
     ),
   };
+}
+
+// Both plans for GET /api/books/:book/sources. A plan that could not be
+// resolved (a transient D1 error) is left undefined, so JSON drops the field;
+// null stays null (authoring project). The web app reads a missing field as a
+// failed request: it shows the project-wide file and does not cache it (#697).
+export async function bookSourcePlansForClient(
+  env: Env,
+  book: string,
+): Promise<{ tnNoteSources?: ClientNoteSourcePlan | null; tqQuestionSources?: ClientNoteSourcePlan | null }> {
+  const plan = (resource: "tn" | "tq") =>
+    noteSourcePlanForClient(env, book, resource).catch((e): undefined => {
+      console.error("noteSourcePlanForClient failed", resource, e instanceof Error ? e.message : String(e));
+      return undefined;
+    });
+  const [tnNoteSources, tqQuestionSources] = await Promise.all([plan("tn"), plan("tq")]);
+  return { tnNoteSources, tqQuestionSources };
 }
 
 // `chapter` is the chapter of the rows being compared (0 = front matter): an
