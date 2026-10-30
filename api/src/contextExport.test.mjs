@@ -17,6 +17,9 @@ import {
   sourceRowKey,
   VALIDATED_TN_EXAMPLES_SQL,
   VALIDATED_TQ_EXAMPLES_SQL,
+  loadContextPackInputs,
+  loadQueuedContextInputs,
+  sameQueuedContextInputs,
 } from "./contextExport.ts";
 import {
   contextShrinkRefused,
@@ -29,6 +32,10 @@ import {
 import { applyContextRef } from "./assistedContextRef.ts";
 import { tsvLooksTruncated } from "./contextSourceFetch.ts";
 import { PRESETS } from "./projectConfig.ts";
+import { DatabaseSync } from "node:sqlite";
+import { readdirSync, readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 function assert(cond, msg) {
   if (!cond) {
@@ -678,6 +685,58 @@ console.log("contextExport — validated-example selectors exclude bulk sweeps")
     assert(sql.includes("deleted_at IS NULL"), `${name} selector excludes tombstones`);
   }
   assert(VALIDATED_TN_EXAMPLES_SQL.includes("trashed_at IS NULL"), "tn selector also excludes trashed rows");
+}
+
+// #712: the export re-reads D1 after fetching master's tip and renders again
+// if anything changed, so an overlapping older run can't publish a pack that
+// misses a newer approval. This proves the loader and the comparison against
+// the real schema; the workflow loop itself has no node harness.
+console.log("contextExport — D1 inputs re-read sees a newer approval");
+{
+  const sqlite = new DatabaseSync(":memory:");
+  const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations");
+  for (const f of readdirSync(dir).filter((f) => f.endsWith(".sql")).sort()) {
+    sqlite.exec(readFileSync(join(dir, f), "utf8"));
+  }
+  const db = {
+    prepare: (sql) => ({
+      first: async () => sqlite.prepare(sql).get() ?? null,
+      all: async () => ({ results: sqlite.prepare(sql).all() }),
+    }),
+  };
+  const unit = sqlite.prepare(
+    `INSERT INTO template_units (template_id, support_ref, sheet_order, type, source_md, source_hash, origin, target_md, translation_state, version)
+     VALUES (?, ?, ?, '', 'src [text]', 'h', ?, ?, ?, 1)`,
+  );
+  unit.run("figs-a-01", "figs-a", 1, "sheet", "approved [text]", "validated");
+  unit.run("figs-b-01", "figs-b", 2, "sheet", "pending [text]", "edited");
+  unit.run("builtin-c", "figs-c", 3, "builtin", "builtin [text]", "validated");
+  const tn = sqlite.prepare(
+    `INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, note, sort_order, version, translation_state)
+     VALUES (?, 'TIT', 1, 1, '1:1', ?, ?, 1, ?)`,
+  );
+  tn.run("aa01", "first", 1, "validated");
+  tn.run("aa02", "second", 2, "validated");
+  tn.run("aa03", "third", 3, "ai_draft");
+
+  const before = await loadContextPackInputs(db);
+  assert(before.templates.map((t) => t.template_id).join() === "figs-a-01", "only validated sheet templates with wording load");
+  assert(before.tnRows.length === 2 && before.prefs.register === "default", "validated tN rows and default prefs load");
+  assert(sameQueuedContextInputs(before, await loadQueuedContextInputs(db)), "an unchanged re-read matches");
+
+  sqlite.prepare(`UPDATE tn_rows SET translation_state = 'validated' WHERE id = 'aa03'`).run();
+  assert(
+    sameQueuedContextInputs(before, await loadQueuedContextInputs(db)),
+    "a tN approval (which queues no export) does not force a re-render",
+  );
+
+  sqlite.prepare(`UPDATE template_units SET translation_state = 'validated' WHERE template_id = 'figs-b-01'`).run();
+  const afterApprove = await loadQueuedContextInputs(db);
+  assert(!sameQueuedContextInputs(before, afterApprove), "a newer template approval is seen as a change");
+
+  const swapped = { ...afterApprove, terms: [{ concept_id: "c", source_term: "s", target_term: "b" }, { concept_id: "c", source_term: "s", target_term: "a" }] };
+  const swappedBack = { ...afterApprove, terms: [...swapped.terms].reverse() };
+  assert(sameQueuedContextInputs(swapped, swappedBack), "terms tied on their sort keys compare equal in either order");
 }
 
 console.log("ALL contextExport tests passed");

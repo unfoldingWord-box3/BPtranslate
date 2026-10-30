@@ -13,6 +13,7 @@ import { getProjectConfig } from "./projectConfig.ts";
 import { nextPreDraftJson } from "./preDraftSnapshot.ts";
 import { getLatestSuccessfulContextExport } from "./contextExportResults.ts";
 import { applyContextRef, derivedTargetLang } from "./assistedContextRef.ts";
+import { queueContextExport } from "./contextExportQueue.ts";
 
 export const templates = new Hono<{ Bindings: Env; Variables: { userId?: number } }>();
 
@@ -374,6 +375,10 @@ templates.post("/unit/validate", requireEditor, async (c) => {
     }
     return c.json({ error: "not_found" }, 404);
   }
+  // Approving adds the template to the context pack AI drafts read; un-approving
+  // takes it out. Queue the context export now rather than waiting for the
+  // nightly run (#707). Never fails the approve: the helper swallows errors.
+  queueContextExport(c);
   const updated = await c.env.DB.prepare(`SELECT * FROM template_units WHERE template_id = ?1`)
     .bind(id)
     .first<TemplateUnit>();

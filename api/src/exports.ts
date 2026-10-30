@@ -12,16 +12,9 @@ import { getProjectConfig, exportOwnerFor } from "./projectConfig.ts";
 import { getLaneState, activeLaneConfig, type LaneKey } from "./scriptureLane";
 import { snapshotPrUrl, type PrDestinationMap } from "./exportPrUrl.ts";
 import type { ChapterRange } from "./exportChapterMerge.ts";
+import { workflowRunId } from "./contextExportQueue.ts";
 
 export const exports = new Hono<{ Bindings: Env; Variables: { userId?: number } }>();
-
-// Deterministic second-precision Workflow instance id. Shared by every spawn
-// site (manual `manual-`/`context-` here, save-triggered `context-save-` in
-// translationMemory.ts) so the no-collision-across-prefixes and same-second
-// dedup guarantees rest on ONE timestamp format, not parallel copies.
-export function workflowRunId(prefix: string): string {
-  return `${prefix}${new Date().toISOString().slice(0, 19).replace(/:/g, "-")}`;
-}
 
 const RunBody = z.object({
   book: z.string().min(1).max(8).optional(),
