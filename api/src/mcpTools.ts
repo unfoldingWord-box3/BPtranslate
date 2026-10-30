@@ -3,8 +3,10 @@
 // the notes for a verse range, and link the chat to their BPtranslate account
 // (chatLinks.ts). Every tool but bpt_link_account takes the session_token,
 // because the link decides which workspace is read (issue #676). Reads go
-// through readerFrom; the writes to come go through principalFrom, so every
-// write carries a real editor.
+// through readerFrom; writes (bpt_edit_row, bpt_approve: issue #670 part a) go
+// through principalFrom, so every write carries a real editor, and run the
+// same PATCH / validate routes the web app uses, as that user, pinned to the
+// version the reviewer was shown.
 //
 // Each tool reads through the SAME route handlers the web app uses (`getJson`
 // runs the Hono app in-process), so chat and web never disagree about counts
@@ -30,6 +32,9 @@ export interface McpSession {
   // GET a path on this Worker's own API, in-process, against the session's
   // workspace env. Returns the parsed JSON body and the HTTP status.
   getJson: (path: string) => Promise<{ status: number; body: unknown }>;
+  // Send a write to this Worker's own API, in-process, as this session's user
+  // (auth.ts chatWriteEnv), with If-Match when given. Same return shape.
+  send: (method: string, path: string, body: unknown, ifMatch?: number) => Promise<{ status: number; body: unknown }>;
   // The one read that does NOT go through a route handler: the tW/tA articles
   // and note templates a book references, read straight from the workspace's
   // D1 (packageRefs.ts says why). Read-only rows; the tool sends counts only.
@@ -52,7 +57,7 @@ export interface ToolContext {
 
 import type { ChatPrincipal } from "./chatLinks.ts";
 import { isTsMilestone } from "./tsMilestone.ts";
-import { summarizePackageRefs, type PackageRefRows } from "./packageRefs.ts";
+import { shortSupport, summarizePackageRefs, type PackageRefRows } from "./packageRefs.ts";
 import type { SourceNotes } from "./sourceNotes.ts";
 
 export class ToolInputError extends Error {}
@@ -304,7 +309,14 @@ function projectRow(kind: "tn" | "tq", r: Record<string, unknown>, cap?: number)
   };
   if (kind === "tn") {
     const note = capText(r.note, cap);
-    return { ...common, support_reference: r.support_reference ?? null, note: note.text, truncated: note.cut || undefined };
+    const sr = typeof r.support_reference === "string" && r.support_reference.trim() ? r.support_reference : null;
+    return {
+      ...common,
+      support_reference: r.support_reference ?? null,
+      ta: sr ? shortSupport(sr) : null,
+      note: note.text,
+      truncated: note.cut || undefined,
+    };
   }
   const q = capText(r.question, cap);
   const a = capText(r.response, cap);
@@ -380,7 +392,7 @@ function parseCursor(raw: unknown): SortKey | null {
 const chunkWork: ToolDef = {
   name: "bpt_chunk_work",
   description:
-    "The translation notes (kind tn) or questions (kind tq) for a verse range in one chapter, with each row's id, current text, state (ai_draft, validated, ...) and version. Each tn row also has en_note: the published English note it was translated from, for comparison (null when the English source has no note with that id or could not be read; the top-level note says why). Results are paged: if next_cursor is not null, call again with it to get the rest. Never claim a chunk is complete until next_cursor is null. A row marked truncated has long text cut; read it whole with bpt_get_row. en_truncated means the English note was cut, or left out (null) to keep the page under the size limit; bpt_get_row returns as much of it as fits in one response, and sets en_truncated again if it still had to cut.",
+    "The translation notes (kind tn) or questions (kind tq) for a verse range in one chapter, with each row's id, current text, state (ai_draft, validated, ...) and version. Each tn row also has en_note: the published English note it was translated from, for comparison (null when the English source has no note with that id or could not be read; the top-level note says why). Results are paged: if next_cursor is not null, call again with it to get the rest. Never claim a chunk is complete until next_cursor is null. Each tn row's ta is the short tA article name of its support_reference (e.g. figs-metaphor). To find the notes for one figure of speech or tA article, pass support_reference (e.g. \"figs-metonymy\", \"metonymy\" or the full rc:// link) instead of reading every page; total and paging then count only the matching notes. A row marked truncated has long text cut; read it whole with bpt_get_row. en_truncated means the English note was cut, or left out (null) to keep the page under the size limit; bpt_get_row returns as much of it as fits in one response, and sets en_truncated again if it still had to cut.",
   inputSchema: {
     type: "object",
     properties: {
@@ -391,6 +403,10 @@ const chunkWork: ToolDef = {
       verse_start: { type: "integer", minimum: 0, description: "First verse; omit for the whole chapter" },
       verse_end: { type: "integer", minimum: 0, description: "Last verse, inclusive" },
       include_trashed: { type: "boolean", description: "Include notes a reviewer trashed (default false)" },
+      support_reference: {
+        type: "string",
+        description: 'tn only: return just the notes for this tA article, e.g. "figs-metaphor", "metaphor" or "rc://*/ta/man/translate/figs-metaphor" (case-insensitive)',
+      },
       cursor: { type: "string", description: "next_cursor from the previous page" },
       limit: { type: "integer", minimum: 1, maximum: MAX_PAGE_ROWS },
     },
@@ -408,11 +424,25 @@ const chunkWork: ToolDef = {
     if (ve < vs) throw new ToolInputError("verse_end is before verse_start");
     const limit = Math.min(intArg(args, "limit", { min: 1 }) ?? DEFAULT_PAGE_ROWS, MAX_PAGE_ROWS);
     const cursor = parseCursor(args.cursor);
+    // The tA filter matches on the last path segment, so the short name, the
+    // full rc:// link and a bare name without "figs-" find the same notes.
+    let ta: string | null = null;
+    if (args.support_reference !== undefined && args.support_reference !== null) {
+      if (kind !== "tn") throw new ToolInputError("support_reference only applies to kind tn");
+      ta = typeof args.support_reference === "string"
+        ? shortSupport(args.support_reference.trim().replace(/\/+$/, "")).toLowerCase()
+        : "";
+      if (!ta) throw new ToolInputError('support_reference must be a tA article name like "figs-metaphor"');
+    }
 
     const body = await apiGet(session, `/api/chapters/${book}/${chapter}`);
     const all = ((body[kind] as Record<string, unknown>[] | undefined) ?? []).filter((r) => {
       const v = Number(r.verse);
       if (v < vs || v > ve) return false;
+      if (ta !== null) {
+        const sr = typeof r.support_reference === "string" ? shortSupport(r.support_reference).toLowerCase() : "";
+        if (sr !== ta && sr !== `figs-${ta}`) return false;
+      }
       return args.include_trashed === true || !r.trashed_at;
     });
 
@@ -438,7 +468,11 @@ const chunkWork: ToolDef = {
       bytes += size;
     }
     let note: string | null = null;
-    if (en && !en.ok) note = `en_note is null on every row: ${en.reason}`;
+    // So "no such notes" is not read as a failed English source, and a
+    // misspelled article name is not read as an answer.
+    if (ta !== null && all.length === 0) {
+      note = `No notes in this range use the tA article "${ta}". If that name may be misspelled, check the ta field of the chapter's rows.`;
+    } else if (en && !en.ok) note = `en_note is null on every row: ${en.reason}`;
     else if (en?.ok) {
       // A row whose en_note was dropped to fit the page is not "missing".
       const missing = rows.filter((r) => r.en_note === null && !r.en_truncated).length;
@@ -452,6 +486,7 @@ const chunkWork: ToolDef = {
       kind,
       verse_start: vs,
       verse_end: ve === Number.MAX_SAFE_INTEGER ? null : ve,
+      ...(ta !== null ? { support_reference: ta } : {}),
       total: all.length,
       returned: rows.length,
       next_cursor: i < all.length ? JSON.stringify(sortKey(all[i - 1])) : null,
@@ -692,4 +727,166 @@ const chunkList: ToolDef = {
   },
 };
 
-export const TOOLS: ToolDef[] = [whoami, linkAccount, listBooks, packageStatus, chunkWork, getRow, chunkList];
+// ── Writes (issue #670 part a) ──────────────────────────────────────────────
+// One row at a time, pinned to the version the reviewer was shown. A row that
+// moved on since is never overwritten: the result is a conflict carrying both
+// the reviewer's text and the row as it is now.
+
+const VERSION_SCHEMA = {
+  type: "integer",
+  minimum: 1,
+  description: "The row's version exactly as bpt_chunk_work or bpt_get_row showed it to the reviewer.",
+};
+
+// The arguments every write takes, and the row as it is now. Not found and
+// trashed rows are refused here, before anything is sent.
+async function writeTarget(args: Record<string, unknown>, ctx: ToolContext) {
+  const session = await principalFrom(args, ctx);
+  const book = bookArg(args);
+  if (args.kind !== "tn" && args.kind !== "tq") throw new ToolInputError('kind must be "tn" or "tq"');
+  const kind: "tn" | "tq" = args.kind;
+  const id = args.id;
+  if (typeof id !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(id)) throw new ToolInputError("id is not a row id");
+  const version = intArg(args, "version", { min: 1, required: true })!;
+  const path = `/api/rows/${kind}/${encodeURIComponent(id)}`;
+  const { status, body } = await session.getJson(`${path}?book=${book}`);
+  if (status === 404) throw new ToolInputError(`There is no ${kind} row ${id} in ${book} in this project. Nothing was changed.`);
+  if (status !== 200) throw new Error(`BPtranslate API ${path} returned ${status}`);
+  const row = body as Record<string, unknown>;
+  if (row.trashed_at) {
+    throw new ToolInputError(`${kind} row ${id} is in the trash. Nothing was changed; restore it in the web app first.`);
+  }
+  return { session, book, kind, id, version, path, row };
+}
+
+// The answers a write route gives that are neither a success nor a conflict.
+function writeRefusal(kind: "tn" | "tq", id: string, status: number, body: unknown): never {
+  const b = (body ?? {}) as Record<string, unknown>;
+  if (status === 409 && b.error === "chapter_locked") {
+    throw new ToolInputError(
+      `An AI ${String(b.pipelineType ?? "")} run is working on this chapter, so ${kind} row ${id} cannot change until it finishes. Nothing was changed.`,
+    );
+  }
+  if (status === 404) throw new ToolInputError(`${kind} row ${id} is gone. Nothing was changed.`);
+  if (status === 403) throw new ToolInputError("This user cannot edit in this project. Nothing was changed.");
+  if (status === 400) throw new ToolInputError(`BPtranslate refused the change (${String(b.error ?? "invalid")}). Nothing was changed.`);
+  throw new Error(`BPtranslate write for ${kind} ${id} returned ${status}`);
+}
+
+// retryWith: what to call again with. An approval pins the state too, and a
+// state change leaves the version as it was, so retrying with only the new
+// version would conflict again.
+function conflict(kind: "tn" | "tq", yours: Record<string, unknown> | null, current: Record<string, unknown>, what: string, retryWith = "current.version") {
+  return {
+    status: "conflict",
+    message:
+      `Someone changed this ${kind} row after the reviewer saw it, so ${what} was NOT saved. ` +
+      `Show the reviewer the current text and ask what they want; to go ahead, call again with ${retryWith}.`,
+    ...(yours ? { your_text: yours } : {}),
+    current: projectRow(kind, current),
+  };
+}
+
+function applied(kind: "tn" | "tq", row: Record<string, unknown>) {
+  return { status: "applied", version: row.version, state: row.translation_state ?? null, row: projectRow(kind, row) };
+}
+
+const editRow: ToolDef = {
+  name: "bpt_edit_row",
+  description:
+    "Save the reviewer's correction to one translation note (kind tn: note) or question (kind tq: question and/or response), replacing that text whole. Pass the version the reviewer was shown; the change is saved only if the row is still at that version. Returns status applied with the row's new version and state (an AI draft or approved row becomes state edited, so it needs approving again: pass the NEW version and state to bpt_approve), or status conflict when someone changed the row since, with your_text and current (the text and version now): nothing was saved, so show the reviewer the current text and ask. Errors (not found, in the trash, an AI run holding the chapter, read-only user) change nothing. Requires edit access.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      book: { type: "string", description: "3-letter book code, e.g. TIT" },
+      kind: { type: "string", enum: ["tn", "tq"] },
+      id: { type: "string", description: "Row id from bpt_chunk_work or bpt_get_row" },
+      version: VERSION_SCHEMA,
+      note: { type: "string", description: "tn only: the whole corrected note text" },
+      question: { type: "string", description: "tq only: the whole corrected question" },
+      response: { type: "string", description: "tq only: the whole corrected response" },
+    },
+    required: ["session_token", "book", "kind", "id", "version"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const t = await writeTarget(args, ctx);
+    const fields = t.kind === "tn" ? ["note"] : ["question", "response"];
+    for (const f of ["note", "question", "response"]) {
+      if (!fields.includes(f) && args[f] !== undefined) throw new ToolInputError(`${f} does not apply to a ${t.kind} row`);
+    }
+    const patch: Record<string, string> = {};
+    for (const f of fields) {
+      if (args[f] === undefined) continue;
+      if (typeof args[f] !== "string") throw new ToolInputError(`${f} must be text`);
+      patch[f] = args[f] as string;
+    }
+    if (Object.keys(patch).length === 0) {
+      throw new ToolInputError(t.kind === "tn" ? "note is required" : "question or response is required");
+    }
+    const { status, body } = await t.session.send("PATCH", `${t.path}?book=${t.book}`, patch, t.version);
+    const b = (body ?? {}) as Record<string, unknown>;
+    if (status === 409 && b.error === "version_mismatch") {
+      return conflict(t.kind, patch, b.current as Record<string, unknown>, "the reviewer's edit");
+    }
+    if (status !== 200) writeRefusal(t.kind, t.id, status, body);
+    return applied(t.kind, b);
+  },
+};
+
+// The translation states a draft row can be in (rows.ts TRANSLATION_STATES).
+const APPROVE_STATES = ["ai_draft", "edited", "validated"] as const;
+
+const approve: ToolDef = {
+  name: "bpt_approve",
+  description:
+    "Approve one translation note (tn) or question (tq) that the reviewer was shown and accepted, marking it validated. Only for a row the reviewer has actually read in this conversation: never approve rows they were not shown. Pass the version and state exactly as the reviewer was shown them (after bpt_edit_row, the version and state it returned); the row is approved only if it is still at that version and in that state. Returns status applied (approving does not change the version), or status conflict when the row changed since (its text, or its state: someone approved, un-approved or trashed it), with current (the text, version and state now): nothing was approved, so show the reviewer the current row first. Errors (not found, in the trash, not an AI draft, an AI run holding the chapter, read-only user) change nothing. Requires edit access.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      book: { type: "string", description: "3-letter book code, e.g. TIT" },
+      kind: { type: "string", enum: ["tn", "tq"] },
+      id: { type: "string", description: "Row id from bpt_chunk_work or bpt_get_row" },
+      version: VERSION_SCHEMA,
+      state: {
+        type: "string",
+        enum: APPROVE_STATES,
+        description: "The row's state exactly as bpt_chunk_work or bpt_get_row showed it to the reviewer.",
+      },
+    },
+    required: ["session_token", "book", "kind", "id", "version", "state"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const t = await writeTarget(args, ctx);
+    // The validate route answers 404 for these too; say why instead.
+    if (t.row.translation_state == null) {
+      throw new ToolInputError(
+        `${t.kind} row ${t.id} is not a translation draft (this project writes its notes directly), so there is nothing to approve. Nothing was changed.`,
+      );
+    }
+    // Required (#701): state flips never bump the version, so the version alone
+    // misses an un-approve or trash that landed after the reviewer saw the row.
+    const state = args.state;
+    if (typeof state !== "string" || !(APPROVE_STATES as readonly string[]).includes(state)) {
+      throw new ToolInputError(`state is required: the row's state as the reviewer was shown it (${APPROVE_STATES.join(", ")})`);
+    }
+    const { status, body } = await t.session.send(
+      "POST",
+      `${t.path}/validate?book=${t.book}`,
+      { value: 1, expected_state: state },
+      t.version,
+    );
+    const b = (body ?? {}) as Record<string, unknown>;
+    if (status === 409 && b.error === "version_mismatch") {
+      return conflict(t.kind, null, b.current as Record<string, unknown>, "the approval", "current.version and current.state");
+    }
+    if (status !== 200) writeRefusal(t.kind, t.id, status, body);
+    return applied(t.kind, b);
+  },
+};
+
+export const TOOLS: ToolDef[] = [whoami, linkAccount, listBooks, packageStatus, chunkWork, getRow, chunkList, editRow, approve];
+

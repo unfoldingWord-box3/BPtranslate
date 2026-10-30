@@ -331,6 +331,36 @@ export async function verifyToken(token: string, env: Env): Promise<AuthClaims |
   }
 }
 
+// The user a chat tool writes as (mcpTools.ts bpt_edit_row / bpt_approve).
+// Those writes run the Hono app in-process with this principal on a per-call
+// env clone, so they pass attachAuth, requireCsrf and requireEditor without a
+// cookie. Only principals made here are trusted: env comes from the Worker
+// code, never from a request, and the WeakSet means even a configured var
+// named CHAT_PRINCIPAL cannot pose as one.
+export interface ChatWritePrincipal {
+  userId: number;
+  username: string;
+  role: Role | null;
+}
+const chatPrincipals = new WeakSet<object>();
+
+export function chatWriteEnv(env: Env, p: ChatWritePrincipal): Env {
+  const principal: ChatWritePrincipal = { userId: p.userId, username: p.username, role: p.role };
+  chatPrincipals.add(principal);
+  return { ...env, CHAT_PRINCIPAL: principal };
+}
+
+function chatPrincipalOf(env: Env | undefined): ChatWritePrincipal | null {
+  const p = env?.CHAT_PRINCIPAL;
+  return p && chatPrincipals.has(p) ? (p as ChatWritePrincipal) : null;
+}
+
+// edit_log.source for a write: 'chat' for a chat tool's write, NULL (an
+// ordinary human edit in the web app) otherwise.
+export function editSource(c: Context): "chat" | null {
+  return chatPrincipalOf(c.env as Env) ? "chat" : null;
+}
+
 // Pulls an Access JWT off the request from the be_access cookie and stamps the
 // claims on the context. The web client (web/src/sync/api.ts) is cookie-only,
 // so the earlier Authorization: Bearer fallback — kept during the localStorage
@@ -347,6 +377,14 @@ export async function verifyToken(token: string, env: Env): Promise<AuthClaims |
 // call /api/auth/refresh (web/src/sync/api.ts), and refresh re-derives the
 // role for the workspace this request resolved to. A 403 would strand it.
 export const attachAuth: MiddlewareHandler = async (c, next) => {
+  const chat = chatPrincipalOf(c.env as Env);
+  if (chat) {
+    (c as AppContext).set("userId", chat.userId);
+    (c as AppContext).set("username", chat.username);
+    if (chat.role) (c as AppContext).set("role", chat.role);
+    await ensureWorkspaceUser(c.env as Env, chat.userId);
+    return next();
+  }
   const token = getCookie(c, ACCESS_COOKIE);
   if (token) {
     const claims = await verifyToken(token, c.env as Env);
@@ -390,6 +428,8 @@ export const requireCsrf: MiddlewareHandler = async (c, next) => {
   if (CSRF_EXEMPT_PATHS.has(c.req.path)) {
     return next();
   }
+  // An in-process chat write never came from a browser (see chatWriteEnv).
+  if (chatPrincipalOf(c.env as Env)) return next();
   const cookieValue = getCookie(c, CSRF_COOKIE);
   const headerValue = c.req.header("x-csrf-token");
   if (!cookieValue || !headerValue || cookieValue !== headerValue) {
