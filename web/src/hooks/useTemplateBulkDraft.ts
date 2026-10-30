@@ -15,6 +15,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, api, type TemplateUnitMeta } from "../sync/api";
 import { reduceBulkDraftOutcome, type BulkDraftState } from "../lib/bulkDraft";
+import { AI_NEEDS_ORG_KEY } from "../lib/aiProviderErrors";
 
 const WORKER_COUNT = 3;
 const RETRY_WAIT_MS = 2000;
@@ -73,6 +74,11 @@ async function draftOne(unit: TemplateUnitMeta, signal: AbortSignal): Promise<Un
       const code = extractApiErrorCode(err);
       if (err.status === 503 && code === "template_draft_disabled") {
         return { kind: "disabled", errorCode: "template_draft_disabled" };
+      }
+      // #551: template drafting can't use the org's own AI key yet. Just as
+      // terminal: stop at the first unit instead of failing every one.
+      if (err.status === 409 && code === AI_NEEDS_ORG_KEY) {
+        return { kind: "disabled", errorCode: AI_NEEDS_ORG_KEY };
       }
       if (err.status === 429) {
         // ApiError does not carry response headers (see api.ts), so a

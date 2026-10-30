@@ -88,7 +88,7 @@ function baseEnv(db, overrides = {}) {
 
 async function makeToken({ sub = "1", role = "editor", username = "alice" } = {}) {
   const now = Math.floor(Date.now() / 1000);
-  return new SignJWT({ username, role })
+  return new SignJWT({ username, role, ws: "uw" })
     .setProtectedHeader({ alg: "HS256" })
     .setSubject(sub)
     .setIssuer(ISSUER)
@@ -427,6 +427,9 @@ console.log("[POST] switching workspace re-mints the access cookie's role from t
       `re-minted token's role is 'viewer' (org2 has no role row for ivy), got ${payload.role}`,
     );
     assert(payload.role !== "admin", "re-minted token must NOT carry the stale org-A admin role");
+    // #680: the token is bound to the TARGET workspace, not the one this
+    // request resolved to (uw), or the first request after the switch 401s.
+    assert(payload.ws === "org2", `re-minted token is bound to org2, got ${payload.ws}`);
   } finally {
     globalThis.fetch = realFetch;
   }

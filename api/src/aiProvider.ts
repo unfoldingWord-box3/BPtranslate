@@ -17,14 +17,15 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { z } from "zod";
 import type { Env } from "./index";
-import { requireAdmin, currentUserId } from "./auth.ts";
+import { requireAdmin, requireEditor, currentUserId } from "./auth.ts";
 import { parseIfMatch } from "./translationMemoryLib.ts";
-import { wrappingKeyAvailable, encryptApiKey } from "./aiKeyCrypto.ts";
+import { wrappingKeyAvailable, encryptApiKey, decryptApiKey } from "./aiKeyCrypto.ts";
 
-// 'default' = no org key configured (what Clear leaves behind); translate jobs
-// refuse to run in that state (#551). The rest are bring-your-own-key
-// providers. Served to the client so the picker can't drift from the server's
-// validation.
+// 'default' = no org key configured (what Clear leaves behind); AI features
+// refuse to run in that state (#551). It is a stored/read state only: PUT
+// refuses it, and DELETE is the one way to clear a key. The rest are
+// bring-your-own-key providers. Served to the client so the picker can't drift
+// from the server's validation.
 export const AI_PROVIDERS = ["default", "claude", "openai", "gemini", "xai"] as const;
 export type AiProvider = (typeof AI_PROVIDERS)[number];
 
@@ -139,6 +140,26 @@ aiProvider.get("/", requireAdmin, async (c) => {
   return c.json(publicShape(row, wrappingKeyAvailable(c.env.AI_KEY_WRAPPING_KEY)));
 });
 
+// Availability probe (#551 part E): can this org's AI features run at all?
+// Editors run AI work but can't read the admin-only GET above, so this answers
+// with a yes/no and the reason dispatch would refuse with, nothing from the row
+// itself. Deployment-level availability (no bot token and no internal runner)
+// is a separate answer: GET /api/pipelines/:jobId's pipeline_api_disabled.
+// A stored key is only "available" if it actually decrypts, as dispatchNext
+// does: a rotated wrapping secret leaves a key that looks configured but fails
+// every run with ai_provider_key_decrypt_failed. The plaintext is discarded
+// unread and never logged.
+aiProvider.get("/status", requireEditor, async (c) => {
+  const ai = resolveDispatchAi(await getAiProviderConfig(c.env.DB), c.env.AI_KEY_WRAPPING_KEY);
+  if (ai.kind === "error") return c.json({ available: false, reason: ai.reason });
+  try {
+    await decryptApiKey(c.env.AI_KEY_WRAPPING_KEY!, ai.ciphertext, ai.iv);
+  } catch {
+    return c.json({ available: false, reason: "ai_provider_key_decrypt_failed" });
+  }
+  return c.json({ available: true, reason: null });
+});
+
 const PutBody = z
   .object({
     provider: z.enum(AI_PROVIDERS),
@@ -243,14 +264,10 @@ aiProvider.put("/", requireAdmin, async (c) => {
   if (!parsed.success) return c.json({ error: "validation_failed", issues: parsed.error.issues }, 400);
   const { provider, model, apiKey } = parsed.data;
 
-  // provider='default' IS the Clear action: no model, no key, so translate jobs
-  // stop until a new key is entered (#551). A model or key alongside it is a
-  // confused client, not a partial intent to honor.
-  if (provider === "default") {
-    if (model !== undefined || apiKey !== undefined) return c.json({ error: "unexpected_fields" }, 400);
-    const existing = await getAiProviderConfig(c.env.DB);
-    return applyWrite(c, existing, expected, "default", null, NO_KEY);
-  }
+  // provider='default' means "no org key". It is not a provider an org can
+  // choose (#551: there is no shared account behind it), so PUT refuses it.
+  // Clearing a key is DELETE.
+  if (provider === "default") return c.json({ error: "default_provider_not_allowed" }, 400);
 
   if (model === undefined) return c.json({ error: "model_required" }, 400);
   if (!PROVIDER_MODELS[provider].includes(model)) {
@@ -278,7 +295,9 @@ aiProvider.put("/", requireAdmin, async (c) => {
   return applyWrite(c, existing, expected, provider, model, key);
 });
 
-// DELETE = PUT provider:'default'. Keeps the row so `version` stays monotonic.
+// DELETE = Clear: writes provider='default' with no model or key, so AI
+// features stop until a new key is entered (#551). Keeps the row so `version`
+// stays monotonic.
 aiProvider.delete("/", requireAdmin, async (c) => {
   const expected = parseIfMatch(c.req.header("If-Match"));
   if (expected == null) return c.json({ error: "if_match_required" }, 428);

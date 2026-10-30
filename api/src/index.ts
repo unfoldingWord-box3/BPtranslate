@@ -26,8 +26,13 @@ import { books } from "./bookImport";
 import { populateReferencedArticles } from "./articlePopulate";
 import { templates } from "./templates";
 import { syncTemplates } from "./templateSync";
-import { attachAuth, requireAuth, requireCsrf, mintDevToken, startDcsAuth, callbackDcsAuth, authMe, authLogout, refreshToken, updateLastLocation, currentUserId } from "./auth";
+import { attachAuth, chatWriteEnv, requireAuth, requireCsrf, mintDevToken, startDcsAuth, callbackDcsAuth, authMe, authLogout, refreshToken, updateLastLocation, currentUserId } from "./auth";
 import { workspaceRoutes } from "./workspaceRoutes";
+import { handleMcp, isMcpPath } from "./mcp";
+import { chatLinkRoutes } from "./chatLinkRoutes";
+import { chatRoleFor, claimCode, lookupLink, revokeLink, type ChatLink } from "./chatLinks";
+import { readPackageRefs } from "./packageRefs";
+import { readSourceNotes } from "./sourceNotes";
 import { blockViewerWrites } from "./viewerGuard";
 import { listWorkspaces, resolveWorkspaceFresh, workspaceEnv, parseWorkspaceCookie, requireWorkspaceMatch, primeWorkspaces } from "./workspaces";
 
@@ -110,6 +115,13 @@ export interface Env {
   // Unset/empty/malformed means "one implicit workspace on the DB binding
   // above", so every existing deployment is unaffected until this is set.
   WORKSPACES?: string;
+  // Secret. The bearer token for the chat MCP endpoint (POST /api/mcp, see
+  // mcp.ts), 32+ characters, one for every workspace. Unset = the endpoint
+  // answers 401 to everyone.
+  MCP_SERVICE_TOKEN?: string;
+  // Never configured. Set only on the env of an in-process write from a chat
+  // tool (chatWriteEnv in auth.ts), and trusted only when auth.ts minted it.
+  CHAT_PRINCIPAL?: object;
   // Second binding to the SAME database as DB — holds org-independent state
   // (accounts, sessions, lexicon, alignment frequencies, UI-string overrides)
   // so switching workspaces doesn't log a user out or blank their lexicon.
@@ -184,7 +196,7 @@ app.use("*", (c, next) => {
   return cors({
     origin: (origin) => (origin && list.includes(origin) ? origin : null),
     credentials: true,
-    allowHeaders: ["Content-Type", "Authorization", "If-Match", "X-CSRF-Token", "X-Source-Generation", "X-Workspace"],
+    allowHeaders: ["Content-Type", "Authorization", "If-Match", "X-CSRF-Token", "X-Source-Generation", "X-Workspace", "X-Op-Queued-At", "X-Client-Route", "X-Tab-Id"],
     exposeHeaders: ["ETag"],
   })(c, next);
 });
@@ -311,6 +323,7 @@ app.route("/api/templates", templates);
 app.route("/api/translation-memory", translationMemory);
 app.route("/api/ai-provider", aiProvider);
 app.route("/api/l10n", l10n);
+app.route("/api/chat-links", chatLinkRoutes);
 
 // WebSocket upgrade into the ChapterRoom DO. WS handshakes are normal HTTP
 // upgrades, so they carry the be_access cookie (same-origin) and attachAuth
@@ -511,6 +524,64 @@ export default {
     // claimed on a sibling isolate isn't silently served as list[0] (a
     // different tenant's D1). A genuinely-dead slug still lands on list[0].
     await primeWorkspaces(env);
+    // The chat MCP endpoint takes its workspace from the caller's account
+    // link, never the cookie, and must not fall back to list[0] when the
+    // link's workspace is gone (that counts as not linked).
+    if (isMcpPath(request.url)) {
+      const sessionFor = async (link: ChatLink) => {
+        const ws = await resolveWorkspaceFresh(env, link.workspaceSlug);
+        if (ws.slug !== link.workspaceSlug) return null;
+        const wsEnv = workspaceEnv(env, ws);
+        const principal = {
+          userId: link.userId,
+          username: link.username,
+          role: await chatRoleFor(wsEnv, link.username),
+          linkId: link.linkId,
+        };
+        return {
+          workspace: { slug: ws.slug, label: ws.label, org: ws.org },
+          principal,
+          getJson: async (path: string) => {
+            const res = await app.fetch(new Request(new URL(path, request.url)), wsEnv, ctx);
+            return { status: res.status, body: await res.json().catch(() => null) };
+          },
+          // Writes run as the linked user: the principal rides a per-call env
+          // clone (chatWriteEnv), never the env the reads use.
+          send: async (method: string, path: string, body: unknown, ifMatch?: number) => {
+            const headers: Record<string, string> = { "Content-Type": "application/json" };
+            if (ifMatch !== undefined) headers["If-Match"] = String(ifMatch);
+            const req = new Request(new URL(path, request.url), { method, headers, body: JSON.stringify(body) });
+            const res = await app.fetch(req, chatWriteEnv(wsEnv, principal), ctx);
+            return { status: res.status, body: await res.json().catch(() => null) };
+          },
+          // Read-only D1 exception to the route-handler rule; see packageRefs.ts.
+          packageRefs: (book: string) => readPackageRefs(wsEnv, book),
+          sourceNotes: (book: string, chapter: number) => readSourceNotes(wsEnv, book, chapter),
+        };
+      };
+      return handleMcp(request, {
+        token: env.MCP_SERVICE_TOKEN,
+        resolveSession: async (token) => {
+          const link = await lookupLink(env, token);
+          return link ? sessionFor(link) : null;
+        },
+        // The code is spent even if its workspace has since been removed;
+        // the reviewer gets the same "did not work" answer as a bad code.
+        // A link whose token never reached the bot is revoked, so it does
+        // not sit in the user's link list.
+        claimLink: async (code) => {
+          const r = await claimCode(env, code);
+          if (!r.ok) return r;
+          let s: Awaited<ReturnType<typeof sessionFor>> = null;
+          try {
+            s = await sessionFor(r.link);
+          } finally {
+            if (!s) await revokeLink(env, r.link.userId, r.link.linkId);
+          }
+          return s ? { ok: true, token: r.token, expiresAt: r.expiresAt, workspace: s.workspace, principal: s.principal } : { ok: false };
+        },
+      });
+    }
     const ws = await resolveWorkspaceFresh(env, parseWorkspaceCookie(request));
     return app.fetch(request, workspaceEnv(env, ws), ctx);
   },

@@ -89,14 +89,16 @@ import { LogosSyncToggle, useLogosSyncVisible } from "./LogosSyncToggle";
 export function UiLanguageControl() {
   const { t } = useTranslation();
   const { lang, setLang } = useContext(UiLangContext);
-  const anchorRef = useRef<HTMLButtonElement>(null);
+  // The button element, held in state (callback ref) so the Menu can anchor on
+  // it without reading a ref during render.
+  const [anchorEl, setAnchorEl] = useState<HTMLButtonElement | null>(null);
   const [open, setOpen] = useState(false);
 
   return (
     <>
       <Tooltip title={t("topbar.uiLanguage")}>
         <IconButton
-          ref={anchorRef}
+          ref={setAnchorEl}
           size="small"
           onClick={() => setOpen(true)}
           aria-label={t("topbar.uiLanguage")}
@@ -104,7 +106,7 @@ export function UiLanguageControl() {
           <LanguageIcon fontSize="small" />
         </IconButton>
       </Tooltip>
-      <Menu open={open} anchorEl={anchorRef.current} onClose={() => setOpen(false)}>
+      <Menu open={open} anchorEl={anchorEl} onClose={() => setOpen(false)}>
         {UI_LANGUAGES.map((l) => (
           <MenuItem
             key={l.code}
@@ -164,7 +166,9 @@ function LayoutSwitcher({
   onRestoreAllRegions?: () => void;
 }) {
   const { t } = useTranslation();
-  const anchorRef = useRef<HTMLButtonElement>(null);
+  // The button element, held in state (callback ref) so the Menu can anchor on
+  // it without reading a ref during render.
+  const [anchorEl, setAnchorEl] = useState<HTMLButtonElement | null>(null);
   const [open, setOpen] = useState(false);
   if (layouts.length === 0) return null;
 
@@ -189,7 +193,7 @@ function LayoutSwitcher({
     <>
       <Tooltip title={t("topbar.layouts")}>
         <IconButton
-          ref={anchorRef}
+          ref={setAnchorEl}
           size="small"
           onClick={() => setOpen(true)}
           aria-label={t("topbar.layouts")}
@@ -197,7 +201,7 @@ function LayoutSwitcher({
           <ViewQuiltIcon fontSize="small" />
         </IconButton>
       </Tooltip>
-      <Menu open={open} anchorEl={anchorRef.current} onClose={() => setOpen(false)}>
+      <Menu open={open} anchorEl={anchorEl} onClose={() => setOpen(false)}>
         {layouts.map(renderLayoutItem)}
         {userLayouts.length > 0 && (
           <ListSubheader sx={{ lineHeight: 2, bgcolor: "transparent" }}>
@@ -436,6 +440,7 @@ export function TopBar({
   }, []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- clear the previous book's summary when the book changes; without it the navigation cluster shows the old book's chapters for one fetch.
     setSummary(null);
     // Only the (hidden) navigation cluster reads `summary` — skip the fetch on
     // routes that don't show it rather than firing a request per mount.

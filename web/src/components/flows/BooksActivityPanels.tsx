@@ -17,6 +17,7 @@ import {
   type PipelineJobRow,
 } from "../../sync/api";
 import { FlowStatusChip, type FlowStatusKind } from "./FlowStatusChip";
+import { errorCopy } from "../../lib/aiErrorCopy";
 import { Panel, PanelBody, PanelFoot, PanelTop, ListRow } from "./BooksPanel";
 
 function errorText(e: unknown): string {
@@ -165,6 +166,7 @@ export function BooksActivityPanel({ book }: { book: string }) {
   }, []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- mount-time load; the same `load` backs the Retry buttons, and it sets status to loading at start so the spinner shows instead of the old job list.
     void load();
   }, [load]);
 
@@ -209,7 +211,7 @@ export function BooksActivityPanel({ book }: { book: string }) {
                 </Typography>
                 {j.state === "failed" && (j.error_message || j.error_kind) && (
                   <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
-                    {j.error_kind ?? t("flowBooks.activity.errorKindFallback")}:{" "}
+                    {j.error_kind ? errorCopy(j.error_kind, t, j.error_message) : t("flowBooks.activity.errorKindFallback")}{" — "}
                     {j.error_message ?? t("flowBooks.activity.noMessage")}
                   </Typography>
                 )}

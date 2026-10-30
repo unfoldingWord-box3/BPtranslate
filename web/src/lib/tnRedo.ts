@@ -82,12 +82,16 @@ export function tnRedoBlockedReason(
     noNoteSelected: string;
     needsSupportRef: string;
     needsQuote: string;
+    /** #551: set while tn-quick can't use the org's own AI key. Blocks verse
+     *  notes only; intro Redo runs the translate pipeline on the org key. */
+    quickNeedsOrgKey?: string | null;
   },
 ): string | null {
   if (opts.aiUnavailable) return opts.aiUnavailable;
   if (!row) return opts.noNoteSelected;
   // Intros skip quote/supportRef — the pipeline retranslates free-form markdown.
   if (tnRedoUsesPipeline(row)) return null;
+  if (opts.quickNeedsOrgKey) return opts.quickNeedsOrgKey;
   if (!row.support_reference) return opts.needsSupportRef;
   if (!row.quote) return opts.needsQuote;
   return null;

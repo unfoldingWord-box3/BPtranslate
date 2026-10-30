@@ -1153,16 +1153,16 @@ function ArticleDetail({
   // is how we learn (no capability flag exists up front).
   const [aiUnavailable, setAiUnavailable] = useState<string | null>(null);
   const [lang, setLang] = useState<Lang>(sessionLang);
-
-  const setLangRemembered = (l: Lang) => {
-    sessionLang = l;
-    setLang(l);
-  };
+  // Remember the choice for the next mount of this screen (this tab only).
+  useEffect(() => {
+    sessionLang = lang;
+  }, [lang]);
 
   // Load full units, then let a persisted draft (unsaved typing from this
   // browser) win over the server's target — mirrors ArticlesScreen:513-560.
   useEffect(() => {
     let cancelled = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- draft-hydration load: re-runs on reloadKey without a remount, its resets stay paired with the async draft-store restore below, and the editingPath reset feeds the focus/scroll effect above, so moving it into render would reorder the two.
     setParts(null);
     setLoadError(null);
     setStaleDraft(false);
@@ -1471,7 +1471,7 @@ function ArticleDetail({
         onClick={() => {
           if (lang !== value) {
             setEditingPath(null);
-            setLangRemembered(value);
+            setLang(value);
           }
         }}
         aria-pressed={active}

@@ -4,7 +4,7 @@
 // confirm. TopBar's LayoutSwitcher opens them via Shell-provided callbacks.
 // i18n Phase 5+ : layout names stay in the language the user typed them.
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
   Dialog,
   DialogTitle,
@@ -56,7 +56,13 @@ function LayoutRow({
 }) {
   const { t } = useTranslation();
   const [name, setName] = useState(layout.name);
-  useEffect(() => setName(layout.name), [layout.name]);
+  // Follow a rename that lands from outside (e.g. the commit below), adjusting
+  // state during render rather than in an effect.
+  const [prevLayoutName, setPrevLayoutName] = useState(layout.name);
+  if (layout.name !== prevLayoutName) {
+    setPrevLayoutName(layout.name);
+    setName(layout.name);
+  }
 
   const commit = () => {
     const trimmed = name.trim();
@@ -117,10 +123,13 @@ export function LayoutMenu({
   const [name, setName] = useState("");
   const [pendingDelete, setPendingDelete] = useState<LayoutSpec | null>(null);
 
-  // Fresh, empty name field each time the Save dialog opens.
-  useEffect(() => {
+  // Fresh, empty name field each time the Save dialog opens (adjusted during
+  // render on the closed → open transition).
+  const [prevSaveAsOpen, setPrevSaveAsOpen] = useState(saveAsOpen);
+  if (saveAsOpen !== prevSaveAsOpen) {
+    setPrevSaveAsOpen(saveAsOpen);
     if (saveAsOpen) setName("");
-  }, [saveAsOpen]);
+  }
 
   const submitSave = () => {
     const trimmed = name.trim();

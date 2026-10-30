@@ -77,12 +77,15 @@ export function StackedResourcePanel({
   onQuestionDelete,
   onQuestionCreate,
   locked = false,
+  noteCardsLocked = locked,
+  lockPipelineType = null,
   onSetNotePreserve,
   onSetNoteHint,
   onNoteApprove,
   onApproveAllNotes,
   onNoteTranslate,
   translatingNoteIds,
+  translateLockedNoteIds,
   onQuestionApprove,
   onApproveAllQuestions,
   onQuestionTranslate,
@@ -240,7 +243,9 @@ export function StackedResourcePanel({
       isAiPending={isNoteAiPending?.(r.id) ?? false}
       aiRecentlyCompletedAt={noteAiRecentlyCompletedAt?.(r.id) ?? null}
       onVisibilityChange={onNoteVisibilityChange}
-      locked={locked}
+      locked={noteCardsLocked}
+      createLocked={locked}
+      lockPipelineType={lockPipelineType}
       onSetPreserve={onSetNotePreserve ? (value) => onSetNotePreserve(r.id, value) : undefined}
       onSetHint={onSetNoteHint ? (value) => onSetNoteHint(r.id, value) : undefined}
       onTranslateQuote={onNoteTranslateQuote && !isForeign(r) ? (english) => onNoteTranslateQuote(r, english) : undefined}
@@ -250,6 +255,7 @@ export function StackedResourcePanel({
       onUnapprove={onNoteApprove ? () => onNoteApprove(r.id, false) : undefined}
       onTranslate={onNoteTranslate ? () => onNoteTranslate(r.id) : undefined}
       isTranslating={translatingNoteIds?.has(r.id) ?? false}
+      rowTranslateLocked={translateLockedNoteIds?.has(r.id) ?? false}
     />
   );
 

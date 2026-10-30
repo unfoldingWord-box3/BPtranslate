@@ -55,8 +55,6 @@ export interface AlignmentTabProps {
   // Confirm-before-save when the edit would unalign a previously aligned word
   // (forwarded to AlignmentPanel; see its onConfirmUnalign prop).
   onConfirmUnalign?: (lostWords: string[], commit: () => void) => void;
-  panelRef?: Ref<AlignmentPanelHandle>;
-  onOpenDual?: () => void;
   // Restore a previously-saved verse version from the panel's history button.
   onRestoreVersion?: (content: unknown, plainText: string | null) => void;
 }
@@ -137,6 +135,14 @@ interface Props {
   // Chapter is locked for editing because an AI pipeline is mid-flight.
   // Hides "new" buttons, propagates read-only to children.
   locked?: boolean;
+  // Whether that lock reaches the note cards (keep-mode, or read-only under a
+  // chapter-wide translate). False under a single-note or verse-range
+  // redraft, which locks only its own notes via translateLockedNoteIds
+  // (issue #607). Defaults to `locked`.
+  noteCardsLocked?: boolean;
+  // Pipeline type of the job holding the lock. A translate run makes every
+  // note read-only, kept and hint notes included (issue #561).
+  lockPipelineType?: string | null;
   // Toggle the TN's preserve bit ("survive future AI pipeline sweeps").
   // Threaded through to NoteCard. Always available, regardless of lock.
   onSetNotePreserve?: (id: string, value: boolean) => void;
@@ -154,6 +160,10 @@ interface Props {
   onNoteTranslate?: (id: string) => void;
   // Rows with an in-flight single-note / chapter translate run (spinner).
   translatingNoteIds?: Set<string>;
+  // Notes an in-flight translate run will write — a single-note or verse-range
+  // redraft's own notes, or every note under a chapter-wide run. Read-only
+  // until it finishes, since the server refuses edits to them (issue #606).
+  translateLockedNoteIds?: Set<string>;
   // ── Translation mode, tQ analogues ── Approve/un-approve + single-question
   // Translate for translationQuestions. Absent in the English root project.
   onQuestionApprove?: (id: string, value: boolean) => void;
@@ -213,6 +223,12 @@ interface Props {
   panelMode?: PanelMode;
   onSetPanelMode?: (mode: PanelMode) => void;
   alignmentProps?: AlignmentTabProps;
+  // The alignment panel's imperative handle and its "Side-by-side" action, kept
+  // out of `alignmentProps`: a ref (or a callback that reaches refs) inside that
+  // memoized object made the React Compiler flag every field read of it during
+  // render (#594).
+  alignmentPanelRef?: Ref<AlignmentPanelHandle>;
+  onOpenDualAligner?: () => void;
   alignmentBadge?: string;
   // Per-resource checkoff for the active verse (in-context "done" + bulk).
   checkoff?: ResourceCheckoff;
@@ -303,12 +319,15 @@ export function ResourceColumn({
   onQuestionDelete,
   onQuestionCreate,
   locked = false,
+  noteCardsLocked = locked,
+  lockPipelineType = null,
   onSetNotePreserve,
   onSetNoteHint,
   onNoteApprove,
   onApproveAllNotes,
   onNoteTranslate,
   translatingNoteIds,
+  translateLockedNoteIds,
   onQuestionApprove,
   onApproveAllQuestions,
   onQuestionTranslate,
@@ -333,6 +352,8 @@ export function ResourceColumn({
   panelMode = "resources",
   onSetPanelMode,
   alignmentProps,
+  alignmentPanelRef,
+  onOpenDualAligner,
   alignmentBadge,
   checkoff,
   visibleTabs,
@@ -433,18 +454,19 @@ export function ResourceColumn({
     if (!requestTab || requestTab.nonce === seenTabRequest.current) return;
     seenTabRequest.current = requestTab.nonce;
     if (tabs.includes(requestTab.tab)) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- the switch lands one commit after Shell's active-row change, so the scroll effect runs once against the old tab and again (via tabRequestScroll) against the new one; moving it into render collapses those runs into one and can change where the list ends up.
       setResourceTab(requestTab.tab);
       setTabRequestScroll((n) => n + 1);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the request nonce by design: a switch happens once per new request. `tabs` is a fresh array every render and `requestTab.tab` only matters alongside a new nonce.
   }, [requestTab?.nonce]);
 
   // Lazily mount the Search iframe on first visit, then keep it alive (the body
   // toggles its visibility rather than unmounting). Avoids loading the external
   // tool on every page load for users who never open the tab.
+  // Latched during render (React's "adjust state when a prop changes" pattern).
   const [searchVisited, setSearchVisited] = useState(false);
-  useEffect(() => {
-    if (panelMode === "search") setSearchVisited(true);
-  }, [panelMode]);
+  if (panelMode === "search" && !searchVisited) setSearchVisited(true);
 
   const [rangeStart, rangeEnd] = displayVerseRange;
   // When a UST verse bridge widens the range to span multiple verses (e.g. ISA
@@ -542,6 +564,7 @@ export function ResourceColumn({
   const noteFocusRef = useRef<{ id: string; dir: "up" | "down" } | null>(null);
   const [recentNoteMove, setRecentNoteMove] = useState<{ id: string; dir: "up" | "down" } | null>(null);
   const noteFlashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- runs after every commit on purpose: it consumes the focus request the arrow handlers leave in noteFocusRef and clears it on first read, so the setState fires once per move, never in a loop.
   useLayoutEffect(() => {
     const pending = noteFocusRef.current;
     if (!pending) return;
@@ -675,7 +698,7 @@ export function ResourceColumn({
       prevPinnedRef.current.notes !== pinned.notes ||
       prevPinnedRef.current.words !== pinned.words ||
       prevPinnedRef.current.questions !== pinned.questions;
-    prevPinnedRef.current = pinned;
+    prevPinnedRef.current = { notes: pinned.notes, words: pinned.words, questions: pinned.questions };
     // The verse-group / verse-end fallbacks below reposition the whole list to
     // a verse boundary. They're meant for navigation (button, verse change, pin
     // toggle) — NOT for incidental re-runs like clearing the active note when a
@@ -827,7 +850,7 @@ export function ResourceColumn({
             // whose useState(computedInitial) seeds the correct state
             // synchronously, closing the race.
             key={`${alignmentProps.bibleVersion}:${alignmentProps.chapter}:${alignmentProps.verseNum}`}
-            ref={alignmentProps.panelRef}
+            ref={alignmentPanelRef}
             book={alignmentProps.book}
             chapter={alignmentProps.chapter}
             verseNum={alignmentProps.verseNum}
@@ -840,7 +863,7 @@ export function ResourceColumn({
             onConfirmUnalign={alignmentProps.onConfirmUnalign}
             onCancel={alignmentProps.onCancel}
             onDirtyChange={alignmentProps.onDirtyChange}
-            onOpenDual={alignmentProps.onOpenDual}
+            onOpenDual={onOpenDualAligner}
             onRestoreVersion={alignmentProps.onRestoreVersion}
           />
         ) : (
@@ -1071,7 +1094,9 @@ export function ResourceColumn({
           isAiPending={isNoteAiPending?.(r.id) ?? false}
           aiRecentlyCompletedAt={noteAiRecentlyCompletedAt?.(r.id) ?? null}
           onVisibilityChange={onNoteVisibilityChange}
-          locked={locked}
+          locked={noteCardsLocked}
+          createLocked={locked}
+          lockPipelineType={lockPipelineType}
           onSetPreserve={
             onSetNotePreserve ? (value) => onSetNotePreserve(r.id, value) : undefined
           }
@@ -1093,6 +1118,7 @@ export function ResourceColumn({
           onUnapprove={onNoteApprove ? () => onNoteApprove(r.id, false) : undefined}
           onTranslate={onNoteTranslate ? () => onNoteTranslate(r.id) : undefined}
           isTranslating={translatingNoteIds?.has(r.id) ?? false}
+          rowTranslateLocked={translateLockedNoteIds?.has(r.id) ?? false}
         />
         {showAfter && <DropIndicator />}
       </Fragment>

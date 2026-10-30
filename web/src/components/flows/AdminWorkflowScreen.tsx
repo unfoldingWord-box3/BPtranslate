@@ -95,9 +95,9 @@
 //     BooksLanePanel.tsx:228-305. Duplicating a THIRD copy of the most dangerous
 //     admin flow in the app was judged conservative-wrong; this screen links the
 //     reader to where staging starts and shows the resulting job honestly.
-//     Future: extract a shared LaneReplacementDriver-style component (note the
-//     existing web/src/components/LaneReplacementDriver.tsx is dead code — never
-//     rendered) and mount it here.
+//     Future: extract a shared lane-replacement driver component and mount it
+//     here (the old web/src/components/LaneReplacementDriver.tsx was never
+//     rendered and was deleted in #593).
 //   * Cancel / Back out / per-book Retry / Waive on the replacement job —
 //     real endpoints (scriptureLaneRoutes.ts:228-359) but they belong to the
 //     staging driver surfaces above; this desk shows state and offers only the
@@ -661,6 +661,7 @@ export default function AdminWorkflowScreen({ role, me }: AdminWorkflowScreenPro
 
   useEffect(() => {
     if (!isAdmin) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- mount-time loaders; loadConfig/loadSnapshots also back the Retry buttons and run after lane actions, and they set state only after the await.
     void loadConfig();
     void loadSnapshots();
   }, [isAdmin, loadConfig, loadSnapshots]);
@@ -680,6 +681,7 @@ export default function AdminWorkflowScreen({ role, me }: AdminWorkflowScreenPro
     if (litJobId) targets.push({ lane: "lit", jobId: litJobId });
     if (simJobId) targets.push({ lane: "sim", jobId: simJobId });
     if (targets.length === 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- clear lane jobs when neither lane has a replacement job; without it a finished job's card stays on screen after the config stops pointing at it.
       setLaneJobs({});
       return;
     }

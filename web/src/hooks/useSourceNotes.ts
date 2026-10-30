@@ -1,4 +1,8 @@
 import { useEffect, useState } from "react";
+import { fallbackSourcePlan, mergeSourceNotes, parseSourceTsv, planRepos, repoKey, type NoteSourcePlan, type SourceNoteMap } from "../lib/sourceNotePlan";
+import { watchSourcePlan } from "./sourcePlans";
+
+export type { SourceNote, SourceNoteMap } from "../lib/sourceNotePlan";
 
 // The published source-language tN (e.g. unfoldingWord/en_tn) for a book, keyed
 // by row ID. In a gateway-language project the row's OWN note is the target
@@ -9,17 +13,18 @@ import { useEffect, useState } from "react";
 // id. Door43 serves raw TSV with permissive CORS (same as the TW article
 // viewer), and the prod CSP already allows git.door43.org.
 //
+// Per chapter (#691): a book or chapter range can take its tN from another
+// source (book_source_overrides). The server sends which source each chapter
+// resolves to (GET /api/books/:book/sources → tnNoteSources), every source in
+// it is fetched, and each note comes from the source its own chapter resolves
+// to (lib/sourceNotePlan.ts). An Aquifer range keeps the project-wide source.
+//
 // Degrades gracefully: a failed fetch or an id with no source row yields no
-// entry, and the card simply omits the source block.
-
-export interface SourceNote {
-  note: string;
-  quote: string;
-  supportReference: string;
-  reference: string;
-}
-
-export type SourceNoteMap = Map<string, SourceNote>;
+// entry, and the card simply omits the source block. If the source plan cannot
+// be read (request failed, or the server could not resolve it), the
+// project-wide file shows for every chapter, as before the per-chapter plan
+// (#697) until a background retry reads the plan; an authoring project (null
+// plan) shows none.
 
 const EMPTY: SourceNoteMap = new Map();
 
@@ -27,37 +32,9 @@ function rawUrl(org: string, repo: string, book: string): string {
   return `https://git.door43.org/${org}/${repo}/raw/branch/master/tn_${book.toUpperCase()}.tsv`;
 }
 
-// tN TSV columns: Reference \t ID \t Tags \t SupportReference \t Quote \t Occurrence \t Note
-function parseTsv(text: string): SourceNoteMap {
-  const map: SourceNoteMap = new Map();
-  // Strip a leading UTF-8 BOM (Door43 raw files sometimes carry one) — without
-  // this the first column of the header row would be "﻿Reference" and,
-  // worse, the header's id would be "﻿Reference"'s neighbour, so the
-  // content-based header skip below would miss it. Split on \r?\n so CRLF-served
-  // files don't leave a trailing "\r" on the Note column.
-  const lines = text.replace(/^﻿/, "").split(/\r?\n/);
-  for (const line of lines) {
-    if (!line) continue;
-    const cols = line.split("\t");
-    if (cols.length < 7) continue;
-    const [reference, id, , supportReference, quote, , note] = cols;
-    // Skip the header by CONTENT, not position (a leading blank line would push
-    // it past index 0). Real row IDs are 4-char slugs, never the literal "ID".
-    if (id === "ID") continue;
-    if (!id) continue;
-    map.set(id, {
-      note: (note ?? "").replace(/\\n/g, "\n"),
-      quote: quote ?? "",
-      supportReference: supportReference ?? "",
-      reference: reference ?? "",
-    });
-  }
-  return map;
-}
-
 const cache = new Map<string, Promise<SourceNoteMap>>();
 
-function fetchSourceNotes(org: string, repo: string, book: string): Promise<SourceNoteMap> {
+function fetchSourceTsv(org: string, repo: string, book: string): Promise<SourceNoteMap> {
   const url = rawUrl(org, repo, book);
   let pending = cache.get(url);
   if (!pending) {
@@ -66,7 +43,7 @@ function fetchSourceNotes(org: string, repo: string, book: string): Promise<Sour
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.text();
       })
-      .then(parseTsv)
+      .then(parseSourceTsv)
       .catch((err) => {
         cache.delete(url); // don't cache failures — allow retry
         throw err;
@@ -76,29 +53,60 @@ function fetchSourceNotes(org: string, repo: string, book: string): Promise<Sour
   return pending;
 }
 
-// `source` is the project's translationSource projection {org, repo}; null (the
-// English root project) short-circuits to an empty map, so no fetch fires.
+async function loadSourceNotes(book: string, plan: NoteSourcePlan | null): Promise<SourceNoteMap> {
+  if (!plan) return EMPTY;
+  const repos = planRepos(plan);
+  const settled = await Promise.allSettled(repos.map((r) => fetchSourceTsv(r.org, r.repo, book)));
+  const byRepo = new Map<string, SourceNoteMap>();
+  settled.forEach((s, i) => {
+    if (s.status === "fulfilled") byRepo.set(repoKey(repos[i]), s.value);
+  });
+  return mergeSourceNotes(plan, byRepo);
+}
+
+// `book` is null outside translation mode, which short-circuits to an empty map
+// with no fetch. `source` is the project's translationSource projection
+// {org, repo}: prefetched, and the fallback when the plan cannot be read; null (no project-wide tN repo) still reads
+// the plan, since a Door43 override applies without one. The server's plan
+// decides which repos are read.
 export function useSourceNotes(
   book: string | null | undefined,
   source: { org: string; repo: string } | null,
 ): SourceNoteMap {
   const [map, setMap] = useState<SourceNoteMap>(EMPTY);
+  // Depend on the two strings, not the object, so a caller that builds `source`
+  // fresh each render does not refetch on every render.
+  const org = source?.org ?? null;
+  const repo = source?.repo ?? null;
   useEffect(() => {
-    if (!book || !source) {
+    if (!book) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- clear the map when the book goes away. Deriving EMPTY in render instead would let the previous book's notes reappear when a book comes back, until its fetch lands.
       setMap(EMPTY);
       return;
     }
     let mounted = true;
-    fetchSourceNotes(source.org, source.repo, book)
-      .then((m) => {
-        if (mounted) setMap(m);
-      })
-      .catch(() => {
-        if (mounted) setMap(EMPTY);
-      });
+    // Start the project-wide file while the plan loads; almost every chapter
+    // reads it, and the shared cache hands it to loadSourceNotes.
+    if (org !== null && repo !== null) fetchSourceTsv(org, repo, book).catch(() => {});
+    // A plan that cannot be read falls back to the project-wide file now and
+    // is retried in the background; a later success replaces the fallback
+    // (#697). `seq` keeps a slow earlier load from overwriting a newer one.
+    const projectWide = org !== null && repo !== null ? { org, repo } : null;
+    let seq = 0;
+    const stop = watchSourcePlan(book, "tn", (plan) => {
+      const mine = ++seq;
+      loadSourceNotes(book, plan === undefined ? fallbackSourcePlan(projectWide) : plan)
+        .then((m) => {
+          if (mounted && mine === seq) setMap(m);
+        })
+        .catch(() => {
+          if (mounted && mine === seq) setMap(EMPTY);
+        });
+    });
     return () => {
       mounted = false;
+      stop();
     };
-  }, [book, source?.org, source?.repo]);
+  }, [book, org, repo]);
   return map;
 }

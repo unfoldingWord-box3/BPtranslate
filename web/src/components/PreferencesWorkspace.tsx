@@ -444,6 +444,7 @@ function LaneCard({ lane, label, cfg }: { lane: "lit" | "sim"; label: string; cf
   // the shared config (which clears replacementJobId, so the poll won't re-arm).
   useEffect(() => {
     if (!replacementJobId) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- clear the job when replacementJobId goes away; without it the finished job's staging status stays on screen after the config no longer points at it.
       setJob(null);
       return;
     }
@@ -1073,17 +1074,15 @@ type PrefsState = ReturnType<typeof useTranslationPrefs>;
 function BriefSection({ prefsState }: { prefsState: PrefsState }) {
   const { t } = useTranslation();
   const { prefs, loading, apply, refetch } = prefsState;
-  const [draft, setDraft] = useState<TranslationPrefs | null>(null);
+  const [draft, setDraft] = useState<TranslationPrefs | null>(() => prefs);
   const save = useSaveState();
 
   // Seed once: a sibling section's save PUTs only its own fields (the server
-  // partial-merges), so it can't change anything Brief owns. If this effect
-  // re-seeded on every `prefs` change, a sibling's save (which also updates
-  // `prefs` via apply()) would silently overwrite whatever the user is still
-  // typing here.
-  useEffect(() => {
-    setDraft((d) => d ?? prefs);
-  }, [prefs]);
+  // partial-merges), so it can't change anything Brief owns. If this re-seeded
+  // on every `prefs` change, a sibling's save (which also updates `prefs` via
+  // apply()) would silently overwrite whatever the user is still typing here.
+  // Seeded during render once prefs arrive, when they weren't loaded at mount.
+  if (draft === null && prefs) setDraft(prefs);
 
   const onSave = async () => {
     if (!draft || !prefs) return;
@@ -1207,17 +1206,16 @@ function MarkdownPrefSection({
   // null = not yet seeded from `prefs` (loading gate below); seeded once so a
   // sibling section's save (which also updates `prefs` via apply()) can't
   // reset text the user is mid-typing here.
-  const [value, setValue] = useState<string | null>(null);
+  const [value, setValue] = useState<string | null>(() => (prefs ? (prefs[field] ?? "") : null));
   const [preview, setPreview] = useState(false);
   const save = useSaveState();
 
-  useEffect(() => {
-    // Seed ONLY once prefs actually loaded. Without the `prefs` gate this
-    // would coalesce the initial null prefs into "" on mount — the editor
-    // would render empty instead of the saved content, and a Save from that
-    // state would silently null the field on the server.
-    if (prefs) setValue((v) => v ?? (prefs[field] ?? ""));
-  }, [prefs, field]);
+  // Seed ONLY once prefs actually loaded (during render when they weren't
+  // loaded at mount). Without the `prefs` gate this would coalesce the initial
+  // null prefs into "" on mount — the editor would render empty instead of the
+  // saved content, and a Save from that state would silently null the field
+  // on the server.
+  if (value === null && prefs) setValue(prefs[field] ?? "");
 
   const overLimit = (value ?? "").length > maxChars;
 

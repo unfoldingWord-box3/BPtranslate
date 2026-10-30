@@ -28,6 +28,8 @@ import { SignJWT } from "jose";
 
 import { dispatchNext, pollAllNonTerminal, pipelines } from "./pipelines.ts";
 import { attachAuth } from "./auth.ts";
+import { tnQuick } from "./tnQuick.ts";
+import { templates } from "./templates.ts";
 import { encryptApiKey } from "./aiKeyCrypto.ts";
 import { clearProjectConfigCache } from "./projectConfig.ts";
 import { outKey } from "./translate/storage.ts";
@@ -407,38 +409,103 @@ test("dispatchNext (#551): a queued translate job whose org has no key fails, an
       assert.equal(env.created.length, 0, `${tag}: no Workflow instance`);
       const row = jobRow(sqlite);
       assert.equal(row.state, "failed", `${tag}: the job fails loudly instead of waiting forever`);
-      assert.equal(row.error_kind, "sdk_error", tag);
-      assert.equal(row.error_message, "ai_provider_unavailable: ai_provider_not_configured", tag);
+      // #575: the real reason, so the UI says "an admin should check the AI
+      // settings" instead of "retrying usually fixes this".
+      assert.equal(row.error_kind, "ai_provider_unavailable", tag);
+      assert.equal(row.error_message, "ai_provider_not_configured", tag);
     }
   }
 });
 
-test("dispatchNext (#551): a legacy notes job with no org key still dispatches to the bot, unchanged (part B is separate)", async () => {
+test("dispatchNext (#575): a queued translate job whose stored key can't be decrypted fails as ai_provider_key_decrypt_failed, and nothing is posted", async () => {
+  for (const mode of [undefined, "internal"]) {
+    const sqlite = freshSqlite();
+    seedQueuedTranslateJob(sqlite);
+    await seedByoKey(sqlite);
+    // The key was wrapped with WRAPPING_KEY; dispatch now holds a different
+    // (valid-length) wrapping key, as after a rotation.
+    const rotated = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64");
+    const env = freshEnv(sqlite, { ...(mode ? { PIPELINE_MODE: mode } : {}), AI_KEY_WRAPPING_KEY: rotated });
+
+    const fetchCount = await withNoFetch(async (count) => {
+      await dispatchNext(env);
+      return count();
+    });
+
+    const tag = `PIPELINE_MODE=${mode ?? "unset"}`;
+    assert.equal(fetchCount, 0, `${tag}: no upstream POST`);
+    assert.equal(env.created.length, 0, `${tag}: no Workflow instance`);
+    const row = jobRow(sqlite);
+    assert.equal(row.state, "failed", tag);
+    assert.equal(row.error_kind, "ai_provider_key_decrypt_failed", tag);
+    assert.equal(row.error_message, "stored provider key could not be decrypted (wrapping key rotated?)", tag);
+  }
+});
+
+test("dispatchNext (#551 switch-off): a queued legacy generate/notes/tqs job fails as ai_needs_org_key, even with an org key, and nothing is posted", async () => {
+  for (const type of ["generate", "notes", "tqs"]) {
+    for (const withKey of [false, true]) {
+      const sqlite = freshSqlite();
+      sqlite
+        .prepare(
+          `INSERT INTO pipeline_jobs
+             (job_id, user_id, pipeline_type, book, start_chapter, end_chapter,
+              session_key, state, options_json, created_at, updated_at)
+           VALUES ('job-legacy', 1, ?, 'OBA', 1, 1, 'sess-legacy', 'queued', NULL, 100, 100)`,
+        )
+        .run(type);
+      if (withKey) await seedByoKey(sqlite);
+      const env = freshEnv(sqlite);
+
+      const fetchCount = await withNoFetch(async (count) => {
+        await dispatchNext(env);
+        return count();
+      });
+
+      const tag = `${type}, org key ${withKey ? "set" : "unset"}`;
+      assert.equal(fetchCount, 0, `${tag}: nothing reaches the bot on the shared account`);
+      assert.equal(env.created.length, 0, `${tag}: no Workflow instance`);
+      const row = jobRow(sqlite, "job-legacy");
+      assert.equal(row.state, "failed", tag);
+      assert.equal(row.error_kind, "ai_needs_org_key", tag);
+    }
+  }
+});
+
+test("dispatchNext (#551 switch-off): legacy jobs queued ahead of a translate job are failed and the translate job dispatches in the same call", async () => {
   const sqlite = freshSqlite();
-  sqlite
-    .prepare(
-      `INSERT INTO pipeline_jobs
-         (job_id, user_id, pipeline_type, book, start_chapter, end_chapter,
-          session_key, state, options_json, created_at, updated_at)
-       VALUES ('job-notes', 1, 'notes', 'OBA', 1, 1, 'sess-notes', 'queued', NULL, 100, 100)`,
-    )
-    .run();
-  const env = freshEnv(sqlite, { PIPELINE_MODE: "internal" });
+  for (const [jobId, type, created] of [["legacy-a", "notes", 10], ["legacy-b", "generate", 20]]) {
+    sqlite
+      .prepare(
+        `INSERT INTO pipeline_jobs
+           (job_id, user_id, pipeline_type, book, start_chapter, end_chapter,
+            session_key, state, options_json, created_at, updated_at)
+         VALUES (?, 1, ?, 'OBA', 1, 1, ?, 'queued', NULL, ?, ?)`,
+      )
+      .run(jobId, type, `sess-${jobId}`, created, created);
+  }
+  seedQueuedTranslateJob(sqlite); // created_at 100: behind both legacy jobs
+  await seedByoKey(sqlite);
+  const env = freshEnv(sqlite);
   await withFetch(
-    async () => new Response(JSON.stringify({ jobId: "bot-notes" }), { status: 200 }),
+    async () => new Response(JSON.stringify({ jobId: "bot-1", provider: "claude" }), { status: 200 }),
     async (calls) => {
       await dispatchNext(env);
-      assert.equal(calls.length, 1, "the notes job still POSTs to the bot");
-      const body = JSON.parse(calls[0].init.body);
-      assert.equal(body.pipelineType, "notes");
-      assert.equal("apiKey" in body, false, "no key fields on a legacy job");
-      assert.equal("provider" in body, false);
+      assert.equal(calls.length, 1, "exactly one POST: the translate job");
+      assert.equal(JSON.parse(calls[0].init.body).pipelineType, "translate");
     },
   );
-  const row = jobRow(sqlite, "job-notes");
-  assert.equal(row.state, "running");
-  assert.equal(row.upstream_job_id, "bot-notes");
+  for (const id of ["legacy-a", "legacy-b"]) {
+    const row = jobRow(sqlite, id);
+    assert.equal(row.state, "failed", id);
+    assert.equal(row.error_kind, "ai_needs_org_key", id);
+  }
+  assert.equal(jobRow(sqlite).state, "running", "the translate job was not left waiting for the next cron tick");
 });
+
+// A translate job with an org key still dispatches with that key: covered by
+// "dispatchNext: every gate-off case still dispatches to the bot" above and
+// "POST /start (#551): translate with an org key gets past the key check" below.
 
 function postReq(token, body) {
   return {
@@ -472,7 +539,7 @@ test("POST /start (#551): translate with no org key is refused with 409 ai_provi
         JWT_ISSUER: ROUTE_ISSUER,
       });
       const app = routeApp();
-      const tok = await editorToken("1");
+      const tok = await editorToken("1", env.WORKSPACE_SLUG);
       const tag = `${label}, BT_API_TOKEN=${token ? "set" : "unset"}`;
 
       const { res, fetchCount } = await withNoFetch(async (count) => {
@@ -498,7 +565,7 @@ test("POST /start (#551): a keyless org with a same-scope translate job already 
   sqlite.prepare(`UPDATE pipeline_jobs SET book = 'OBA', start_chapter = 1, end_chapter = 1 WHERE job_id = 'pre-deploy'`).run();
   const env = freshEnv(sqlite, { JWT_SIGNING_KEY: ROUTE_SIGNING, JWT_ISSUER: ROUTE_ISSUER });
   const app = routeApp();
-  const tok = await editorToken("1");
+  const tok = await editorToken("1", env.WORKSPACE_SLUG);
 
   const { res, fetchCount } = await withNoFetch(async (count) => {
     const res = await app.request("/api/pipelines/start", postReq(tok, START_TRANSLATE), env);
@@ -517,7 +584,7 @@ test("POST /start (#551): translate with an org key gets past the key check and 
   await seedByoKey(sqlite, { provider: "openai", model: "gpt-5.5" });
   const env = freshEnv(sqlite, { JWT_SIGNING_KEY: ROUTE_SIGNING, JWT_ISSUER: ROUTE_ISSUER });
   const app = routeApp();
-  const tok = await editorToken("1");
+  const tok = await editorToken("1", env.WORKSPACE_SLUG);
 
   await withFetch(
     async () => new Response(JSON.stringify({ jobId: "bot-start", provider: "openai" }), { status: 200 }),
@@ -532,6 +599,91 @@ test("POST /start (#551): translate with an org key gets past the key check and 
       assert.equal(body.apiKey, API_KEY, "the org's own key is what the bot runs on");
     },
   );
+});
+
+test("POST /start (#551 switch-off): generate/notes/tqs are refused with 409 ai_needs_org_key, even with an org key; nothing is enqueued", async () => {
+  for (const pipelineType of ["generate", "notes", "tqs"]) {
+    for (const withKey of [false, true]) {
+      const sqlite = freshSqlite();
+      if (withKey) await seedByoKey(sqlite);
+      const env = freshEnv(sqlite, { JWT_SIGNING_KEY: ROUTE_SIGNING, JWT_ISSUER: ROUTE_ISSUER });
+      const app = routeApp();
+      const tok = await editorToken("1", env.WORKSPACE_SLUG);
+      const tag = `${pipelineType}, org key ${withKey ? "set" : "unset"}`;
+
+      const { res, fetchCount } = await withNoFetch(async (count) => {
+        const res = await app.request(
+          "/api/pipelines/start",
+          postReq(tok, { pipelineType, book: "OBA", startChapter: 1, endChapter: 1, sessionKey: `sess-${pipelineType}` }),
+          env,
+        );
+        return { res, fetchCount: count() };
+      });
+
+      assert.equal(res.status, 409, tag);
+      assert.deepEqual(await res.json(), { error: "ai_needs_org_key" }, tag);
+      assert.equal(fetchCount, 0, `${tag}: no fetch`);
+      const jobs = sqlite.prepare(`SELECT COUNT(*) AS n FROM pipeline_jobs`).all()[0].n;
+      assert.equal(jobs, 0, `${tag}: no pipeline_jobs row was enqueued`);
+    }
+  }
+});
+
+test("POST /start (#551 switch-off): a translate job whose followUpChain holds a legacy step is refused; nothing is enqueued", async () => {
+  const sqlite = freshSqlite();
+  await seedByoKey(sqlite);
+  const env = freshEnv(sqlite, { JWT_SIGNING_KEY: ROUTE_SIGNING, JWT_ISSUER: ROUTE_ISSUER });
+  const tok = await editorToken("1", env.WORKSPACE_SLUG);
+  const { res, fetchCount } = await withNoFetch(async (count) => {
+    const res = await routeApp().request(
+      "/api/pipelines/start",
+      postReq(tok, { ...START_TRANSLATE, followUpChain: [{ pipelineType: "notes" }] }),
+      env,
+    );
+    return { res, fetchCount: count() };
+  });
+  assert.equal(res.status, 409, await res.clone().text());
+  assert.deepEqual(await res.json(), { error: "ai_needs_org_key" });
+  assert.equal(fetchCount, 0);
+  assert.equal(sqlite.prepare(`SELECT COUNT(*) AS n FROM pipeline_jobs`).all()[0].n, 0);
+});
+
+function sideRouteApp() {
+  const app = new Hono();
+  app.use("*", attachAuth);
+  app.route("/api/tn-quick", tnQuick);
+  app.route("/api/templates", templates);
+  return app;
+}
+
+test("POST /api/tn-quick (#551 switch-off): refused with 409 ai_needs_org_key, even with an org key and the bot token; nothing is posted", async () => {
+  const sqlite = freshSqlite();
+  await seedByoKey(sqlite);
+  const env = freshEnv(sqlite, { JWT_SIGNING_KEY: ROUTE_SIGNING, JWT_ISSUER: ROUTE_ISSUER });
+  const tok = await editorToken("1", env.WORKSPACE_SLUG);
+  const { res, fetchCount } = await withNoFetch(async (count) => {
+    const res = await sideRouteApp().request("/api/tn-quick", postReq(tok, { book: "OBA" }), env);
+    return { res, fetchCount: count() };
+  });
+  assert.equal(res.status, 409);
+  assert.deepEqual(await res.json(), { error: "ai_needs_org_key" });
+  assert.equal(fetchCount, 0);
+});
+
+test("POST /api/templates/unit/draft (#551 switch-off): refused with 409 ai_needs_org_key, even with an org key and the bot token; nothing is posted", async () => {
+  const sqlite = freshSqlite();
+  await seedByoKey(sqlite);
+  const env = freshEnv(sqlite, { JWT_SIGNING_KEY: ROUTE_SIGNING, JWT_ISSUER: ROUTE_ISSUER });
+  const tok = await editorToken("1", env.WORKSPACE_SLUG);
+  const req = postReq(tok, {});
+  req.headers["If-Match"] = "1";
+  const { res, fetchCount } = await withNoFetch(async (count) => {
+    const res = await sideRouteApp().request("/api/templates/unit/draft?id=t-1", req, env);
+    return { res, fetchCount: count() };
+  });
+  assert.equal(res.status, 409);
+  assert.deepEqual(await res.json(), { error: "ai_needs_org_key" });
+  assert.equal(fetchCount, 0);
 });
 
 // ---------------------------------------------------------------------------
@@ -584,9 +736,9 @@ function routeApp() {
   app.route("/api/pipelines", pipelines);
   return app;
 }
-async function editorToken(sub = "1") {
+async function editorToken(sub = "1", ws) {
   const now = Math.floor(Date.now() / 1000);
-  return new SignJWT({ username: "translator", role: "editor" })
+  return new SignJWT({ username: "translator", role: "editor", ws })
     .setProtectedHeader({ alg: "HS256" })
     .setSubject(sub)
     .setIssuer(ROUTE_ISSUER)
@@ -773,7 +925,7 @@ test("GET /:jobId (internal): a running internal job still returns its status af
     JWT_ISSUER: ROUTE_ISSUER,
   });
   const app = routeApp();
-  const tok = await editorToken("1");
+  const tok = await editorToken("1", env.WORKSPACE_SLUG);
 
   const res = await withNoFetch(async () => app.request("/api/pipelines/job-1", getReq(tok), env));
   assert.equal(res.status, 200, "the internal job's status is served, not a 503 from the capability gate");
@@ -790,7 +942,7 @@ test("GET /:jobId (proxy / bogus): the capability probe still 503s for non-inter
     JWT_ISSUER: ROUTE_ISSUER,
   });
   const app = routeApp();
-  const tok = await editorToken("1");
+  const tok = await editorToken("1", env.WORKSPACE_SLUG);
 
   await withNoFetch(async () => {
     // A proxy row is not stamped 'internal', so the gate still fires.

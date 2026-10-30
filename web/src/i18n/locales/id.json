@@ -52,8 +52,7 @@
     "draftAllDone": "{{n}} templat dibuat draf.",
     "draftAllDonePartial": "{{n}} templat dibuat draf; {{failed}} gagal.",
     "draftAllCancelled": "Dihentikan. {{n}} templat dibuat draf.",
-    "draftAllFailed": "Dihentikan setelah kegagalan berulang ({{code}}). {{n}} templat dibuat draf.",
-    "draftAllDisabled": "AI belum dikonfigurasi — admin harus mengatur BT_API_TOKEN."
+    "draftAllFailed": "Dihentikan setelah kegagalan berulang ({{code}}). {{n}} templat dibuat draf."
   },
   "topbar": {
     "showVerseList": "tampilkan daftar ayat",
@@ -604,10 +603,8 @@
     },
     "aiService": {
       "title": "Layanan AI",
-      "intro": "Pilih AI mana yang menjalankan tugas pipeline terjemahan organisasi ini (menerjemahkan catatan, pertanyaan, kata, dan artikel): langganan bersama unfoldingWord, atau penyedia Anda sendiri dengan kunci API Anda sendiri. Fitur AI lainnya, seperti pembuatan catatan dan draf cepat, tetap menggunakan langganan bersama unfoldingWord terlepas dari pengaturan ini. Penting: setelah kunci disimpan di sini, kunci tidak dapat dilihat lagi — hanya dapat diganti atau dihapus.",
       "providerLabel": "Penyedia",
       "provider": {
-        "default": "Default (langganan uW)",
         "claude": "Claude (API)",
         "openai": "OpenAI",
         "gemini": "Google Gemini",

@@ -75,6 +75,7 @@ function TwlSuggestionsInner({ book, chapter, verse, refreshKey, onAdd, isExclud
   const [peeked, setPeeked] = useState(false);
   // Re-collapse when the verse changes or the lane is re-checked.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- kept after commit on purpose: the fetch effect below depends on `peeked`, and moving this reset into render would change its request/abort sequence when navigating while paused and peeked.
     setPeeked(false);
   }, [book, chapter, verse, paused]);
   const [suggestions, setSuggestions] = useState<TwlSuggestion[]>([]);
@@ -115,6 +116,7 @@ function TwlSuggestionsInner({ book, chapter, verse, refreshKey, onAdd, isExclud
     // Skip the scan entirely while paused (and not peeking) — the whole point
     // is to stop proposing once the editor has signed off on words here.
     if (verse === 0 || (paused && !peeked)) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- empty the list while paused or with no verse; without it the previous verse's suggestions stay on screen when there is nothing to scan.
       setSuggestions([]);
       return;
     }
@@ -145,10 +147,14 @@ function TwlSuggestionsInner({ book, chapter, verse, refreshKey, onAdd, isExclud
 
   // Clear rejections only when the verse itself changes — NOT on refreshKey
   // (which ticks whenever a link is added/deleted on this verse). Otherwise a
-  // normal "reject A, add B" flow would refetch and un-reject A.
-  useEffect(() => {
+  // normal "reject A, add B" flow would refetch and un-reject A. Adjusted
+  // during render when the verse location changes.
+  const rejectLoc = `${book}|${chapter}|${verse}`;
+  const [prevRejectLoc, setPrevRejectLoc] = useState(rejectLoc);
+  if (rejectLoc !== prevRejectLoc) {
+    setPrevRejectLoc(rejectLoc);
     setRejected({});
-  }, [book, chapter, verse]);
+  }
 
   // Report the raw list up (for committed-row alternative merging) whenever it
   // changes, and clear it on unmount so a stale list can't linger after the

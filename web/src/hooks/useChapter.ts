@@ -18,7 +18,10 @@ import {
   type LaneCheckState,
 } from "../sync/api";
 import { fetchWithRetry } from "../sync/fetchWithRetry";
+import { applyCacheOp, rowAtVersion } from "../lib/bookCache";
 import { onOutboxResult } from "../sync/outbox";
+import { rebuiltRow, rowWithLivePatches } from "../sync/outboxTargeting";
+import { onRowRebuild } from "../sync/rowRebuild";
 
 type Status = "idle" | "loading" | "ready" | "error" | "retrying";
 
@@ -29,9 +32,16 @@ export interface UseChapterReturn {
   /** Incremented every failed attempt during the current retry loop. Useful for showing "reconnecting…". */
   retryAttempts: number;
   refetch: () => Promise<void>;
-  applyLocalRowPatch: (kind: "tn" | "tq" | "twl", id: string, patch: Partial<TnRow & TqRow & TwlRow>) => void;
+  /** With `onlyAtVersion`, applied only if the cached row is at that version (rowAtVersion). */
+  applyLocalRowPatch: (
+    kind: "tn" | "tq" | "twl",
+    id: string,
+    patch: Partial<TnRow & TqRow & TwlRow>,
+    onlyAtVersion?: number,
+  ) => void;
   applyLocalRowReplacement: (kind: "tn" | "tq" | "twl", row: TnRow | TqRow | TwlRow) => void;
-  applyLocalRowDelete: (kind: "tn" | "tq" | "twl", id: string) => void;
+  /** With `onlyAtVersion`, applied only if the cached row is at that version (rowAtVersion). */
+  applyLocalRowDelete: (kind: "tn" | "tq" | "twl", id: string, onlyAtVersion?: number) => void;
   applyLocalRowInsert: (
     kind: "tn" | "tq" | "twl",
     row: TnRow | TqRow | TwlRow,
@@ -92,6 +102,7 @@ export function useChapter(book: string, chapter: number): UseChapterReturn {
 
   useEffect(() => {
     mounted.current = true;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- refetch() marks the chapter loading as it starts the request (the same function backs Retry); the data itself is set after the await.
     void refetch();
     return () => {
       mounted.current = false;
@@ -100,10 +111,11 @@ export function useChapter(book: string, chapter: number): UseChapterReturn {
   }, [refetch]);
 
   const applyLocalRowPatch = useCallback<UseChapterReturn["applyLocalRowPatch"]>(
-    (kind, id, patch) => {
+    (kind, id, patch, onlyAtVersion) => {
       setData((prev) => {
         if (!prev) return prev;
         const list = prev[kind] as Array<TnRow | TqRow | TwlRow>;
+        if (!rowAtVersion(list.find((r) => r.id === id), onlyAtVersion)) return prev;
         const next = list.map((r) => (r.id === id ? { ...r, ...patch } : r));
         return { ...prev, [kind]: next } as ChapterPayload;
       });
@@ -124,10 +136,11 @@ export function useChapter(book: string, chapter: number): UseChapterReturn {
   );
 
   const applyLocalRowDelete = useCallback<UseChapterReturn["applyLocalRowDelete"]>(
-    (kind, id) => {
+    (kind, id, onlyAtVersion) => {
       setData((prev) => {
         if (!prev) return prev;
         const list = prev[kind] as Array<TnRow | TqRow | TwlRow>;
+        if (!rowAtVersion(list.find((r) => r.id === id), onlyAtVersion)) return prev;
         const next = list.filter((r) => r.id !== id);
         return { ...prev, [kind]: next } as ChapterPayload;
       });
@@ -258,14 +271,15 @@ export function useChapter(book: string, chapter: number): UseChapterReturn {
     [],
   );
 
-  // Adopt server-confirmed values when an outbox op succeeds.
+  // Adopt server-confirmed values when an outbox op succeeds. For a row, the
+  // patches of later saves still queued for it stay on top (#620).
   useEffect(() => {
-    return onOutboxResult((op, result) => {
+    return onOutboxResult((op, result, queued) => {
       if (result.kind !== "ok") return;
       if (op.target.kind === "row") {
         const u = result.updated as TnRow | TqRow | TwlRow;
         if (u && u.book === book && u.chapter === chapter) {
-          applyLocalRowReplacement(op.target.rowKind, u);
+          applyLocalRowReplacement(op.target.rowKind, rowWithLivePatches(u, op, queued));
         }
         return;
       }
@@ -291,6 +305,23 @@ export function useChapter(book: string, chapter: number): UseChapterReturn {
       }
     });
   }, [book, chapter, applyLocalRowReplacement, applyLocalVerse, applyLocalVerseStatus, applyLaneCheckers]);
+
+  // A row op that never landed (refused, dropped as locked, discarded): put
+  // the server's row back, with the row's saves still waiting on top, or put
+  // back a row whose own delete never landed (#637 item 1). The "rebuild"
+  // cache op (lib/bookCache.ts, shared with useBook) decides inside the
+  // updater against the row cached then, so a newer row that landed while the
+  // server row was being read is kept, and a row put back goes to its place.
+  useEffect(() => {
+    return onRowRebuild(({ target, server, queued, cause, mayInsert }) => {
+      if (server.book !== book || server.chapter !== chapter) return;
+      const rebuilt = rebuiltRow(server, target, queued, cause);
+      if (!rebuilt) return;
+      setData((prev) =>
+        prev ? applyCacheOp(prev, { t: "rebuild", kind: target.rowKind, row: rebuilt, mayInsert }) : prev,
+      );
+    });
+  }, [book, chapter]);
 
   return {
     status,

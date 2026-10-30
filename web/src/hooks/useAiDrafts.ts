@@ -16,9 +16,10 @@
 // Cross-chapter persistence is intentionally a v3 — for now the
 // expectation is "click sparkles, stay in this chapter until it lands."
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import i18n from "../i18n";
 import { ApiError, api, type TnRow, type TnQuickRequest, type TnQuickResponse } from "../sync/api";
+import { AI_NEEDS_ORG_KEY } from "../lib/aiProviderErrors";
 
 const PULSE_MS = 4000;
 const RETRY_DELAY_MS = 2000;
@@ -74,7 +75,7 @@ export interface StartOptions {
 // stays the logic value (see the 502/model_call_failed retry branch in start()),
 // so nothing ever branches on this prose. Translated inside the function on
 // every call (never at module load) so the active UI language wins; HTTP status
-// codes and BT_API_TOKEN are interpolated/literal, never translated.
+// codes are interpolated, never translated.
 function mapAiError(err: unknown): string {
   if (err instanceof ApiError) {
     const code =
@@ -98,6 +99,8 @@ function mapAiError(err: unknown): string {
         return i18n.t("messages.aiDraft.serviceUnavailable");
       case "tn_quick_disabled":
         return i18n.t("messages.aiDraft.notConfiguredToken");
+      case AI_NEEDS_ORG_KEY:
+        return i18n.t("ai.needsOrgKey");
       case "anthropic_api_key_missing":
         return i18n.t("messages.aiDraft.notConfiguredKey");
       case "cache_unavailable":
@@ -122,8 +125,12 @@ export function useAiDrafts(): UseAiDraftsAPI {
 
   // Refs so async callbacks read current values without re-binding the
   // setters every keystroke.
+  // Synced after every commit (no deps), before paint and before any
+  // passive effect or user event can call start/abortAll.
   const pendingRef = useRef(pending);
-  pendingRef.current = pending;
+  useLayoutEffect(() => {
+    pendingRef.current = pending;
+  });
 
   const isPending = useCallback((rowId: string) => pending.has(rowId), [pending]);
   const recentlyCompletedAt = useCallback(

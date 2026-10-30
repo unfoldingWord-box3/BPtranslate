@@ -41,6 +41,7 @@ import { applyContextRef } from "./assistedContextRef.ts";
 import { getLatestSuccessfulContextExport } from "./contextExportResults.ts";
 import { broadcastChapter } from "./wsEvents.ts";
 import { sameDcsName } from "./repoUrl.ts";
+import { isChapterWideTnTranslate, translateNoteSelection } from "./chapterLock.ts";
 import {
   assertLaneWritable,
   type LaneKey,
@@ -55,6 +56,14 @@ const DEFAULT_BASE = "https://uw-bt-bot.fly.dev";
 
 const PIPELINE_TYPES = ["generate", "notes", "tqs", "translate"] as const;
 type PipelineType = (typeof PIPELINE_TYPES)[number];
+
+// #551: every AI call made for an org runs on that org's own AI key. The bot
+// accepts a per-request key only for translate, so these three older types
+// (Generate ULT/UST, Write tN, Write tQ) would still run on unfoldingWord's
+// shared account. They are switched off until they can take the org key:
+// /start refuses them and dispatchNext fails any that are already queued.
+// They stay in PIPELINE_TYPES because history and import code still read them.
+const NEEDS_ORG_KEY_TYPES: ReadonlySet<string> = new Set(["generate", "notes", "tqs"]);
 
 // States that occupy the single bot slot. While any job is in one of these,
 // dispatchNext refuses to send another job upstream. 'dispatching' is the
@@ -601,6 +610,17 @@ export async function dispatchNext(env: Env): Promise<void> {
       .run();
   };
 
+  // #551: a legacy generate/notes/tqs job queued before /start began refusing
+  // them (or a follow-up enqueued server-side) would run on the shared account.
+  // Fail it before anything else, so nothing reaches the bot. Then move on to
+  // the next queued job at once, so leftover legacy jobs don't each hold a
+  // job behind them for a cron tick. Bounded: each pass takes one row out of
+  // 'queued', and the failed row frees the slot for the next claim.
+  if (NEEDS_ORG_KEY_TYPES.has(job.pipeline_type)) {
+    await fail("ai_needs_org_key", "this pipeline type cannot run on the organization's own AI key yet");
+    return dispatchNext(env);
+  }
+
   // Our OWN dispatch-POST timeout firing does NOT mean the upstream request
   // never landed — only that WE gave up waiting (see DISPATCH_TIMEOUT_ERROR_
   // KIND/MESSAGE's doc comment for the full reasoning). Unlike `fail`, this
@@ -686,14 +706,16 @@ export async function dispatchNext(env: Env): Promise<void> {
     const row = await getAiProviderConfig(env.DB);
     const ai = resolveDispatchAi(row, env.AI_KEY_WRAPPING_KEY);
     if (ai.kind === "error") {
-      await fail("sdk_error", `ai_provider_unavailable: ${ai.reason}`);
+      // Same kind + message as the internal runner (translate/workflowSteps.ts),
+      // so the UI shows "an admin should check the AI settings" (#575).
+      await fail("ai_provider_unavailable", ai.reason);
       return;
     }
     dispatchAi = ai;
     try {
       aiApiKey = await decryptApiKey(env.AI_KEY_WRAPPING_KEY!, ai.ciphertext, ai.iv);
     } catch {
-      await fail("sdk_error", "ai_provider_key_decrypt_failed");
+      await fail("ai_provider_key_decrypt_failed", "stored provider key could not be decrypted (wrapping key rotated?)");
       return;
     }
     aiProvider = ai.provider;
@@ -1495,6 +1517,18 @@ pipelines.post("/start", requireEditor, async (c) => {
   const username = await resolveUsername(c, userId);
   if (!username) return c.json({ error: "username_missing" }, 400);
 
+  // #551: generate/notes/tqs can't run on the org's own key yet, so they are
+  // refused outright (key or no key), before dedup and the bot-token gate.
+  // That includes a followUpChain step of those types: the child would only
+  // fail at dispatch. (followUpOptions makes a same-type child, so a translate
+  // parent can't produce a legacy one that way.)
+  if (
+    NEEDS_ORG_KEY_TYPES.has(parsed.data.pipelineType) ||
+    parsed.data.followUpChain?.some((step) => NEEDS_ORG_KEY_TYPES.has(step.pipelineType))
+  ) {
+    return c.json({ error: "ai_needs_org_key" }, 409);
+  }
+
   // Org-key gate (#551): a translate job runs on the org's own AI key or not at
   // all, so with no key configured (no row, or provider='default' after Clear)
   // refuse it here, before anything is enqueued. It sits before the dedup
@@ -2186,7 +2220,7 @@ pipelines.get("/", requireEditor, async (c) => {
             start_chapter, end_chapter, session_key, state, priority,
             current_skill, current_status, error_kind, error_message,
             output_json, follow_up_job_id, created_at, updated_at,
-            last_polled_at, notified_user_at`;
+            last_polled_at, notified_user_at, options_json`;
 
   if (stateList === null) {
     // Default: the live queue is visible to everyone (active + waiting jobs,
@@ -2234,7 +2268,7 @@ pipelines.get("/", requireEditor, async (c) => {
   }
 
   const snap = await queueSnapshot(c.env);
-  const jobs = (rs.results ?? []).map((row) => {
+  const jobs = (rs.results ?? []).map(({ options_json, ...row }) => {
     // Another user's row rides the shared-queue clause. Strip the internal
     // fields the UI never renders for a foreign job (session key, the bot's
     // upstream id, produced output, error detail) so the shared queue only
@@ -2251,11 +2285,21 @@ pipelines.get("/", requireEditor, async (c) => {
             error_message: null,
           }
         : row;
-    if (sanitized.state === "queued") {
-      const pos = snap.positions.get(sanitized.job_id);
-      return { ...sanitized, queue_position: pos?.position ?? null, queue_ahead: pos?.ahead ?? null };
+    // options_json itself stays server-side (a notes run's hints live there);
+    // the client only needs to know whether this run rewrites every note in
+    // its chapters, so it can make them read-only up front (issue #561), and
+    // for a single-note or verse-range redraft which notes it will write
+    // (issue #606).
+    const withLock = {
+      ...sanitized,
+      locks_chapter_notes: isChapterWideTnTranslate(row.pipeline_type, options_json),
+      note_selection: translateNoteSelection(row.pipeline_type, options_json),
+    };
+    if (withLock.state === "queued") {
+      const pos = snap.positions.get(withLock.job_id);
+      return { ...withLock, queue_position: pos?.position ?? null, queue_ahead: pos?.ahead ?? null };
     }
-    return sanitized;
+    return withLock;
   });
 
   return c.json({
@@ -2285,6 +2329,7 @@ interface PipelineRowSelect {
   updated_at: number;
   last_polled_at: number | null;
   notified_user_at: number | null;
+  options_json: string | null;
   // Present only on the default (shared-queue) list where we JOIN users, so the
   // UI can attribute another user's run. Absent on the explicit-state branch.
   started_by_username?: string | null;

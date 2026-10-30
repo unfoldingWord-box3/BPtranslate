@@ -1324,6 +1324,7 @@ function ActiveLine({
   const hydratedFromDraftRef = useRef(false);
   useEffect(() => {
     if (!draftKey) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- clears hasDraft when the row has no draft key and skips the drafts-store subscription; drafts.subscribe has no getSnapshot, and its callback also hydrates the DOM once, so useSyncExternalStore would not be equivalent.
       setHasDraft(false);
       return;
     }
@@ -1494,6 +1495,7 @@ function ActiveLine({
       elRef.current.innerHTML = html;
     }
     lastSetRef.current = next;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `hasDraft` is read only as a guard. Listing it would resync the DOM when a draft clears, which can reset the caret; the resync is meant to follow content and highlight changes only (see above).
   }, [html, domBaseline]);
 
   return (

@@ -4,6 +4,7 @@
 
 import type { LayoutSpec } from "../lib/layoutSpec";
 import type { ReviewSweepBody, ReviewSweepResource, ReviewSweepTarget } from "../lib/reviewStateSweep";
+import type { NoteSourcePlan } from "../lib/sourceNotePlan";
 import { getWorkspaceSlug, setWorkspaceSlug } from "./workspace";
 
 export type RowKind = "tn" | "tq" | "twl";
@@ -432,6 +433,29 @@ function composeSignals(signals: AbortSignal[]): AbortSignal {
     s.addEventListener("abort", () => onAbort(s), { once: true });
   }
   return controller.signal;
+}
+
+// Diagnostics for row writes, recorded server-side only when the write 409s
+// (api/migrations/0074_row_conflict_log.sql). A rejected save leaves no
+// edit_log trace, so without these a "someone else changed this note" report
+// can't tell a leftover op from an earlier session (old queuedAt) from a second
+// open tab (two tab ids) from a live race.
+const TAB_ID =
+  typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID().slice(0, 8)
+    : Math.random().toString(36).slice(2, 10);
+
+function rowWriteDiagnosticHeaders(queuedAt: number | undefined): Record<string, string> {
+  const headers: Record<string, string> = { "X-Tab-Id": TAB_ID };
+  if (typeof queuedAt === "number" && Number.isFinite(queuedAt)) {
+    headers["X-Op-Queued-At"] = String(Math.floor(queuedAt));
+  }
+  if (typeof location !== "undefined" && location.hash) {
+    // Header values must be ISO-8859-1; the hash route is ASCII in practice
+    // (#/notes/LUK/7), but strip anything else rather than throw.
+    headers["X-Client-Route"] = location.hash.split("?")[0].replace(/[^\x20-\x7e]/g, "").slice(0, 120);
+  }
+  return headers;
 }
 
 async function request<T>(
@@ -1160,9 +1184,8 @@ export interface AiProviderSettings {
   encryptionAvailable: boolean;
   catalog: AiProviderCatalog;
 }
-export type AiProviderInput =
-  | { provider: "default" }
-  | { provider: string; model: string; apiKey?: string };
+// No `provider: "default"` variant: PUT refuses it (#551). Clear is DELETE.
+export type AiProviderInput = { provider: string; model: string; apiKey?: string };
 
 export interface ContextExportStatus {
   status: string;
@@ -1367,7 +1390,9 @@ export type PipelineErrorKind =
   | "merge_shrink_refused"
   // Dispatch-time failures written by api/src/pipelines.ts dispatchNext.
   | "lane_fenced"
-  | "pipeline_api_disabled";
+  | "pipeline_api_disabled"
+  // #551: a queued generate/notes/tqs job, which can't run on the org's own key yet.
+  | "ai_needs_org_key";
 // The union is hand-kept; the wire value is any string. Fields that carry an
 // errorKind from the server are typed `string`, and lib/aiErrorCopy.ts falls
 // back for a kind it doesn't know. lib/aiErrorCopy.test.mjs scans api/src and
@@ -1548,6 +1573,18 @@ export interface PipelineJobRow {
    * them ("requested by X"). Undefined/null on the current user's own rows.
    */
   started_by_username?: string | null;
+  /**
+   * True for a tn translate run with no row or verse selection: it rewrites
+   * every note in its chapters, so they are read-only until it finishes
+   * (issue #561). Set by GET /api/pipelines; seeded on start.
+   */
+  locks_chapter_notes?: boolean;
+  /**
+   * For a single-note or verse-range tn translate redraft: which notes it will
+   * write, so just those are read-only until it finishes (issue #606). Null or
+   * absent for every other job. Set by GET /api/pipelines; seeded on start.
+   */
+  note_selection?: { row_ids: string[] | null; verse_start: number | null; verse_end: number | null } | null;
 }
 
 // Global queue context returned alongside GET /api/pipelines so the chip can
@@ -1731,6 +1768,14 @@ export interface InferredOrgConfigResponse {
   warnings: string[];
 }
 
+export interface ChatLink {
+  id: number;
+  workspace: string;
+  createdAt: number;
+  expiresAt: number;
+  lastUsedAt: number | null;
+}
+
 export const api = {
   getBookSummary: (book: string, signal?: AbortSignal) =>
     request<BookSummary>(`/api/chapters/${encodeURIComponent(book)}`, { signal }),
@@ -1808,8 +1853,18 @@ export const api = {
   // Per-book resource source overrides (issue #103). Whole-book override rows
   // come back as (chapter_start=0, chapter_end=999); range rows carry their real
   // bounds. Readable by any authenticated user; the PUT below is admin-only.
+  // tnNoteSources: which source each chapter's English tN source note is read
+  // from (#691; lib/sourceNotePlan.ts). null for an authoring project (no
+  // English source); left out when the server could not resolve it (#697,
+  // read through planFromBookSources). tqQuestionSources: the same
+  // for the English tQ source question (#695).
   getBookSources: (book: string) =>
-    request<{ book: string; overrides: BookSourceOverride[] }>(
+    request<{
+      book: string;
+      overrides: BookSourceOverride[];
+      tnNoteSources?: NoteSourcePlan | null;
+      tqQuestionSources?: NoteSourcePlan | null;
+    }>(
       `/api/books/${encodeURIComponent(book)}/sources`,
     ),
 
@@ -1947,6 +2002,11 @@ export const api = {
   // book is required after the composite-(book, id) PK migration (0015);
   // the server returns 400 if it's missing because the same 4-char id can
   // exist in two books with different content.
+  // The server's current copy of one row (404 once deleted). Read after a row
+  // save that never landed, to rebuild the cached row (rowRebuild.ts, #637).
+  getRow: <T = TnRow | TqRow | TwlRow>(kind: RowKind, id: string, book: string) =>
+    request<T>(`/api/rows/${kind}/${encodeURIComponent(id)}?book=${encodeURIComponent(book)}`),
+
   getRowHistory: (kind: RowKind, id: string, book: string) =>
     request<RowHistory>(
       `/api/rows/${kind}/${encodeURIComponent(id)}/history?book=${encodeURIComponent(book)}`,
@@ -1957,11 +2017,11 @@ export const api = {
     id: string,
     expectedVersion: number,
     patch: Record<string, unknown>,
-    opts: { restoredFromVersion?: number | null; book: string },
+    opts: { restoredFromVersion?: number | null; book: string; queuedAt?: number },
   ) =>
     request<T>(`/api/rows/${kind}/${encodeURIComponent(id)}?book=${encodeURIComponent(opts.book)}`, {
       method: "PATCH",
-      headers: { "If-Match": String(expectedVersion) },
+      headers: { "If-Match": String(expectedVersion), ...rowWriteDiagnosticHeaders(opts.queuedAt) },
       body: JSON.stringify(
         typeof opts.restoredFromVersion === "number"
           ? { ...patch, restored_from_version: opts.restoredFromVersion }
@@ -1969,10 +2029,10 @@ export const api = {
       ),
     }),
 
-  deleteRow: (kind: RowKind, id: string, expectedVersion: number, book: string) =>
+  deleteRow: (kind: RowKind, id: string, expectedVersion: number, book: string, queuedAt?: number) =>
     request<{ ok: true }>(`/api/rows/${kind}/${encodeURIComponent(id)}?book=${encodeURIComponent(book)}`, {
       method: "DELETE",
-      headers: { "If-Match": String(expectedVersion) },
+      headers: { "If-Match": String(expectedVersion), ...rowWriteDiagnosticHeaders(queuedAt) },
     }),
 
   // Legacy: alias for setPreserveNote(id, true). Server still accepts it for
@@ -2002,7 +2062,8 @@ export const api = {
     }),
 
   // Translation-mode "Approve" action. value=true → translation_state
-  // 'validated'; value=false → 'edited' (un-approve). Lock-exempt, non-version-
+  // 'validated'; value=false → 'edited' (un-approve). Approving is refused (409
+  // chapter_locked) while a translate run will write the note (#602). Non-version-
   // bumping, mirrors setPreserveNote. Returns the updated row so the caller can
   // refresh local state (the collapsed/green treatment keys off the new state).
   validateNote: (id: string, book: string, value: boolean) =>
@@ -2144,6 +2205,9 @@ export const api = {
 
   // ── Org-wide AI provider config (migration 0065) ──
   getAiProvider: () => request<AiProviderSettings>(`/api/ai-provider`),
+  // Editor-readable "can this org's AI run?" probe (#551 part E).
+  getAiProviderStatus: () =>
+    request<{ available: boolean; reason: string | null }>(`/api/ai-provider/status`),
   putAiProvider: (expectedVersion: number, body: AiProviderInput) =>
     request<AiProviderSettings>(`/api/ai-provider`, {
       method: "PUT",
@@ -2214,7 +2278,9 @@ export const api = {
 
   // Move a note to the visible "trash" state (the delete button). Returns the
   // updated row with trashed_at set. Reversible via restoreNote; finalized to a
-  // deleted_at tombstone by the nightly job. Lock-exempt, no If-Match.
+  // deleted_at tombstone by the nightly job. No If-Match. Refused (409
+  // chapter_locked) while a translate run will write the note (#602); so is
+  // restoreNote.
   trashNote: (id: string, book: string) =>
     request<TnRow>(`/api/rows/tn/${encodeURIComponent(id)}/trash?book=${encodeURIComponent(book)}`, {
       method: "POST",
@@ -2309,6 +2375,16 @@ export const api = {
       `/api/pipelines/${encodeURIComponent(jobId)}/notified`,
       { method: "POST", signal },
     ),
+
+  // ── Chat assistant links (api/src/chatLinkRoutes.ts) ──
+  chatLinkCode: () =>
+    request<{ code: string; expiresAt: number; ttlSeconds: number; workspace: string }>(
+      "/api/chat-links/code",
+      { method: "POST" },
+    ),
+  chatLinksList: () => request<{ links: ChatLink[] }>("/api/chat-links"),
+  chatLinkRevoke: (id: number) =>
+    request<{ ok: boolean }>(`/api/chat-links/${encodeURIComponent(String(id))}`, { method: "DELETE" }),
 
   // ── Nightly export admin surface (api/src/exports.ts) ──
   // Previously hand-rolled per admin screen (ObserveScreen.tsx's observeFetch,

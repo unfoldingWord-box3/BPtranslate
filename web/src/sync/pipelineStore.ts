@@ -379,6 +379,23 @@ export const pipelineStore = {
       last_polled_at: null,
       notified_user_at: null,
       started_by_username: null,
+      // Same rule as the server's isChapterWideTnTranslate (api/src/chapterLock.ts).
+      locks_chapter_notes:
+        req.pipelineType === "translate" &&
+        (req.translate?.resourceType ?? "tn") === "tn" &&
+        !req.translate?.rowIds?.length &&
+        req.translate?.verseStart == null,
+      // Same rule as the server's translateNoteSelection (issue #606).
+      note_selection:
+        req.pipelineType === "translate" &&
+        (req.translate?.resourceType ?? "tn") === "tn" &&
+        (req.translate?.rowIds?.length || req.translate?.verseStart != null)
+          ? {
+              row_ids: req.translate?.rowIds?.length ? req.translate.rowIds : null,
+              verse_start: req.translate?.verseStart ?? null,
+              verse_end: req.translate?.verseEnd ?? null,
+            }
+          : null,
     };
     jobs.set(res.jobId, jobs.get(res.jobId) ?? seeded);
     notify();

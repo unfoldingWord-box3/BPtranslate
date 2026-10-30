@@ -68,6 +68,32 @@ For the full corpus, see the memory index at
 `C:\Users\benja\.claude\projects\C--Users-benja-Documents-GitHub-bible-editor\memory\MEMORY.md`.
 Highlights that bite repeatedly:
 
+- **The chat MCP endpoint (`POST /api/mcp`, `api/src/mcp.ts`) is one server for every workspace, and the
+  account link picks the workspace** (#676). BT Servant pools every registered server's tools for every
+  org, so per-workspace servers would put duplicate `bpt_*` tool sets in front of the bot. The bearer is one
+  secret (`MCP_SERVICE_TOKEN`, 32+ chars). Every tool but `bpt_link_account` requires the `session_token`;
+  the `chat_links` row names the workspace the code was issued in (`api/src/chatLinks.ts`, #669), and a link
+  whose workspace is gone counts as not linked, never the `list[0]` fallback the cookie path uses. It is
+  handled in the `index.ts` fetch wrapper before the cookie swap and before every Hono middleware. Tools read
+  through the same route handlers in-process (`app.fetch`) on that workspace's env, so they see what the web
+  app sees. Two exceptions (#671): `session.packageRefs` (`api/src/packageRefs.ts`) reads D1 directly for
+  `bpt_package_status`'s tW/tA/template counts, because the article and template routes are editor-only and
+  the in-process call carries no user (SELECTs only, counts only, never text); and `session.sourceNotes`
+  (`api/src/sourceNotes.ts`) fetches the English tN TSV for the `en_note` of `bpt_chunk_work` and `bpt_get_row` from Door43
+  anonymously, the same data the web app's browser fetch shows (never with the DCS service token). Links: one-time code from the web app (any signed-in user, viewers included), 30-day token,
+  hash-only storage, role re-read from the link's workspace on every call and capped at editor. Reads go
+  through `readerFrom()` and write tools must call `principalFrom()` (editor only) in `mcpTools.ts`; never
+  accept a workspace, username or user id as a tool argument.
+- **Local alignment testing needs the `mltest` workspace, not the default.** `POST /api/auth/dev`
+  with no `be_ws` cookie lands on `bsoj` (the first entry in `WORKSPACES`). Its `ar-bsoj` preset
+  quarantines the ULT/UST lanes as soon as verses exist (`ensureLaneState` in
+  `api/src/scriptureLane.ts`), so the aligner says "Alignment is locked" and a local UPDATE to
+  `scripture_lane_state` is rewritten on the next config read. Instead, apply migrations and seed
+  `bptranslate_mltest_dev --local`, then send the cookie `be_ws=mltest` (Playwright:
+  `ctx.addCookies` before the dev-auth POST). That lane comes up with `alignmentWritable: true`.
+  Playwright's `locator.dragTo` drives the aligner's HTML5 drag and drop; cards are
+  `[data-group-id]` and chips are `[draggable="true"]` (#594 part 2).
+
 - **A Workflows step error reaches `run()`'s catch as `${name}: ${message}`, not as the object you
   threw.** The engine runs a step across an isolate boundary and rebuilds its error on the far side,
   so `new NonRetryableError("[merge_failed] …")` arrives with message
@@ -166,6 +192,10 @@ Highlights that bite repeatedly:
   reading off a `BASE_ENV` reference). More generally: **per-org identity cached in a token (e.g. a `role` claim) has to
   be re-resolved when the org changes, not just at sign-in** — a workspace/org switch that only swaps the active database
   while leaving a stale claim in the session token is a privilege-escalation seam, not a cosmetic bug.
+  Since #680 the access JWT carries a `ws` claim and `attachAuth` treats a token whose `ws` differs from the
+  request's resolved workspace (or is missing) as signed out, so the client's 401 refresh re-derives the role.
+  Every `mintToken` call must name the workspace the role was resolved in, and a test that signs a JWT by hand
+  must include `ws` equal to its env's `WORKSPACE_SLUG` (`"default"` when unset) or every request 401s.
 - **`node:sqlite` (`DatabaseSync`) works for D1 schema/trigger testing.** Node 24's built-in SQLite supports `unixepoch()`,
   `?1`/`?2` positional params, triggers with `RAISE(ABORT)`, and CHECK constraints. Use an in-memory DB + the migration
   CREATE TABLE/TRIGGER statements to unit-test schema invariants without Miniflare. Wrap multi-statement batches in

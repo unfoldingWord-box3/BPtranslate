@@ -84,7 +84,7 @@
     "draftAllDonePartial": "Drafted {{n}} template(s); {{failed}} failed.",
     "draftAllCancelled": "Stopped. Drafted {{n}} template(s).",
     "draftAllFailed": "Stopped after repeated failures ({{code}}). Drafted {{n}} template(s).",
-    "draftAllDisabled": "AI not configured — an admin must set BT_API_TOKEN.",
+    "draftAllDisabled": "AI isn't set up on this server. Whoever runs the server needs to connect the AI service.",
     "draftDisabledValidated": "Un-approve first to draft over an approved translation."
   },
   "import": {
@@ -289,10 +289,10 @@
     },
     "aiService": {
       "title": "AI service",
-      "intro": "Choose which AI provider runs this org's translation pipeline jobs (translating notes, questions, words, and articles). Gemini is the recommended starting point — enter your own API key to use it. Other AI features, like note generation and quick drafts, always use the shared unfoldingWord subscription regardless of this setting. Important: once you save a key here it cannot be viewed again, only replaced or cleared.",
+      "intro": "Choose which AI provider runs this org's AI translation (notes, questions, words, and articles). It runs on this org's own API key, so the usage is billed to this org. Gemini is the recommended starting point. Important: once you save a key here it cannot be viewed again, only replaced or cleared.",
+      "noKey": "No AI key: AI translation is off for this organization until an admin adds one.",
       "providerLabel": "Provider",
       "provider": {
-        "default": "Default (uW subscription)",
         "claude": "Claude (API)",
         "openai": "OpenAI",
         "gemini": "Google Gemini",
@@ -697,6 +697,24 @@
     "chooseFailed": "Couldn't load your organizations — you can switch later in Preferences.",
     "chooseStay": "Continue"
   },
+  "chatLink": {
+    "menuItem": "Link chat assistant",
+    "title": "Link chat assistant",
+    "intro": "Link the BT Servant chat to your account for this project. The bot can then read the project, and save your edits if you are an editor. Generate a code, then send it to the bot in a one-to-one chat (not a group) within 10 minutes.",
+    "generate": "Generate code",
+    "generating": "Generating...",
+    "expiresIn": "Expires in {{time}}",
+    "expired": "Code expired",
+    "error": "Could not complete that request. Please try again.",
+    "linkedChats": "Linked chats",
+    "none": "No chats linked.",
+    "linked": "Linked {{date}}",
+    "lastUsed": "last used {{when}}",
+    "neverUsed": "never used",
+    "linkExpires": "expires {{date}}",
+    "revoke": "Revoke",
+    "close": "Close"
+  },
   "shell": {
     "scripture": "Scripture",
     "rows": "rows",
@@ -796,6 +814,7 @@
     "couldntUpdateHint": "Couldn't update Hint: {{message}}",
     "couldntDeleteNote": "Couldn't delete note: {{message}}",
     "couldntRestoreNote": "Couldn't restore note: {{message}}",
+    "noteLockedByTranslate": "An AI translation is writing this note. Try again after it finishes.",
     "couldntApproveNote": "Couldn't approve note: {{message}}",
     "couldntTranslateNote": "Couldn't start translation: {{message}}",
     "cantPreserveAlignment": "This edit can't preserve word alignment on words you didn't change, so it wasn't saved ({{ref}} {{bibleVersion}}{{affected}}). Please note this verse ({{ref}}) for your admin to file a bug-fix review, or re-align in the alignment panel.",
@@ -807,6 +826,8 @@
     "editLeftUnaligned_one": "This edit left {{count}} word unaligned in {{ref}} {{bibleVersion}} — re-align in the Alignment panel.",
     "editLeftUnaligned_other": "This edit left {{count}} words unaligned in {{ref}} {{bibleVersion}} — re-align in the Alignment panel.",
     "chapterLockBanner": "AI {{pipelineType}} run in progress for {{book}} {{chapter}} — started {{started}}. Editing is locked for this chapter. You can still mark notes to keep before the new set lands.",
+    "chapterLockBannerTranslate": "AI translation in progress for {{book}} {{chapter}} — started {{started}}. Notes in this chapter are read-only until it finishes.",
+    "chapterLockBannerRedraft": "AI translation of selected notes in progress for {{book}} {{chapter}} — started {{started}}. Scripture, questions and words in this chapter are locked until it finishes, and so are the notes being translated. Other notes can still be edited.",
     "bulkCheckTitle": "Check all {{label}} for this chapter?",
     "bulkClearTitle": "Clear all {{label}} for this chapter?",
     "bulkCheckBody": "This marks {{label}} as checked by you for all {{verseCount}} applicable verses in {{ref}}.",
@@ -842,6 +863,9 @@
     "enableBody": "Checking this will cause Logos to steal focus (bring its window to the front) every time you change verses. Fine if you have Logos on a second monitor, but otherwise just use the sync button when you want to move Logos.",
     "dontShowAgain": "Don't show this again",
     "ok": "OK"
+  },
+  "ai": {
+    "needsOrgKey": "This needs your organization's AI key, and it can't use one yet."
   },
   "pipeline": {
     "aiButton": "AI",
@@ -1140,39 +1164,15 @@
     "identityChangedRevert": "This project already has data, so its org, export target, and resource repos can't change here. Revert your repo edits to the current configuration to apply a language or lane-mode tweak, or start from a fresh database to onboard a different org.",
     "revertAllRepos": "Revert all repos to current configuration",
     "laneSourceLockedBlocked": "The scripture source for {{lanes}} can't be reconciled here — it's mid source-change (or points at a different org). Finish or cancel it in \"Change scripture source\" in Preferences before applying Setup.",
-    "replacementStepIntro": "You changed the scripture source for an already-populated project, so the new text must be staged before it goes live. This step finishes that change; nothing changes for editors until you press Activate.",
-    "replacementStart": "Stage the new text",
-    "replacementIntro": "This stages the new source text book by book. When every book is ready, press Activate to switch the lane over.",
-    "replacementNone": "No lane needs a source change. You can continue.",
-    "replacementContinue": "Continue",
     "retryDetection": "Retry detection",
     "upstreamOrgUnreachable": "Door43 is unreachable right now — retry to verify this org.",
     "upstreamOrgRetry": "Retry",
     "laneModeFailed": "Couldn't set {{lanes}} to the chosen edit/align mode — retry before continuing so the lane isn't left editable by mistake.",
     "retryLaneMode": "Retry edit/align settings",
-    "laneModeConfirming": "Applying the edit/align setting…",
-    "laneModeConfirmed": "Lane activated and set to “{{mode}}”.",
-    "laneModeRetryError": "Couldn't set {{lane}} to “{{mode}}” — retry. Until this succeeds the lane stays editable.",
-    "replacementContinueBlocked": "Activate each lane above and confirm its edit/align setting to continue.",
     "unverifiedOverride": "These resources point at a source URL that hasn't verified yet — verify or clear them before continuing: {{resources}}.",
-    "replacementActionRequired": "Action required — retry or waive the flagged books below before this lane can be activated.",
     "bookError": {
       "notFound": "Not found in {{location}}"
-    },
-    "replacementConfirmTitle": "Replace the text in {{lane}}?",
-    "replacementConfirmSource": "New source: {{owner}}/{{repo}}",
-    "replacementConfirmWarning": "Activating will OVERWRITE the current text and alignment for the books below with the new source. This cannot be undone from here.",
-    "replacementConfirmLoadingBooks": "Loading the affected books…",
-    "replacementConfirmBooksLead": "{{count}} book(s) will be replaced:",
-    "replacementConfirmBooksSelectLead": "Choose which of the {{count}} book(s) to replace from the new source. Books you leave unselected are kept unchanged (carried forward):",
-    "replacementConfirmBooksSelectAll": "Replace all",
-    "replacementConfirmBooksSelectNone": "Keep all",
-    "replacementConfirmBooksSummary": "Replacing {{replacing}} · keeping {{keep}}",
-    "replacementConfirmBooksEditedHint": "✎ marks books with verses you've edited. They start unselected so your work is kept (carried forward) — select one only if you want to overwrite it from the new source.",
-    "replacementConfirmBookStatTip": "{{verses}} verses · {{edited}} edited",
-    "replacementConfirmNoBookList": "The affected books couldn't be listed, but every imported book in this lane will be replaced.",
-    "replacementConfirmAck": "I understand this replaces the text for the books marked to replace, and keeps the rest unchanged.",
-    "replacementConfirmButton": "Stage the replacement"
+    }
   },
   "books": {
     "GEN": {
@@ -1468,8 +1468,7 @@
     "notVisibleForRole": "AI pipeline status isn't visible for your role.",
     "runStatusNotVisible": "AI run status isn't visible for your role.",
     "notConfiguredTitle": "AI not configured",
-    "notConfiguredBodyBefore": "An admin needs to set ",
-    "notConfiguredBodyAfter": " for this workspace before AI pipelines can run. This isn't an error — the feature is simply off until then. Job status reads (Details/Retry below) are disabled too, so those actions are turned off rather than left to fail on click.",
+    "notConfiguredBody": "AI isn't set up on this server, so AI runs can't start. Whoever runs the server needs to connect the AI service. This isn't an error — the feature is simply off until then. Job status reads (Details/Retry below) are disabled too, so those actions are turned off rather than left to fail on click.",
     "bookLabel": "Book",
     "chapterLabel": "Chapter",
     "booksLoadFailed": "Couldn't load books",
@@ -1521,7 +1520,7 @@
     },
     "errors": {
       "transient_outage": "The AI service had a temporary outage. It should recover on its own — try again in a few minutes.",
-      "auth_error": "The AI service rejected our credentials. An admin needs to check the BT_API_TOKEN.",
+      "auth_error": "The AI service rejected this server's credentials. Whoever runs the server needs to check its connection to the AI service.",
       "usage_limit": "This workspace hit its daily AI usage limit. The run will resume automatically tomorrow.",
       "sdk_error": "Something went wrong talking to the AI service. Retrying usually fixes this.",
       "non_success_result": "The AI service finished but reported a failure. Retry, or check with an admin if it keeps happening.",
@@ -1561,7 +1560,8 @@
       "merge_failed": "The AI's work couldn't be merged into the chapter, so the chapter was not changed. Running it again will likely fail the same way; please report it to an admin.",
       "merge_shrink_refused": "The AI's result was rejected because it would have removed existing content. The chapter was not changed.",
       "lane_fenced": "The project's source text changed or was locked after this run was queued, so it did not start. Nothing was changed — start a new run.",
-      "pipeline_api_disabled": "The external AI service isn't set up on this server, so this run could not start. An admin needs to check the AI settings."
+      "pipeline_api_disabled": "The external AI service isn't set up on this server, so this run could not start. An admin needs to check the AI settings.",
+      "ai_needs_org_key": "This needs your organization's AI key, and it can't use one yet, so this run did not start. Nothing was changed."
     }
   },
   "flowTranslate": {
@@ -1584,6 +1584,7 @@
     "laneNoText": "No {{label}} text exists for this verse in this workspace. That is normal in a translation-mode workspace whose target lanes have not been drafted yet.",
     "laneClampHint": "Showing the first {{shown}} of {{total}} verses this reference covers — check the reference if that looks wrong.",
     "toggleSourceUlt": "Show the {{label}} source text alongside the project's scripture",
+    "changeQuote": "Change which words this note points to",
     "sourceLaneLoading": "Loading the {{label}} text…",
     "sourceLaneNoVerse": "The {{label}} source has no text for this verse.",
     "sourceLaneUnavailable": "The {{label}} text could not be loaded from Door43 right now.",
@@ -1630,7 +1631,10 @@
     "conflictNotice": "Another editor changed this note while you were working on it. Your version was not saved.",
     "reloadNote": "Reload note",
     "queuedNotConfirmed": "Your edit is queued but the server hasn't confirmed it yet — it was not approved.",
+    "quoteNotConfirmed": "Your quote change is queued but the server hasn't confirmed it yet.",
+    "quotePendingApprove": "Your quote change hasn't been saved yet. Wait for it to save, or resolve or discard it in the sync panel, then approve.",
     "lockedEditDropped": "An AI run is rewriting this chapter — your edit was dropped rather than overwritten.",
+    "noteLockedByTranslate": "An AI translation is writing this note. Try again after it finishes.",
     "saveFailed": "Saving this note failed ({{reason}}). It was not approved.",
     "loadFailed": "Could not load {{book}} {{chapter}}.",
     "noNotesInChapter": "No translation notes in {{book}} {{chapter}}.",
@@ -2278,7 +2282,7 @@
       "glOnly": "Note templates are only editable on gateway-language projects.",
       "searchPlaceholder": "Search templates…",
       "bulkProgress": "{{done}} / {{total}} drafted",
-      "aiNotConfiguredAdmin": "AI not configured for this workspace — an admin needs to set BT_API_TOKEN.",
+      "aiNotConfiguredAdmin": "AI isn't set up on this server. Whoever runs the server needs to connect the AI service.",
       "draftAllWithAi": "Draft all with AI ({{count}})",
       "aiNotConfigured": "AI not configured for this workspace.",
       "bulkStopped": "Stopped after {{drafted}} drafted — repeated failures ({{code}}).",
@@ -2302,7 +2306,7 @@
       "unitLoadFailed": "Couldn't load {{id}}.",
       "backToList": "Back to template list",
       "versionHistory": "Version history",
-      "aiUnavailableInfo": "AI not configured for this workspace — Draft with AI is unavailable (an admin needs to set BT_API_TOKEN). Editing and Approve still work normally.",
+      "aiUnavailableInfo": "AI isn't set up on this server, so Draft with AI is unavailable. Editing and Approve still work normally.",
       "validatedExpand": "Validated — click to expand and edit",
       "sourceLabel": "Source (English, read-only)",
       "targetLabel": "Target (translated template)",
@@ -2679,6 +2683,7 @@
       "apply": "Apply",
       "applying": "Applying…",
       "errForbidden": "Only admins can change review state in bulk.",
+      "errLockedByTranslate": "An AI translation is rewriting notes in this range, so they can't be approved yet. Try again after it finishes.",
       "errMaybeApplied": "The change could not be confirmed ({{detail}}). It may have been partly or fully applied, so check the counts below before trying again."
     }
   },
@@ -3053,9 +3058,11 @@
     "quoteBuilder": {
       "header": "Build quote · {{book}} {{chapter}}:{{verse}}",
       "shiftHint": "shift-click for a range",
+      "tapHint": "tap words to add or remove",
       "noSourceWords": "no source words for this verse",
       "noUltAlignment": "no ULT alignment for this verse",
       "noUstAlignment": "no UST alignment for this verse",
+      "noLaneAlignment": "no {{label}} alignment for this verse",
       "noHebrewAlignment": "no Hebrew alignment for this word",
       "preview": "Preview",
       "occurrence": "occurrence {{n}}",
@@ -3442,7 +3449,7 @@
       "contextTooLarge": "Verse context too large.",
       "rateLimited": "Rate limited — wait 30 s.",
       "serviceUnavailable": "AI service unavailable.",
-      "notConfiguredToken": "AI not configured — admin must set BT_API_TOKEN.",
+      "notConfiguredToken": "AI isn't set up on this server. Whoever runs the server needs to connect the AI service.",
       "notConfiguredKey": "AI not configured — admin must set the Anthropic API key.",
       "cacheUnavailable": "AI cache unavailable — try again shortly.",
       "uhbMissing": "Hebrew source not available for this verse.",

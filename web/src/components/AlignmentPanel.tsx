@@ -327,6 +327,7 @@ export const AlignmentPanel = forwardRef<AlignmentPanelHandle, Props>(
     // `initial` stays computedInitial so the restored state reads as dirty
     // (state !== initial) and can be saved or reset.
     useEffect(() => {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- the synchronous reset must land before the async crash-draft restore below so the restore wins (see the comment above); a render-time reset would change that ordering.
       setInitial(computedInitial);
       setState(computedInitial);
       setSelectedUnaligned(new Set());
@@ -376,9 +377,12 @@ export const AlignmentPanel = forwardRef<AlignmentPanelHandle, Props>(
     // the user navigates to a different verse / edits a different bible, but NOT
     // on same-verse re-sync after a save (computedInitial churns then; the
     // coordinate doesn't), so rejected ghosts stay rejected across a save.
-    useEffect(() => {
+    const ghostScope = `${verseNum}|${bibleVersion}`;
+    const [prevGhostScope, setPrevGhostScope] = useState(ghostScope);
+    if (ghostScope !== prevGhostScope) {
+      setPrevGhostScope(ghostScope);
       setDismissedGhosts(new Set());
-    }, [verseNum, bibleVersion]);
+    }
 
     const dirty = state !== initial && state !== null;
     useEffect(() => {
@@ -403,6 +407,37 @@ export const AlignmentPanel = forwardRef<AlignmentPanelHandle, Props>(
       }, 400);
       return () => clearTimeout(t);
     }, [state, dirty, verse, book, chapter, verseNum, bibleVersion]);
+
+    // Map Hebrew tokens to alignment groups by source-token POSITION.
+    // `strong|occurrence` is NOT unique: occurrence numbers the exact surface
+    // text (cantillation included), so same-Strong words with different
+    // pointing all carry occurrence 1 (three אֶל forms in ZEC 1:3 are each
+    // H0413|1 — 236 such collisions across ZEC) and the strong-keyed map lit
+    // the wrong word. Each group source word resolves to a position via the
+    // same text→strong fallback chain displayGroups sorts by; the strip's
+    // tokens carry their walk position natively. Positions in `hover` are
+    // union-relative (see highlightTypes.ts); these maps are own-relative and
+    // translate via posOffset at the comparison sites. Declared above the drop
+    // handlers that read it, so the React Compiler can preserve the memo (a
+    // read before the declaration made it treat the map as mutable).
+    const sourceIndexMap = useMemo(() => buildSourceIndexMap(sourceVerse), [sourceVerse]);
+
+    // Also above the handlers that read it (handleMergeGroups), for the same
+    // React Compiler reason as sourceIndexMap.
+    const displayGroups = useMemo(() => {
+      if (!state) return [];
+      const sortKey = (g: (typeof state.groups)[number]) => {
+        if (g.source.length === 0) return Number.MAX_SAFE_INTEGER;
+        const pos = resolveSourcePos(g.source[0], sourceIndexMap);
+        return pos >= 0 ? pos : Number.MAX_SAFE_INTEGER;
+      };
+      const sorted = [...state.groups].sort((a, b) => sortKey(a) - sortKey(b));
+      const stripped = stripCompoundOverlaps(sorted);
+      const merged = mergeAdjacentSameSource(stripped);
+      // Collapse same-position duplicates (one physical Hebrew token the AI
+      // stamped with occurrences>actual — see mergeSamePositionGroups).
+      return mergeSamePositionGroups(merged, (g) => groupPositionKey(g, sourceIndexMap));
+    }, [state, sourceIndexMap]);
 
     const handleTargetsDrop = (dest: string, wordIds: string[]) => {
       if (!state || wordIds.length === 0) return;
@@ -583,33 +618,6 @@ export const AlignmentPanel = forwardRef<AlignmentPanelHandle, Props>(
       }
       return map;
     }, [state]);
-    // Map Hebrew tokens to alignment groups by source-token POSITION.
-    // `strong|occurrence` is NOT unique: occurrence numbers the exact surface
-    // text (cantillation included), so same-Strong words with different
-    // pointing all carry occurrence 1 (three אֶל forms in ZEC 1:3 are each
-    // H0413|1 — 236 such collisions across ZEC) and the strong-keyed map lit
-    // the wrong word. Each group source word resolves to a position via the
-    // same text→strong fallback chain displayGroups sorts by; the strip's
-    // tokens carry their walk position natively. Positions in `hover` are
-    // union-relative (see highlightTypes.ts); these maps are own-relative and
-    // translate via posOffset at the comparison sites.
-    const sourceIndexMap = useMemo(() => buildSourceIndexMap(sourceVerse), [sourceVerse]);
-
-    const displayGroups = useMemo(() => {
-      if (!state) return [];
-      const sortKey = (g: (typeof state.groups)[number]) => {
-        if (g.source.length === 0) return Number.MAX_SAFE_INTEGER;
-        const pos = resolveSourcePos(g.source[0], sourceIndexMap);
-        return pos >= 0 ? pos : Number.MAX_SAFE_INTEGER;
-      };
-      const sorted = [...state.groups].sort((a, b) => sortKey(a) - sortKey(b));
-      const stripped = stripCompoundOverlaps(sorted);
-      const merged = mergeAdjacentSameSource(stripped);
-      // Collapse same-position duplicates (one physical Hebrew token the AI
-      // stamped with occurrences>actual — see mergeSamePositionGroups).
-      return mergeSamePositionGroups(merged, (g) => groupPositionKey(g, sourceIndexMap));
-    }, [state, sourceIndexMap]);
-
     const posMaps = useMemo(() => {
       const posToGroupId = new Map<number, string>();
       const sourcePosById = new Map<string, number>();

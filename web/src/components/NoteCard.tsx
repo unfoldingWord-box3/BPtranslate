@@ -1,4 +1,4 @@
-import { lazy, Suspense, memo, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
+import { lazy, Suspense, memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import {
   Paper,
   Stack,
@@ -53,8 +53,20 @@ import { taShort, parseTaRef } from "../lib/taArticle";
 import { TCM, buildSH } from "../lib/noteTemplates";
 import { getLockUnapprovedDrafts } from "../lib/editorPrefs";
 import { formatEpochSecondsDateTime } from "../lib/formatDate";
+import { QUICK_DRAFTS_NEED_ORG_KEY } from "../lib/aiProviderErrors";
 import { drafts, rowKey, draftDirtyBorderSx } from "../sync/drafts";
+import {
+  isEditorsPendingSave,
+  pendingRevertSave,
+  revertMarks,
+  rowSaveEnded,
+  withPendingReverts,
+  type PendingRowSave,
+} from "../sync/draftSaveState";
+import { onOutboxDrop, onOutboxResult, outbox, type OutboxOp } from "../sync/outbox";
+import { useRefusedSaveHold } from "../hooks/useRefusedSaveHold";
 import { isAquiferDraftRow } from "./flows/translateShared";
+import { noteLockedReadOnly } from "../lib/chapterLock";
 
 const NoteHistoryDialog = lazy(() =>
   import("./NoteHistoryDialog").then((m) => ({ default: m.NoteHistoryDialog })),
@@ -138,8 +150,15 @@ interface Props {
   onVisibilityChange?: (rowId: string, isVisible: boolean) => void;
   // Chapter has an active AI pipeline (state from pipelineStore). When true
   // and the row is neither preserved nor a hint, the card is read-only.
-  // Preserved or hinted rows stay editable even during a run.
+  // Preserved or hinted rows stay editable during a non-translate run.
   locked?: boolean;
+  // Any active pipeline locks this chapter. The server refuses new rows for
+  // the whole chapter during any run (rows.ts create), so the insert-after
+  // button hides even on cards that stay editable (preserved/hint notes, or
+  // every note outside a single-note redraft, issue #607).
+  createLocked?: boolean;
+  // Pipeline type of the job holding the lock (see lib/chapterLock.ts).
+  lockPipelineType?: string | null;
   // Toggle the row's "survive future AI pipeline sweeps" bit. Always
   // available — these are pre-run intent signals, not in-run claims.
   // Fires POST /api/rows/tn/:id/preserve upstream.
@@ -186,14 +205,32 @@ interface Props {
   onTranslate?: () => void;
   // This row has an in-flight translate pipeline — show a working affordance.
   isTranslating?: boolean;
+  // An in-flight translate run (anyone's) will write this note — a single-note
+  // or verse-range redraft that covers it. Read-only like a chapter-wide
+  // translate lock, since the server refuses the edit (issue #606).
+  rowTranslateLocked?: boolean;
 }
 
 // Notes coming from TSV imports use literal "\n" (two characters) as the
 // line-break marker. tcCreate renders those as real newlines; we do the same
 // on read, and on save we write back whatever the user typed verbatim. The
 // data in D1 transitions to true newlines as users edit.
+// This card's save as sentRef remembers it: the TSV values it sent, and the
+// same values as the card shows them (#658).
+function sentSave(patch: Partial<TnRow>): PendingRowSave {
+  const shown: Record<string, unknown> = { ...patch };
+  if (typeof patch.quote === "string") shown.quote = tsvToDisplay(patch.quote);
+  if (typeof patch.note === "string") shown.note = tsvToDisplay(patch.note);
+  return { patch: patch as Record<string, unknown>, shown };
+}
+
 function tsvToDisplay(s: string | null): string {
   return (s ?? "").replace(/\\n/g, "\n");
+}
+
+// The TSV form flushPending sends for a display value.
+function toTsv(s: string): string {
+  return s.replace(/\n/g, "\\n");
 }
 
 // Detect the primary script of a string for directing RTL/LTR rendering and
@@ -390,6 +427,8 @@ function NoteCardInner({
   onStartAi,
   onVisibilityChange,
   locked = false,
+  createLocked = false,
+  lockPipelineType = null,
   onSetPreserve,
   onSetHint,
   onTranslateQuote,
@@ -403,6 +442,7 @@ function NoteCardInner({
   onUnapprove,
   onTranslate,
   isTranslating = false,
+  rowTranslateLocked = false,
 }: Props) {
   const { t } = useTranslation();
   // The notes pane publishes the EFFECTIVE axis (it collapses side-by-side to
@@ -412,7 +452,8 @@ function NoteCardInner({
   // Two explicit bits drive lock-time behavior now:
   //   - preserve=1: translator marked this row "survive AI runs"
   //   - hint=1:    this row is a stub queued for AI expansion in place
-  // Either bit keeps the card editable during a locked chapter. The legacy
+  // Either bit keeps the card editable during a locked chapter, except under a
+  // translate run, which overwrites every note it covers (issue #561). The legacy
   // implicit "kept = updated_by IS NOT NULL" signal is folded into the
   // preserve bit on the server (see rows.ts /keep alias).
   const isPreserved = row.preserve === 1;
@@ -431,7 +472,16 @@ function NoteCardInner({
   // when the flag is off, Editor mode behaves exactly as before. See editorPrefs.ts.
   const isUnapprovedAiDraft = !translationMode && row.translation_state === "ai_draft";
   const lockUnapproved = isUnapprovedAiDraft && getLockUnapprovedDrafts();
-  const readOnly = trashed || lockUnapproved || (locked && !isPreserved && !isHint);
+  // A redraft that will write this note locks it like a chapter-wide translate
+  // run (issue #606). This adds no lock to the other notes; any keep-mode they
+  // are in comes from the chapter lock (`locked`), as before.
+  const noteLocked = locked || rowTranslateLocked;
+  const noteLockType = rowTranslateLocked ? "translate" : lockPipelineType;
+  const readOnly = trashed || lockUnapproved || noteLockedReadOnly(noteLockType, noteLocked, isPreserved, isHint);
+  // A translate run writes this note whether or not it is trashed, so Restore
+  // is refused too until it finishes (issue #602). Approve and delete already
+  // hide under readOnly.
+  const translateLocked = noteLocked && noteLockType === "translate";
   const [quote, setQuote] = useState(tsvToDisplay(row.quote));
   const [note, setNote] = useState(tsvToDisplay(row.note));
   // Find-highlight: the active match note shows a read view (with the match
@@ -439,9 +489,14 @@ function NoteCardInner({
   const noteTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const [editingBody, setEditingBody] = useState(false);
   // A new find target (different occurrence / note) always returns to the read
-  // view so the highlight shows; clicking sets editingBody back to true.
+  // view so the highlight shows; clicking sets editingBody back to true. A find
+  // target also opens an approved (collapsed) card, or the highlighted match
+  // would sit hidden behind the one-line preview (#641).
+  const [expanded, setExpanded] = useState(false);
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- find-target reset, kept post-commit beside the focus effect below that keys on editingBody; the find path is not covered by the classic-card live test, so it stays as it was.
     setEditingBody(false);
+    if (activeMatchOccurrence != null) setExpanded(true);
   }, [activeMatchOccurrence, row.id]);
   // When the user clicks the read view to edit, focus the now-shown textarea
   // and put the caret at the end.
@@ -480,10 +535,13 @@ function NoteCardInner({
   // Validated cards collapse (green, one-line preview). Local expand is
   // view-only — editing a re-expanded card auto-demotes it to 'edited'
   // server-side (rows.ts content PATCH). Re-collapses when it re-validates.
-  const [expanded, setExpanded] = useState(false);
-  useEffect(() => {
+  // Leaving the validated state resets it, adjusted during render. (`expanded`
+  // itself is declared above, beside the find-target effect that sets it.)
+  const [prevIsValidated, setPrevIsValidated] = useState(isValidated);
+  if (prevIsValidated !== isValidated) {
+    setPrevIsValidated(isValidated);
     if (!isValidated) setExpanded(false);
-  }, [isValidated]);
+  }
   const [historyOpen, setHistoryOpen] = useState(false);
   const [aiConfirmOpen, setAiConfirmOpen] = useState(false);
   // Guards the destructive note-level discard (Undo): reverting drops every
@@ -507,30 +565,41 @@ function NoteCardInner({
   // lockstep and hasRowDiff would never go true. Pinning the baseline to
   // version means it only rebases on a real server confirmation (PATCH 200,
   // restore, AI completion, or WS row.upserted), all of which bump version.
-  const savedRef = useRef({
+  //
+  // `saved` (state) is what render reads; `savedRef` mirrors it at commit for
+  // the handlers below, one of which (handleDelete) reads it after an await,
+  // where a closure value would be stale. The rebase is adjusted during
+  // render and converges once saved.version equals row.version.
+  const [saved, setSaved] = useState(() => ({
     quote: row.quote,
     note: row.note,
     support_reference: row.support_reference,
     version: row.version,
-  });
+  }));
+  const savedRef = useRef(saved);
   const [savePendingVersion, setSavePendingVersion] = useState<number | null>(null);
-  if (row.version !== savedRef.current.version) {
-    savedRef.current = {
+  if (row.version !== saved.version) {
+    setSaved({
       quote: row.quote,
       note: row.note,
       support_reference: row.support_reference,
       version: row.version,
-    };
+    });
   }
+  useLayoutEffect(() => {
+    savedRef.current = saved;
+  }, [saved]);
   // Clear the in-flight gate once the server-confirmed version moves past
   // the one we saved against. A conflict (409) keeps row.version stuck and
   // savePendingVersion stays set — that's intentional, the user has to
-  // resolve via the SyncStatusBar before sending another save.
-  useEffect(() => {
-    if (savePendingVersion !== null && row.version > savePendingVersion) {
-      setSavePendingVersion(null);
-    }
-  }, [row.version, savePendingVersion]);
+  // resolve via the SyncStatusBar before sending another save. A save that ends
+  // without landing (fatal, "locked", discarded) clears it in the save-end
+  // listener below instead, since the version never moves (#660). Adjusted during
+  // render, in the same pass as the `saved` rebase above, so both react to the
+  // version bump together.
+  if (savePendingVersion !== null && row.version > savePendingVersion) {
+    setSavePendingVersion(null);
+  }
 
   // Session model: when this card becomes active, snapshot the current
   // committed values so undo can revert to "what it was when I started
@@ -546,6 +615,18 @@ function NoteCardInner({
     sessionSnapshotRef.current = next;
   };
   const pendingRef = useRef<Partial<TnRow>>({});
+  // The patch of this card's save while it can still land. Until then the
+  // draft keeps a field typed back to the baseline but differing from what was
+  // sent (withPendingReverts, #632 item 2). Cleared by that save's outcome
+  // (the listener below), never by a version check: the row can reach a new
+  // version (a refetch) before the save lands (review A2).
+  const sentRef = useRef<PendingRowSave | null>(null);
+  // Ops this card heard end since it mounted, so the on-mount outbox read
+  // cannot restore a save that ended while the read was in flight (#658).
+  const endedOpsRef = useRef(new Set<string>());
+  // Re-runs the draft write when a refused or discarded save ends the
+  // protection, so a type-back equal to the server copy leaves the draft.
+  const [sentTick, setSentTick] = useState(0);
 
   // The quote field drives the scripture highlight (Shell reads the active
   // note's quote out of chapter state). Propagate quote edits to the parent
@@ -557,7 +638,9 @@ function NoteCardInner({
   // BODY drives nothing outside this card, so it never propagates (it persists
   // via the draft store and saves through flushPending).
   const quoteRef = useRef(quote);
-  quoteRef.current = quote;
+  useLayoutEffect(() => {
+    quoteRef.current = quote;
+  }, [quote]);
   const quotePropagateTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scheduleQuotePropagate = () => {
     if (quotePropagateTimer.current !== null) clearTimeout(quotePropagateTimer.current);
@@ -591,20 +674,65 @@ function NoteCardInner({
   // survives a deactivate, and an unrelated version bump elsewhere (e.g.
   // an AI-suggest save landing after the user wandered off) must not stamp
   // that pending pick back to the server's stale value.
+  // Also keep a field still showing the text of a refused save of this card's
+  // (#637 item 1): the cached row goes back to the server's copy, and adopting
+  // it here would drop the text from the screen and, through the no-diff
+  // clear below, from the drafts store. The held patch is in the TSV form
+  // flushPending sends. Discarding that save puts the saved value back.
+  // When the server moves past a held save (rowChanged), a field still showing
+  // the held text adopts the row's value, and a field whose hold ended but
+  // that shows other text (typed after the refused save) keeps it as unsaved
+  // typing, as in the tQ / tW-link editors (round 2, B5). A field that was not
+  // part of a held save follows this card's rule from before #637: with no
+  // session open and no stashed pick, it takes the row's value (unsaved typing
+  // in it is replaced on a row change, the same as on main; round 3, C2).
+  const { noteSave, rowChanged, decide } = useRefusedSaveHold("tn", row.id, row.book, (released) => {
+    const saved = savedRef.current;
+    if ("quote" in released) setQuote((q) => (toTsv(q) === released.quote ? tsvToDisplay(saved.quote) : q));
+    if ("note" in released) setNote((n) => (toTsv(n) === released.note ? tsvToDisplay(saved.note) : n));
+    if ("support_reference" in released) {
+      setSupportRef((s) => (s === released.support_reference ? saved.support_reference : s));
+    }
+  });
+  // The three field effects below all run on a version change; the first one
+  // asks rowChanged and the others reuse its answer for that version.
+  const releaseRef = useRef<{ version: number; released: Array<Record<string, unknown>> }>({
+    version: row.version,
+    released: [],
+  });
+  const releasedAt = (version: number) => {
+    if (releaseRef.current.version !== version) {
+      releaseRef.current = { version, released: rowChanged(version) };
+    }
+    return releaseRef.current.released;
+  };
+  // The value a field shows after the row changed (no session open).
+  const resynced = <T,>(field: string, local: T, sendForm: unknown, rowValue: T, released: Array<Record<string, unknown>>): T => {
+    const d = decide(field, sendForm, released);
+    if (d === "keep") return local;
+    if (d === "reconcile" && released.some((f) => field in f)) return local;
+    return rowValue;
+  };
   useEffect(() => {
     if (sessionSnapshotRef.current !== null) return;
     if ("quote" in pendingRef.current) return;
-    setQuote(tsvToDisplay(row.quote));
+    const released = releasedAt(row.version);
+    setQuote((q) => resynced("quote", q, toTsv(q), tsvToDisplay(row.quote), released));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- releasedAt/resynced read refs and stable hook callbacks only.
   }, [row.id, row.version, row.quote]);
   useEffect(() => {
     if (sessionSnapshotRef.current !== null) return;
     if ("note" in pendingRef.current) return;
-    setNote(tsvToDisplay(row.note));
+    const released = releasedAt(row.version);
+    setNote((n) => resynced("note", n, toTsv(n), tsvToDisplay(row.note), released));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- releasedAt/resynced read refs and stable hook callbacks only.
   }, [row.id, row.version, row.note]);
   useEffect(() => {
     if (sessionSnapshotRef.current !== null) return;
     if ("support_reference" in pendingRef.current) return;
-    setSupportRef(row.support_reference);
+    const released = releasedAt(row.version);
+    setSupportRef((s) => resynced("support_reference", s, s, row.support_reference, released));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- releasedAt/resynced read refs and stable hook callbacks only.
   }, [row.id, row.version, row.support_reference]);
 
   // Restore unsaved typing on first mount. If a draft exists for this row,
@@ -620,9 +748,20 @@ function NoteCardInner({
   const hydratedFromDraftRef = useRef(false);
   useEffect(() => {
     if (hydratedFromDraftRef.current) return;
-    void drafts.get(rowKey("tn", row.book, row.id)).then((rec) => {
+    // The outbox is read alongside the draft (#658): a remount while this
+    // card's save is pending starts with no sentRef, so a note typed back to
+    // its baseline would drop out of the next draft write. A failed outbox
+    // read must not stop the draft restore.
+    void Promise.all([
+      drafts.get(rowKey("tn", row.book, row.id)),
+      outbox.listWithUncommitted().catch(() => [] as OutboxOp[]),
+    ]).then(([rec, ops]) => {
       if (hydratedFromDraftRef.current) return;
       hydratedFromDraftRef.current = true;
+      if (!sentRef.current) {
+        const pending = pendingRevertSave(rec, ops, { rowKind: "tn", id: row.id, book: row.book }, endedOpsRef.current);
+        if (pending) sentRef.current = pending;
+      }
       const payload = rec?.payload as
         | {
             patch?: Partial<TnRow>;
@@ -642,12 +781,14 @@ function NoteCardInner({
       // Save button honest.
       const baseline = payload?.baseline;
       if (baseline) {
-        savedRef.current = {
+        const next = {
           quote: baseline.quote,
           note: baseline.note,
           support_reference: baseline.support_reference,
           version: rec?.expectedVersion ?? savedRef.current.version,
         };
+        savedRef.current = next;
+        setSaved(next);
       }
       if (typeof patch.quote === "string") setQuote(tsvToDisplay(patch.quote));
       if (typeof patch.note === "string") setNote(tsvToDisplay(patch.note));
@@ -708,6 +849,8 @@ function NoteCardInner({
     // double-clicking Save before the server responds enqueues two PATCHes
     // with the same If-Match, the second of which lands as a phantom 409.
     setSavePendingVersion(savedRef.current.version);
+    sentRef.current = sentSave(patch);
+    noteSave(patch, row.version);
     onSave(patch);
     // Rebase the snapshot so the chip stops showing "*" after a manual
     // save and a follow-up Undo reverts to the just-saved state.
@@ -832,6 +975,8 @@ function NoteCardInner({
     if (rawSr !== savedRef.current.support_reference) patch.support_reference = rawSr;
     if (Object.keys(patch).length === 0) return;
     onChange(patch);
+    sentRef.current = sentSave(patch);
+    noteSave(patch, row.version);
     onSave(patch, { restoredFromVersion: fromVersion });
   };
 
@@ -860,6 +1005,7 @@ function NoteCardInner({
     if (!aiRecentlyCompletedAt) return;
     const newQuote = tsvToDisplay(row.quote);
     const newNote = tsvToDisplay(row.note);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- consumes a one-shot AI-completion signal from Shell and also clears pendingRef and rebaselines sessionSnapshotRef, so it has to run after commit, not during render.
     setQuote(newQuote);
     setNote(newNote);
     pendingRef.current = {};
@@ -883,6 +1029,7 @@ function NoteCardInner({
   useEffect(() => {
     if (quoteBuildAppliedAt == null) return;
     const newQuote = tsvToDisplay(row.quote);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- consumes a one-shot quote-builder commit signal from Shell and also clears pendingRef and rebaselines sessionSnapshotRef, so it has to run after commit, not during render.
     setQuote(newQuote);
     pendingRef.current = {};
     if (sessionSnapshotRef.current !== null) {
@@ -930,7 +1077,7 @@ function NoteCardInner({
   });
 
   const handleAiClick = () => {
-    if (!onStartAi || !aiPrereqsMet || isAiPending) return;
+    if (QUICK_DRAFTS_NEED_ORG_KEY || !onStartAi || !aiPrereqsMet || isAiPending) return;
     if (note.trim().length > 0) {
       setAiConfirmOpen(true);
       return;
@@ -964,15 +1111,18 @@ function NoteCardInner({
   // from hasNetChanges because we want drafts to track divergence from the
   // *saved* state, not from the session entry point.
   const rowDiff: Partial<TnRow> = {};
-  const rowQuoteDisplay = tsvToDisplay(savedRef.current.quote);
-  const rowNoteDisplay = tsvToDisplay(savedRef.current.note);
+  const rowQuoteDisplay = tsvToDisplay(saved.quote);
+  const rowNoteDisplay = tsvToDisplay(saved.note);
   if (quote !== rowQuoteDisplay) rowDiff.quote = quote;
   if (note !== rowNoteDisplay) rowDiff.note = note;
-  if (supportRef !== savedRef.current.support_reference) rowDiff.support_reference = supportRef;
+  if (supportRef !== saved.support_reference) rowDiff.support_reference = supportRef;
   const hasRowDiff = Object.keys(rowDiff).length > 0;
-  // A validated card sits collapsed unless the user is actively editing it,
-  // has expanded it for review, or has unsaved edits (which would auto-demote).
-  const collapsedValidated = isValidated && !active && !expanded && !hasRowDiff;
+  // A validated card sits collapsed unless the user has expanded it for review
+  // or has unsaved edits (which would auto-demote). Being active does not open
+  // it: the card activates on mousedown, so an `active` term here unmounted the
+  // preview before its click could set `expanded`, and Collapse / Un-approve
+  // (gated on `expanded`) were unreachable (#641). Matches QuestionCard.
+  const collapsedValidated = isValidated && !expanded && !hasRowDiff;
   // State chip descriptor for the header. null → no chip (English root project,
   // or a non-null-but-uninteresting case). Colors mirror the mockup: violet for
   // AI draft, blue for edited, green for validated, neutral for untranslated.
@@ -1000,13 +1150,47 @@ function NoteCardInner({
             ? { label: t("translation.stateUntranslated"), color: "text.secondary" }
             : null;
   const draftKey = rowKey("tn", row.book, row.id);
+  // End the type-back protection when this card's pending save can no longer
+  // land: confirmed, refused, dropped as "locked", or discarded. A 409 that
+  // waits for keep-mine keeps it. On a 200 no re-run is forced: the row's new
+  // version re-runs the draft write against the moved baseline.
+  useEffect(() => {
+    const target = { rowKind: "tn", id: row.id, book: row.book };
+    const end = (op: OutboxOp, rerun: boolean) => {
+      endedOpsRef.current.add(op.id);
+      const sent = sentRef.current;
+      if (!sent || !isEditorsPendingSave(sent, op, target)) return;
+      sentRef.current = null;
+      if (rerun) {
+        setSentTick((n) => n + 1);
+        // A save that ended without landing never moves the version, so the
+        // Save gate would stay shut (#660).
+        setSavePendingVersion(null);
+      }
+    };
+    const offResult = onOutboxResult((op, result) => {
+      if (rowSaveEnded(result)) end(op, result.kind !== "ok");
+    });
+    const offDrop = onOutboxDrop((op) => end(op, true));
+    return () => {
+      offResult();
+      offDrop();
+    };
+  }, [row.id, row.book]);
   useEffect(() => {
     if (readOnly) return;
-    if (hasRowDiff) {
+    const draftPatch = withPendingReverts(
+      rowDiff,
+      { quote, note, support_reference: supportRef },
+      sentRef.current?.patch,
+    );
+    // Record the kept type-backs so a remount can restore the protection (#658).
+    const reverted = revertMarks(rowDiff, draftPatch, sentRef.current ?? undefined);
+    if (Object.keys(draftPatch).length > 0) {
       void drafts.set(
         draftKey,
         {
-          patch: rowDiff,
+          patch: draftPatch,
           // Persist the server baseline (savedRef stays version-pinned, immune
           // to the optimistic same-version row mutations) so a remount restores
           // an honest baseline instead of inheriting a polluted row. See the
@@ -1016,6 +1200,7 @@ function NoteCardInner({
             note: savedRef.current.note,
             support_reference: savedRef.current.support_reference,
           },
+          ...(reverted ? { reverted } : {}),
         },
         row.version,
         {
@@ -1030,12 +1215,15 @@ function NoteCardInner({
     } else if (hydrated) {
       // Only clear after the on-mount draft lookup has run — before that,
       // hasRowDiff is measured against an unhydrated baseline and would
-      // spuriously wipe a draft we haven't had the chance to restore.
-      void drafts.clear(draftKey);
+      // spuriously wipe a draft we haven't had the chance to restore. Kept
+      // while a live later op for the row holds it: the baseline can follow
+      // a confirmed row that carries that op's unlanded text (#620).
+      void drafts.clearRowUnlessHeld(draftKey);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     draftKey,
+    sentTick,
     hasRowDiff,
     hydrated,
     quote,
@@ -1397,7 +1585,7 @@ function NoteCardInner({
         )}
         {!readOnly && (
           <>
-            {onInsertAfter && (
+            {onInsertAfter && !createLocked && (
               <Tooltip title={t("noteCard.addNoteAfter")}>
                 <IconButton size="small" aria-label={t("noteCard.addNoteAfter")} onClick={onInsertAfter} color="success" sx={{ p: 0.25 }}>
                   <AddIcon fontSize="inherit" />
@@ -1420,10 +1608,19 @@ function NoteCardInner({
               variant="outlined"
               sx={{ height: 22, fontSize: 11, color: "text.secondary", borderColor: "divider" }}
             />
-            <Tooltip title={t("noteCard.restoreNote")}>
-              <IconButton size="small" aria-label={t("noteCard.restoreNote")} onClick={onRestore} color="primary" sx={{ p: 0.25 }}>
-                <RestoreFromTrashIcon fontSize="inherit" />
-              </IconButton>
+            <Tooltip title={translateLocked ? t("shell.noteLockedByTranslate") : t("noteCard.restoreNote")}>
+              <span>
+                <IconButton
+                  size="small"
+                  aria-label={t("noteCard.restoreNote")}
+                  onClick={onRestore}
+                  disabled={translateLocked}
+                  color="primary"
+                  sx={{ p: 0.25 }}
+                >
+                  <RestoreFromTrashIcon fontSize="inherit" />
+                </IconButton>
+              </span>
             </Tooltip>
           </>
         )}
@@ -1647,7 +1844,9 @@ function NoteCardInner({
             title={
               isAiPending
                 ? t("noteCard.draftingInBackground")
-                : !onStartAi
+                : QUICK_DRAFTS_NEED_ORG_KEY
+                  ? t("ai.needsOrgKey") // #551: tn-quick can't use the org's own key yet
+                  : !onStartAi
                   ? t("noteCard.aiUnavailable")
                   : !supportRef
                     ? t("noteCard.pickSupportRefFirst")
@@ -1661,7 +1860,7 @@ function NoteCardInner({
                 size="small"
                 variant="text"
                 onClick={handleAiClick}
-                disabled={!onStartAi || !aiPrereqsMet || isAiPending || readOnly}
+                disabled={QUICK_DRAFTS_NEED_ORG_KEY || !onStartAi || !aiPrereqsMet || isAiPending || readOnly}
                 startIcon={
                   isAiPending ? (
                     <CircularProgress size={12} color="inherit" />
@@ -2124,12 +2323,15 @@ function areNotePropsEqual(a: Props, b: Props): boolean {
     a.isAiPending === b.isAiPending &&
     a.aiRecentlyCompletedAt === b.aiRecentlyCompletedAt &&
     a.locked === b.locked &&
+    (a.createLocked ?? false) === (b.createLocked ?? false) &&
+    (a.lockPipelineType ?? null) === (b.lockPipelineType ?? null) &&
     a.quoteBuildMode === b.quoteBuildMode &&
     a.quoteBuildSelectionCount === b.quoteBuildSelectionCount &&
     (a.flashArrow ?? null) === (b.flashArrow ?? null) &&
     a.translationMode === b.translationMode &&
     (a.sourceNote ?? null) === (b.sourceNote ?? null) &&
-    a.isTranslating === b.isTranslating
+    a.isTranslating === b.isTranslating &&
+    (a.rowTranslateLocked ?? false) === (b.rowTranslateLocked ?? false)
   );
 }
 

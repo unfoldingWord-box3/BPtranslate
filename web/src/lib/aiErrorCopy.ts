@@ -56,12 +56,63 @@ export const ERROR_COPY_KEY: Record<PipelineErrorKind, string> = {
   // Dispatch-time kinds (pipelines.ts dispatchNext).
   lane_fenced: "aiStudio.errors.lane_fenced",
   pipeline_api_disabled: "aiStudio.errors.pipeline_api_disabled",
+  ai_needs_org_key: "aiStudio.errors.ai_needs_org_key",
 };
+
+// i18n key for the AI-studio banner, from GET /api/ai-provider/status's
+// `reason` (#551 part E). "No AI key" only when the org really has none; a key
+// that is stored but unusable gets the copy dispatch would fail the job with
+// (decrypt failure, or ai_provider_unavailable for the other reasons). null =
+// no banner: available, or a reason this build doesn't know.
+export function orgKeyStatusCopyKey(reason: string | null): string | null {
+  switch (reason) {
+    case "ai_provider_not_configured":
+    case "api_key_missing":
+      return "preferences.aiService.noKey";
+    case "ai_provider_key_decrypt_failed":
+      return ERROR_COPY_KEY.ai_provider_key_decrypt_failed;
+    case "ai_key_encryption_unavailable":
+    case "model_missing":
+      return ERROR_COPY_KEY.ai_provider_unavailable;
+    default:
+      return null;
+  }
+}
+
+// i18n key for the warning in the admin AI service section (#551 part F): a key
+// is stored (`configured`) but the status probe says it can't be used, e.g. the
+// wrapping secret was rotated and the key no longer decrypts. null when the
+// section already says it another way: no key (its noKey line), encryption off
+// (its encryptionUnavailable warning), or the probe isn't back / failed.
+export function adminKeyWarningCopyKey(
+  configured: boolean,
+  status: { available: boolean; reason: string | null } | null,
+): string | null {
+  if (!configured || !status || status.available) return null;
+  if (status.reason === "ai_key_encryption_unavailable") return null;
+  // `configured` (publicShape) needs only key_ciphertext; dispatch also needs
+  // key_iv and reports api_key_missing without it. The stored key is unusable
+  // and must be re-entered, the same fix as a decrypt failure.
+  if (status.reason === "api_key_missing") return ERROR_COPY_KEY.ai_provider_key_decrypt_failed;
+  const key = orgKeyStatusCopyKey(status.reason);
+  return key === "preferences.aiService.noKey" ? null : key;
+}
 
 // `kind` is whatever string the server wrote, so it may be a kind this build
 // doesn't know. Own-property check: a plain index would return Object.prototype
 // members for "constructor" or "toString" and hand a function to t().
-export function errorCopy(kind: string | null, t: TFunction): string {
+//
+// `message` is the job's error_message. sdk_error's copy says retrying usually
+// fixes it, which is wrong when the dispatch POST was refused with a 4xx
+// (pipelines.ts writes "upstream <status>: …"): the same request gets the same
+// refusal, so it gets provider_error's "check the AI settings" copy (#678).
+// 408, 409 and 429 are 4xx but clear on a retry (409: another run holds that
+// scope, and a retry works once it finishes), so they keep the generic copy.
+export function errorCopy(kind: string | null, t: TFunction, message?: string | null): string {
+  if (kind === "sdk_error" && message) {
+    const status = /^upstream (4\d\d)\b/.exec(message)?.[1];
+    if (status && status !== "408" && status !== "409" && status !== "429") return t(ERROR_COPY_KEY.provider_error);
+  }
   const key = kind && Object.hasOwn(ERROR_COPY_KEY, kind) ? ERROR_COPY_KEY[kind as PipelineErrorKind] : undefined;
   return key ? t(key) : t("aiStudio.unrecognizedError", { kind });
 }

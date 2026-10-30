@@ -120,4 +120,34 @@ check(
   "numeric field changed on both sides to different values -> conflict",
 );
 
+// Newline forms (#664). D1 holds tn/tq text with a literal backslash-n (TSV
+// imports, NoteCard) or a real newline (rows the flows Translate screens saved
+// before #593). The same text in either form is the same value.
+check(
+  classifyRowPatchConflict(
+    { note: "a\\nb2" },
+    { note: "a\\nb" },
+    { version: 3, note: "a\nb" },
+  ) === "auto_heal",
+  "escaped baseline vs a real-newline server note with the same text -> auto_heal",
+);
+
+check(
+  classifyRowPatchConflict(
+    { note: "a\nb2" },
+    { note: "a\nb" },
+    { version: 3, note: "a\\nb" },
+  ) === "auto_heal",
+  "real-newline baseline vs an escaped server note with the same text -> auto_heal",
+);
+
+check(
+  classifyRowPatchConflict(
+    { note: "a\\nb2" },
+    { note: "a\\nb" },
+    { version: 3, note: "someone else\nrewrote it" },
+  ) === "conflict",
+  "a multi-line note genuinely changed on the server still -> conflict",
+);
+
 console.log(`\nrowConflict.test.mjs: ${passed} checks passed`);

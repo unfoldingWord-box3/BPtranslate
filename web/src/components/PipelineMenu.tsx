@@ -41,7 +41,11 @@ import type {
 import { getSessionKey, pipelineStore, type PipelineJob } from "../sync/pipelineStore";
 import { currentPipelineUserId } from "../sync/pipelineSession";
 import { parseChapterRange } from "../lib/refParser";
-import { isAiProviderNotConfigured } from "../lib/aiProviderErrors";
+import {
+  isAiNeedsOrgKey,
+  isAiProviderNotConfigured,
+  PIPELINE_TYPES_NEEDING_ORG_KEY,
+} from "../lib/aiProviderErrors";
 import { useTranslation } from "react-i18next";
 import { useProjectConfig, isTranslationProject } from "../hooks/useProjectConfig";
 
@@ -252,6 +256,7 @@ export function PipelineMenu({ book, chapter, onMessage, onImported }: Props) {
   // Re-load from localStorage whenever the dialog opens for a generate run, so
   // a change made in a different tab is reflected.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- loadGenOpts() reads localStorage (an external store another tab can change) each time the dialog opens; that read belongs after commit, not in render.
     if (confirm?.type === "generate") setGenOpts(loadGenOpts());
     if (confirm) setRefInput(String(chapter));
   }, [confirm, book, chapter]);
@@ -260,6 +265,7 @@ export function PipelineMenu({ book, chapter, onMessage, onImported }: Props) {
   // `t` is a dep because parseChapterRange returns a translated error message;
   // without it the message stays in the previous language after a switch. Safe
   // here — pure derivation, no fetch.
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- `t` is a deliberate recompute signal (see above); the linter cannot see that parseChapterRange reads the active language.
   const refParsed = useMemo(() => parseChapterRange(refInput, book), [refInput, book, t]);
 
   // "In progress" for the chapter = queued/dispatching/running/paused. A
@@ -359,6 +365,9 @@ export function PipelineMenu({ book, chapter, onMessage, onImported }: Props) {
           }
         } else if (isAiProviderNotConfigured(e)) {
           onMessage?.(t("pipeline.aiKeyNotConfigured"));
+          setConfirm(null);
+        } else if (isAiNeedsOrgKey(e)) {
+          onMessage?.(t("ai.needsOrgKey"));
           setConfirm(null);
         } else if (e.status === 401) {
           onMessage?.(t("pipeline.signInToStart"));
@@ -465,10 +474,13 @@ export function PipelineMenu({ book, chapter, onMessage, onImported }: Props) {
       <Menu anchorEl={anchorEl} open={Boolean(anchorEl)} onClose={close}>
         {visibleOptions.map((opt) => {
           const running = runningType(opt.type);
+          // #551: generate/notes/tqs would bill unfoldingWord's shared account,
+          // so they stay listed but switched off, with the reason as the second line.
+          const needsOrgKey = PIPELINE_TYPES_NEEDING_ORG_KEY.has(opt.type);
           return (
             <MenuItem
               key={opt.key}
-              disabled={Boolean(running)}
+              disabled={Boolean(running) || needsOrgKey}
               onClick={() => {
                 close();
                 setConfirm(opt);
@@ -477,9 +489,11 @@ export function PipelineMenu({ book, chapter, onMessage, onImported }: Props) {
               <ListItemText
                 primary={t(opt.label)}
                 secondary={
-                  running
-                    ? t("pipeline.alreadyRunningState", { state: running.state })
-                    : `${t(opt.description)} ${t(opt.approxDuration)}`
+                  needsOrgKey
+                    ? t("ai.needsOrgKey")
+                    : running
+                      ? t("pipeline.alreadyRunningState", { state: running.state })
+                      : `${t(opt.description)} ${t(opt.approxDuration)}`
                 }
               />
             </MenuItem>

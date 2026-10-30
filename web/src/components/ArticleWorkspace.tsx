@@ -520,6 +520,7 @@ function ArticleEditor({
   // what makes leaving and coming back non-destructive.
   useEffect(() => {
     if (!articleId || paths.length === 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- draft-hydration load: re-runs on reloadKey (translate complete, refetch) without a remount, so the loading/staleDraft resets below do real work, and they stay paired with the async draft-store restore in the same effect.
       setParts(null);
       return;
     }
@@ -577,6 +578,7 @@ function ArticleEditor({
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `pathsKey` is the content key for `paths`; the array itself is a new reference every render, so listing it would refetch on every render.
   }, [resource, articleId, pathsKey, reloadKey]);
 
   // A finished translate run (single-slot queue → one at a time) clears the
@@ -654,9 +656,13 @@ function ArticleEditor({
     [parts],
   );
 
-  useEffect(() => {
+  // Collapse again once the unit leaves the validated state (adjusted during
+  // render; the expander only exists while validated).
+  const [prevValidated, setPrevValidated] = useState(isValidated);
+  if (isValidated !== prevValidated) {
+    setPrevValidated(isValidated);
     if (!isValidated) setExpanded(false);
-  }, [isValidated]);
+  }
   const collapsedValidated = isValidated && !expanded && !anyDirty;
 
   const handleSave = useCallback(async () => {
