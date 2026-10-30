@@ -824,6 +824,43 @@ console.log("[sourceNotes] per-book / per-chapter tN source overrides (#691)");
 
     const authoringPlan = await noteSourcePlanForClient(envFor("en-unfoldingword", "src-auth-plan", []), "ZEC");
     assert(authoringPlan === null, "an authoring project gets no plan");
+
+    // tQ (#695): the same plan for the English source question. This mock
+    // filters on the bound resource, so a tN range must not leak into the tQ
+    // plan. Aquifer is tN-only, so a tQ Aquifer range is dropped.
+    const byResource = (slug, rows, overrides_json = null) => ({
+      WORKSPACE_SLUG: slug,
+      DCS_BASE_URL: "https://door43.test",
+      DB: {
+        prepare: (sql) =>
+          /book_source_overrides/.test(sql)
+            ? { bind: (_book, resource) => ({ all: async () => ({ results: rows.filter((r) => r.resource === resource) }) }) }
+            : { first: async () => ({ preset: PRESET, overrides_json }) },
+      },
+    });
+    const tqEnv = byResource("src-tq", [
+      { resource: "tn", chapter_start: 3, chapter_end: 4, kind: "dcs", org: "OtherOrg", repo: "other_tn" },
+      { resource: "tq", chapter_start: 1, chapter_end: 2, kind: "dcs", org: "ru_gl", repo: "ru_tq" },
+      { resource: "tq", chapter_start: 5, chapter_end: 6, kind: "aquifer", org: "aquifer", repo: "arb" },
+    ]);
+    const tqPlan = await noteSourcePlanForClient(tqEnv, "ZEC", "tq");
+    assert(tqPlan?.base?.org === "unfoldingWord" && tqPlan.base.repo === "en_tq", "the tQ plan's base is the project-wide tQ repo");
+    assert(
+      tqPlan.ranges.length === 1 && tqPlan.ranges[0].org === "ru_gl" && tqPlan.ranges[0].repo === "ru_tq" && tqPlan.ranges[0].chapter_start === 1 && tqPlan.ranges[0].chapter_end === 2,
+      "the tQ plan carries only the tQ dcs range (no tN range, no Aquifer)",
+    );
+    const tnPlanSame = await noteSourcePlanForClient(tqEnv, "ZEC");
+    assert(tnPlanSame?.base?.repo === "en_tn" && tnPlanSame.ranges.length === 1 && tnPlanSame.ranges[0].org === "OtherOrg", "the tN plan is unchanged and default");
+
+    const tqNone = await noteSourcePlanForClient(byResource("src-tq-none", []), "ZEC", "tq");
+    assert(tqNone?.base?.repo === "en_tq" && tqNone.ranges.length === 0, "no tQ override: the project-wide tQ repo, no ranges");
+
+    const tqWhole = await noteSourcePlanForClient(
+      byResource("src-tq-whole", [{ resource: "tq", chapter_start: 0, chapter_end: 999, kind: "dcs", org: "ru_gl", repo: "ru_tq" }]),
+      "ZEC",
+      "tq",
+    );
+    assert(tqWhole?.base?.org === "ru_gl" && tqWhole.ranges.length === 0, "a whole-book tQ override is the base");
   } finally {
     globalThis.fetch = realFetch;
     clearSourceNotesCache();
