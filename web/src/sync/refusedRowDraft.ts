@@ -202,7 +202,8 @@ export function withCarriedRefusal(prev: DraftRecord | undefined, next: DraftRec
   return { ...next, payload: { ...next.payload, patch: { ...patch, ...carried } }, refused };
 }
 
-// An editor's "no diff" clear (drafts.clearUnlessRefused). `current` is what
+// An editor's "no diff" clear (drafts.clearUnlessRefused; NoteCard's
+// drafts.clearRowUnlessHeld when given what it shows, #724). `current` is what
 // the editor shows (its field values, in the form its Save sends); `queued` is
 // the outbox (null when unreadable). No diff against the cached row means every
 // field the editor shows is on the row already, either confirmed or in a save

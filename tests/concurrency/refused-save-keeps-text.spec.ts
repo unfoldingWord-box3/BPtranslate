@@ -306,6 +306,7 @@ test('tN card: text refused with a "locked" 409 survives a later AI apply to the
   expect(await readDraftPatch(page, key), "the refused text should stay in the drafts store").toEqual(
     expect.objectContaining({ note: typed }),
   );
+  await expectOneUnsaved(page, false);
 
   // A reload restores it as unsaved over the AI note.
   await page.reload();

@@ -76,7 +76,8 @@ export interface DraftRecord {
   // Row drafts only (#647): fields a refused save sent (fatal 4xx, or dropped
   // as "locked") that were written back here because nothing else held them
   // (refusedRowDraft.ts). While set, an editor's "no diff" clear keeps the
-  // draft (drafts.clearUnlessRefused): its fields still equal the cached row,
+  // draft (drafts.clearUnlessRefused, or NoteCard's clearRowUnlessHeld with
+  // what it shows, #724): its fields still equal the cached row,
   // which carries the refused text. The next set() drops it, as typing makes
   // the draft the editor's own again; a confirmed save or Discard clears it.
   refused?: Record<string, unknown>;
