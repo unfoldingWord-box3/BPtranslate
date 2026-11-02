@@ -13,26 +13,15 @@ Living checklist of things that need eyes-on verification — UI behaviors, live
 
 ## Pending verification
 
+> Since #470 the AI menu no longer offers "Generate ULT + UST", "Write translation notes" or "Write translation questions" (they were switched off in #551). Items below that start one of those runs from the menu can't be exercised any more.
+
 ### Phase 2d — PR #14 (asymmetric alignment, AI chip, stage bar, cron polling)
 
 The four items below shipped on 2026-05-13. Type-checks pass and the logic was reasoned through, but none of them have been exercised against a live `uw-bt-bot.fly.dev` run yet. The first live verification is the highest-risk path.
 
 #### Asymmetric ULT/UST alignment
 
-- [ ] **Dialog warning shows when alignment is asymmetric.** Open AI pipelines → Generate ULT + UST. Tick ULT + ULT-alignment + UST (leave UST-alignment unticked). The italic line "Asymmetric alignment: runs as two pipelines back-to-back (ULT first)." appears below the checkboxes. Untick UST-alignment + tick ULT-alignment for the mirror case — same warning shows.
-- [ ] **Asymmetric start creates two `pipeline_jobs` rows in sequence.** With the dialog warning visible, click Start. Run this query immediately:
-  ```sh
-  wrangler d1 execute bptranslate_dev --local --command \
-    "SELECT job_id, pipeline_type, session_key, state, follow_up_options IS NOT NULL AS has_followup, follow_up_job_id FROM pipeline_jobs ORDER BY created_at DESC LIMIT 4"
-  ```
-  Expect: one row, `state='running'`, `has_followup=1`, `follow_up_job_id=NULL`, `session_key` matches the browser's `bible-editor.pipeline.sessionKey`.
-- [ ] **Follow-up fires on the parent's `done` transition.** After the parent reports `state='done'` (status panel pill turns green), re-run the same query. Expect: TWO rows now. Parent's `follow_up_job_id` matches the second row's `job_id`. Second row's `session_key` ends in `/followup`. Parent's `follow_up_options` should still be set (we don't clear it; the `follow_up_job_id` is the idempotency guard).
-- [ ] **Chapter lock re-engages for the follow-up.** While the follow-up is running, the chapter banner shows again ("AI generate run in progress…") and TN cards are read-only. (~5-10s gap between parent-done and follow-up-running is expected; the chapter is briefly unlocked.)
-- [ ] **Both content types land correctly.** When the follow-up completes, ULT verses should be ALIGNED (zaln markers visible in `content_json`) and UST verses should be PLAIN (no zaln). Verify with:
-  ```sh
-  wrangler d1 execute bptranslate_dev --local --command \
-    "SELECT bible_version, SUBSTR(content_json, 1, 200) FROM verses WHERE book='ZEC' AND chapter=<N> AND verse=1"
-  ```
+Removed with the "Generate ULT + UST" action in #470: the AI menu no longer offers it, so these runs can't be started.
 
 #### AI provenance chip
 
@@ -78,7 +67,6 @@ Shipped 2026-05-14 as five small commits. Type-checks pass and the macro chain w
 
 #### Parent-child follow-up link (Phase 3.5)
 
-- [ ] **Asymmetric generate shows the link in both directions.** Trigger an asymmetric ULT/UST run (Phase 2d). While both rows are running, open the status-bar panel. Parent row shows "Step 1 of 2 · follow-up …xyz" (last 6 chars of child id). Child row shows "Step 2 of 2 · after …xyz" (last 6 chars of parent id).
 - [ ] **Single-pipeline runs show no chain line.** A plain `tqs` run with no follow-up shows no Step-of-N line in the panel. (Negative check — verifies we're reading the column correctly, not always rendering.)
 
 #### Concurrency UX (Phase 3.1, minimum viable)
