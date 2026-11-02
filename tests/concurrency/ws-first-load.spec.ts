@@ -22,21 +22,22 @@ import { RTL_FIXTURE } from "./global-setup";
 // response.
 //
 // Not checked: /api/auth/* and /api/ws/*, which the server exempts from the
-// workspace check, and GET /api/l10n/overrides. main.tsx fetches the overrides
-// once at boot, outside App and before /api/auth/me returns, so on a first load
-// it still claims "default" and gets a 409 (harmless: the bundled strings stand
-// and the reload fetches them again; tracked in #766).
-// That 409 also makes sync/api.ts reload the tab, which raced App's own
-// reconcile and usually tore the page down before App's children mounted, so
-// the bug showed only now and then. The spec answers the overrides itself, so
-// App's reconcile is the only reload and the check sees App's ordering on
-// every run.
+// workspace check.
+//
+// GET /api/l10n/overrides used to be one more exception (#766): main.tsx
+// fetches it once at boot, outside App and before /api/auth/me returns, so on
+// a first load it claimed "default" and got a 409. That 409 ran sync/api.ts's
+// sibling-tab reload, which raced App's reconcile and spent the tab's
+// once-per-session `ws-mismatch-reloaded` flag, so a later genuine mismatch got
+// no reconciling reload. The overrides are not org-scoped (sharedDb), so that
+// request now claims no workspace. The first-load tests check that nothing
+// 409s and the flag stays unspent; the last test checks that a later mismatch
+// still gets its one reload.
 
 test.describe.configure({ timeout: 120_000 });
 
-const BOOT_FETCH_OUTSIDE_APP = "/api/l10n/overrides";
-const unchecked = (path: string) =>
-  path === BOOT_FETCH_OUTSIDE_APP || path.startsWith("/api/auth/") || path.startsWith("/api/ws/");
+const WS_MISMATCH_RELOAD_KEY = "bible-editor.ws-mismatch-reloaded";
+const unchecked = (path: string) => path.startsWith("/api/auth/") || path.startsWith("/api/ws/");
 
 for (const [name, hash] of [
   ["verse screen", `/#/verse/${RTL_FIXTURE.book}/${RTL_FIXTURE.chapter}/${RTL_FIXTURE.verse}`],
@@ -48,11 +49,6 @@ for (const [name, hash] of [
     await page.route("https://git.door43.org/**", (route) =>
       route.fulfill({ status: 404, body: "not mocked" }),
     );
-    await page.route(`**${BOOT_FETCH_OUTSIDE_APP}`, (route) =>
-      route.request().method() === "GET"
-        ? route.fulfill({ status: 200, json: { overrides: {}, versions: {} } })
-        : route.continue(),
-    );
     const sent: { what: string; ws: string }[] = [];
     page.on("request", (req: Request) => {
       const url = new URL(req.url());
@@ -63,8 +59,11 @@ for (const [name, hash] of [
     // The workspace the server says this session is in, straight from
     // /api/auth/me (not from localStorage, which the app under test writes).
     let serverWs: string | undefined;
+    const mismatches: string[] = [];
     page.on("response", async (res) => {
-      if (new URL(res.url()).pathname !== "/api/auth/me" || res.status() !== 200) return;
+      const path = new URL(res.url()).pathname;
+      if (res.status() === 409 && path.startsWith("/api/")) mismatches.push(`${res.request().method()} ${path}`);
+      if (path !== "/api/auth/me" || res.status() !== 200) return;
       try {
         serverWs = ((await res.json()) as { workspace?: string }).workspace ?? serverWs;
       } catch {
@@ -87,6 +86,11 @@ for (const [name, hash] of [
     const wrong = sent.filter((s) => s.ws !== serverWs).map((s) => `${s.what} claimed ${s.ws}`);
     console.log(`[#749 ${name}] ${sent.length} requests, wrong workspace: ${wrong.join("; ") || "none"}`);
     expect(wrong, `API calls sent under a workspace other than ${serverWs}`).toEqual([]);
+    // Requests the reload aborts never produce a response, so check for the
+    // absence of a 409 rather than the presence of a 200 (#766).
+    expect(mismatches, "no request of the first load is answered 409").toEqual([]);
+    const spent = await page.evaluate((k) => sessionStorage.getItem(k), WS_MISMATCH_RELOAD_KEY);
+    expect(spent, "the first load must not spend the sibling-tab reload").toBeNull();
     await context.close();
   });
 }
@@ -156,5 +160,39 @@ test("#749: another tab changing the workspace slug does not blank a running tab
   await page.waitForTimeout(2_000);
   expect(navigations, "nothing should reload this tab").toBe(0);
   await expect(title, "the editor stays on screen").toBeVisible();
+  await context.close();
+});
+
+// #766: a fresh tab keeps its one sibling-tab reload. Before the fix the boot
+// overrides fetch's 409 spent it, so a later mismatch reloaded nothing and the
+// tab stayed on the stale slug. Here, once the first load settles, this tab's
+// slug goes stale (as when a sibling tab's org switch leaves the be_ws cookie
+// and this tab's slug disagreeing); the next API call gets a real 409 and
+// sync/api.ts must reload the tab exactly once, onto the server's workspace.
+test("#766: after a fresh first load, a workspace mismatch still reloads the tab once", async ({ browser }) => {
+  const { context } = await newUserContext(browser, "ws-first-load-then-switch");
+  const page = await context.newPage();
+  await page.route("https://git.door43.org/**", (route) =>
+    route.fulfill({ status: 404, body: "not mocked" }),
+  );
+  const v = `${RTL_FIXTURE.book}/${RTL_FIXTURE.chapter}`;
+  await page.goto(`/#/verse/${v}/${RTL_FIXTURE.verse}`);
+  await expect(page.getByRole("heading", { level: 1 })).toBeVisible({ timeout: 60_000 });
+  await page.waitForLoadState("networkidle");
+  const serverWs = await page.evaluate(() => localStorage.getItem("bible-editor.workspace"));
+  expect(serverWs, "App stored the server's workspace").toBeTruthy();
+
+  let loads = 0;
+  page.on("load", () => loads++);
+  await page.evaluate(() => localStorage.setItem("bible-editor.workspace", "stale-766"));
+  await page.evaluate((hash) => {
+    location.hash = hash;
+  }, `#/verse/${v}/${RTL_FIXTURE.verse + 1}`);
+  await expect.poll(() => loads, { message: "the mismatch reloads the tab", timeout: 20_000 }).toBeGreaterThan(0);
+  await page.waitForLoadState("networkidle");
+  await page.waitForTimeout(2_000);
+  console.log(`[#766 mismatch after first load] full loads: ${loads}`);
+  expect(loads, "exactly one reconciling reload").toBe(1);
+  expect(await page.evaluate(() => localStorage.getItem("bible-editor.workspace"))).toBe(serverWs);
   await context.close();
 });

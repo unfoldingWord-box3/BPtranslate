@@ -414,6 +414,9 @@ export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 export interface RequestInitWithTimeout extends RequestInit {
   /** Override the default 30s timeout. Pass 0 to disable. */
   timeoutMs?: number;
+  /** Send no X-Workspace claim. Only for routes whose data is the same in
+   *  every workspace (sharedDb), so a stale claim can't make them 409. */
+  noWorkspaceClaim?: boolean;
 }
 
 // Compose any number of AbortSignals into one. Aborts as soon as any input
@@ -486,13 +489,14 @@ async function request<T>(
     const csrf = getCsrfToken();
     if (csrf) headers["X-CSRF-Token"] = csrf;
   }
-  // Stamp this tab's own notion of the active workspace on every request.
+  // Stamp this tab's own notion of the active workspace on every request
+  // (except a `noWorkspaceClaim` one, whose data is shared by every org).
   // The server (requireWorkspaceMatch in api/src/workspaces.ts) compares it
   // against the workspace it actually resolved the request against (from the
   // be_ws cookie) and 409s workspace_mismatch on a mismatch — the signal that
   // a SIBLING tab switched orgs and this tab is now stale. See the 409
   // handling below and outbox.ts's dispatch().
-  headers["X-Workspace"] = getWorkspaceSlug();
+  if (!init?.noWorkspaceClaim) headers["X-Workspace"] = getWorkspaceSlug();
 
   const timeoutMs = init?.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   let signal = init?.signal ?? undefined;
@@ -511,6 +515,7 @@ async function request<T>(
   // dev proxy preserves them too.
   const fetchInit: RequestInit = { ...init, headers, signal, credentials: "include" };
   delete (fetchInit as RequestInitWithTimeout).timeoutMs;
+  delete (fetchInit as RequestInitWithTimeout).noWorkspaceClaim;
 
   // The timeout signal must stay armed until the *body* is consumed, not
   // just until headers arrive — a stalled response body would otherwise hang
@@ -2213,8 +2218,13 @@ export const api = {
     request<TemplateHistory>(`/api/templates/unit/history?id=${encodeURIComponent(id)}`),
 
   // ── UI localization overrides (migration 0052) ──
+  // No workspace claim: overrides live in the shared DB, the same for every
+  // org. main.tsx fetches them at boot, before App reconciles the slug, and a
+  // stale claim used to 409 and spend the tab's sibling-tab reload (#766).
   getL10nOverrides: () =>
-    request<{ overrides: Record<string, L10nBag>; versions: Record<string, number> }>(`/api/l10n/overrides`),
+    request<{ overrides: Record<string, L10nBag>; versions: Record<string, number> }>(`/api/l10n/overrides`, {
+      noWorkspaceClaim: true,
+    }),
   putL10nOverrides: (lang: string, expectedVersion: number, overrides: L10nBag) =>
     request<{ version: number }>(`/api/l10n/overrides/${lang}`, {
       method: "PUT",
