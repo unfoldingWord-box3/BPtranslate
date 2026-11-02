@@ -159,6 +159,7 @@ export function BookView({
   // mounted yet; a bare scrollIntoView would no-op against a null ref. Mark
   // the request pending and let the effect below load + center it.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- also arms the initial scroll on mount; a render-time prev-key compare would drop that mount run and change the scroll path.
     setScrollPending(true);
   }, [activeChapter, activeVerse, scrollNonce]);
 
@@ -183,6 +184,7 @@ export function BookView({
     // lazy-loaded scroll container (the original "go to active" no-op). Since
     // we only scroll once heights have settled, the jump lands true.
     activeRowRef.current?.scrollIntoView({ behavior: "auto", block: "center" });
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- clears the pending flag only after the DOM scroll above has run against the committed, fully loaded rows; it can't move into render.
     setScrollPending(false);
   }, [scrollPending, chapters, activeChapter, activeVerse, chapterList, onLoadChapter]);
 
@@ -215,6 +217,9 @@ export function BookView({
 
   const cols = enabledVersions.length;
   const gridTemplateColumns = `repeat(${cols}, minmax(0, 1fr))`;
+  // Where the front-matter header sends you: the first real chapter's intro tile,
+  // which is where the notes column lists the book introduction.
+  const introChapter = chapterList.find((c) => c >= 1);
 
   return (
     <Box sx={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
@@ -292,6 +297,7 @@ export function BookView({
               lexiconMap={lexiconMap}
               onLoadChapter={onLoadChapter}
               onSelectVerse={onSelectVerse}
+              introChapter={introChapter}
               onEditVerse={onEditVerse}
               onSaveVerse={handleSaveVerse}
               onOpenAligner={onOpenAligner}
@@ -330,6 +336,7 @@ const ChapterBlock = memo(function ChapterBlock({
   lexiconMap,
   onLoadChapter,
   onSelectVerse,
+  introChapter,
   onEditVerse,
   onSaveVerse,
   onOpenAligner,
@@ -355,6 +362,8 @@ const ChapterBlock = memo(function ChapterBlock({
   lexiconMap: Map<string, LexiconEntry | null>;
   onLoadChapter: (ch: number) => void;
   onSelectVerse: (chapter: number, verse: number) => void;
+  // Chapter-0 block only: the chapter whose intro tile shows the book introduction.
+  introChapter?: number;
   onEditVerse: (chapter: number, verse: number, bibleVersion: string, plain: string, base: VerseDto) => void;
   onSaveVerse: (bv: string, chapter: number, verse: number, plain: string, base: VerseDto) => void;
   onOpenAligner: (chapter: number, verse: number, bibleVersion: string) => void;
@@ -457,6 +466,8 @@ const ChapterBlock = memo(function ChapterBlock({
   }
 
   const data = state.data;
+  const goToIntro =
+    chapter === 0 && introChapter !== undefined ? () => onSelectVerse(introChapter, 0) : undefined;
 
   return (
     <Fragment>
@@ -473,7 +484,19 @@ const ChapterBlock = memo(function ChapterBlock({
           borderColor: "primary.main",
           display: "flex",
           alignItems: "center",
+          ...(goToIntro && { cursor: "pointer", "&:hover": { bgcolor: "action.hover" } }),
         }}
+        {...(goToIntro && {
+          role: "button",
+          tabIndex: 0,
+          onClick: goToIntro,
+          onKeyDown: (e: React.KeyboardEvent) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              goToIntro();
+            }
+          },
+        })}
       >
         <Typography
           variant="subtitle2"
@@ -752,6 +775,7 @@ const VerseCell = memo(function VerseCell({
   const hydratedFromDraftRef = useRef(false);
   useEffect(() => {
     if (readOnly) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- clears hasDraft when the cell turns read-only and skips the drafts-store subscription; drafts.subscribe has no getSnapshot, and its callback also hydrates the DOM once, so useSyncExternalStore would not be equivalent.
       setHasDraft(false);
       return;
     }
@@ -808,42 +832,47 @@ const VerseCell = memo(function VerseCell({
     return hit ? `${hit.text}|${hit.occurrence}` : null;
   }, [activeRange, sourceHits]);
 
+  // Read once so the memos below depend on these fields, not on `dto` (the
+  // React Compiler can't match `dto?.x` deps to `dto.x` reads after a guard).
+  const dtoPlainText = dto?.plain_text;
+  const dtoContent = dto?.content;
+
   // Find marks override note highlights while the overlay is open — fewer
   // visual layers, easier to scan results. Note highlights resume when the
   // overlay closes.
   const findHTML = useMemo(() => {
-    if (!dto?.plain_text) return null;
+    if (!dtoPlainText) return null;
     // Source-language query: ULT/UST cells stay clean; UGNT uses the offset
     // painter (UHB renders via HebrewLine, ignoring findHTML).
     if (search && search.sourceQuery.kind !== "english") {
       if (!isSource || !sourceHits || sourceHits.length === 0) return null;
-      return renderFindMatchesByOffsets(dto.plain_text, sourceHits, activeRange);
+      return renderFindMatchesByOffsets(dtoPlainText, sourceHits, activeRange);
     }
     // English / regex path — unchanged.
     if (!search?.re) return null;
-    const html = renderFindMatchesHTML(dto.plain_text, search.re, activeRange);
+    const html = renderFindMatchesHTML(dtoPlainText, search.re, activeRange);
     return html.includes("be-find") ? html : null;
-  }, [search, sourceHits, dto?.plain_text, isSource, activeRange]);
+  }, [search, sourceHits, dtoPlainText, isSource, activeRange]);
 
   const highlights = useMemo<Set<HighlightKey> | null>(() => {
-    if (findHTML || !isActive || !dto?.content) return null;
+    if (findHTML || !isActive || !dtoContent) return null;
     // During a preview the yellow follows the moved/hovered note; else active.
     const aQuote = reorderHighlight?.movedQuote ?? activeNoteQuote;
     const aOcc = reorderHighlight?.movedQuote ? reorderHighlight.movedOccurrence : activeNoteOccurrence;
     if (!aQuote) return null;
-    return highlightsFor(bibleVersion, dto.content, aQuote, aOcc, activeSourceContent);
-  }, [findHTML, isActive, activeNoteQuote, activeNoteOccurrence, reorderHighlight, bibleVersion, dto?.content, activeSourceContent]);
+    return highlightsFor(bibleVersion, dtoContent, aQuote, aOcc, activeSourceContent);
+  }, [findHTML, isActive, activeNoteQuote, activeNoteOccurrence, reorderHighlight, bibleVersion, dtoContent, activeSourceContent]);
 
   // Reorder stoplight neighbour sets (green underline / red overline), active
   // verse only and only while a drag / recent arrow-move is live.
   const prevHighlights = useMemo<Set<HighlightKey> | null>(() => {
-    if (findHTML || !isActive || !reorderHighlight?.prevQuote || !dto?.content) return null;
-    return highlightsFor(bibleVersion, dto.content, reorderHighlight.prevQuote, reorderHighlight.prevOccurrence, activeSourceContent);
-  }, [findHTML, isActive, reorderHighlight, bibleVersion, dto?.content, activeSourceContent]);
+    if (findHTML || !isActive || !reorderHighlight?.prevQuote || !dtoContent) return null;
+    return highlightsFor(bibleVersion, dtoContent, reorderHighlight.prevQuote, reorderHighlight.prevOccurrence, activeSourceContent);
+  }, [findHTML, isActive, reorderHighlight, bibleVersion, dtoContent, activeSourceContent]);
   const nextHighlights = useMemo<Set<HighlightKey> | null>(() => {
-    if (findHTML || !isActive || !reorderHighlight?.nextQuote || !dto?.content) return null;
-    return highlightsFor(bibleVersion, dto.content, reorderHighlight.nextQuote, reorderHighlight.nextOccurrence, activeSourceContent);
-  }, [findHTML, isActive, reorderHighlight, bibleVersion, dto?.content, activeSourceContent]);
+    if (findHTML || !isActive || !reorderHighlight?.nextQuote || !dtoContent) return null;
+    return highlightsFor(bibleVersion, dtoContent, reorderHighlight.nextQuote, reorderHighlight.nextOccurrence, activeSourceContent);
+  }, [findHTML, isActive, reorderHighlight, bibleVersion, dtoContent, activeSourceContent]);
   const roles = useMemo(() => {
     if (!prevHighlights?.size && !nextHighlights?.size) return undefined;
     return { prev: prevHighlights, next: nextHighlights };

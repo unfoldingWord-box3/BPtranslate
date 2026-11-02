@@ -66,6 +66,7 @@ export function LocalizationSection() {
   // right If-Match and untouched overrides aren't wiped on a whole-bag PUT.
   useEffect(() => {
     let cancelled = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- on language change, show loading and drop the old language's unsaved draft before fetching that language's overrides; otherwise the old language's unsaved edits would show, and count as unsaved, against the new language's keys.
     setLoading(true);
     setDraft({});
     api

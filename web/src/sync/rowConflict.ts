@@ -18,12 +18,63 @@
 
 export type RowConflictResolution = "auto_heal" | "conflict";
 
+// Cap on silent re-arm-and-retry after a 409 that we judged spurious — either a
+// reorder-only patch (sort_order is transient last-write-wins, see api/src/rows.ts
+// "transient fields like sort_order") or a content patch that doesn't genuinely
+// conflict with the server's current row (see classifyRowPatchConflict). Neither
+// should surface a conflict prompt. This cap stops a pathological loop if another
+// writer is bumping the same row faster than we can land — beyond it, fall through
+// to the normal conflict flow.
+export const MAX_CONFLICT_AUTOHEAL = 5;
+
+// A reorder enqueues a patch whose only field is sort_order. Such patches are
+// last-write-wins and must never raise a user-facing conflict — they auto-heal
+// against the server's current version instead.
+export function isSortOrderOnlyPatch(patch: Record<string, unknown>): boolean {
+  const keys = Object.keys(patch);
+  return keys.length === 1 && keys[0] === "sort_order";
+}
+
+/**
+ * Whether the outbox re-arms `op` after a 409 whose body carried `current`,
+ * instead of holding it as a conflict for the user: a row patch that is
+ * reorder-only or does not genuinely conflict (classifyRowPatchConflict), when
+ * `current` has a numeric version and the op is under MAX_CONFLICT_AUTOHEAL.
+ * The one rule both drainPass and the live-update follow-up use (#637), so
+ * the cache never shows a save the outbox will turn into a conflict prompt.
+ */
+export function wouldAutoHeal(
+  op: {
+    target: { kind: string };
+    action: string;
+    patch?: Record<string, unknown>;
+    baseline?: Record<string, unknown>;
+    conflictRetries?: number;
+  },
+  current: unknown,
+): boolean {
+  if (op.target.kind !== "row" || op.action !== "patch" || !op.patch) return false;
+  const healable =
+    isSortOrderOnlyPatch(op.patch) ||
+    classifyRowPatchConflict(op.patch, op.baseline, current as Record<string, unknown>) === "auto_heal";
+  const version = (current as { version?: unknown } | null | undefined)?.version;
+  return healable && typeof version === "number" && (op.conflictRetries ?? 0) < MAX_CONFLICT_AUTOHEAL;
+}
+
 // null and undefined are the same "absent" value here: the server serializes an
 // empty column as null, while an un-set optimistic field is undefined. Types are
-// otherwise primitives (string | number) straight from JSON, so === is right.
+// otherwise primitives (string | number) straight from JSON, so === is right,
+// except that text compares with newlines folded: D1 holds tn/tq text with a
+// literal backslash-n (TSV imports, NoteCard) or a real newline (rows the flows
+// Translate screens saved before #593), and the same text in either form must
+// not read as a conflict (#664). Same fold as rowValueKey in draftSaveState.ts.
+function foldNewlines(v: unknown): unknown {
+  return typeof v === "string" ? v.replace(/\\n/g, "\n") : v;
+}
+
 function valuesEqual(a: unknown, b: unknown): boolean {
-  const na = a === undefined ? null : a;
-  const nb = b === undefined ? null : b;
+  const na = a === undefined ? null : foldNewlines(a);
+  const nb = b === undefined ? null : foldNewlines(b);
   return na === nb;
 }
 

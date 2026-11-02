@@ -27,7 +27,7 @@ const API_KEY = "sk-ant-api03-notarealkey-000000wxyz";
 
 function freshDb() {
   const db = new DatabaseSync(":memory:");
-  const mig = readFileSync(new URL("../../migrations/0074_help_chat.sql", import.meta.url), "utf8");
+  const mig = readFileSync(new URL("../../migrations/0076_help_chat.sql", import.meta.url), "utf8");
   db.exec(`
     CREATE TABLE ai_provider_config (
       id INTEGER PRIMARY KEY CHECK (id = 1), provider TEXT NOT NULL DEFAULT 'default', model TEXT,

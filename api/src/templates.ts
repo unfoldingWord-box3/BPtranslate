@@ -7,12 +7,13 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { Env } from "./index";
 import type { TemplateUnit } from "./types";
-import { currentUserId, requireEditor, requireAdmin } from "./auth";
-import { syncTemplates, ensureTemplatesPopulated } from "./templateSync";
-import { getProjectConfig } from "./projectConfig";
-import { nextPreDraftJson } from "./preDraftSnapshot";
-import { getLatestSuccessfulContextExport } from "./contextExportResults";
-import { applyContextRef, derivedTargetLang } from "./assistedContextRef";
+import { currentUserId, editSource, requireEditor, requireAdmin } from "./auth.ts";
+import { syncTemplates, ensureTemplatesPopulated } from "./templateSync.ts";
+import { getProjectConfig } from "./projectConfig.ts";
+import { nextPreDraftJson } from "./preDraftSnapshot.ts";
+import { getLatestSuccessfulContextExport } from "./contextExportResults.ts";
+import { applyContextRef, derivedTargetLang } from "./assistedContextRef.ts";
+import { queueContextExport } from "./contextExportQueue.ts";
 
 export const templates = new Hono<{ Bindings: Env; Variables: { userId?: number } }>();
 
@@ -117,10 +118,10 @@ templates.patch("/unit", requireEditor, async (c) => {
         // Audit gated on the CAS having won (changes() in the same batch).
         // payload_json carries the full patch so /unit/history can replay it.
         `INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action, source, payload_json)
-         SELECT 'template', ?1, NULL, ?2, ?3, ?3 + 1, 'update', NULL, ?4
+         SELECT 'template', ?1, NULL, ?2, ?3, ?3 + 1, 'update', ?5, ?4
           WHERE (SELECT changes()) > 0`,
       )
-      .bind(id, userId ?? null, expected, JSON.stringify({ target_md: parsed.data.target_md })),
+      .bind(id, userId ?? null, expected, JSON.stringify({ target_md: parsed.data.target_md }), editSource(c)),
   ]);
 
   if (!updateRes.meta.changes) {
@@ -154,7 +155,16 @@ templates.patch("/unit", requireEditor, async (c) => {
 // (export gate) is computed identically to every other AI-draft producer.
 // If-Match CAS guards against clobbering a concurrent human edit — same
 // mechanics as PATCH /unit above.
+// #551: every AI call for an org must run on that org's own key. The bot's
+// template-quick schema can't take one, so "Draft with AI" for templates is
+// switched off until it can. The code below is kept for then; flip this to
+// false once the call carries the org key.
+const TEMPLATE_DRAFT_NEEDS_ORG_KEY: boolean = true;
+
 templates.post("/unit/draft", requireEditor, async (c) => {
+  if (TEMPLATE_DRAFT_NEEDS_ORG_KEY) {
+    return c.json({ error: "ai_needs_org_key" }, 409);
+  }
   if (!c.env.BT_API_TOKEN) {
     return c.json({ error: "template_draft_disabled" }, 503);
   }
@@ -300,14 +310,26 @@ templates.post("/unit/draft", requireEditor, async (c) => {
   return c.json(updated);
 });
 
-const ValidateBody = z.object({ value: z.union([z.literal(0), z.literal(1), z.boolean()]) });
+const ValidateBody = z.object({
+  value: z.union([z.literal(0), z.literal(1), z.boolean()]),
+  expected_state: z.enum(["ai_draft", "edited", "validated"]).optional(),
+});
 
 // POST /api/templates/unit/validate?id=... — the "Approve" action. value=1 ->
 // validated; value=0 -> edited. Non-version-bumping; guarded on
-// translation_state IS NOT NULL; audit source=NULL (human approval).
+// translation_state IS NOT NULL; audit source=NULL (human approval), 'chat' when
+// a chat reviewer approved. Optional If-Match pins the version the caller saw;
+// optional body expected_state pins the translation_state they saw. State flips
+// never bump `version`, so the version alone misses an un-approve that landed
+// after the reviewer saw the template (#708, the #701 gap for templates). The
+// chat's bpt_approve_template sends both; the web app sends neither. A pinned
+// miss is a 409 version_mismatch with current.
 templates.post("/unit/validate", requireEditor, async (c) => {
   const id = c.req.query("id");
   if (!id) return c.json({ error: "id_required" }, 400);
+  const ifMatch = c.req.header("if-match");
+  const expected = parseIfMatch(ifMatch);
+  if (ifMatch !== undefined && expected === null) return c.json({ error: "invalid_if_match" }, 400);
   let body: unknown;
   try {
     body = await c.req.json();
@@ -326,23 +348,66 @@ templates.post("/unit/validate", requireEditor, async (c) => {
   const snapshotClause = state === "validated"
     ? ", pre_draft_json = json_object('target_md', target_md)"
     : "";
-  const [updateRes] = await c.env.DB.batch([
-    c.env.DB
-      .prepare(
-        `UPDATE template_units SET translation_state = ?1, updated_at = ?2${snapshotClause}
-          WHERE template_id = ?3 AND deleted_at IS NULL AND translation_state IS NOT NULL`,
-      )
-      .bind(state, now, id),
+  const source = editSource(c);
+  const expectedState = parsed.data.expected_state ?? null;
+  // The pin clauses numbered from ?first, with their values in the same order.
+  // Each statement binds exactly the parameters it references (D1 rejects an
+  // unreferenced ?N), so a clause and its value come and go together.
+  const pins = (first: number) => {
+    let n = first;
+    let sql = "";
+    const values: unknown[] = [];
+    if (expected !== null) {
+      sql += ` AND version = ?${n++}`;
+      values.push(expected);
+    }
+    if (expectedState !== null) {
+      sql += ` AND translation_state = ?${n++}`;
+      values.push(expectedState);
+    }
+    return { sql, values };
+  };
+  const auditPins = pins(5);
+  const updatePins = pins(4);
+  // The audit INSERT runs FIRST: its WHERE must see the row before the UPDATE,
+  // or a state pin (which the UPDATE itself changes) would never match and the
+  // approval would land with no audit entry. A batch is one transaction.
+  const [, updateRes] = await c.env.DB.batch([
     c.env.DB
       .prepare(
         `INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action, source)
-         SELECT 'template', ?1, NULL, ?2, version, version, ?3, NULL
+         SELECT 'template', ?1, NULL, ?2, version, version, ?3, ?4
            FROM template_units
-          WHERE template_id = ?1 AND deleted_at IS NULL AND translation_state IS NOT NULL`,
+          WHERE template_id = ?1 AND deleted_at IS NULL AND translation_state IS NOT NULL${auditPins.sql}`,
       )
-      .bind(id, userId ?? null, action),
+      .bind(id, userId ?? null, action, source, ...auditPins.values),
+    c.env.DB
+      .prepare(
+        `UPDATE template_units SET translation_state = ?1, updated_at = ?2${snapshotClause}
+          WHERE template_id = ?3 AND deleted_at IS NULL AND translation_state IS NOT NULL${updatePins.sql}`,
+      )
+      .bind(state, now, id, ...updatePins.values),
   ]);
-  if (!updateRes.meta.changes) return c.json({ error: "not_found" }, 404);
+  if (!updateRes.meta.changes) {
+    if (expected !== null || expectedState !== null) {
+      const cur = await c.env.DB.prepare(
+        `SELECT * FROM template_units WHERE template_id = ?1 AND deleted_at IS NULL`,
+      )
+        .bind(id)
+        .first<TemplateUnit>();
+      const moved =
+        !!cur &&
+        cur.translation_state !== null &&
+        ((expected !== null && cur.version !== expected) ||
+          (expectedState !== null && cur.translation_state !== expectedState));
+      if (moved) return c.json({ error: "version_mismatch", current: cur }, 409);
+    }
+    return c.json({ error: "not_found" }, 404);
+  }
+  // Approving adds the template to the context pack AI drafts read; un-approving
+  // takes it out. Queue the context export now rather than waiting for the
+  // nightly run (#707). Never fails the approve: the helper swallows errors.
+  queueContextExport(c);
   const updated = await c.env.DB.prepare(`SELECT * FROM template_units WHERE template_id = ?1`)
     .bind(id)
     .first<TemplateUnit>();

@@ -15,17 +15,26 @@
 
 import { Hono } from "hono";
 import type { Env } from "./index";
-import { requireEditor } from "./auth";
-import { getProjectConfig } from "./projectConfig";
-import { getLatestSuccessfulContextExport } from "./contextExportResults";
-import { applyTnQuickContext, stripClientContextFields } from "./assistedContextRef";
+import { requireEditor } from "./auth.ts";
+import { getProjectConfig } from "./projectConfig.ts";
+import { getLatestSuccessfulContextExport } from "./contextExportResults.ts";
+import { applyTnQuickContext, stripClientContextFields } from "./assistedContextRef.ts";
 
 export const tnQuick = new Hono<{ Bindings: Env; Variables: { userId?: number } }>();
 
 const DEFAULT_URL = "https://uw-bt-bot.fly.dev/api/tn-quick";
 const MAX_BODY_BYTES = 32 * 1024;
 
+// #551: every AI call for an org must run on that org's own key. The bot's
+// tn-quick schema can't take one, so this route is switched off until it can
+// (#446 tracks an in-Worker port). The proxy code below is kept for then; flip
+// this to false once the call carries the org key.
+const TN_QUICK_NEEDS_ORG_KEY: boolean = true;
+
 tnQuick.post("/", requireEditor, async (c) => {
+  if (TN_QUICK_NEEDS_ORG_KEY) {
+    return c.json({ error: "ai_needs_org_key" }, 409);
+  }
   if (!c.env.BT_API_TOKEN) {
     return c.json({ error: "tn_quick_disabled" }, 503);
   }

@@ -30,7 +30,7 @@ import {
 import CheckIcon from "@mui/icons-material/Check";
 import BusinessIcon from "@mui/icons-material/Business";
 import { api, type WorkspaceInfo } from "../sync/api";
-import { setWorkspaceSlug, setWorkspaceIsFallback } from "../sync/workspace";
+import { setWorkspaceSlug } from "../sync/workspace";
 
 const CHOOSE_WS_KEY = "bible-editor.choose-ws";
 
@@ -101,7 +101,6 @@ export function WorkspaceChoiceDialog({ onClose }: { onClose: () => void }) {
     if (w.slug === current) {
       // Already where the server landed us — persist the mirror and move on.
       setWorkspaceSlug(w.slug);
-      setWorkspaceIsFallback(w.isFallback);
       dismiss();
       return;
     }
@@ -110,7 +109,6 @@ export function WorkspaceChoiceDialog({ onClose }: { onClose: () => void }) {
     try {
       await api.switchWorkspace(w.slug);
       setWorkspaceSlug(w.slug);
-      setWorkspaceIsFallback(w.isFallback);
       clearChooseWsPending();
       // Deliberate full reload, same as WorkspaceSwitcher: no hook state from
       // the previous org may survive the D1 rebind.

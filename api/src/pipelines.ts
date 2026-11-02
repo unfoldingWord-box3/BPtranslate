@@ -41,6 +41,7 @@ import { applyContextRef } from "./assistedContextRef.ts";
 import { getLatestSuccessfulContextExport } from "./contextExportResults.ts";
 import { broadcastChapter } from "./wsEvents.ts";
 import { sameDcsName } from "./repoUrl.ts";
+import { isChapterWideTnTranslate, translateNoteSelection } from "./chapterLock.ts";
 import {
   assertLaneWritable,
   type LaneKey,
@@ -55,6 +56,14 @@ const DEFAULT_BASE = "https://uw-bt-bot.fly.dev";
 
 const PIPELINE_TYPES = ["generate", "notes", "tqs", "translate"] as const;
 type PipelineType = (typeof PIPELINE_TYPES)[number];
+
+// #551: every AI call made for an org runs on that org's own AI key. The bot
+// accepts a per-request key only for translate, so these three older types
+// (Generate ULT/UST, Write tN, Write tQ) would still run on unfoldingWord's
+// shared account. They are switched off until they can take the org key:
+// /start refuses them and dispatchNext fails any that are already queued.
+// They stay in PIPELINE_TYPES because history and import code still read them.
+const NEEDS_ORG_KEY_TYPES: ReadonlySet<string> = new Set(["generate", "notes", "tqs"]);
 
 // States that occupy the single bot slot. While any job is in one of these,
 // dispatchNext refuses to send another job upstream. 'dispatching' is the
@@ -601,6 +610,17 @@ export async function dispatchNext(env: Env): Promise<void> {
       .run();
   };
 
+  // #551: a legacy generate/notes/tqs job queued before /start began refusing
+  // them (or a follow-up enqueued server-side) would run on the shared account.
+  // Fail it before anything else, so nothing reaches the bot. Then move on to
+  // the next queued job at once, so leftover legacy jobs don't each hold a
+  // job behind them for a cron tick. Bounded: each pass takes one row out of
+  // 'queued', and the failed row frees the slot for the next claim.
+  if (NEEDS_ORG_KEY_TYPES.has(job.pipeline_type)) {
+    await fail("ai_needs_org_key", "this pipeline type cannot run on the organization's own AI key yet");
+    return dispatchNext(env);
+  }
+
   // Our OWN dispatch-POST timeout firing does NOT mean the upstream request
   // never landed — only that WE gave up waiting (see DISPATCH_TIMEOUT_ERROR_
   // KIND/MESSAGE's doc comment for the full reasoning). Unlike `fail`, this
@@ -673,34 +693,36 @@ export async function dispatchNext(env: Env): Promise<void> {
 
   // Per-org AI provider config (migration 0066): translate jobs only. Read
   // fresh at every dispatch — never cached — so an admin's config change
-  // applies to jobs that were already queued. A BYO provider that can't be
-  // decrypted must fail the job, never silently fall back to the shared
-  // subscription (billing correctness).
+  // applies to jobs that were already queued. A translate job runs on the
+  // org's own key or not at all (#551): no key configured, or a BYO provider
+  // that can't be used or decrypted, fails the job. It never falls back to a
+  // shared account (billing correctness). This also fails keyless jobs that
+  // were queued before /start began refusing them.
   let aiApiKey: string | undefined; // plaintext lives ONLY in this function scope
   let aiProvider: string | undefined;
   let aiModel: string | undefined;
-  let dispatchAi: DispatchAi = { kind: "none" };
+  let dispatchAi: DispatchAi | null = null; // null = not a translate job
   if (job.pipeline_type === "translate") {
     const row = await getAiProviderConfig(env.DB);
     const ai = resolveDispatchAi(row, env.AI_KEY_WRAPPING_KEY);
     if (ai.kind === "error") {
-      await fail("sdk_error", `ai_provider_unavailable: ${ai.reason}`);
+      // Same kind + message as the internal runner (translate/workflowSteps.ts),
+      // so the UI shows "an admin should check the AI settings" (#575).
+      await fail("ai_provider_unavailable", ai.reason);
       return;
     }
     dispatchAi = ai;
-    if (ai.kind === "configured") {
-      try {
-        aiApiKey = await decryptApiKey(env.AI_KEY_WRAPPING_KEY!, ai.ciphertext, ai.iv);
-      } catch {
-        await fail("sdk_error", "ai_provider_key_decrypt_failed");
-        return;
-      }
-      aiProvider = ai.provider;
-      // Non-null in practice: resolveDispatchAi returns kind:'error'
-      // ("model_missing") before 'configured' when the row has no model.
-      aiModel = ai.model ?? undefined;
-      Object.assign(upstreamBody, { provider: ai.provider, model: ai.model, apiKey: aiApiKey });
+    try {
+      aiApiKey = await decryptApiKey(env.AI_KEY_WRAPPING_KEY!, ai.ciphertext, ai.iv);
+    } catch {
+      await fail("ai_provider_key_decrypt_failed", "stored provider key could not be decrypted (wrapping key rotated?)");
+      return;
     }
+    aiProvider = ai.provider;
+    // Non-null in practice: resolveDispatchAi returns kind:'error'
+    // ("model_missing") before 'configured' when the row has no model.
+    aiModel = ai.model ?? undefined;
+    Object.assign(upstreamBody, { provider: ai.provider, model: ai.model, apiKey: aiApiKey });
   }
 
   // Internal runner fork (docs/translate-internal-runner.md §D.1). Everything
@@ -709,7 +731,7 @@ export async function dispatchNext(env: Env): Promise<void> {
   // half differs. The internal branch never touches `upstreamBody` (it was built
   // for the bot's POST and carries the plaintext key, which must not travel) and
   // never reaches the fetch block below.
-  if (translateRunner(env, job, dispatchAi, options) === "internal") {
+  if (dispatchAi && translateRunner(env, job, dispatchAi, options) === "internal") {
     // params.workspace is REQUIRED by the Workflow: it re-points its own env on
     // the first line of run(), because a Workflow does NOT inherit the
     // per-request env clone. "default" is the implicit single-workspace slug
@@ -1218,9 +1240,10 @@ const AMBIGUOUS_DISPATCH_GRACE_SECONDS = 300;
 // and the job id (translateInstanceId), so the sweep can rebuild it without
 // having stored it (the crash window is exactly the case where upstream_job_id
 // was never written). Best-effort: create() may never have landed, in which case
-// there is no instance and get()/terminate() throws — that is expected, not an
-// error, so it is swallowed. A terminate failure is likewise non-fatal; the
-// row is already failed and the slot already freed regardless.
+// there is no instance and get()/terminate() throws; likewise terminate() throws
+// on an instance that already finished or errored. Both are logged and
+// swallowed, never fatal: the row is already failed and the slot already freed
+// regardless, and the rest of the sweep must still run.
 async function terminateTranslateInstance(env: Env, jobId: string): Promise<void> {
   if (env.TRANSLATE_WORKFLOW == null) return;
   const workspace = env.WORKSPACE_SLUG ?? "default";
@@ -1228,8 +1251,43 @@ async function terminateTranslateInstance(env: Env, jobId: string): Promise<void
   try {
     const instance = await env.TRANSLATE_WORKFLOW.get(instanceId);
     await instance.terminate();
-  } catch {
+  } catch (e) {
     // No such instance (create() never landed) or already terminal — nothing to stop.
+    console.warn(
+      `[scheduled.pipelinePoll] workspace=${workspace} job=${jobId} instance=${instanceId}: ` +
+        `terminate on force-fail did not complete (non-fatal): ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+}
+
+// #456: given job ids captured (while still non-terminal) under a force-fail
+// predicate, terminate the Workflow instance of ONLY the rows this sweep
+// actually force-failed — now state='failed', error_kind='interrupted'. The
+// capture SELECT and the force-fail UPDATE are two separate statements, so a
+// still-live Worker can rescue a captured row in between (dispatchNext's
+// promote-to-'running' UPDATE, or a poll landing the job 'done'); re-reading
+// state after the UPDATE excludes it, so a legitimately-live paid instance is
+// never killed out from under a surviving row (see the dispatch sweep's own
+// doc comment below for the concrete race). A row failed with any other
+// error_kind (a real runner failure) is left alone: its Workflow is already
+// terminal, so there is nothing to stop. Best-effort throughout —
+// terminateTranslateInstance swallows a missing instance / terminate failure.
+async function terminateForceFailedTranslateInstances(
+  env: Env,
+  capturedJobIds: string[],
+): Promise<void> {
+  if (capturedJobIds.length === 0) return;
+  const placeholders = capturedJobIds.map((_, i) => `?${i + 1}`).join(", ");
+  const forceFailed = await env.DB.prepare(
+    `SELECT job_id FROM pipeline_jobs
+      WHERE job_id IN (${placeholders})
+        AND state = 'failed'
+        AND error_kind = 'interrupted'`,
+  )
+    .bind(...capturedJobIds)
+    .all<{ job_id: string }>();
+  for (const r of forceFailed.results ?? []) {
+    await terminateTranslateInstance(env, r.job_id);
   }
 }
 
@@ -1243,6 +1301,24 @@ export async function pollAllNonTerminal(env: Env): Promise<void> {
   // proxy branch of pollPipelineJob keeps its own token dependency; a proxy job
   // cannot exist on a token-less deployment (dispatchNext fails it before it
   // ever reaches 'running'), so nothing here spins a bot fetch without a token.
+  //
+  // #456: capture the internal translate jobs the two running-state auto-fail
+  // sweeps below (48h no-progress and MAX_POLL_ATTEMPTS) are about to force-fail,
+  // while they are still non-terminal, so their still-live Workflow instances can
+  // be terminated afterward — the same paid-model-call / cost leak #464 fixed for
+  // the dispatch crash window, but for a job that already reached 'running'. Unlike
+  // that window, a running/paused row has runner='internal' written, so that is the
+  // precise signal (a proxy translate job has no Workflow instance and terminate
+  // no-ops anyway). Union of both sweeps' predicates so one capture covers both;
+  // the verify-after-UPDATE step below terminates only rows actually failed here.
+  const stuckRunningTranslates = await env.DB.prepare(
+    `SELECT job_id FROM pipeline_jobs
+      WHERE state IN ('running', 'paused_for_outage', 'paused_for_usage_limit')
+        AND runner = 'internal'
+        AND (updated_at < unixepoch() - ?1 OR attempt_count > ?2)`,
+  )
+    .bind(STUCK_JOB_THRESHOLD_SECONDS, MAX_POLL_ATTEMPTS)
+    .all<{ job_id: string }>();
   await env.DB.prepare(
     `UPDATE pipeline_jobs
         SET state = 'failed',
@@ -1268,6 +1344,14 @@ export async function pollAllNonTerminal(env: Env): Promise<void> {
   )
     .bind(MAX_POLL_ATTEMPTS)
     .run();
+  // #456: terminate the orphaned Workflow instance of every internal translate
+  // job the two sweeps above just force-failed. Re-reads state, so a row a live
+  // poll rescued to 'done' (fresh updated_at, or a terminal state) between the
+  // capture and the UPDATEs is not terminated.
+  await terminateForceFailedTranslateInstances(
+    env,
+    (stuckRunningTranslates.results ?? []).map((r) => r.job_id),
+  );
   // Recover wedged dispatches so a dead-mid-POST Worker can't hold the slot
   // forever.
   //
@@ -1325,21 +1409,10 @@ export async function pollAllNonTerminal(env: Env): Promise<void> {
   // say-so would kill that live instance and leave a `running` row holding the
   // single global dispatch slot and the chapter write-lock until the 48h
   // no-progress sweep. Re-reading state after the UPDATE closes that window.
-  const capturedIds = (stuckTranslateDispatches.results ?? []).map((r) => r.job_id);
-  if (capturedIds.length > 0) {
-    const placeholders = capturedIds.map((_, i) => `?${i + 1}`).join(", ");
-    const forceFailed = await env.DB.prepare(
-      `SELECT job_id FROM pipeline_jobs
-        WHERE job_id IN (${placeholders})
-          AND state = 'failed'
-          AND error_kind = 'interrupted'`,
-    )
-      .bind(...capturedIds)
-      .all<{ job_id: string }>();
-    for (const r of forceFailed.results ?? []) {
-      await terminateTranslateInstance(env, r.job_id);
-    }
-  }
+  await terminateForceFailedTranslateInstances(
+    env,
+    (stuckTranslateDispatches.results ?? []).map((r) => r.job_id),
+  );
   // Upstream #493 / #511: a dispatch that timed out on OUR side (marked
   // ambiguous by dispatchNext's own catch block, see
   // AMBIGUOUS_DISPATCH_GRACE_SECONDS's doc comment) gets one extra grace
@@ -1376,7 +1449,20 @@ export async function pollAllNonTerminal(env: Env): Promise<void> {
   // recoverable proxy job to the poll cap and auto-fail it. Internal jobs read
   // their status from D1 with no token, so they still advance.
   if (!env.BT_API_TOKEN) {
+    const skipped = jobs.filter((j) => j.runner !== "internal").map((j) => j.job_id);
     jobs = jobs.filter((j) => j.runner === "internal");
+    // #496: the skipped proxy rows are in ACTIVE_STATES, the single global
+    // dispatch slot, and are neither polled nor counted toward the poll cap. So
+    // they hold the slot (and the chapter write-lock), blocking every other job,
+    // internal ones included, until the token returns or the 48h no-progress
+    // sweep frees it. That trade is deliberate (#469/#474); this line only makes
+    // it visible. One line per tick, ids only (bounded by the LIMIT above).
+    if (skipped.length > 0) {
+      console.warn(
+        `[scheduled.pipelinePoll] workspace=${env.WORKSPACE_SLUG ?? "default"} BT_API_TOKEN unset: skipped ${skipped.length} proxy job(s) [${skipped.join(", ")}]; ` +
+          `they hold the single dispatch slot until the token returns or the 48h no-progress sweep frees it`,
+      );
+    }
   }
   if (jobs.length > 0) {
     // Bump attempt_count for everything we're about to poll, in one batch. We
@@ -1430,6 +1516,35 @@ pipelines.post("/start", requireEditor, async (c) => {
 
   const username = await resolveUsername(c, userId);
   if (!username) return c.json({ error: "username_missing" }, 400);
+
+  // #551: generate/notes/tqs can't run on the org's own key yet, so they are
+  // refused outright (key or no key), before dedup and the bot-token gate.
+  // That includes a followUpChain step of those types: the child would only
+  // fail at dispatch. (followUpOptions makes a same-type child, so a translate
+  // parent can't produce a legacy one that way.)
+  if (
+    NEEDS_ORG_KEY_TYPES.has(parsed.data.pipelineType) ||
+    parsed.data.followUpChain?.some((step) => NEEDS_ORG_KEY_TYPES.has(step.pipelineType))
+  ) {
+    return c.json({ error: "ai_needs_org_key" }, 409);
+  }
+
+  // Org-key gate (#551): a translate job runs on the org's own AI key or not at
+  // all, so with no key configured (no row, or provider='default' after Clear)
+  // refuse it here, before anything is enqueued. It sits before the dedup
+  // check so a keyless org isn't pointed at an already-queued job that is
+  // doomed to fail at dispatch, and before the bot-token gate because "an admin
+  // needs to add a key" is the more actionable error. A BYO row that is
+  // configured but broken (no key or model, wrapping key unavailable) is not
+  // refused here; dispatchNext fails it with its reason.
+  let translateAi: DispatchAi | null = null;
+  if (parsed.data.pipelineType === "translate") {
+    const aiRow = await getAiProviderConfig(c.env.DB);
+    translateAi = resolveDispatchAi(aiRow, c.env.AI_KEY_WRAPPING_KEY);
+    if (translateAi.kind === "error" && translateAi.reason === "ai_provider_not_configured") {
+      return c.json({ error: "ai_provider_not_configured" }, 409);
+    }
+  }
 
   // Article translate (tw|ta) is scoped by article, not book/chapter. It reuses
   // the pipeline_jobs scope columns via a per-article sentinel so all the
@@ -1697,17 +1812,14 @@ pipelines.post("/start", requireEditor, async (c) => {
   // Bot-token gate (#467), now scoped to jobs that need the bot. A translate
   // job that resolves to the internal runner (BYO key, PIPELINE_MODE=internal,
   // a TSV resource on a ported provider) never touches Fly, so it may start with
-  // no BT_API_TOKEN. Everything else — generate/notes/tqs, a shared-subscription
-  // translate, an un-ported provider, an article resource — still routes to the
-  // proxy and fails closed here, before the job is ever enqueued. mergedOptions
-  // carries the server-resolved resourceType translateRunner reads.
+  // no BT_API_TOKEN. Everything else — generate/notes/tqs, an un-ported
+  // provider, an article resource — still routes to the proxy and fails closed
+  // here, before the job is ever enqueued. mergedOptions carries the
+  // server-resolved resourceType translateRunner reads.
   if (!c.env.BT_API_TOKEN) {
-    let runner: "proxy" | "internal" = "proxy";
-    if (parsed.data.pipelineType === "translate") {
-      const aiRow = await getAiProviderConfig(c.env.DB);
-      const ai = resolveDispatchAi(aiRow, c.env.AI_KEY_WRAPPING_KEY);
-      runner = translateRunner(c.env, { pipeline_type: "translate" }, ai, mergedOptions);
-    }
+    const runner = translateAi
+      ? translateRunner(c.env, { pipeline_type: "translate" }, translateAi, mergedOptions)
+      : "proxy";
     if (runner !== "internal") {
       return c.json({ error: "pipeline_api_disabled" }, 503);
     }
@@ -2108,7 +2220,7 @@ pipelines.get("/", requireEditor, async (c) => {
             start_chapter, end_chapter, session_key, state, priority,
             current_skill, current_status, error_kind, error_message,
             output_json, follow_up_job_id, created_at, updated_at,
-            last_polled_at, notified_user_at`;
+            last_polled_at, notified_user_at, options_json`;
 
   if (stateList === null) {
     // Default: the live queue is visible to everyone (active + waiting jobs,
@@ -2156,7 +2268,7 @@ pipelines.get("/", requireEditor, async (c) => {
   }
 
   const snap = await queueSnapshot(c.env);
-  const jobs = (rs.results ?? []).map((row) => {
+  const jobs = (rs.results ?? []).map(({ options_json, ...row }) => {
     // Another user's row rides the shared-queue clause. Strip the internal
     // fields the UI never renders for a foreign job (session key, the bot's
     // upstream id, produced output, error detail) so the shared queue only
@@ -2173,11 +2285,21 @@ pipelines.get("/", requireEditor, async (c) => {
             error_message: null,
           }
         : row;
-    if (sanitized.state === "queued") {
-      const pos = snap.positions.get(sanitized.job_id);
-      return { ...sanitized, queue_position: pos?.position ?? null, queue_ahead: pos?.ahead ?? null };
+    // options_json itself stays server-side (a notes run's hints live there);
+    // the client only needs to know whether this run rewrites every note in
+    // its chapters, so it can make them read-only up front (issue #561), and
+    // for a single-note or verse-range redraft which notes it will write
+    // (issue #606).
+    const withLock = {
+      ...sanitized,
+      locks_chapter_notes: isChapterWideTnTranslate(row.pipeline_type, options_json),
+      note_selection: translateNoteSelection(row.pipeline_type, options_json),
+    };
+    if (withLock.state === "queued") {
+      const pos = snap.positions.get(withLock.job_id);
+      return { ...withLock, queue_position: pos?.position ?? null, queue_ahead: pos?.ahead ?? null };
     }
-    return sanitized;
+    return withLock;
   });
 
   return c.json({
@@ -2207,6 +2329,7 @@ interface PipelineRowSelect {
   updated_at: number;
   last_polled_at: number | null;
   notified_user_at: number | null;
+  options_json: string | null;
   // Present only on the default (shared-queue) list where we JOIN users, so the
   // UI can attribute another user's run. Absent on the explicit-state branch.
   started_by_username?: string | null;

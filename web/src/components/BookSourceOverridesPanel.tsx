@@ -55,6 +55,7 @@ export function BookSourceOverridesPanel({ book }: { book: string }) {
   }, [book]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch on mount and on book change; refetch sets loading at start so the spinner shows instead of the previous book's overrides. Adding and clearing an override call the same refetch.
     void refetch();
   }, [refetch]);
 
@@ -152,7 +153,7 @@ export function BookSourceOverridesPanel({ book }: { book: string }) {
     } finally {
       setSaving(false);
     }
-  }, [book, resource, sourceType, isAquifer, dcsPreset, fromCh, toCh, url, refetch, t]);
+  }, [book, resource, isAquifer, dcsPreset, fromCh, toCh, url, refetch, t]);
 
   const handleRemove = useCallback(
     async (o: BookSourceOverride) => {
