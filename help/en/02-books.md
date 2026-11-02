@@ -42,6 +42,6 @@ After **Open**, you see the package for the book. The back arrow returns to **Bo
 - **Chapter by chapter**: **Scripture**, **Notes**, **Questions** and **Alignment**. Select a row to open its chapter list, then choose a chapter. A row with nothing in it (for example no notes) is greyed out.
 - **Whole book**: **Verse view** and **Words & Articles**.
 
-Editors and admins also have an icon in the package's top bar. In a translation project it is a sparkle icon, **Start an AI run**, with **Translate chapter**, **Translate questions** and **Import from Door43**. In a source project it is a download icon, **Import from Door43**. On a phone it is the first item in your account menu instead. The Scripture, Notes and Questions screens have the same icon; see [Translating scripture](#help:scripture) for what each item does.
+Editors and admins also have an icon in the package's top bar. In a translation project it is a sparkle icon, **Start an AI run**, with **Translate chapter**, **Translate questions** and **Import from Door43** (admins also see **Pull Aquifer drafts** and **Re-source notes from English**). In a source project it is a download icon, **Import from Door43**. On a phone it is the first item in your account menu instead. The Scripture, Notes and Questions screens have the same icon; [Translating scripture](#help:scripture) explains what each item does.
 
 Related: [Scripture](#help:scripture), [Notes](#help:notes), [Questions](#help:questions), [Alignment](#help:alignment), [Verse view](#help:verse-view), [Words and articles](#help:words).

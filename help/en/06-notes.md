@@ -42,12 +42,22 @@ An icon next to the verse opens the verse view. See [Verse view](#help:verse-vie
 You see **OBA 1 notes complete** with a count of approved, edited and not-needed notes. Select **Continue to chapter 2** or **Review again**.
 
 ## Start an AI run
-Editors and admins have one more icon in the top bar:
-- In a translation project it is a sparkle icon, **Start an AI run**. Its menu has **Translate chapter** (the chapter's translation notes), **Translate questions** and **Import from Door43**. Admins also see **Pull Aquifer drafts** and **Re-source notes from English**. After you choose a run, a confirm window opens: type a chapter or a range under **Chapter or range** and press **Start**.
-- In a source project, one that does not translate from another language (such as unfoldingWord's English), it is a download icon, **Import from Door43**. It opens the import straight away, with no menu.
-- On a phone the icon is not in the top bar. It is the first item in your account menu, with the same name.
+Editors and admins have one more icon in the top bar.
 
-A run locks its chapter for editing until it finishes. Admins follow the runs in [AI studio](#help:admin-ai).
+In a translation project it is a sparkle icon, **Start an AI run**. It opens a menu:
+- **Translate chapter**: the AI drafts the chapter's translation notes.
+- **Translate questions**: the AI drafts the chapter's translation questions.
+- **Import from Door43**: opens its own window. Type a chapter or a range under **Chapter or range**, tick what to bring in under **What to import:**, and press **Import**. Rows that translators already edited are skipped.
+- **Pull Aquifer drafts** (admins only): starts at once for the whole book, with no confirm window. It adds Aquifer translation notes as drafts to review, and it marks the notes that are already translated as approved.
+- **Re-source notes from English** (admins only): replaces the whole book (scripture, notes, questions and word links) from the English source, and local edits to the book are lost. Press **Re-source** to confirm. If the book has local edits, a second window counts them and asks again: **Discard and re-source**.
+
+After **Translate chapter** or **Translate questions**, a confirm window opens: type a chapter or a range under **Chapter or range** and press **Start**.
+
+In a source project, one that does not translate from another language (such as unfoldingWord's English), the icon is a download icon, **Import from Door43**. It opens the import window straight away, with no menu.
+
+On a phone the icon is not in the top bar. It is the first item in your account menu, with the same name.
+
+While a **Translate chapter** run is running on a chapter, that chapter's notes can't be saved. A **Translate questions** run does not lock notes, and a run that is still waiting in line locks nothing. Admins follow the runs in [AI studio](#help:admin-ai).
 
 ## Good to know
 - Your text is kept in your browser while you type. The top bar shows **N unsaved** until you save. See [Saving and working offline](#help:save-and-sync).
