@@ -6,6 +6,9 @@ import SaveIcon from "@mui/icons-material/Save";
 import SaveOutlinedIcon from "@mui/icons-material/SaveOutlined";
 import type { TqRow } from "../sync/api";
 import { drafts, rowKey, draftDirtyBorderSx } from "../sync/drafts";
+import { tqTableBaseline } from "../lib/tqRowFields";
+import { reconcileField } from "../lib/twlRowFields";
+import { useRefusedSaveHold } from "../hooks/useRefusedSaveHold";
 import { useTranslation } from "react-i18next";
 
 interface Props {
@@ -116,15 +119,38 @@ const Row = memo(function Row({
   const [question, setQuestion] = useState(row.question ?? "");
   const [response, setResponse] = useState(row.response ?? "");
 
-  useEffect(() => setRefRaw(row.ref_raw ?? ""), [row.id, row.version, row.ref_raw]);
-  useEffect(() => setQuestion(row.question ?? ""), [row.id, row.version, row.question]);
-  useEffect(() => setResponse(row.response ?? ""), [row.id, row.version, row.response]);
+  // When the row's values change (an optimistic Save, the server's answer, a
+  // remote edit), a field adopts the new value only if the user hasn't edited
+  // it since the last baseline. Resetting on every version bump dropped text
+  // typed between Save and the server's answer, and cleared its draft (#617).
+  const baselineRef = useRef(tqTableBaseline(row));
+  // Text of a refused save stays when the row is rebuilt to the server's copy
+  // (#637 item 1); discarding that save puts the row's value back.
+  const { noteSave, rowChanged, decide } = useRefusedSaveHold("tq", row.id, row.book, (released) => {
+    const base = baselineRef.current;
+    if ("ref_raw" in released) setRefRaw((v) => (v === released.ref_raw ? base.refRaw : v));
+    if ("question" in released) setQuestion((q) => (q === released.question ? base.question : q));
+    if ("response" in released) setResponse((r) => (r === released.response ? base.response : r));
+  });
+  useEffect(() => {
+    const prev = baselineRef.current;
+    const next = tqTableBaseline({ ref_raw: row.ref_raw, question: row.question, response: row.response });
+    baselineRef.current = next;
+    const released = rowChanged(row.version);
+    const pick = <T,>(field: string, p: T, n: T, local: T): T => {
+      const d = decide(field, local, released);
+      return d === "keep" ? local : d === "adopt" ? n : reconcileField(p, n, local);
+    };
+    setRefRaw((v) => pick("ref_raw", prev.refRaw, next.refRaw, v));
+    setQuestion((q) => pick("question", prev.question, next.question, q));
+    setResponse((r) => pick("response", prev.response, next.response, r));
+  }, [row.ref_raw, row.question, row.response, row.version, rowChanged, decide]);
 
   const draftKey = useMemo(() => rowKey("tq", row.book, row.id), [row.book, row.id]);
 
   // Hydrate from any persisted draft on first mount so unsaved typing
-  // survives navigation. Subsequent server pushes are caught by the
-  // useEffects above (which only run when row.version changes).
+  // survives navigation. Later server pushes are reconciled by the effect
+  // above.
   const hydratedFromDraftRef = useRef(false);
   useEffect(() => {
     if (hydratedFromDraftRef.current) return;
@@ -161,17 +187,22 @@ const Row = memo(function Row({
         verse: row.verse,
       });
     } else {
-      void drafts.clear(draftKey);
+      // Keeps a refused save's text (#647): these fields equal the cached
+      // row, which still carries it. The shown values tell a refused field
+      // still pending from one since saved over.
+      void drafts.clearUnlessRefused(draftKey, { ref_raw: refRaw, question, response });
     }
-  }, [draftKey, isDirty, diff, row.version, row.id, row.book, row.chapter, row.verse, locked]);
+  }, [draftKey, isDirty, diff, row.version, row.id, row.book, row.chapter, row.verse, locked, refRaw, question, response]);
 
   const handleSave = () => {
     if (!isDirty) return;
+    noteSave(diff, row.version);
     onSave(diff);
   };
 
   return (
     <Box
+      data-question-id={row.id}
       sx={{
         ...responsiveGridSx,
         px: 1,

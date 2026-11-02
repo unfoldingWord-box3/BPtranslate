@@ -136,7 +136,7 @@ export function isInFlowMarker(node: unknown): boolean {
 //   usfm-js 3.5.0, well-formed  → {tag:"ts\\*"}
 //   editor-written, malformed   → {tag:"ts*"}     (repaired on export)
 //   legacy usfm-js              → {tag:"ts", content:"\\*"|"*"}
-// Mirrors isTsMilestone in api/src/importParsers.ts — keep the two in sync.
+// Mirrors isTsMilestone in api/src/tsMilestone.ts — keep the two in sync.
 export function isTsMilestone(node: unknown): boolean {
   const o = node as Record<string, unknown> | null;
   if (!o) return false;

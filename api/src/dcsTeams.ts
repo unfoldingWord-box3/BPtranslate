@@ -16,6 +16,7 @@ import type { Env } from "./index";
 import type { Role } from "./auth.ts";
 import { materialize } from "./projectConfig.ts";
 import { activeWorkspaceOrg } from "./workspaces.ts";
+import { orgLogin } from "./dcsSchemas.ts";
 
 export const DEFAULT_ADMIN_TEAM = "BE-Admins";
 export const DEFAULT_EDITOR_TEAM = "BE-Editors";
@@ -34,7 +35,8 @@ export function teamRoleNames(env: Env): TeamRoleNames {
 
 export interface DcsTeam {
   name?: string;
-  organization?: { username?: string } | null;
+  // `name` is the org login; Door43 deprecates `username` (#581).
+  organization?: { name?: string | null; username?: string | null } | null;
 }
 
 // Gitea caps page size; 50 matches listOrgRepos in orgInference.ts. A user in
@@ -140,7 +142,7 @@ export async function fetchMemberOrgs(
   accessToken: string,
   deps?: { fetch?: typeof fetch },
 ): Promise<Set<string> | null> {
-  const list = await fetchPagedList<{ username?: string }>(
+  const list = await fetchPagedList<{ name?: string | null; username?: string | null }>(
     env,
     "/api/v1/user/orgs",
     "/user/orgs",
@@ -149,9 +151,12 @@ export async function fetchMemberOrgs(
   );
   if (list === null) return null;
   const orgs = new Set<string>();
+  // `name` and the deprecated `username` are both the org login (#572).
   for (const o of list) {
-    const name = (o?.username ?? "").toLowerCase();
-    if (name) orgs.add(name);
+    for (const v of [o?.name, o?.username]) {
+      const login = (typeof v === "string" ? v : "").toLowerCase();
+      if (login) orgs.add(login);
+    }
   }
   return orgs;
 }
@@ -171,7 +176,7 @@ export function roleFromTeams(
   const editorTeam = names.editor.toLowerCase();
   let role: Role | null = null;
   for (const t of teams) {
-    if ((t?.organization?.username ?? "").toLowerCase() !== wantOrg) continue;
+    if (orgLogin(t?.organization).toLowerCase() !== wantOrg) continue;
     const name = (t?.name ?? "").trim().toLowerCase();
     if (name === adminTeam) return "admin"; // highest — nothing can beat it
     if (name === editorTeam) role = "editor";
@@ -205,7 +210,7 @@ export async function resolveTeamRole(
     // rename the team or set DCS_TEAM_ADMIN / DCS_TEAM_EDITOR.
     const wantOrg = org.trim().toLowerCase();
     const inOrg = teams
-      .filter((t) => (t?.organization?.username ?? "").toLowerCase() === wantOrg)
+      .filter((t) => orgLogin(t?.organization).toLowerCase() === wantOrg)
       .map((t) => (t?.name ?? "").trim())
       .filter(Boolean);
     if (inOrg.length > 0) {

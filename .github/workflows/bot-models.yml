@@ -1,0 +1,47 @@
+name: Bot model parity check
+
+# Asserts every model in PROVIDER_MODELS (api/src/aiProvider.ts) still exists
+# in the translate bot's model-provider-config.json (unfoldingWord/bp-assistant),
+# as a model or an alias. A model offered here but unknown to the bot fails every
+# translate job with model_not_found (#677). Deliberately NOT part of CI: it
+# calls raw.githubusercontent.com, and CI in this repo is offline/deterministic
+# by design — an outage must never redden an unrelated PR.
+#
+# It checks the repo file on bp-assistant's `main`, not the running bot's merged
+# config. The bot accepts its built-in DEFAULT_PROVIDER_CONFIGS merged with a
+# runtime copy of this file, so models only in the built-in defaults are not
+# seen here, and a model just added on `main` passes before the deployed bot
+# (which can lag `main`) knows it.
+#
+# It runs nightly instead, because the drift can come from the bot repo (a model
+# removed or renamed there) as much as from a change here, and the bot repo's
+# commits have nothing in this repo to hang a check on. Also runnable on demand
+# from the Actions tab.
+on:
+  schedule:
+    # Nightly, offset from ta-refs.yml. A drift detector, not a guard: it gates
+    # nothing, and GitHub cron is best-effort (often delayed).
+    - cron: "40 4 * * *"
+  workflow_dispatch:
+
+# Only talks to an external host; needs nothing from the repo but a checkout.
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate offered models against the bot's config
+        run: npm --workspace api run check:bot-models

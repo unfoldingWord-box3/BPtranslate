@@ -13,6 +13,8 @@ import SaveIcon from "@mui/icons-material/Save";
 import SaveOutlinedIcon from "@mui/icons-material/SaveOutlined";
 import OpenInNewIcon from "@mui/icons-material/OpenInNew";
 import type { TwlRow } from "../sync/api";
+import { reconcileField, twlBaseline, twlDiff, type TwlFields } from "../lib/twlRowFields";
+import { useRefusedSaveHold } from "../hooks/useRefusedSaveHold";
 import { useCatalogs } from "../hooks/useCatalogs";
 import { CatalogPicker } from "./CatalogPicker";
 import { TwArticleDialog } from "./TwArticleDialog";
@@ -153,6 +155,7 @@ function WordsTableInner({ rows, activeId, onSave, onDelete, onFocus, onReorder,
   const pendingFocusRef = useRef<{ id: string; dir: "up" | "down" } | null>(null);
   const [recentMove, setRecentMove] = useState<{ id: string; dir: "up" | "down" } | null>(null);
   const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- runs after every commit on purpose: it consumes the focus request the arrow handlers leave in pendingFocusRef and clears it on first read, so the setState fires once per move, never in a loop.
   useLayoutEffect(() => {
     const pending = pendingFocusRef.current;
     if (!pending) return;
@@ -395,7 +398,6 @@ const WordRow = memo(function WordRow({
   const [occurrence, setOccurrence] = useState(row.occurrence ?? 1);
   const [translateError, setTranslateError] = useState(false);
   const rowRef = useRef<HTMLDivElement | null>(null);
-  const savedRef = useRef({ quote: row.orig_words ?? "", twLink: row.tw_link, occurrence: row.occurrence ?? 1 });
   const catalogs = useCatalogs();
 
   // Alternative articles for the current link, from two sources unioned by link:
@@ -429,12 +431,34 @@ const WordRow = memo(function WordRow({
   }, [twLink, catalogs.disambiguationIndex, catalogs.disambiguationGroups, suggestionAltIds]);
   const [disambigAnchor, setDisambigAnchor] = useState<HTMLElement | null>(null);
 
-  useEffect(() => setQuote(row.orig_words ?? ""), [row.id, row.version, row.orig_words]);
-  useEffect(() => setTwLink(row.tw_link), [row.id, row.version, row.tw_link]);
-  useEffect(() => setOccurrence(row.occurrence ?? 1), [row.id, row.version, row.occurrence]);
+  // When the row's field values change (an optimistic Save, the server's
+  // answer, a remote edit), a field adopts the new value only if the user
+  // hasn't edited it since the last baseline. This used to reset every field on
+  // each version bump, so the server's answer to a Save dropped text typed
+  // after the Save and cleared its draft (#616).
+  const baselineRef = useRef<TwlFields>(twlBaseline(row));
+  // Text of a refused save stays when the row is rebuilt to the server's copy
+  // (#637 item 1); discarding that save puts the row's value back. The held
+  // patch uses the row's field names (twlDiff).
+  const { noteSave, rowChanged, decide } = useRefusedSaveHold("twl", row.id, row.book, (released) => {
+    const base = baselineRef.current;
+    if ("orig_words" in released) setQuote((q) => (q === released.orig_words ? base.quote : q));
+    if ("tw_link" in released) setTwLink((l) => (l === released.tw_link ? base.twLink : l));
+    if ("occurrence" in released) setOccurrence((o) => (o === released.occurrence ? base.occurrence : o));
+  });
   useEffect(() => {
-    savedRef.current = { quote: row.orig_words ?? "", twLink: row.tw_link, occurrence: row.occurrence ?? 1 };
-  }, [row.id, row.version]);
+    const prev = baselineRef.current;
+    const next = twlBaseline({ orig_words: row.orig_words, tw_link: row.tw_link, occurrence: row.occurrence });
+    baselineRef.current = next;
+    const released = rowChanged(row.version);
+    const pick = <T,>(field: string, p: T, n: T, local: T): T => {
+      const d = decide(field, local, released);
+      return d === "keep" ? local : d === "adopt" ? n : reconcileField(p, n, local);
+    };
+    setQuote((q) => pick("orig_words", prev.quote, next.quote, q));
+    setTwLink((l) => pick("tw_link", prev.twLink, next.twLink, l));
+    setOccurrence((o) => pick("occurrence", prev.occurrence, next.occurrence, o));
+  }, [row.orig_words, row.tw_link, row.occurrence, row.version, rowChanged, decide]);
 
   const draftKey = useMemo(() => rowKey("twl", row.book, row.id), [row.book, row.id]);
 
@@ -453,15 +477,16 @@ const WordRow = memo(function WordRow({
       if (typeof patch.occurrence === "number") setOccurrence(patch.occurrence);
     });
   }, [draftKey]);
-  const diff = useMemo<Partial<TwlRow>>(() => {
-    const out: Partial<TwlRow> = {};
-    if (quote !== (row.orig_words ?? "")) out.orig_words = quote;
-    if (twLink !== row.tw_link) out.tw_link = twLink;
-    // null/0 stored occurrence is equivalent to 1 for an OL quote (see export
-    // coercion), so only a real numeric change counts as dirty.
-    if (occurrence !== (row.occurrence ?? 1)) out.occurrence = occurrence;
-    return out;
-  }, [quote, twLink, occurrence, row.orig_words, row.tw_link, row.occurrence]);
+  // null/0 stored occurrence is equivalent to 1 for an OL quote (see export
+  // coercion), so only a real numeric change counts as dirty.
+  const diff = useMemo<Partial<TwlRow>>(
+    () =>
+      twlDiff(
+        { orig_words: row.orig_words, tw_link: row.tw_link, occurrence: row.occurrence },
+        { quote, twLink, occurrence },
+      ),
+    [quote, twLink, occurrence, row.orig_words, row.tw_link, row.occurrence],
+  );
   const isDirty = Object.keys(diff).length > 0;
 
   useEffect(() => {
@@ -475,9 +500,12 @@ const WordRow = memo(function WordRow({
         verse: row.verse,
       });
     } else {
-      void drafts.clear(draftKey);
+      // Keeps a refused save's text (#647): these fields equal the cached
+      // row, which still carries it. The shown values tell a refused field
+      // still pending from one since saved over.
+      void drafts.clearUnlessRefused(draftKey, { orig_words: quote, tw_link: twLink, occurrence });
     }
-  }, [draftKey, isDirty, diff, row.version, row.id, row.book, row.chapter, row.verse]);
+  }, [draftKey, isDirty, diff, row.version, row.id, row.book, row.chapter, row.verse, quote, twLink, occurrence]);
 
   const positionFromEvent = (e: React.DragEvent): WordDropPosition => {
     const rect = rowRef.current?.getBoundingClientRect();
@@ -498,14 +526,19 @@ const WordRow = memo(function WordRow({
     }
   };
 
+  // Undo discards unsaved edits: it resets to the current row, the same
+  // baseline `diff` uses. The row already carries an optimistic save before
+  // the server acknowledges it, so Undo never restores a pre-save value (#613).
   const handleUndo = () => {
-    setQuote(savedRef.current.quote);
-    setTwLink(savedRef.current.twLink);
-    setOccurrence(savedRef.current.occurrence);
+    const base = twlBaseline(row);
+    setQuote(base.quote);
+    setTwLink(base.twLink);
+    setOccurrence(base.occurrence);
   };
 
   const handleSave = () => {
     if (!isDirty) return;
+    noteSave(diff, row.version);
     onSave(diff);
   };
 

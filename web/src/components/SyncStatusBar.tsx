@@ -196,7 +196,7 @@ export function useSyncSummary(): SyncSummary {
   // Tick once a second when pending > 0 so the "stale progress" heuristic
   // can flip the pill to offline-style without waiting for the next outbox
   // event. Cheap: 1Hz timer only when there's actually work outstanding.
-  const [now, setNow] = useState(Date.now());
+  const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (pending === 0) return;
     const t = setInterval(() => setNow(Date.now()), 1000);
@@ -266,6 +266,7 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
   const liveDropOp =
     confirmDropOp && failed.some((f) => f.id === confirmDropOp.id) ? confirmDropOp : null;
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- drops the click-time snapshot once its op leaves the failed list, so a later re-fail of the same op can't reopen the dialog; render already reads liveDropOp, so nothing stale paints.
     if (confirmDropOp && !liveDropOp) setConfirmDropOp(null);
   }, [confirmDropOp, liveDropOp]);
 
@@ -464,18 +465,18 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
     // article route instead so "jump to unsaved" still lands the user on the
     // editor holding the draft.
     if (m.kind === "article") {
-      location.hash = `#/articles/${m.resource}/${encodeURIComponent(m.articleId)}`;
+      location.assign(`#/articles/${m.resource}/${encodeURIComponent(m.articleId)}`);
     } else if (m.kind === "template") {
       // Same reasoning as articles: no scripture reference to navigate to, so
       // route to the template's own hash instead of calling onNavigate with
       // book/chapter/verse this variant does not carry.
-      location.hash = `#/templates/${encodeURIComponent(m.templateId)}`;
+      location.assign(`#/templates/${encodeURIComponent(m.templateId)}`);
     } else if (m.kind === "verse") {
       // 3-segment #/scripture/B/C/V: App.tsx's `ts` route accepts the optional
       // verse segment and TranslateScriptureScreen seeds its cursor from it on
       // mount, so this lands the translator on the exact drafted verse, not
       // just the top of the chapter (#229, #389).
-      if (flowRouting) location.hash = `#/scripture/${m.book}/${m.chapter}/${m.verse}`;
+      if (flowRouting) location.assign(`#/scripture/${m.book}/${m.chapter}/${m.verse}`);
       else onNavigate?.(m.book, m.chapter, m.verse);
     } else {
       // Row draft — branch by rowKind so tq/twl don't land on Translate Notes.
@@ -484,20 +485,20 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
           // Carry the exact row id so the notes screen lands on the note that
           // holds the draft, not just the verse's first card — several notes
           // can share a verse, and the point of this jump is telling them apart.
-          location.hash = `#/notes/${m.book}/${m.chapter}/${m.verse}?row=${encodeURIComponent(m.id)}`;
+          location.assign(`#/notes/${m.book}/${m.chapter}/${m.verse}?row=${encodeURIComponent(m.id)}`);
         } else if (m.rowKind === "tq") {
           // Carry verse + exact row id (like tn) so the questions screen lands
           // on the question holding the draft, not just the chapter — several
           // questions can share a verse, and telling them apart is the point of
           // this jump. parseHash accepts the verse and ?row= tail (#335).
-          location.hash = `#/questions/${m.book}/${m.chapter}/${m.verse}?row=${encodeURIComponent(m.id)}`;
+          location.assign(`#/questions/${m.book}/${m.chapter}/${m.verse}?row=${encodeURIComponent(m.id)}`);
         } else {
           // twl row: the new UI has no word-links editor since the old flows
           // words screen retired (#173), so open the classic editor at that
           // verse. ?twl= starts its resource column on the Words tab with this
           // row active; the row's WordsTable entry restores the draft from the
           // drafts store (same rowKey).
-          location.hash = `#/${m.book}/${m.chapter}/${m.verse}?twl=${encodeURIComponent(m.id)}`;
+          location.assign(`#/${m.book}/${m.chapter}/${m.verse}?twl=${encodeURIComponent(m.id)}`);
         }
       } else {
         onNavigate?.(m.book, m.chapter, m.verse);
@@ -603,7 +604,9 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
                   onClick={(e) => {
                     // Stop the MenuItem's navigate onClick from also firing.
                     e.stopPropagation();
-                    void drafts.clear(d.key);
+                    // discard, not clear: an editor holding a refused save's
+                    // text lets it go too (#637 item 1).
+                    void drafts.discard(d.key);
                   }}
                   sx={{ p: 0.25 }}
                 >
@@ -770,7 +773,7 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
                         variant="text"
                         color="error"
                         onClick={async () => {
-                          for (const d of quarantinedDrafts) await drafts.clear(d.key);
+                          for (const d of quarantinedDrafts) await drafts.discard(d.key);
                         }}
                         sx={{ minWidth: 0, py: 0, fontSize: 11 }}
                       >
@@ -825,7 +828,7 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
                       <IconButton
                         size="small"
                         color="error"
-                        onClick={() => void drafts.clear(d.key)}
+                        onClick={() => void drafts.discard(d.key)}
                         sx={{ p: 0.25 }}
                       >
                         <DeleteOutlineIcon fontSize="inherit" />

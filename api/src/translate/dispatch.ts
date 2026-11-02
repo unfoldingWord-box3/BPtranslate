@@ -63,9 +63,9 @@ function resourceTypeOf(options: unknown): string {
  *
  *   * PIPELINE_MODE === "internal"       — the deployment opted in
  *   * pipeline_type === "translate"      — generate/notes/tqs have no in-Worker port
- *   * resolveDispatchAi → "configured"   — the org brought its own key. BYO only:
- *                                          a job on the shared uW subscription must
- *                                          keep running where that subscription is.
+ *   * resolveDispatchAi → "configured"   — the org has its own usable key. Anything
+ *                                          else is an error that dispatchNext fails
+ *                                          before asking (#551: no shared account).
  *   * provider ∈ PIPELINE_INTERNAL_PROVIDERS
  *   * the resource is a TSV family (tn/tq)  — see the gate's own comment below
  *

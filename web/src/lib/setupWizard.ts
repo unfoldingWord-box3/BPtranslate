@@ -142,21 +142,6 @@ export function hasUnverifiedOverride(map: ResourceSourceMap): boolean {
   return unverifiedOverrideResources(map).length > 0;
 }
 
-// ── Post-activation lane-mode confirmation (Step 4b) ─────────────────────────
-// After a lane's generation flips on Activate, its edit/align choice must be
-// re-applied — and CONFIRMED. A lane is only "done" when its live config matches
-// the desired mode: align → text read-only + alignment writable; edit → text
-// writable + alignment writable. If the post-activation lanePatch silently
-// failed, this returns false and the wizard must NOT let the user Continue.
-export function laneModeMatches(
-  config: { textReadOnly: boolean; alignmentWritable: boolean } | null | undefined,
-  desiredMode: "edit" | "align",
-): boolean {
-  if (!config) return false;
-  const desiredReadOnly = desiredMode === "align";
-  return config.textReadOnly === desiredReadOnly && config.alignmentWritable === true;
-}
-
 // Default per-book replace/keep selection for the Change-Source checklist
 // (issue #94). The set returned is the books to REPLACE (stage from the new
 // source) by default; every other affected book is kept (carried forward).
@@ -185,19 +170,10 @@ export function upstreamLanguageOf(inferredLanguageCode: string | null | undefin
 // ── Replacement-job progress (Step 4b) ──────────────────────────────────────
 // A book that hit a retryable_error / failed needs admin action (retry/waive);
 // the job will otherwise sit in `staging` forever (e.g. a source repo missing a
-// book's USFM → sha_unavailable). "Actionable" drives both the "Action required"
-// panel and the spinner gate so the wizard never spins forever on a stuck job.
+// book's USFM → sha_unavailable). "Actionable" drives the "Action required"
+// panel so a stuck job is never left waiting silently.
 export function jobActionable(books: ReadonlyArray<{ status: string }>): boolean {
   return books.some((b) => b.status === "retryable_error" || b.status === "failed");
-}
-
-// The staging spinner shows ONLY while genuinely working: not once ready
-// (awaiting Activate) and not once a book needs action.
-export function replacementSpinnerVisible(
-  jobStatus: string | undefined,
-  books: ReadonlyArray<{ status: string }>,
-): boolean {
-  return jobStatus !== "ready" && !jobActionable(books);
 }
 
 export type BookErrorInfo =

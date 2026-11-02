@@ -25,6 +25,23 @@ export interface Workspace {
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
+// Slug "default" is reserved for the implicit single workspace
+// (implicitWorkspace below): the client keeps slug "default" on the unsuffixed
+// IndexedDB names that older builds used for the fallback workspace
+// (web/src/sync/workspace.ts), so a real org named "default" would share those
+// databases with another org's queued edits and drafts (#228, #502).
+//
+// The reservation applies only where a NEW workspace slug is created:
+// registerPoolSlot refuses it, and claimWorkspace never claims an available
+// slot carrying it. An existing WORKSPACES entry or registry row named
+// "default" still loads exactly as before (parseEntry only warns): dropping it
+// would make that org vanish from the roster and let a be_ws=default cookie
+// resolve to another org's database.
+const RESERVED_SLUG = "default";
+function isNewSlugAllowed(slug: string): boolean {
+  return SLUG_RE.test(slug) && slug !== RESERVED_SLUG;
+}
+
 function implicitWorkspace(env: Env): Workspace {
   const org = (env.VIEWER_ORG ?? "unfoldingWord").trim() || "unfoldingWord";
   return { slug: "default", label: org, org, binding: "DB" };
@@ -42,6 +59,12 @@ function parseEntry(env: Env, entry: unknown): Workspace | null {
   if (typeof e.slug !== "string" || !SLUG_RE.test(e.slug)) {
     console.warn("workspaces: dropping entry with invalid slug", e.slug);
     return null;
+  }
+  if (e.slug === RESERVED_SLUG) {
+    console.warn(
+      `workspaces: slug "${RESERVED_SLUG}" is reserved for the implicit workspace and shares the legacy browser databases (#502); keeping this existing entry`,
+      e.org,
+    );
   }
   if (typeof e.org !== "string" || !isIdent(e.org)) {
     console.warn("workspaces: dropping entry with invalid org", e.slug, e.org);
@@ -472,6 +495,10 @@ export async function claimWorkspace(
 
   for (const cand of candidates.results ?? []) {
     if (!SLUG_RE.test(cand.slug)) continue; // corrupt slot row; never claim into it
+    if (cand.slug === RESERVED_SLUG) {
+      console.warn(`workspaces: skipping available slot with reserved slug "${RESERVED_SLUG}" (#502); never claim a new org into it`);
+      continue;
+    }
     if (!bindingIsLiveD1(env, cand.binding)) continue; // binding not deployed yet
     // Never assign two orgs to the same physical database: skip an available
     // slot whose binding is already held by a claimed row. registerPoolSlot
@@ -570,7 +597,7 @@ export interface RegisterPoolResult {
 }
 
 // Derive a slug from a binding name: "DB_POOL1" -> "pool1", "DB_MLTEST" ->
-// "mltest". Callers may override; a derivation that doesn't satisfy SLUG_RE is
+// "mltest". Callers may override; a derivation that isNewSlugAllowed rejects is
 // rejected (invalid_slug) so the operator supplies one explicitly.
 function defaultSlugForBinding(binding: string): string {
   return binding.replace(/^DB_?/i, "").toLowerCase().replace(/[^a-z0-9-]/g, "-");
@@ -588,7 +615,7 @@ export async function registerPoolSlot(
   if (!binding) return { ok: false, error: "invalid_binding" };
   if (!bindingIsLiveD1(env, binding)) return { ok: false, error: "binding_not_live" };
   const slug = (opts.slug ?? defaultSlugForBinding(binding)).trim();
-  if (!SLUG_RE.test(slug)) return { ok: false, error: "invalid_slug" };
+  if (!isNewSlugAllowed(slug)) return { ok: false, error: "invalid_slug" };
 
   const db = sharedDb(env);
   // One binding = one physical database = at most one workspace. Registering

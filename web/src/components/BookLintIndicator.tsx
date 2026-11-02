@@ -5,7 +5,7 @@
 // for TN findings, activates the offending note). Hidden entirely when the
 // book is clean — it's a nudge, not a permanent fixture.
 
-import { useRef, useState } from "react";
+import { useState } from "react";
 import {
   Box,
   Chip,
@@ -54,7 +54,9 @@ export function BookLintIndicator({
   variant = "chip",
 }: Props) {
   const { t } = useTranslation();
-  const anchorRef = useRef<HTMLElement | null>(null);
+  // The trigger element, held in state (callback ref) so the Menu can anchor
+  // on it without reading a ref during render.
+  const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
   const [open, setOpen] = useState(false);
 
   // Nothing to clean up — stay out of the way.
@@ -67,7 +69,7 @@ export function BookLintIndicator({
   const trigger =
     variant === "row" ? (
       <Box
-        ref={anchorRef}
+        ref={setAnchorEl}
         component="button"
         onClick={() => setOpen(true)}
         sx={{
@@ -92,7 +94,7 @@ export function BookLintIndicator({
         <ChevronRightIcon sx={{ fontSize: 18, color: "text.disabled" }} />
       </Box>
     ) : (
-      <Box ref={anchorRef} component="span" sx={{ display: "inline-flex" }}>
+      <Box ref={setAnchorEl} component="span" sx={{ display: "inline-flex" }}>
         <Tooltip title={tooltip}>
           <Chip
             icon={<ReportProblemOutlinedIcon />}
@@ -111,7 +113,7 @@ export function BookLintIndicator({
     <>
       {trigger}
       <Menu
-        anchorEl={anchorRef.current}
+        anchorEl={anchorEl}
         open={open}
         onClose={() => setOpen(false)}
         anchorOrigin={{ vertical: "bottom", horizontal: "right" }}

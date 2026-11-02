@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Alert, Box, Button, Chip, CircularProgress, IconButton, Link, Snackbar, Stack, Tooltip, Typography } from "@mui/material";
 import RefreshIcon from "@mui/icons-material/Refresh";
@@ -35,7 +35,9 @@ import {
 } from "./sync/api";
 import { setPipelineUser } from "./sync/pipelineStore";
 import { api } from "./sync/api";
-import { getWorkspaceSlug, setWorkspaceSlug, setWorkspaceIsFallback } from "./sync/workspace";
+import { getWorkspaceSlug, setWorkspaceSlug } from "./sync/workspace";
+import { adoptBeforeEditors, nothingToAdopt } from "./sync/adoptionGate";
+import { needsAdoptionGate } from "./sync/legacyAdoption";
 import {
   WorkspaceChoiceDialog,
   markChooseWsPending,
@@ -487,8 +489,10 @@ export function App() {
   useEffect(() => onAuthRefreshed(() => setSessionExpired(false)), []);
 
   const navigate = (book: string, chapter: number, verse?: number) => {
+    // Verse 1 is the default (omitted); verse 0 is the chapter-intro tile and
+    // must survive the round trip or the jump lands on verse 1 instead.
     location.hash =
-      verse !== undefined && verse > 1
+      verse !== undefined && verse !== 1
         ? `#/${book}/${chapter}/${verse}`
         : `#/${book}/${chapter}`;
   };
@@ -506,9 +510,10 @@ export function App() {
     verse: 1,
   });
   const lastScripturePos = positionFromLoc(loc);
-  if (lastScripturePos) {
-    lastScriptureRef.current = lastScripturePos;
-  }
+  // Written after commit (no deps) on scripture routes only.
+  useLayoutEffect(() => {
+    if (lastScripturePos) lastScriptureRef.current = lastScripturePos;
+  });
   const backToScripture = () => {
     const { book, chapter, verse } = lastScriptureRef.current;
     navigate(book, chapter, verse);
@@ -526,19 +531,24 @@ export function App() {
   // lastScriptureRef above (a ref, so it can't trigger a re-render), this is
   // state — BooksScreen needs to actually re-render when it changes.
   const [livePosition, setLivePosition] = useState<{ book: string; chapter: number; verse: number } | null>(null);
-  useEffect(() => {
-    // Track the same routes the server-side push does (classic chapter + the
-    // redesign scripture routes), so the card updates in-session no matter which
-    // UI the translator works in (#200). The prev-comparison keeps this a no-op
-    // when the position is unchanged.
+  // Track the same routes the server-side push does (classic chapter + the
+  // redesign scripture routes), so the card updates in-session no matter which
+  // UI the translator works in (#200). Adjusted during render on a loc change
+  // (React's "adjust state when a prop changes" pattern); non-scripture routes
+  // keep the previous value. The prev-comparison keeps this a no-op when the
+  // position is unchanged.
+  const [livePositionLoc, setLivePositionLoc] = useState<Location | null>(null);
+  if (livePositionLoc !== loc) {
+    setLivePositionLoc(loc);
     const pos = positionFromLoc(loc);
-    if (!pos) return;
-    setLivePosition((prev) =>
-      prev && prev.book === pos.book && prev.chapter === pos.chapter && prev.verse === pos.verse
-        ? prev
-        : pos,
-    );
-  }, [loc]);
+    if (pos) {
+      setLivePosition((prev) =>
+        prev && prev.book === pos.book && prev.chapter === pos.chapter && prev.verse === pos.verse
+          ? prev
+          : pos,
+      );
+    }
+  }
 
   // Workspace reconciliation. The server's be_ws cookie is the source of
   // truth for which org's D1 database we're talking to; localStorage is just
@@ -552,12 +562,9 @@ export function App() {
     if (auth.kind !== "ready") return;
     const serverWs = auth.me?.workspace;
     if (serverWs === undefined) return;
-    const serverIsFallback = auth.me?.workspaceIsFallback;
     if (serverWs === getWorkspaceSlug()) {
-      // Slug already agrees — still sync the fallback flag (it's cheap and
-      // keeps outbox.ts's outboxDbName() correct even if it was never set,
-      // e.g. an install that predates the fallback flag).
-      if (serverIsFallback !== undefined) setWorkspaceIsFallback(serverIsFallback);
+      // Slug confirmed. Legacy adoption for a fallback workspace runs in the
+      // adoption hold below, before any editor renders (#502).
       try { sessionStorage.removeItem(WS_RECONCILED_KEY); } catch { /* private mode */ }
       return;
     }
@@ -565,7 +572,6 @@ export function App() {
     try { alreadyTried = sessionStorage.getItem(WS_RECONCILED_KEY) === "1"; } catch { /* private mode */ }
     if (alreadyTried) return; // already reloaded once this session — don't loop
     setWorkspaceSlug(serverWs);
-    if (serverIsFallback !== undefined) setWorkspaceIsFallback(serverIsFallback);
     try { sessionStorage.setItem(WS_RECONCILED_KEY, "1"); } catch { /* private mode */ }
     location.reload();
   }, [auth]);
@@ -592,11 +598,29 @@ export function App() {
   // auth is not "ready".
   const { alerts, dismiss } = useAlerts(auth.kind === "ready");
 
+  // Legacy adoption hold (#502, sync/adoptionGate.ts). When /api/auth/me
+  // confirms a NAMED fallback slug, records older builds left under the
+  // legacy database name are moved in before any editor mounts, because
+  // editors read their draft only once, at mount. Decided during render (an
+  // effect would run after the editors' own mount effects). Bounded: past
+  // ADOPTION_WAIT_MS adoption is skipped for this boot and the hold lifts.
+  // Every other boot (slug "default", a non-fallback org) never holds.
+  const [adoptionSettled, setAdoptionSettled] = useState(false);
+  const holdForAdoption =
+    !adoptionSettled &&
+    auth.kind === "ready" &&
+    needsAdoptionGate(auth.me, getWorkspaceSlug()) &&
+    !nothingToAdopt();
+  useEffect(() => {
+    if (!holdForAdoption) return;
+    void adoptBeforeEditors(getWorkspaceSlug()).then(() => setAdoptionSettled(true));
+  }, [holdForAdoption]);
+
   useEffect(() => {
     setPipelineUser(auth.kind === "ready" ? auth.me?.userId ?? null : null);
   }, [auth]);
 
-  if (auth.kind === "loading") {
+  if (auth.kind === "loading" || holdForAdoption) {
     return (
       // 100dvh with a 100vh fallback — see the height comment on the main Shell
       // Box further down; plain 100vh sits under mobile browsers' URL bar.
@@ -807,6 +831,7 @@ export function App() {
           // switcher, export, verse-list toggle, lint counts) are simply not
           // passed, so each hides itself.
           <Stack sx={{ height: "100%", minHeight: 0 }}>
+            {/* eslint-disable react-hooks/refs -- deliberate render-time read: article routes never write lastScriptureRef, so this is the position the last committed scripture route left. It stays a ref so remembering a position never re-renders App. */}
             <TopBar
               showNavigation={false}
               book={lastScriptureRef.current.book}
@@ -816,6 +841,7 @@ export function App() {
               username={auth.kind === "ready" ? auth.me?.username ?? null : null}
               onLogout={handleSignOut}
             />
+            {/* eslint-enable react-hooks/refs */}
             <Box sx={{ flex: 1, minHeight: 0 }}>
               <ArticleWorkspace
                 resource={loc.resource}
@@ -983,7 +1009,7 @@ export function App() {
                     candidates.push({
                       book: loc.book,
                       chapter: ("chapter" in loc && loc.chapter) || 1,
-                      verse: ("verse" in loc && loc.verse) || 1,
+                      verse: ("verse" in loc ? loc.verse : null) ?? 1,
                     });
                   }
                   const last =

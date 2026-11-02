@@ -191,6 +191,9 @@ console.log("[callback] first-time manual allowlistee in a NON-DEFAULT workspace
     const { payload } = await jwtVerify(token, KEY, { algorithms: ["HS256"], issuer: ISSUER });
     assert(payload.role === "editor", `JWT carries her manual editor role, got ${payload.role}`);
     assert(payload.username === "mallory", "JWT is for mallory");
+    // #680: bound to the workspace login resolved to (org2), not the request's
+    // list[0] env (uw), or her first request after sign-in would 401.
+    assert(payload.ws === "org2", `JWT is bound to org2, got ${payload.ws}`);
 
     const userRow = sharedSql
       .prepare("SELECT id, last_workspace_slug FROM users WHERE dcs_username = 'mallory'")

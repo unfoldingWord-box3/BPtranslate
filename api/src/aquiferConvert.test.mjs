@@ -18,6 +18,7 @@ import {
   planFormattingRepair,
   legacyHtmlToMarkdown,
 } from "./aquiferConvert.ts";
+import { parseEnglishTitle } from "./aquiferLinks.ts";
 
 const en = (Reference, ID, SupportReference, Quote, Occurrence, Note) => ({
   Reference, ID, Tags: "", SupportReference, Quote, Occurrence, Note,
@@ -49,12 +50,54 @@ test("embeddedQuote pulls the first ltr(Greek)/rtl(Hebrew) span, NFC-trimmed", (
   assert.equal(embeddedQuote("<p>no span here</p>"), "");
 });
 
+test("aquiferRef skips index 00000000, stray other-book items in the v2026-10-14 release", () => {
+  assert.equal(aquiferRef(aq("1 कुरिन्थियों 1:1 (#1)", "00000000", "1CO 1:1", "")), null);
+  const { notes, report } = convertAquiferBook([aq("1 कुरिन्थियों 1:1 (#1)", "00000000", "1CO 1:1", "")], []);
+  assert.equal(notes.length, 0);
+  assert.equal(report.unmatched, 0);
+});
+
 test("aquiferRef maps book intro, chapter intro, verse, and range", () => {
   assert.deepEqual(aquiferRef({ index_reference: "08000000", associations: { passage: [{ start_ref_usfm: "RUT 0:1" }] } }), { ref: "front:intro", isIntro: true });
   assert.deepEqual(aquiferRef({ index_reference: "08Ruth000", associations: { passage: [{ start_ref_usfm: "RUT 2:1" }] } }), { ref: "2:intro", isIntro: true });
   assert.deepEqual(aquiferRef({ index_reference: "08001001", associations: { passage: [{ start_ref_usfm: "RUT 1:1" }] } }), { ref: "1:1", isIntro: false });
   assert.deepEqual(aquiferRef({ index_reference: "08001002", associations: { passage: [{ start_ref_usfm: "RUT 1:2", end_ref_usfm: "RUT 1:8" }] } }), { ref: "1:2-8", isIntro: false });
   assert.deepEqual(aquiferRef({ index_reference: "64001006-64001007", associations: { passage: [{ start_ref_usfm: "3JN 1:6", end_ref_usfm: "3JN 1:7" }] } }), { ref: "1:6-7", isIntro: false });
+});
+
+test("aquiferRef reads digits-only BBCCC000 as a chapter intro, from the index not the passage", () => {
+  // Real v2026-10-14 shapes: hin RUT (passage 1:1), eng GEN (passage 1:0), arb/hin JDG (passage 1:3).
+  assert.deepEqual(aquiferRef(aq("रूत - अध्याय 1 परिचय", "08001000", "RUT 1:1", "")), { ref: "1:intro", isIntro: true });
+  assert.deepEqual(aquiferRef(aq("Genesis - Chapter 12 Introduction", "01012000", "GEN 12:0", "")), { ref: "12:intro", isIntro: true });
+  assert.deepEqual(aquiferRef(aq("न्यायियों - अध्याय 1 परिचय", "07001000", "JDG 1:3", "")), { ref: "1:intro", isIntro: true });
+  // An English Psalm-title note shares the index but carries "#N": a verse-style
+  // note on en_tn's "<ch>:front" rows, not an intro.
+  assert.deepEqual(aquiferRef(aq("Psalms 3:0 (#2)", "19003000", "PSA 3:0", "")), { ref: "3:front", isIntro: false });
+  // Without a title (the issue's example) it is an intro.
+  assert.deepEqual(aquiferRef({ index_reference: "08001000", associations: { passage: [{ start_ref_usfm: "RUT 1:1" }] } }), { ref: "1:intro", isIntro: true });
+});
+
+test("chapter intros indexed BBCCC000 leave the 1:1 notes on their own rows", () => {
+  const enRows = [
+    en("1:intro", "i1", "", "", "0", "# en ch1 intro"),
+    en("2:intro", "i2", "", "", "0", "# en ch2 intro"),
+    en("1:1", "v11", "rc://*/ta/man/translate/figs-explicit", "ὁ πρεσβύτερος", "1", "The elder..."),
+  ];
+  const items = [
+    aq("रूत - अध्याय 1 परिचय", "08001000", "RUT 1:1", "<h1>अध्याय 1</h1>"),
+    aq("रूत - अध्याय 2 परिचय", "08002000", "RUT 2:1", "<h1>अध्याय 2</h1>"),
+    aq("रूत 1:1 (#1)", "08001001", "RUT 1:1", noteHtml("ὁ πρεσβύτερος", "ltr", "प्राचीन", "यूहन्ना मानता है...")),
+  ];
+  const { notes, report } = convertAquiferBook(items, enRows);
+  assert.equal(notes.find((n) => n.enId === "i1").joinMethod, "intro");
+  assert.equal(notes.find((n) => n.enId === "i2").joinMethod, "intro");
+  const v = notes.find((n) => n.enId === "v11");
+  assert.equal(v.joinMethod, "quote");
+  assert.equal(v.reviewReason, null);
+  assert.equal(notes.length, 3);
+  assert.equal(report.matchedIntro, 2);
+  assert.equal(report.unmatched, 0);
+  assert.equal(report.flagged, 0);
 });
 
 test("htmlToMarkdown strips leading quote + trailing See-link, keeps prose", () => {
@@ -274,4 +317,184 @@ test("planFormattingRepair repairs the approval snapshot, and survives a junk on
     assert.equal(r.repairs[0].preDraftJson, null, `snapshot left alone: ${junk}`);
     assert.equal(r.repairs[0].note, FIXED, "the note itself is still repaired");
   }
+});
+
+// ---------- English-link join (primary key) ----------
+
+// PHM 1:1 shape: two en_tn rows on the SAME words. Quote-first cannot tell the
+// notes apart and hands the first row to whichever note it sees first.
+const phmRows = () => [
+  en("1:1", "mtph", "rc://*/ta/man/translate/figs-metaphor", "ὁ ἀδελφὸς", "1", "metaphor note"),
+  en("1:1", "excl", "rc://*/ta/man/translate/figs-exclusive", "ὁ ἀδελφὸς", "1", "exclusive note"),
+];
+const links = (pairs) => new Map(pairs.map(([id, title]) => [id, { engContentId: `e-${id}`, engTitle: title }]));
+
+test("parseEnglishTitle reads reference + ordinal, ranges too, and rejects intros", () => {
+  assert.deepEqual(parseEnglishTitle("Titus 1:1 (#1)"), { ref: "1:1", ordinal: 1 });
+  assert.deepEqual(parseEnglishTitle("1 John 2:3-5 (#12)"), { ref: "2:3-5", ordinal: 12 });
+  assert.equal(parseEnglishTitle("Titus - Introduction"), null);
+  assert.equal(parseEnglishTitle("Titus - Chapter 1 Introduction"), null);
+  assert.equal(parseEnglishTitle(undefined), null);
+});
+
+test("link join: two rows on the same quote each get their own note (quote-first would swap them)", () => {
+  // Aquifer order is the reverse of en_tn order: the exclusive note comes first.
+  const items = [
+    aq("फिलेमोन 1:1 (#4)", "57001001", "PHM 1:1", noteHtml("ὁ ἀδελφὸς", "ltr", "x", "exclusive prose")),
+    aq("फिलेमोन 1:1 (#3)", "57001001", "PHM 1:1", noteHtml("ὁ ἀδελφὸς", "ltr", "y", "metaphor prose")),
+  ];
+  // English numbers match en_tn order (#1 = first row at 1:1); Hindi's do not.
+  const l = links([["c-फिलेमोन 1:1 (#4)", "Philemon 1:1 (#2)"], ["c-फिलेमोन 1:1 (#3)", "Philemon 1:1 (#1)"]]);
+  const { notes, report } = convertAquiferBook(items, phmRows(), l);
+  const byProse = (t) => notes.find((n) => n.note.includes(t));
+  assert.equal(byProse("exclusive prose").enId, "excl");
+  assert.equal(byProse("exclusive prose").supportReference, "rc://*/ta/man/translate/figs-exclusive");
+  assert.equal(byProse("metaphor prose").enId, "mtph");
+  assert.equal(byProse("metaphor prose").supportReference, "rc://*/ta/man/translate/figs-metaphor");
+  assert.ok(notes.every((n) => n.joinMethod === "link" && n.reviewReason === null));
+  assert.equal(report.matchedLink, 2);
+  assert.equal(report.matchedQuote, 0);
+
+  // Control: the same data without links takes quote-first and swaps them.
+  const swapped = convertAquiferBook(items, phmRows()).notes;
+  assert.equal(swapped.find((n) => n.note.includes("exclusive prose")).enId, "mtph");
+});
+
+test("link join flags a note whose quote differs from the linked row's", () => {
+  const items = [aq("Leviticus 1:1 (#1)", "03001001", "LEV 1:1", noteHtml("לֵ⁠אמֹֽר׃ דַּבֵּ֞ר", "rtl", "saying", "Address."))];
+  const rows = [en("1:1", "aaaa", "rc://*/ta/man/translate/figs-x", "מֵ⁠אֹ֥הֶל מוֹעֵ֖ד", "1", "from the tent")];
+  const { notes, report } = convertAquiferBook(items, rows, links([["c-Leviticus 1:1 (#1)", "Leviticus 1:1 (#1)"]]));
+  assert.equal(notes[0].joinMethod, "link");
+  assert.equal(notes[0].enId, "aaaa");
+  assert.ok(notes[0].reviewReason, "quote mismatch is flagged");
+  assert.equal(report.matchedLink, 1);
+  assert.equal(report.flagged, 1);
+});
+
+test("a link pointing past the en_tn rows, or with no link at all, falls back to quote then ordinal", () => {
+  const rows = [en("1:1", "aaaa", "rc://*/ta/man/translate/figs-x", "ὁ πρεσβύτερος", "1", "n")];
+  const items = [
+    aq("a 1:1 (#1)", "64001001", "3JN 1:1", noteHtml("ὁ πρεσβύτερος", "ltr", "g", "linked past the end")),
+    aq("b 1:1 (#2)", "64001001", "3JN 1:1", noteHtml("ἄλλο", "ltr", "g", "no link")),
+  ];
+  const l = links([["c-a 1:1 (#1)", "X 1:1 (#9)"]]);
+  const { notes, report } = convertAquiferBook(items, rows, l);
+  const a = notes.find((n) => n.note.includes("linked past the end"));
+  assert.equal(a.joinMethod, "quote");
+  assert.equal(a.enId, "aaaa");
+  assert.equal(notes.find((n) => n.note.includes("no link")).joinMethod, "unmatched"); // row already taken
+  assert.equal(report.matchedLink, 0);
+});
+
+test("a linked note claims its row before a quote match can take it", () => {
+  // Two notes quote the same words; only one is linked. The linked one must get
+  // its own row even though the other is first in Aquifer order.
+  const items = [
+    aq("n 1:1 (#7)", "57001001", "PHM 1:1", noteHtml("ὁ ἀδελφὸς", "ltr", "x", "unlinked")),
+    aq("n 1:1 (#8)", "57001001", "PHM 1:1", noteHtml("ὁ ἀδελφὸς", "ltr", "y", "linked to second")),
+  ];
+  const l = links([["c-n 1:1 (#8)", "Philemon 1:1 (#1)"]]);
+  const { notes } = convertAquiferBook(items, phmRows(), l);
+  assert.equal(notes.find((n) => n.note.includes("linked to second")).enId, "mtph");
+  assert.equal(notes.find((n) => n.note.includes("unlinked")).enId, "excl");
+});
+
+test("link to a row whose quote disagrees yields to an exact quote match on a free row (en_tn drifted from the pinned release)", () => {
+  // The link says "#1", but en_tn has since gained a row in front, so row 1 is
+  // not the note Aquifer meant. The note's quote matches row 2 exactly.
+  const rows = [
+    en("1:1", "newr", "rc://*/ta/man/translate/figs-new", "ἄλλο", "1", "added after the release"),
+    en("1:1", "mtph", "rc://*/ta/man/translate/figs-metaphor", "ὁ ἀδελφὸς", "1", "metaphor note"),
+  ];
+  const items = [aq("n 1:1 (#1)", "57001001", "PHM 1:1", noteHtml("ὁ ἀδελφὸς", "ltr", "x", "prose"))];
+  const { notes, report } = convertAquiferBook(items, rows, links([["c-n 1:1 (#1)", "Philemon 1:1 (#1)"]]));
+  assert.equal(notes[0].enId, "mtph");
+  assert.equal(notes[0].joinMethod, "quote");
+  assert.equal(notes[0].reviewReason, null);
+  assert.equal(report.matchedLink, 0);
+});
+
+test("link whose English reference differs from the note's own reference is flagged", () => {
+  const rows = [en("1:2", "aaaa", "rc://*/ta/man/translate/figs-x", "ὁ ἀδελφὸς", "1", "n")];
+  const items = [aq("n 1:1 (#1)", "57001001", "PHM 1:1", noteHtml("ὁ ἀδελφὸς", "ltr", "x", "prose"))];
+  const { notes } = convertAquiferBook(items, rows, links([["c-n 1:1 (#1)", "Philemon 1:2 (#1)"]]));
+  assert.equal(notes[0].joinMethod, "link");
+  assert.ok(notes[0].reviewReason, "reference disagreement is flagged even when the quote matches");
+});
+
+// Psalm titles (#587): English Aquifer Psalms indexes the 113 title notes
+// BBCCC000 with passage "PSA N:0" and a title "Psalms N:0 (#k)"; en_tn files them
+// as "N:front" rows. k counts the chapter introduction as #1.
+const psaFront = () => [
+  en("3:intro", "py7j", "", "", "0", "# en ch3 intro"),
+  en("3:front", "py7k", "", "לְ⁠דָוִ֑ד", "1", "title note"),
+  en("3:1", "xp7i", "", "יְ֭הוָה", "1", "verse note"),
+];
+const psaTitle = (n, quote = "לְ⁠דָוִ֑ד", prose = "title prose") =>
+  aq(`Psalms 3:0 (#${n})`, "19003000", "PSA 3:0", noteHtml(quote, "rtl", "of David", prose));
+const psaIntro = () => aq("Psalms - Chapter 3 Introduction", "19003000", "PSA 3:0", "<h1>Psalm 3</h1>");
+
+test("parseEnglishTitle maps a Psalm title to N:front, one ordinal below its (#k)", () => {
+  assert.deepEqual(parseEnglishTitle("Psalms 3:0 (#2)"), { ref: "3:front", ordinal: 1 });
+  assert.deepEqual(parseEnglishTitle("Psalms 119:0 (#4)"), { ref: "119:front", ordinal: 3 });
+  assert.equal(parseEnglishTitle("Psalms 3:0 (#1)"), null);
+  assert.deepEqual(parseEnglishTitle("Psalms 3:1 (#1)"), { ref: "3:1", ordinal: 1 });
+});
+
+test("Psalm title joins en_tn's N:front row by quote, with no minted row", () => {
+  const { notes, report } = convertAquiferBook([psaIntro(), psaTitle(2)], psaFront());
+  const t = notes.find((n) => n.note.includes("title prose"));
+  assert.equal(t.ref, "3:front");
+  assert.equal(t.enId, "py7k");
+  assert.equal(t.joinMethod, "quote");
+  assert.equal(report.unmatched, 0);
+  assert.equal(notes.find((n) => n.enId === "py7j").joinMethod, "intro"); // chapter intro still goes to 3:intro
+  assert.equal(notes.length, 2);
+});
+
+test("Psalm title with its English link and a single front row joins that row, unflagged", () => {
+  const l = links([["c-Psalms 3:0 (#2)", "Psalms 3:0 (#2)"]]);
+  const { notes, report } = convertAquiferBook([psaIntro(), psaTitle(2)], psaFront(), l);
+  const t = notes.find((n) => n.note.includes("title prose"));
+  assert.equal(t.enId, "py7k");
+  assert.equal(t.joinMethod, "link");
+  assert.equal(t.reviewReason, null);
+  assert.equal(report.matchedLink, 1);
+  assert.equal(report.unmatched, 0);
+});
+
+test("Psalm titles on the same quote each take their own front row by link", () => {
+  const rows = [
+    en("9:front", "fr1", "", "לְ⁠דָוִ֑ד", "1", "first"),
+    en("9:front", "fr2", "", "לְ⁠דָוִ֑ד", "1", "second"),
+  ];
+  // Aquifer order reversed relative to en_tn: link ordinals decide, not position.
+  const items = [
+    aq("Psalms 9:0 (#3)", "19009000", "PSA 9:0", noteHtml("לְ⁠דָוִ֑ד", "rtl", "g", "second prose")),
+    aq("Psalms 9:0 (#2)", "19009000", "PSA 9:0", noteHtml("לְ⁠דָוִ֑ד", "rtl", "g", "first prose")),
+  ];
+  const l = links([["c-Psalms 9:0 (#3)", "Psalms 9:0 (#3)"], ["c-Psalms 9:0 (#2)", "Psalms 9:0 (#2)"]]);
+  const { notes } = convertAquiferBook(items, rows, l);
+  assert.equal(notes.find((n) => n.note.includes("first prose")).enId, "fr1");
+  assert.equal(notes.find((n) => n.note.includes("second prose")).enId, "fr2");
+});
+
+test("Psalm title whose link points past the front rows falls through to the quote pass", () => {
+  // Stale/odd link (#5 -> slot 4) with one front row: no throw, no minted row.
+  const l = links([["c-Psalms 3:0 (#5)", "Psalms 3:0 (#5)"]]);
+  const { notes, report } = convertAquiferBook([psaTitle(5)], psaFront(), l);
+  assert.equal(notes[0].enId, "py7k");
+  assert.equal(notes[0].joinMethod, "quote");
+  assert.equal(report.unmatched, 0);
+});
+
+test("Psalm title with no quote match takes the front slot by its offset ordinal", () => {
+  const rows = [
+    en("4:front", "a1", "", "אחד", "1", "one"),
+    en("4:front", "a2", "", "שנים", "1", "two"),
+  ];
+  const item = aq("Psalms 4:0 (#3)", "19004000", "PSA 4:0", noteHtml("שלשה", "rtl", "g", "ord prose"));
+  const { notes } = convertAquiferBook([item], rows);
+  assert.equal(notes[0].enId, "a2"); // (#3) = second front row, not the third slot
+  assert.equal(notes[0].joinMethod, "ordinal");
 });

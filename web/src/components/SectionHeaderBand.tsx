@@ -40,10 +40,15 @@ export function SectionHeaderBand({ tag, text, editable, onChange }: Props) {
   const [draftTag, setDraftTag] = useState(tag);
   const inputRef = useRef<HTMLDivElement | null>(null);
 
-  useEffect(() => {
+  // Re-seed the drafts when the props change (adjusted during render).
+  const [prevText, setPrevText] = useState(text);
+  const [prevTag, setPrevTag] = useState(tag);
+  if (text !== prevText || tag !== prevTag) {
+    setPrevText(text);
+    setPrevTag(tag);
     setDraftText(text);
     setDraftTag(tag);
-  }, [text, tag]);
+  }
 
   useEffect(() => {
     if (editing && inputRef.current) {
