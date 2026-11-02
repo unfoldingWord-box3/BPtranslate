@@ -76,7 +76,8 @@ export interface DraftRecord {
   // Row drafts only (#647): fields a refused save sent (fatal 4xx, or dropped
   // as "locked") that were written back here because nothing else held them
   // (refusedRowDraft.ts). While set, an editor's "no diff" clear keeps the
-  // draft (drafts.clearUnlessRefused): its fields still equal the cached row,
+  // draft (drafts.clearUnlessRefused, or NoteCard's clearRowUnlessHeld with
+  // what it shows, #724): its fields still equal the cached row,
   // which carries the refused text. The next set() drops it, as typing makes
   // the draft the editor's own again; a confirmed save or Discard clears it.
   refused?: Record<string, unknown>;
@@ -482,22 +483,23 @@ export const drafts = {
   // then would leave that text nowhere if the op is dropped or discarded (#618
   // rule). Runs on the row's settle chain; it also skips when a newer set()
   // started after the request, so typing in the outbox-read window is kept.
-  clearRowUnlessHeld(key: string): Promise<boolean> {
+  // With `current` (what the editor shows, in the form its Save sends), a draft
+  // holding a refused save's text keeps the text still pending, as
+  // clearUnlessRefused does (rowDraftOnNoDiff): NoteCard's own refused save
+  // after an AI apply moved the row on (#724).
+  clearRowUnlessHeld(key: string, current?: Record<string, unknown>): Promise<boolean> {
     const requested = latestGenerationByKey.get(key);
     return onRowChain(
       key,
       async () => {
-        let queued: OutboxOp[] | null;
-        try {
-          queued = await outbox.list();
-        } catch {
-          queued = null;
-        }
-        return clearRowIf(
-          key,
-          (rec) =>
-            latestGenerationByKey.get(key) === requested && !liveRowOpHoldsDraft(rec, key, queued),
-        );
+        let cleared = false;
+        await settleRowNow(key, (rec, queued) => {
+          if (latestGenerationByKey.get(key) !== requested || liveRowOpHoldsDraft(rec, key, queued)) return undefined;
+          const next = current && rec.refused ? rowDraftOnNoDiff(rec, current, queued) : "clear";
+          cleared = next === "clear";
+          return next;
+        });
+        return cleared;
       },
       false,
     );

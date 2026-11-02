@@ -53,6 +53,11 @@ jobs:
       - name: i18n coverage
         run: npm run check:i18n
 
+      # The in-app guide's generated index (web/src/help/helpIndex.generated.json)
+      # must match help/**/*.md. Fix with: node scripts/build-help.mjs
+      - name: Help guide is current
+        run: node scripts/build-help.mjs --check
+
       # Import/export/alignment/lint suites for the Worker — pure-function
       # tests, no D1 or network needed.
       - name: API unit tests
