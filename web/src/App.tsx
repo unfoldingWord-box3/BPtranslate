@@ -39,7 +39,7 @@ import {
 } from "./sync/api";
 import { setPipelineUser } from "./sync/pipelineStore";
 import { api } from "./sync/api";
-import { getWorkspaceSlug, setWorkspaceSlug } from "./sync/workspace";
+import { getWorkspaceSlug, setWorkspaceSlug, shouldReconcileWorkspace } from "./sync/workspace";
 import { adoptBeforeEditors, nothingToAdopt } from "./sync/adoptionGate";
 import { needsAdoptionGate } from "./sync/legacyAdoption";
 import {
@@ -150,6 +150,14 @@ const SIGNED_OUT_KEY = "bible-editor.signed_out";
 // agree so a later genuine mismatch (e.g. a stale cookie from another tab)
 // still gets one reconciliation attempt.
 const WS_RECONCILED_KEY = "bible-editor.ws-reconciled";
+
+function wsReconcileTried(): boolean {
+  try {
+    return sessionStorage.getItem(WS_RECONCILED_KEY) === "1";
+  } catch {
+    return false; // private mode
+  }
+}
 
 // Organization name shown (bold) inside the read-only viewer banner. A brand
 // name, so it is deliberately NOT a translatable string.
@@ -472,13 +480,30 @@ export function App() {
   });
   const [auth, setAuth] = useAuthGate();
   const [sessionExpired, setSessionExpired] = useState(false);
+  // True while the workspace reconciliation below is about to reload this tab
+  // onto the server's workspace. Decided during render, like the adoption hold
+  // further down: the reconcile is an effect, and child effects (plus this
+  // component's earlier hooks, like useBook) run before it, so anything
+  // mounted now would send its first requests claiming the stale slug and get
+  // 409 workspace_mismatch (#749). The effect acts on this same value, so the
+  // hold shows exactly when the effect reloads, and never after one attempt
+  // (no loop). Decided once per `auth` value, NOT on every render: another
+  // tab switching org rewrites the shared localStorage slug, and a re-render
+  // here must not then hide a running editor behind a spinner that no reload
+  // will ever lift.
+  const reconcilingWorkspace = useMemo(
+    () =>
+      auth.kind === "ready" &&
+      shouldReconcileWorkspace(auth.me?.workspace, getWorkspaceSlug(), wsReconcileTried()),
+    [auth],
+  );
   // useBook is hoisted here so its chapter cache survives Shell remounts
   // (which happen when the user navigates between chapters via the URL).
   // Don't initialize it until auth is ready — the BookSummary fetch is now
   // gated and would otherwise burn a 401 every reload.
   const bookHook = useBook(
     loc.view === "chapter" ? loc.book : DEFAULT_BOOK,
-    auth.kind === "ready" && loc.view === "chapter",
+    auth.kind === "ready" && !reconcilingWorkspace && loc.view === "chapter",
   );
 
   useEffect(() => {
@@ -590,13 +615,13 @@ export function App() {
       try { sessionStorage.removeItem(WS_RECONCILED_KEY); } catch { /* private mode */ }
       return;
     }
-    let alreadyTried = false;
-    try { alreadyTried = sessionStorage.getItem(WS_RECONCILED_KEY) === "1"; } catch { /* private mode */ }
-    if (alreadyTried) return; // already reloaded once this session — don't loop
+    // Only when the render-time hold is up (already reloaded once this
+    // session otherwise: don't loop).
+    if (!reconcilingWorkspace) return;
     setWorkspaceSlug(serverWs);
     try { sessionStorage.setItem(WS_RECONCILED_KEY, "1"); } catch { /* private mode */ }
     location.reload();
-  }, [auth]);
+  }, [auth, reconcilingWorkspace]);
 
   // Debounced push of the current location to the server so the next sign-in
   // on a different device / after a logout can land back here. Records from the
@@ -604,7 +629,7 @@ export function App() {
   // #/notes, #/questions — see positionFromLoc); the package hub and
   // non-scripture views map to null and leave the stored position untouched (#200).
   useEffect(() => {
-    if (auth.kind !== "ready") return;
+    if (auth.kind !== "ready" || reconcilingWorkspace) return;
     const pos = positionFromLoc(loc);
     if (!pos) return;
     const { book, chapter, verse } = pos;
@@ -612,13 +637,15 @@ export function App() {
       void updateLastLocation(book, chapter, verse);
     }, 1500);
     return () => clearTimeout(t);
-  }, [auth.kind, loc]);
+  }, [auth.kind, reconcilingWorkspace, loc]);
 
   // Must run before any of the early returns below — otherwise the hook is
   // conditionally invoked across renders (loading → ready calls one extra
   // hook), which violates Rules of Hooks. The hook itself no-ops while
   // auth is not "ready".
-  const { alerts, dismiss } = useAlerts(auth.kind === "ready");
+  // Off while the workspace reconcile reloads (#749): its fetch would claim the
+  // stale slug.
+  const { alerts, dismiss } = useAlerts(auth.kind === "ready" && !reconcilingWorkspace);
 
   // Legacy adoption hold (#502, sync/adoptionGate.ts). When /api/auth/me
   // confirms a NAMED fallback slug, records older builds left under the
@@ -642,7 +669,7 @@ export function App() {
     setPipelineUser(auth.kind === "ready" ? auth.me?.userId ?? null : null);
   }, [auth]);
 
-  if (auth.kind === "loading" || holdForAdoption) {
+  if (auth.kind === "loading" || holdForAdoption || reconcilingWorkspace) {
     return (
       // 100dvh with a 100vh fallback — see the height comment on the main Shell
       // Box further down; plain 100vh sits under mobile browsers' URL bar.

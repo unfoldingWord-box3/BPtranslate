@@ -34,7 +34,7 @@ function installLocalStorage() {
 }
 
 const data = installLocalStorage();
-const { getWorkspaceSlug, setWorkspaceSlug, workspaceDbName, legacyDbNames } = await import(
+const { getWorkspaceSlug, setWorkspaceSlug, workspaceDbName, legacyDbNames, shouldReconcileWorkspace } = await import(
   "./workspace.ts"
 );
 
@@ -87,6 +87,25 @@ setWorkspaceSlug("bsoj");
 assert(
   !legacyDbNames("bible-editor-outbox", "bsoj").includes(workspaceDbName("bible-editor-outbox")),
   "a workspace never adopts from its own live database",
+);
+
+// ── #749: boot-time reconcile decision (App.tsx holds the tree while true) ──
+
+assert(
+  shouldReconcileWorkspace("bsoj", "default", false) === true,
+  "fresh tab (slug 'default') on a named workspace: reconcile, so App holds the tree and reloads",
+);
+assert(
+  shouldReconcileWorkspace("bsoj", "bsoj", false) === false,
+  "slug already matches the server: no hold, no reload",
+);
+assert(
+  shouldReconcileWorkspace(undefined, "default", false) === false,
+  "older cached /api/auth/me without `workspace`: no hold, no reload",
+);
+assert(
+  shouldReconcileWorkspace("bsoj", "default", true) === false,
+  "persistent mismatch after one reload this session: render normally, never hold or reload again (no loop)",
 );
 
 console.log("\nAll workspace smoke checks passed.");
