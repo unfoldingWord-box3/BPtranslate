@@ -1215,7 +1215,7 @@ function NoteCardInner({
       // row, not the copy before it (else the next Save would go out at the
       // old version and conflict with the translator's own save). Any other
       // write to the row leaves the copy alone (review A1, isNoteCardSaveOf).
-      if (result.kind === "ok" && originRef.current !== null && isNoteCardSaveOf(op, row)) {
+      if (result.kind === "ok" && originRef.current !== null && isNoteCardSaveOf(op, { id: row.id, book: row.book })) {
         const landed = result.updated as Partial<TnRow> | null | undefined;
         originRef.current =
           landed && typeof landed.version === "number"
