@@ -19,7 +19,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { Env } from "./index";
 import { currentUserId, requireEditor } from "./auth.ts";
-import { importJobOutput, type ApplySkipped } from "./pipelineImport.ts";
+import { importJobOutput, applySkippedOf, type ApplySkipped } from "./pipelineImport.ts";
 import { exportOwnerFor, getProjectConfig } from "./projectConfig.ts";
 import { buildTranslateOptions, normalizeRowIds, normalizeTranslateRowIdsJson } from "./translateOptions.ts";
 import {
@@ -432,7 +432,7 @@ async function resolveUsername(c: {
 // edit_log.id when the job is queued. Evaluated inside the job's own INSERT, so
 // no edit can commit between reading it and queueing the job. The translate
 // apply treats a human edit_log row above it as "changed after the job was
-// queued" (pipelineImport.ts humanTouchedTnIds).
+// queued" (pipelineImport.ts humanTouchedIds).
 const EDIT_LOG_WATERMARK_SQL = `(SELECT COALESCE(MAX(id), 0) FROM edit_log)`;
 // A follow-up or chain child inherits its parent's watermark, so an edit made
 // between the parent's and the child's enqueue still counts. A parent queued
@@ -1035,12 +1035,7 @@ async function pollPipelineJob(
         return { kind: "ok", text, status: httpStatus, state: data.state ?? "running" };
       }
       appliedChapters = importResult.applied?.affectedChapters ?? [];
-      if (importResult.applied && importResult.applied.tnSkippedTouched > 0) {
-        applySkipped = {
-          tnTouched: importResult.applied.tnSkippedTouched,
-          tnTouchedIds: importResult.applied.tnSkippedTouchedIds,
-        };
-      }
+      if (importResult.applied) applySkipped = applySkippedOf(importResult.applied);
     } catch (err) {
       importFailed = true;
       importErrMessage = err instanceof Error ? err.message : String(err);

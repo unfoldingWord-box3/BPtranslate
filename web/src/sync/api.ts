@@ -1486,8 +1486,8 @@ export interface PipelineStatusResponse {
    */
   queuePosition?: number;
   queueAhead?: number;
-  /** Notes a translate apply left alone because a person changed them after the job was queued (#601). */
-  applySkipped?: { tnTouched: number; tnTouchedIds: string[] };
+  /** Notes (#601) or questions (#725) a translate apply left alone because a person changed them after the job was queued. */
+  applySkipped?: { tnTouched?: number; tnTouchedIds?: string[]; tqTouched?: number; tqTouchedIds?: string[] };
 }
 
 // AI pipeline proposal staged in pending_imports. The server parses payload

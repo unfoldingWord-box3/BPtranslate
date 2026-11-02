@@ -46,3 +46,6 @@ scratch/
 
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 /graft/
+
+# In-app guide screenshots copied from help/screenshots/ by scripts/build-help.mjs
+web/public/help/

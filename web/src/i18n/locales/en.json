@@ -3661,5 +3661,17 @@
       "diminutive": "diminutive",
       "indeclinable": "indeclinable"
     }
+  },
+  "help": {
+    "open": "Help",
+    "title": "Help",
+    "close": "Close Help",
+    "loadFailed": "Help couldn't load. Reload the page to get the latest version.",
+    "searchLabel": "Search help",
+    "searchPlaceholder": "Search the guide",
+    "noResults": "Nothing found for \"{{query}}\".",
+    "results": "Search results",
+    "allTopics": "All topics",
+    "forAdmins": "For admins"
   }
 }

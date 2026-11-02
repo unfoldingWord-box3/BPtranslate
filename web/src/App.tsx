@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Alert, Box, Button, Chip, CircularProgress, IconButton, Link, Snackbar, Stack, Tooltip, Typography } from "@mui/material";
 import RefreshIcon from "@mui/icons-material/Refresh";
@@ -16,6 +16,9 @@ import { TemplateWorkspace } from "./components/TemplateWorkspace";
 import { ReviewQueue } from "./components/ReviewQueue";
 import { PreferencesWorkspace, ALL_SECTIONS as PREFS_SECTIONS, type Section as PrefsSection } from "./components/PreferencesWorkspace";
 import { LocalizationInspector } from "./components/LocalizationInspector";
+import { HelpContext } from "./help/HelpContext";
+import { HelpButton } from "./help/HelpButton";
+import { routeKey as helpRouteKey } from "./help/guideMap";
 import { legacyFlowRedirect } from "./lib/legacyFlowRoutes";
 import { useBook } from "./hooks/useBook";
 import { useAlerts } from "./hooks/useAlerts";
@@ -89,6 +92,23 @@ function positionFromLoc(loc: Location): { book: string; chapter: number; verse:
       return null;
   }
 }
+
+// The Help panel (and the guide JSON it bundles) loads on first open.
+// A failed chunk load (stale tab after a deploy) must not reach the top-level
+// error boundary, which reloads the page and can lose unsaved edits.
+function HelpUnavailable({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const { t } = useTranslation();
+  return (
+    <Snackbar open={open} onClose={onClose} anchorOrigin={{ vertical: "bottom", horizontal: "center" }}>
+      <Alert severity="warning" onClose={onClose}>
+        {t("help.loadFailed")}
+      </Alert>
+    </Snackbar>
+  );
+}
+const HelpDrawer = lazy(() =>
+  import("./help/HelpDrawer").catch(() => ({ default: HelpUnavailable as unknown as typeof import("./help/HelpDrawer").default })),
+);
 
 // Flow screens are lazy so their weight isn't paid on the classic editor
 // routes.
@@ -418,6 +438,22 @@ export function App() {
   // flow screens still gets nudged to reload after a deploy.
   const { updateAvailable } = useAppVersion();
   const [loc, setLoc] = useState<Location>(() => parseHash());
+  // In-app Help panel. The drawer is mounted only after the first open.
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [helpEverOpened, setHelpEverOpened] = useState(false);
+  const [helpSeq, setHelpSeq] = useState(0);
+  const [helpArticle, setHelpArticle] = useState<string | undefined>(undefined);
+  const helpReturnFocus = useRef<HTMLElement | null>(null);
+  const openHelp = useCallback((articleId?: string, returnFocus?: HTMLElement | null) => {
+    helpReturnFocus.current =
+      returnFocus ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    setHelpArticle(articleId);
+    setHelpSeq((n) => n + 1);
+    setHelpEverOpened(true);
+    setHelpOpen(true);
+  }, []);
+  const helpKey = helpRouteKey(loc);
+  const helpValue = useMemo(() => ({ routeKey: helpKey, openHelp }), [helpKey, openHelp]);
   // ?_choose_ws=1: the OAuth callback matched this account to SEVERAL Door43
   // orgs with no usable history and landed the session in the first match —
   // offer a one-time picker. Persisted to sessionStorage (markChooseWsPending)
@@ -725,6 +761,7 @@ export function App() {
   const isViewer = auth.kind === "ready" && auth.role === "viewer";
 
   return (
+    <HelpContext.Provider value={helpValue}>
     <Box
       sx={{
         // 100dvh with a 100vh fallback — plain 100vh includes mobile browsers'
@@ -967,7 +1004,10 @@ export function App() {
               <SyncStatusBar onNavigate={navigate} flowRouting compact={isPhone} />
               <UnsavedToasts onGoTo={goToDraft} />
               <PipelineStatusBar />
+              {/* Phones: Help is in the account menu; a button here truncated screen titles at 360px. */}
+              {!isPhone && <HelpButton />}
               <AccountMenu
+                onOpenHelp={isPhone ? (el) => openHelp(undefined, el) : undefined}
                 username={auth.kind === "ready" ? auth.me?.username ?? null : null}
                 onLogout={handleSignOut}
                 isAdmin={auth.kind === "ready" && auth.role === "admin"}
@@ -1121,6 +1161,24 @@ export function App() {
         </Alert>
       </Snackbar>
       {chooseWs && <WorkspaceChoiceDialog onClose={() => setChooseWs(false)} />}
+      {helpEverOpened && (
+        <Suspense
+          fallback={<CircularProgress size={20} aria-hidden sx={{ position: "fixed", top: 12, insetInlineEnd: 12, zIndex: (th) => th.zIndex.modal + 1 }} />}
+        >
+          <HelpDrawer
+            open={helpOpen}
+            openSeq={helpSeq}
+            routeKey={helpKey}
+            initialArticle={helpArticle}
+            onClose={() => setHelpOpen(false)}
+            onClosed={() => {
+              const el = helpReturnFocus.current;
+              if (el?.isConnected) el.focus();
+            }}
+          />
+        </Suspense>
+      )}
     </Box>
+    </HelpContext.Provider>
   );
 }
