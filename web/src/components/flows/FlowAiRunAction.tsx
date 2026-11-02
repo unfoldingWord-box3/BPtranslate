@@ -6,6 +6,9 @@
 // tablet and desktop; at the phone band an item in the account menu
 // (Benjamin's decision on #481, 2026-11-02), so the crowded phone header
 // (#517) gains no button and page titles keep their room. Viewers get nothing.
+// In a source project (the English root) there is no AI action, so the same
+// trigger is labelled and iconed as "Import from Door43" (#731,
+// lib/pipelineTrigger.ts); AccountMenu does the same for the phone item.
 //
 // A hook, not a component, because it has two parts that mount in different
 // places:
@@ -20,9 +23,12 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import { IconButton, Snackbar, Tooltip } from "@mui/material";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
+import CloudDownloadIcon from "@mui/icons-material/CloudDownload";
 import { useTranslation } from "react-i18next";
 import { PipelineMenu } from "../PipelineMenu";
 import { aiRunPlacement } from "../../lib/aiRunPlacement";
+import { pipelineTrigger } from "../../lib/pipelineTrigger";
+import { projectType, useProjectConfig } from "../../hooks/useProjectConfig";
 import type { Role } from "../../sync/api";
 
 /** Opens the screen's pipeline menu anchored to the given element. */
@@ -31,7 +37,7 @@ export type OpenAiRun = (anchor: HTMLElement) => void;
 /**
  * Set by App.tsx around the flow screens. A screen at the phone band registers
  * its OpenAiRun here (null on unmount); AccountMenu shows "Start an AI run"
- * while one is registered.
+ * ("Import from Door43" in a source project, #731) while one is registered.
  */
 export const FlowAccountAiRunContext = createContext<(open: OpenAiRun | null) => void>(() => {});
 
@@ -60,6 +66,7 @@ export function useFlowAiRun({ book, chapter, role, phone, onImported }: Options
   const { t } = useTranslation();
   const placement = aiRunPlacement(role, phone ? "phone" : "tablet");
   const registerInAccountMenu = useContext(FlowAccountAiRunContext);
+  const trigger = pipelineTrigger(projectType(useProjectConfig()));
   const [open, setOpenState] = useState<OpenAiRun | null>(null);
   const setOpen = useCallback((fn: OpenAiRun | null) => setOpenState(() => fn), []);
   // Own toast, not the host's: the hosts' save toasts close after 1.4s, too
@@ -94,14 +101,14 @@ export function useFlowAiRun({ book, chapter, role, phone, onImported }: Options
   );
   const headerButton =
     !onPhone && open ? (
-      <Tooltip title={t("pipeline.startAiRun")}>
+      <Tooltip title={t(trigger.actionKey)}>
         <IconButton
           size="small"
-          aria-label={t("pipeline.startAiRun")}
+          aria-label={t(trigger.actionKey)}
           onClick={(e) => open(e.currentTarget)}
           sx={{ flex: "none" }}
         >
-          <AutoAwesomeIcon fontSize="small" />
+          {trigger.kind === "import" ? <CloudDownloadIcon fontSize="small" /> : <AutoAwesomeIcon fontSize="small" />}
         </IconButton>
       </Tooltip>
     ) : null;

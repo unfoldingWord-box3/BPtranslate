@@ -37,6 +37,7 @@ import useMediaQuery from "@mui/material/useMediaQuery";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
+import CloudDownloadIcon from "@mui/icons-material/CloudDownload";
 import { AdminDesk } from "./AdminDesk";
 import { AdminPageHeader } from "./AdminPageHeader";
 import { LockBanner, ReadyBanner } from "./FlowBanners";
@@ -45,7 +46,8 @@ import type { FlowScreenContext } from "./types";
 import { PipelineMenu } from "../PipelineMenu";
 import { AiServiceSection } from "../AiServiceSection";
 import { pipelineStore, type PipelineJob } from "../../sync/pipelineStore";
-import { useProjectConfig, isTranslationProject } from "../../hooks/useProjectConfig";
+import { useProjectConfig, isTranslationProject, projectType } from "../../hooks/useProjectConfig";
+import { aiStudioSubtitleKey, pipelineTrigger } from "../../lib/pipelineTrigger";
 import {
   isAiNeedsOrgKey,
   isAiProviderNotConfigured,
@@ -150,6 +152,10 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
   const verse = me?.lastVerse || 1;
 
   const cfg = useProjectConfig();
+  // A source project (the English root) has no AI translation runs (#731).
+  // Unknown (config still loading) keeps the AI copy.
+  const type = projectType(cfg);
+  const pickTrigger = pipelineTrigger(type);
   const eyebrow = cfg
     ? `${cfg.languageTitle || cfg.languageName || cfg.languageCode} · ${cfg.org}`
     : t("aiStudio.workspace");
@@ -372,7 +378,7 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
         <AdminPageHeader
           eyebrow={eyebrow}
           title={t("aiStudio.title")}
-          subtitle={t("aiStudio.subtitle")}
+          subtitle={t(aiStudioSubtitleKey(type))}
         />
 
       <Stack spacing={1} sx={{ mb: 2 }}>
@@ -457,8 +463,19 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
         ) : (
           <Tooltip title={t("aiStudio.pickBookFirst")}>
             <span>
-              <Button size="small" variant="outlined" startIcon={<AutoAwesomeIcon fontSize="small" />} disabled>
-                {t("pipeline.aiButton")}
+              <Button
+                size="small"
+                variant="outlined"
+                startIcon={
+                  pickTrigger.kind === "import" ? (
+                    <CloudDownloadIcon fontSize="small" />
+                  ) : (
+                    <AutoAwesomeIcon fontSize="small" />
+                  )
+                }
+                disabled
+              >
+                {t(pickTrigger.buttonKey)}
               </Button>
             </span>
           </Tooltip>
