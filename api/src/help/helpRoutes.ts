@@ -149,7 +149,8 @@ export function makeHelpRoutes(deps: HelpRouteDeps = {}) {
     if (!(await helpEnabled(db))) return c.json({ code: "help_ai_disabled" }, 403);
 
     const ai = resolveDispatchAi(await getAiProviderConfig(db), c.env.AI_KEY_WRAPPING_KEY);
-    if (ai.kind === "none") return c.json({ code: "help_ai_not_configured" }, 409);
+    // No org key (#551 removed the shared-account fallback, so this is an "error" kind now).
+    if (ai.kind === "error" && ai.reason === "ai_provider_not_configured") return c.json({ code: "help_ai_not_configured" }, 409);
     if (ai.kind === "error") return c.json({ code: "help_ai_unavailable", reason: ai.reason }, 409);
 
     let catalog;

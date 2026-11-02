@@ -49,7 +49,7 @@ function makeD1(db) {
 
 async function token(role, sub = "1") {
   const now = Math.floor(Date.now() / 1000);
-  return new SignJWT({ username: "u" + sub, role })
+  return new SignJWT({ username: "u" + sub, role, ws: "default" })
     .setProtectedHeader({ alg: "HS256" }).setSubject(sub).setIssuer("bible-editor")
     .setIssuedAt(now).setExpirationTime(now + 3600).sign(KEY);
 }

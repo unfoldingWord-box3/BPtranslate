@@ -76,6 +76,7 @@ export default function HelpDrawer({ open, openSeq, routeKey, initialArticle, on
   // article, else the table of contents.
   useEffect(() => {
     if (!open) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset on each open (openSeq bumps per click, even for the same article); the drawer stays mounted between opens, so there is no remount to reset it.
     setQuery("");
     const requested = initialArticle ? articles.find((a) => a.id === initialArticle) : undefined;
     const forRoute = routeKey ? articleForRoute(helpIndex, lang, routeKey) : null;
