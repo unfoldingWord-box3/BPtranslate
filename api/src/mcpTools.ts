@@ -1212,8 +1212,9 @@ const approveTemplate: ToolDef = {
 // approval stays with bpt_approve, on rows the reviewer was shown). Two calls:
 // a dry run that changes nothing and returns a confirm token signed over the
 // exact id:version list it found, then a confirm that un-approves just those
-// rows through the per-row validate route (value 0), each pinned to its version
-// and to 'validated', so a row that changed in between is left alone. Not the
+// rows through the per-row validate route (value 0), each pinned to its
+// version, to 'validated' and to its updated_at, so a row that changed in
+// between is left alone. Not the
 // admin review-state sweep (reviewState.ts): that is admin-only, chapter-wide,
 // lifts the draft guard and can approve.
 
@@ -1402,8 +1403,11 @@ const bulkSetState: ToolDef = {
       });
     // Read the rows fresh and send a write only for those still exactly as the
     // preview saw them, updated_at included (see BulkTokenBody). The validate
-    // itself pins version and state; what remains open is a web un-approve
-    // plus re-approve landing between this read and that row's write.
+    // itself pins all three, so a web un-approve plus re-approve that lands
+    // between this read and that row's write is refused there (409) too. The
+    // updated_at pin is airtight only because the preview left out rows written
+    // in its own second (changed_just_now): every later flip writes a strictly
+    // greater updated_at. Keep that filter.
     const now = new Map((await inRange()).map((x) => [String(x.id), x]));
     for (const [id, version, updatedAt] of t.r) {
       const cur = now.get(id);
@@ -1419,7 +1423,7 @@ const bulkSetState: ToolDef = {
       const { status, body } = await session.send(
         "POST",
         `/api/rows/${kind}/${encodeURIComponent(id)}/validate?book=${book}`,
-        { value: 0, expected_state: "validated" },
+        { value: 0, expected_state: "validated", expected_updated_at: updatedAt },
         version,
       );
       const b = (body ?? {}) as Record<string, unknown>;
