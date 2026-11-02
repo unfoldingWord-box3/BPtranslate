@@ -19,12 +19,14 @@ export function formatDraftMeta(m: DraftMeta): string {
   return `${m.rowKind.toUpperCase()} ${m.book} ${m.chapter}:${m.verse}`;
 }
 
-// The hash of the screen whose editor holds this draft. tW/tA articles and
-// note templates carry no book/chapter/verse, so they route to their own
-// editors by id.
+// The hash of the flows screen whose editor holds this draft. tW/tA articles
+// and note templates carry no book/chapter/verse, so they route by id: a
+// template to the flows Curate screen, an article to the article workspace
+// (the flows Translate Words screen is per book, which an article draft does
+// not record).
 export function draftFlowHash(m: DraftMeta): string {
   if (m.kind === "article") return `#/articles/${m.resource}/${encodeURIComponent(m.articleId)}`;
-  if (m.kind === "template") return `#/templates/${encodeURIComponent(m.templateId)}`;
+  if (m.kind === "template") return `#/admin/curate/${encodeURIComponent(m.templateId)}`;
   // 3-segment #/scripture/B/C/V: App.tsx's `ts` route accepts the optional
   // verse segment and TranslateScriptureScreen seeds its cursor from it on
   // mount, so this lands the translator on the exact drafted verse, not just
@@ -53,9 +55,12 @@ export interface FlowScreen {
 // Whether the current flows screen shows the editor holding this draft, judged
 // by route: the flows editors are not tagged for a DOM lookup the way the
 // classic verse cells are. Chapter granularity, because the notes, questions
-// and scripture screens edit a whole chapter.
+// and scripture screens edit a whole chapter. tW/tA articles are edited on
+// Translate Words (any book: articles are book-agnostic) and templates on
+// Curate.
 export function draftOnFlowScreen(m: DraftMeta, screen: FlowScreen): boolean {
-  if (m.kind === "article" || m.kind === "template") return false;
+  if (m.kind === "article") return screen.view === "translateWords";
+  if (m.kind === "template") return screen.view === "curate";
   const view =
     m.kind === "verse"
       ? "translateScripture"

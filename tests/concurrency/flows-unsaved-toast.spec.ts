@@ -66,7 +66,7 @@ async function openWithDraft(browser: Browser, user: string, uiLang?: string): P
 
 test("#372: an unsaved flows note shows a toast elsewhere, and Go to it opens it", async ({ browser }, testInfo) => {
   const page = await openWithDraft(browser, "unsaved-toast-372");
-  const toast = page.getByRole("alert").filter({ hasText: ui(EN, "widgets.toasts.unsavedDraftRef", { ref: REF }) });
+  const toast = page.getByRole("status").filter({ hasText: ui(EN, "widgets.toasts.unsavedDraftRef", { ref: REF }) });
   // On the screen that holds the draft: no toast, once the toolbar's
   // "1 unsaved" chip shows the draft has landed in the store.
   await expect(page.getByText(`1 ${ui(EN, "sync.unsaved")}`)).toBeVisible({ timeout: 15_000 });
@@ -79,7 +79,7 @@ test("#372: an unsaved flows note shows a toast elsewhere, and Go to it opens it
   await expect(toast).toBeVisible({ timeout: 15_000 });
   await page.screenshot({ path: testInfo.outputPath("372-toast.png") });
 
-  await toast.getByRole("button", { name: ui(EN, "widgets.toasts.goToDraft") }).click();
+  await toast.getByRole("button", { name: ui(EN, "widgets.toasts.goToDraftAria", { ref: REF }) }).click();
   await expect.poll(() => page.evaluate(() => location.hash)).toBe(
     `#/notes/${BOOK}/${CHAPTER}/${VERSE}?row=${ROW}`,
   );
@@ -109,9 +109,63 @@ test("#372: the toast under the Arabic UI", async ({ browser }, testInfo) => {
   await expect(page.getByRole("heading", { name: ui(AR, "flowBooks.title"), exact: true }).first()).toBeVisible({
     timeout: 15_000,
   });
-  const toast = page.getByRole("alert").filter({ hasText: ui(AR, "widgets.toasts.unsavedDraftRef", { ref: REF }) });
+  const toast = page.getByRole("status").filter({ hasText: ui(AR, "widgets.toasts.unsavedDraftRef", { ref: REF }) });
   await expect(toast).toBeVisible({ timeout: 15_000 });
-  await expect(toast.getByRole("button", { name: ui(AR, "widgets.toasts.goToDraft") })).toBeVisible();
+  await expect(toast.getByRole("button", { name: ui(AR, "widgets.toasts.goToDraftAria", { ref: REF }) })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("372-toast-ar.png") });
   await page.context().close();
+});
+
+// tW/tA articles are edited on Translate Words and note templates on Curate,
+// so a draft of either stays quiet there and toasts elsewhere. The seeded
+// workspace is an authoring project, where Translate Words shows only a
+// notice and has no articles to type into, so the drafts are written through
+// the app's own drafts module (the same instance the editors use) while the
+// route is open. The on-screen rule is decided by the route alone.
+test("#372: article and template drafts stay quiet on their own flows screens", async ({ browser }, testInfo) => {
+  const { context } = await newUserContext(browser, "unsaved-toast-372-words");
+  openContexts.push(context);
+  const page = await context.newPage();
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.route("https://git.door43.org/**", (route) => route.fulfill({ status: 404, body: "not mocked" }));
+  const seed = (meta: Record<string, string>, key: string) =>
+    page.evaluate(
+      async ({ meta, key }) => {
+        const url = "/src/sync/drafts.ts";
+        const m = await import(/* @vite-ignore */ url);
+        await m.drafts.set(key, { target_md: "Unsaved article or template text" }, 1, meta);
+      },
+      { meta, key },
+    );
+  const articleRef = "TW kt/god";
+  const templateRef = "rc://*/ta/man/translate/figs-idiom · zz-l4-template";
+  const articleToast = page.getByRole("status").filter({ hasText: ui(EN, "widgets.toasts.unsavedDraftRef", { ref: articleRef }) });
+  const templateToast = page.getByRole("status").filter({ hasText: ui(EN, "widgets.toasts.unsavedDraftRef", { ref: templateRef }) });
+
+  await page.goto("/#/words/ZEC");
+  await expect(page.getByRole("toolbar")).toBeVisible({ timeout: 20_000 });
+  await seed(
+    { kind: "article", resource: "tw", articleId: "kt/god", path: "bible/kt/god.md", part: "body" },
+    "article:tw:bible/kt/god.md",
+  );
+  await expect(page.getByText(`1 ${ui(EN, "sync.unsaved")}`)).toBeVisible({ timeout: 15_000 });
+  await expect(articleToast).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath("372-words-quiet.png") });
+
+  await page.evaluate(() => (location.hash = "#/admin/curate"));
+  await expect(articleToast).toBeVisible({ timeout: 15_000 });
+  await seed(
+    { kind: "template", templateId: "zz-l4-template", supportRef: "rc://*/ta/man/translate/figs-idiom" },
+    "template:zz-l4-template",
+  );
+  await expect(page.getByText(`2 ${ui(EN, "sync.unsaved")}`)).toBeVisible({ timeout: 15_000 });
+  await expect(templateToast).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath("372-curate-quiet.png") });
+
+  await page.evaluate(() => (location.hash = "#/books"));
+  await expect(templateToast).toBeVisible({ timeout: 15_000 });
+  await expect(articleToast).toBeVisible();
+  await templateToast.getByRole("button", { name: ui(EN, "widgets.toasts.goToDraftAria", { ref: templateRef }) }).click();
+  await expect.poll(() => page.evaluate(() => location.hash)).toBe("#/admin/curate/zz-l4-template");
+  await expect(templateToast).toHaveCount(0);
 });

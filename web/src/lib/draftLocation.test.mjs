@@ -21,7 +21,8 @@ assert.strictEqual(draftFlowHash(tq), "#/questions/ZEC/6/2?row=q1%202");
 // The flows UI has no word-links editor; twl drafts open the classic editor.
 assert.strictEqual(draftFlowHash(twl), "#/ZEC/6/3?twl=w9");
 assert.strictEqual(draftFlowHash(article), "#/articles/ta/figs-metaphor");
-assert.strictEqual(draftFlowHash(template), "#/templates/t%2F1");
+// Templates are edited on the flows Curate screen.
+assert.strictEqual(draftFlowHash(template), "#/admin/curate/t%2F1");
 
 // ── draftOnFlowScreen ──────────────────────────────────────────────────────
 // Same screen and chapter as the draft's editor: on screen.
@@ -35,10 +36,21 @@ assert.strictEqual(draftOnFlowScreen(tn, { view: "questions", book: "ZEC", chapt
 assert.strictEqual(draftOnFlowScreen(tq, { view: "notes", book: "ZEC", chapter: 6 }), false);
 assert.strictEqual(draftOnFlowScreen(verse, { view: "verse", book: "ZEC", chapter: 6 }), false);
 assert.strictEqual(draftOnFlowScreen(tn, { view: "books" }), false);
-// No flows screen edits word links, articles, or templates.
+// No flows screen edits word links.
 assert.strictEqual(draftOnFlowScreen(twl, { view: "notes", book: "ZEC", chapter: 6 }), false);
+// tW and tA articles are edited on the Translate Words screen, whatever its
+// book (articles are book-agnostic); templates on the Curate screen.
+assert.strictEqual(draftOnFlowScreen(article, { view: "translateWords", book: "ZEC" }), true);
+assert.strictEqual(draftOnFlowScreen(article, { view: "translateWords", book: "RUT" }), true);
+assert.strictEqual(
+  draftOnFlowScreen({ ...article, resource: "tw", articleId: "kt/god" }, { view: "translateWords", book: "ZEC" }),
+  true,
+);
 assert.strictEqual(draftOnFlowScreen(article, { view: "books" }), false);
-assert.strictEqual(draftOnFlowScreen(template, { view: "curate" }), false);
+assert.strictEqual(draftOnFlowScreen(article, { view: "curate" }), false);
+assert.strictEqual(draftOnFlowScreen(template, { view: "curate" }), true);
+assert.strictEqual(draftOnFlowScreen(template, { view: "translateWords", book: "ZEC" }), false);
+assert.strictEqual(draftOnFlowScreen(template, { view: "books" }), false);
 
 // ── formatDraftMeta ────────────────────────────────────────────────────────
 assert.strictEqual(formatDraftMeta(verse), "ULT ZEC 6:1");

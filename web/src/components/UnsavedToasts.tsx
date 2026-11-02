@@ -15,9 +15,11 @@ import CloseIcon from "@mui/icons-material/Close";
 import { drafts, type DraftMeta, type DraftRecord } from "../sync/drafts";
 import { formatDraftMeta } from "../lib/draftLocation";
 import { outbox, type OutboxOp } from "../sync/outbox";
-import { verseDraftHasActiveSave } from "../sync/draftSaveState";
+import { rowDraftHasActiveSave, verseDraftHasActiveSave } from "../sync/draftSaveState";
 
 const AGGREGATE_THRESHOLD = 3;
+// Stand-in for the draft ref when splitting a translated sentence around it.
+const REF_SLOT = "\u0000ref\u0000";
 
 // Two mounts:
 //  - Classic Shell passes `book` + `onSaveVerseDraft`: verse drafts of that
@@ -64,7 +66,20 @@ export function UnsavedToasts({ book, onSaveVerseDraft, onJumpTo, onGoTo, isOnSc
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState(false);
 
-  useEffect(() => drafts.subscribe(setDraftList), []);
+  useEffect(
+    () =>
+      drafts.subscribe((list) => {
+        setDraftList(list);
+        // Forget dismissals of drafts that have cleared (saved or discarded),
+        // so a later draft on the same field reminds again.
+        setDismissed((prev) => {
+          const live = new Set(list.map((d) => d.key));
+          const next = new Set([...prev].filter((k) => live.has(k)));
+          return next.size === prev.size ? prev : next;
+        });
+      }),
+    [],
+  );
   useEffect(() => outbox.subscribe(setOps), []);
 
   // Re-arm IntersectionObservers whenever the draft set changes. Drafts
@@ -114,6 +129,8 @@ export function UnsavedToasts({ book, onSaveVerseDraft, onJumpTo, onGoTo, isOnSc
         // being saved right now — nagging "Save X?" would re-enqueue the same
         // payload. Conflicted/failed saves still surface (they need action).
         !verseDraftHasActiveSave(d, ops) &&
+        // Same for a note/question whose save is queued (e.g. offline).
+        !rowDraftHasActiveSave(d, ops) &&
         !visibleKeys.has(d.key) &&
         !dismissed.has(d.key),
     );
@@ -191,22 +208,37 @@ export function UnsavedToasts({ book, onSaveVerseDraft, onJumpTo, onGoTo, isOnSc
           );
           if (onGoTo) {
             const meta = d.meta;
+            const ref = formatDraftMeta(meta);
+            // The ref is Latin ("TN ZEC 6:11"); isolate it in <bdi> so it
+            // keeps its own order inside an Arabic sentence.
+            const [before, after = ""] = t("widgets.toasts.unsavedDraftRef", { ref: REF_SLOT }).split(REF_SLOT);
             return (
               <Alert
                 key={d.key}
+                // Polite, not assertive: the toast remounts on every screen
+                // change, and should not interrupt each time.
+                role="status"
                 severity="warning"
                 variant="filled"
                 sx={{ boxShadow: 3, alignItems: "center" }}
                 action={
                   <>
-                    <Button color="inherit" size="small" onClick={() => onGoTo(meta)} sx={{ fontWeight: 600 }}>
+                    <Button
+                      color="inherit"
+                      size="small"
+                      onClick={() => onGoTo(meta)}
+                      aria-label={t("widgets.toasts.goToDraftAria", { ref })}
+                      sx={{ fontWeight: 600 }}
+                    >
                       {t("widgets.toasts.goToDraft")}
                     </Button>
                     {dismissButton}
                   </>
                 }
               >
-                {t("widgets.toasts.unsavedDraftRef", { ref: formatDraftMeta(meta) })}
+                {before}
+                <bdi>{ref}</bdi>
+                {after}
               </Alert>
             );
           }

@@ -448,11 +448,16 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
   } as const;
 
   const navigateToDraft = (m: DraftMeta) => {
-    // Article and template drafts have no scripture reference to navigate to,
-    // so they always route to their own editor's hash (draftFlowHash). On the
-    // flows screens every draft does, so the jump stays in the new UI.
-    if (flowRouting || m.kind === "article" || m.kind === "template") {
+    // On the flows screens every draft routes to its flows editor
+    // (draftFlowHash), so the jump stays in the new UI. In classic, article
+    // and template drafts have no scripture reference to navigate to, so they
+    // route to the classic article / template editors by id.
+    if (flowRouting) {
       location.assign(draftFlowHash(m));
+    } else if (m.kind === "article") {
+      location.assign(`#/articles/${m.resource}/${encodeURIComponent(m.articleId)}`);
+    } else if (m.kind === "template") {
+      location.assign(`#/templates/${encodeURIComponent(m.templateId)}`);
     } else {
       onNavigate?.(m.book, m.chapter, m.verse);
     }

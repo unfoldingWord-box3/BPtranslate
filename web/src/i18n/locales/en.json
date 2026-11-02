@@ -2698,6 +2698,7 @@
       "saveVerseRef": "Save {{book}} {{chapter}}:{{verse}} {{version}}?",
       "unsavedDraftRef": "Unsaved: {{ref}}",
       "goToDraft": "Go to it",
+      "goToDraftAria": "Go to unsaved {{ref}}",
       "aiDraftReady": "AI draft ready · v{{verse}}"
     },
     "errorBoundary": {
