@@ -1257,13 +1257,18 @@ function sameMac(a: string, b: string): boolean {
   return diff === 0;
 }
 
+const NOT_CHANGED = "Nothing was changed.";
+
+// No JWT_SIGNING_KEY: refuse in plain words rather than as an internal error.
 async function signedMac(session: McpSession, body: string): Promise<string> {
   const mac = await session.confirmMac(body);
-  if (!mac) throw new Error("bpt_bulk_set_state: no signing key configured");
+  if (!mac) {
+    throw new ToolInputError(
+      `Moving a range back to needs review is not set up on this server (it has no signing key). Ask a BPtranslate admin. ${NOT_CHANGED}`,
+    );
+  }
   return mac;
 }
-
-const NOT_CHANGED = "Nothing was changed.";
 
 // The confirm token's body, or a refusal saying why. A token is good only for
 // the link it was issued to and exactly the arguments of its dry run.
@@ -1296,10 +1301,17 @@ const SKIP_REASONS = {
 // each skip reason lists only its first few ids (count has them all).
 const SKIP_ID_CAP = 20;
 
+// The description's export claim: approve snapshots the note into
+// pre_draft_json (rows.ts setTnTranslationState) and un-approve leaves it, so
+// the nightly TSV export (preDraftSnapshot.ts / publishGate.ts) ships that
+// snapshot for an edited row. Exception: a row approved before migration 0049
+// has no snapshot; in its own chapter the export ships the unchanged current
+// text, and in a chapter from a foreign source (publishGate) it is omitted.
+// The context export of AI examples reads validated rows only.
 const bulkSetState: ToolDef = {
   name: "bpt_bulk_set_state",
   description:
-    "Move the approved translation notes (kind tn) or questions (kind tq) of a verse range in one chapter back to needs review (state edited), for when a reviewer wants a stretch looked at again. It NEVER approves anything: to approve, use bpt_approve on each row the reviewer has read. Always two calls. 1) Call without confirm_token: a preview that changes nothing and returns would_change (how many approved rows would go back to needs review), their ids and versions, the rows it would skip and why (AI drafts and edited rows already need review; trashed rows and rows that are not translation drafts are left alone; an approved row changed a moment ago is left out until a new preview a few seconds later), each reason with its count and at most the first 20 ids, and a confirm_token. Tell the reviewer the count and get a clear yes. 2) Call again with exactly the same book, kind, chapter, verse_start and verse_end plus confirm_token: only the rows in the preview change. A row that changed since the preview (edited, approved or un-approved by someone, or already un-approved by an earlier confirm of this same preview) is left as it is and listed in not_changed with its current state and version, so calling confirm twice is safe. remaining counts rows in the range that are approved after the call (approved or changed since the preview): run a new preview to include them. remaining is null when that count could not be read; the rows listed as applied were still changed. The token lasts 10 minutes and works only for this user's link and the same arguments; otherwise nothing changes. At most " +
+    "Move the approved translation notes (kind tn) or questions (kind tq) of a verse range in one chapter back to needs review (state edited), for when a reviewer wants a stretch looked at again. Un-approving does not change the wording: the nightly Door43 export keeps publishing the last approved text of each such note until it is approved again, but it stops counting as an approved example for AI drafts. It NEVER approves anything: to approve, use bpt_approve on each row the reviewer has read. Always two calls. 1) Call without confirm_token: a preview that changes nothing and returns would_change (how many approved rows would go back to needs review), their ids and versions, the rows it would skip and why (AI drafts and edited rows already need review; trashed rows and rows that are not translation drafts are left alone; an approved row changed a moment ago is left out until a new preview a few seconds later), each reason with its count and at most the first 20 ids, and a confirm_token. Tell the reviewer the count and get a clear yes. 2) Call again with exactly the same book, kind, chapter, verse_start and verse_end plus confirm_token: only the rows in the preview change. A row that changed in any way since the preview (edited, approved or un-approved, reordered, or flagged keep or AI hint, or already un-approved by an earlier confirm of this same preview) is left as it is and listed in not_changed with its current state and version, so calling confirm twice is safe. remaining counts rows in the range that are approved after the call (approved or changed since the preview): run a new preview to include them. remaining is null when that count could not be read; the rows listed as applied were still changed. The token lasts 10 minutes and works only for this user's link and the same arguments; otherwise nothing changes. At most " +
     `${BULK_ROW_CAP} approved rows per call; a bigger range is refused, so narrow verse_start/verse_end. Requires edit access.`,
   inputSchema: {
     type: "object",
@@ -1336,12 +1348,18 @@ const bulkSetState: ToolDef = {
     const approvedLive = (r: Record<string, unknown>) => r.translation_state === "validated" && !r.trashed_at;
 
     if (args.confirm_token === undefined || args.confirm_token === null || args.confirm_token === "") {
+      // A preview with no way to sign its token is refused before any read.
+      await signedMac(session, "");
       // updated_at has 1-second resolution. A row last written in this second
       // (or later, if the clock that wrote it runs ahead) is left out of the
       // token: a web un-approve and re-approve later in this same second would
       // reproduce its updated_at, and the confirm would take the newer approval
       // for the one previewed. Every token row is older than the preview, so
-      // any later state flip changes its updated_at.
+      // any later state flip changes its updated_at. Residual gap: this
+      // compares against this isolate's clock. If the server that runs a later
+      // web flip has a clock 1 s or more behind this one, an un-approve plus
+      // re-approve there inside one second could write the very updated_at in
+      // the token, and the confirm would un-approve that newer approval.
       const nowSec = Math.floor(Date.now() / 1000);
       const justNow = (x: Record<string, unknown>) => Number(x.updated_at) >= nowSec;
       const rows = await inRange();
@@ -1396,7 +1414,7 @@ const bulkSetState: ToolDef = {
       notChanged.push({
         id,
         reason: "changed_since_preview",
-        why: "changed since the preview, by someone else or by an earlier confirm of this same preview",
+        why: "changed since the preview (edited, approved or un-approved, reordered, or flagged keep or AI hint), or already un-approved by an earlier confirm of this same preview",
         current_state: cur.translation_state ?? null,
         current_version: cur.version,
         trashed: cur.trashed_at ? true : undefined,
@@ -1449,7 +1467,7 @@ const bulkSetState: ToolDef = {
       message:
         `${appliedIds.length} ${kind} rows went back to needs review.` +
         (notChanged.length
-          ? ` ${notChanged.length} were left as they are: changed since the preview (by someone else, or by an earlier confirm of this same preview) or gone.`
+          ? ` ${notChanged.length} were left as they are: changed since the preview (edited, approved or un-approved, reordered, or flagged keep or AI hint; or already un-approved by an earlier confirm of this same preview) or gone.`
           : "") +
         (remaining === null
           ? " How many rows in this range are approved now could not be read; preview again to see."
@@ -1464,5 +1482,4 @@ export const TOOLS: ToolDef[] = [
   whoami, linkAccount, listBooks, packageStatus, chunkWork, getRow, chunkList, editRow, approve,
   templatesForRow, editTemplate, approveTemplate, bulkSetState,
 ];
-
 
