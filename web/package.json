@@ -4,7 +4,9 @@
   "version": "0.0.1",
   "type": "module",
   "scripts": {
+    "predev": "node ../scripts/build-help.mjs --assets",
     "dev": "vite",
+    "prebuild": "node ../scripts/build-help.mjs --assets",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "typecheck": "tsc -b --noEmit",
