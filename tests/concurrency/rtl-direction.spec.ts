@@ -59,10 +59,13 @@ const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
 //   - The old flows screens deleted in #534 (HomeScreen, ScriptureScreen +
 //     ScriptureLane, AlignScreen, ArticlesScreen, WordsScreen, SetupScreen,
 //     TeamScreen) — gone; their hashes redirect (legacy-flow-redirects.spec.ts).
-//   - WordsLexiconStrip, UhbStrip, QuoteBuilderPopper, ReviewSourceStrip,
-//     OriginalLanguagePanel — show only the Hebrew original + English glosses,
-//     never target-language text; the Hebrew `versionIsRtl("UHB")` path is
-//     already guarded by the classic + book-view cases below.
+//   - WordsLexiconStrip, UhbStrip, ReviewSourceStrip, OriginalLanguagePanel —
+//     show only the Hebrew original + English glosses, never target-language
+//     text; the Hebrew `versionIsRtl("UHB")` path is already guarded by the
+//     classic + book-view cases below.
+//   - QuoteBuilderPopper — its ULT/UST chip rows ARE target text and wait on
+//     the project config like the lanes below (#728), but the popper opens
+//     only from a note's quote picker and has no case here yet (TODO, #728).
 //   - flows/UltAlignmentStrip — shows the published English en_ult source, not
 //     project content (direction of its lane is `dir="auto"`).
 //   - TranslateWordsScreen, ArticleWorkspace, MarkdownView,
@@ -730,5 +733,187 @@ test.describe("RTL paint on Arabic surfaces (#486)", () => {
     expect(await computedDirection(setup)).toBe("rtl");
     await expectRtlPaint(setup, "AdminSetupScreen subtitle");
     await context.close();
+  });
+});
+
+// #728 (follow-up to #451): every other screen with a target-text lane waits
+// for the project config too, instead of painting Arabic LTR first. Each case
+// opens with no cached config (`bible-editor.project-config.v1` removed) and
+// holds GET /api/project-config until it has seen the spinner and no target
+// lane, then releases it with an Arabic (RTL) project.
+async function openWithHeldConfig(
+  browser: Browser,
+  user: string,
+  hash: string,
+  opts: { storage?: Record<string, unknown>; viewport: { width: number; height: number } },
+): Promise<{ page: Page; release: () => void }> {
+  const { context } = await newUserContext(browser, user);
+  track(context);
+  await context.addInitScript((storage) => {
+    try {
+      localStorage.removeItem("bible-editor.project-config.v1");
+      for (const [k, v] of Object.entries(storage)) localStorage.setItem(k, JSON.stringify(v));
+    } catch {
+      /* private mode etc. */
+    }
+  }, opts.storage ?? {});
+  const page = await context.newPage();
+  await page.setViewportSize(opts.viewport);
+  await blockDoor43(page);
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  await page.route("**/api/project-config", async (route) => {
+    if (route.request().method() !== "GET") return route.continue();
+    await held;
+    const res = await route.fetch();
+    const json = await res.json();
+    json.config = { ...json.config, ...RTL_PROJECT };
+    return route.fulfill({ response: res, json });
+  });
+  await page.goto(hash);
+  return { page, release };
+}
+
+/** The #451/#728 "Loading project settings…" spinner. */
+function directionSpinner(page: Page): Locator {
+  return page.getByRole("status").filter({ hasText: enUi("flowVerse.verse.directionLoading") });
+}
+
+test.describe("RTL target lanes wait for the project config (#728)", () => {
+  const DESK = { width: 1280, height: 900 };
+  const ULT_CELL = `[data-find-cell="${RTL_FIXTURE.chapter}-${RTL_FIXTURE.verse}-ULT"]`;
+
+  test("translate scripture screen: lane editors wait, then the ULT editor is rtl", async ({
+    browser,
+  }, testInfo) => {
+    const { page, release } = await openWithHeldConfig(browser, "rtl-728-tscripture", `/#/scripture/${V}`, {
+      viewport: DESK,
+    });
+    await expect(directionSpinner(page).first()).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('section[aria-label="ULT lane"]')).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath("728-tscripture-pending.png") });
+    release();
+    const editor = page
+      .locator('section[aria-label="ULT lane"] textarea:not([aria-hidden="true"])')
+      .first();
+    await expect(editor).toHaveValue(RTL_FIXTURE.arabicUlt, { timeout: 15_000 });
+    expect(await computedDirection(editor)).toBe("rtl");
+    await expect(directionSpinner(page)).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath("728-tscripture-resolved.png") });
+  });
+
+  for (const [mode, label] of [
+    ["stacked", "classic scripture pane"],
+    ["columns", "classic columns view"],
+    ["book", "classic book view"],
+  ] as const) {
+    test(`${label}: the ULT verse waits, then paints rtl`, async ({ browser }, testInfo) => {
+      const storage: Record<string, unknown> = { "be:scriptureMode": mode };
+      if (mode === "book") storage["be:enabledVersions"] = ["ULT", "UST"];
+      const { page, release } = await openWithHeldConfig(browser, `rtl-728-${mode}`, `/#/${V}`, {
+        storage,
+        viewport: DESK,
+      });
+      await expect(directionSpinner(page).first()).toBeVisible({ timeout: 15_000 });
+      await expect(page.locator(ULT_CELL)).toHaveCount(0);
+      await page.screenshot({ path: testInfo.outputPath(`728-${mode}-pending.png`) });
+      release();
+      const cell = page.locator(ULT_CELL).first();
+      await cell.waitFor({ state: "attached", timeout: 15_000 });
+      await cell.scrollIntoViewIfNeeded({ timeout: 15_000 });
+      await expectRtlSentence(sentence(cell, RTL_FIXTURE.arabicUlt), `${label} ULT verse, after config`);
+      await expect(directionSpinner(page)).toHaveCount(0);
+      await page.screenshot({ path: testInfo.outputPath(`728-${mode}-resolved.png`) });
+    });
+  }
+
+  // The stacked view scrolls the active verse into view on mount. With the
+  // body held behind the gate, that scroll must still happen once the config
+  // arrives, or a shared deep link opens at the top of the chapter.
+  test("classic scripture pane: a deep link still scrolls to its verse after the config", async ({
+    browser,
+  }, testInfo) => {
+    const far = 12;
+    const { page, release } = await openWithHeldConfig(
+      browser,
+      "rtl-728-deeplink",
+      `/#/${RTL_FIXTURE.book}/${RTL_FIXTURE.chapter}/${far}`,
+      { storage: { "be:scriptureMode": "stacked" }, viewport: DESK },
+    );
+    await expect(directionSpinner(page).first()).toBeVisible({ timeout: 15_000 });
+    release();
+    const cell = page.locator(`[data-find-cell="${RTL_FIXTURE.chapter}-${far}-ULT"]`).first();
+    await expect(cell).toBeAttached({ timeout: 15_000 });
+    await expect(cell, "active verse not scrolled into view").toBeInViewport({ timeout: 5_000 });
+    await page.screenshot({ path: testInfo.outputPath("728-deeplink-resolved.png") });
+  });
+
+  /** AlignmentPanel's word-bank strip (same scoping as the #532 case). */
+  function wordBank(page: Page): Locator {
+    return page
+      .locator("div")
+      .filter({ has: page.getByText("ULT words", { exact: true }) })
+      .filter({ has: page.getByText(ULT_WORDS[0], { exact: true }) })
+      .last();
+  }
+
+  // AlignmentPanel itself gates its word bank and cards: the classic editor's
+  // Alignment tab mounts it with no screen-level wait in front of it.
+  test("classic Alignment tab: the word bank waits, then runs right-to-left", async ({ browser }, testInfo) => {
+    const { page, release } = await openWithHeldConfig(browser, "rtl-728-classicalign", `/#/${V}`, {
+      viewport: DESK,
+    });
+    await page.getByText(enUi("shell.alignment"), { exact: true }).first().click({ timeout: 15_000 });
+    // One spinner for the scripture column, one inside the alignment panel.
+    await expect(directionSpinner(page)).toHaveCount(2, { timeout: 15_000 });
+    await expect(page.getByText("ULT words", { exact: true })).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath("728-classicalign-pending.png") });
+    release();
+    await expect(wordBank(page), "AlignmentPanel word bank not shown").toBeVisible({ timeout: 15_000 });
+    await expectRtlWordOrder(wordBank(page), "AlignmentPanel word bank, after config");
+    await expect(directionSpinner(page)).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath("728-classicalign-resolved.png") });
+  });
+
+  // The flows alignment screen already held its whole body (a skeleton) until
+  // the config arrived; this guards that, and #728's warning + Retry for the
+  // offline-with-nothing-cached case, where the skeleton never resolved.
+  test("translate alignment screen: no target words before the config, then rtl", async ({ browser }) => {
+    const { page, release } = await openWithHeldConfig(browser, "rtl-728-talign", `/#/alignment/${V}`, {
+      viewport: DESK,
+    });
+    await expect(page.getByText(/^Verse \d+ of \d+$/).first()).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText(ULT_WORDS[0], { exact: true })).toHaveCount(0);
+    release();
+    await expect(wordBank(page), "AlignmentPanel word bank not shown").toBeVisible({ timeout: 15_000 });
+    await expectRtlWordOrder(wordBank(page), "TranslateAlign word bank, after config");
+  });
+
+  test("translate alignment screen: offline with no cached config says so, Retry recovers", async ({
+    browser,
+  }, testInfo) => {
+    const { context } = await newUserContext(browser, "rtl-728-talign-offline");
+    track(context);
+    const page = await context.newPage();
+    await page.setViewportSize(DESK);
+    await blockDoor43(page);
+    let offline = true;
+    await page.route("**/api/project-config", async (route) => {
+      if (route.request().method() !== "GET") return route.continue();
+      if (offline) return route.abort("internetdisconnected");
+      const res = await route.fetch();
+      const json = await res.json();
+      json.config = { ...json.config, ...RTL_PROJECT };
+      return route.fulfill({ response: res, json });
+    });
+    await page.goto(`/#/alignment/${V}`);
+    const alert = page.getByRole("alert").filter({ hasText: enUi("flowVerse.verse.directionLoadFailed") });
+    await expect(alert).toBeVisible({ timeout: 15_000 });
+    await page.screenshot({ path: testInfo.outputPath("728-talign-offline.png") });
+    offline = false;
+    await alert.getByRole("button", { name: enUi("common.retry") }).click();
+    await expect(wordBank(page), "AlignmentPanel word bank not shown").toBeVisible({ timeout: 15_000 });
+    await expectRtlWordOrder(wordBank(page), "TranslateAlign word bank, after retry");
+    await page.screenshot({ path: testInfo.outputPath("728-talign-retried.png") });
   });
 });

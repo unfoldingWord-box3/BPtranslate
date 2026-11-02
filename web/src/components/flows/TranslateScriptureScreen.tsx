@@ -158,7 +158,8 @@ import { isHebrewBook } from "../../lib/sourceSearch";
 import { realChapters } from "../../lib/bookSummary";
 import { extractEditableText, extractPlainText, normalizeEditable } from "../../lib/usfm";
 import { buildVerseIndex } from "../../lib/verseRange";
-import { versionIsRtl, versionLabel } from "../../lib/versionLabels";
+import { versionDirection, versionIsRtl, versionLabel } from "../../lib/versionLabels";
+import { TargetDirectionGate } from "../TargetDirectionGate";
 import { drafts, verseKey } from "../../sync/drafts";
 import { useShowDraftEditors } from "../../sync/draftEditors";
 import { onOutboxResult, outbox } from "../../sync/outbox";
@@ -272,7 +273,14 @@ export default function TranslateScriptureScreen({
   const sourceIsHebrew = isHebrewBook(book);
   const sourceLane = sourceIsHebrew ? "UHB" : "UGNT";
   const sourceLabel = versionLabel(projectConfig, sourceLane);
+  // The source lane (UHB/UGNT) has a fixed direction, so versionIsRtl is
+  // exact for it. The ULT/UST lanes follow the project config, which is null
+  // until it loads with nothing cached: the lane cards wait on it rather than
+  // guessing LTR (issue #728, as #451 did for the verse view).
   const sourceRtl = versionIsRtl(projectConfig, sourceLane);
+  const ultDir = versionDirection(projectConfig, "ULT");
+  const ustDir = versionDirection(projectConfig, "UST");
+  const targetDirKnown = ultDir !== null && ustDir !== null;
 
   // The source lane anchors "which verses exist" — it is present even when a
   // target lane is omitted mid-replacement (ScriptureScreen.tsx:211-217).
@@ -668,7 +676,7 @@ export default function TranslateScriptureScreen({
     onPrev: goPrev,
     onNext: goNext,
     enabled: view !== "done" && !focusMode,
-    rtl: versionIsRtl(projectConfig, "ULT"),
+    rtl: ultDir === "rtl",
   });
 
   // ── writes ───────────────────────────────────────────────────────────────
@@ -923,7 +931,7 @@ export default function TranslateScriptureScreen({
     const base = bases[bv];
     const info = laneInfo(bv);
     const display = versionLabel(projectConfig, bv);
-    const targetRtl = versionIsRtl(projectConfig, bv);
+    const targetRtl = versionDirection(projectConfig, bv) === "rtl";
     const chip = laneChip(bv);
     const canEdit =
       canEditRole && Boolean(base) && !info.pendingReplacement && !info.textReadOnly;
@@ -1511,9 +1519,11 @@ export default function TranslateScriptureScreen({
                   </Box>
                 </Box>
 
-                {/* the two target lanes */}
-                {renderLaneCard("ULT")}
-                {renderLaneCard("UST")}
+                {/* the two target lanes, once their direction is known */}
+                <TargetDirectionGate known={targetDirKnown}>
+                  {renderLaneCard("ULT")}
+                  {renderLaneCard("UST")}
+                </TargetDirectionGate>
 
                 {/* dual-mode hand-off to the Align screen (both lanes side by
                     side); the per-lane buttons above cover single mode.

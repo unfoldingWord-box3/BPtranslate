@@ -48,7 +48,8 @@ import type { SourceWord } from "../lib/alignment";
 import { isHebrewBook } from "../lib/sourceSearch";
 import { SourceTooltipBody } from "./SourceTooltipBody";
 import { useProjectConfig } from "../hooks/useProjectConfig";
-import { versionIsRtl, versionLabel } from "../lib/versionLabels";
+import { versionDirection, versionLabel } from "../lib/versionLabels";
+import { TargetDirectionGate } from "./TargetDirectionGate";
 
 // Which row a shift-click range is anchored in. A range never spans rows.
 // "src", "ult", "ust", or an extra lane's id.
@@ -127,7 +128,10 @@ export function QuoteBuilderPopper({
   const projectConfig = useProjectConfig();
   const sourceLabel = versionLabel(projectConfig, sourceIsHebrew ? "UHB" : "UGNT");
   // ULT/UST are in the project's own language (Arabic AVD/NAV reads RTL).
-  const targetRtl = versionIsRtl(projectConfig, "ULT");
+  // Null until the project config loads with nothing cached; those two rows
+  // wait on it rather than guessing LTR (issue #728).
+  const targetDir = versionDirection(projectConfig, "ULT");
+  const targetRtl = targetDir === "rtl";
 
   // Preview of the would-be quote string. Re-runs cheaply on every toggle
   // since collectUhbWords / matchGroupsAt scan an in-memory tree.
@@ -302,6 +306,7 @@ export function QuoteBuilderPopper({
           </Section>
         ))}
 
+        <TargetDirectionGate known={targetDir !== null}>
         {/* ULT row */}
         <Section label={versionLabel(projectConfig, "ULT")} rtl={targetRtl}>
           {ultTokens.length === 0 ? (
@@ -319,6 +324,7 @@ export function QuoteBuilderPopper({
             renderTargetChips("ust", ustTokens)
           )}
         </Section>
+        </TargetDirectionGate>
       </Box>
 
       <Divider />
