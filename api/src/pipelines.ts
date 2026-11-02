@@ -2009,13 +2009,14 @@ pipelines.get("/:jobId", requireEditor, async (c) => {
   const owned = await c.env.DB.prepare(
     `SELECT job_id, upstream_job_id, user_id, pipeline_type, book, start_chapter,
             end_chapter, session_key, follow_up_options, follow_up_chain,
-            follow_up_job_id, error_kind, state, current_skill, current_status,
+            follow_up_job_id, error_kind, error_message, state, current_skill, current_status,
             created_at, updated_at, (output_json IS NULL) AS no_output_yet,
             runner, wf_status_json, apply_skipped_json
        FROM pipeline_jobs WHERE job_id = ?1`,
   )
     .bind(jobId)
     .first<PolledJob & {
+      error_message: string | null;
       state: string;
       current_skill: string | null;
       current_status: string | null;
@@ -2056,6 +2057,22 @@ pipelines.get("/:jobId", requireEditor, async (c) => {
       createdAt: new Date(owned.created_at * 1000).toISOString(),
       queuePosition: pos?.position,
       queueAhead: pos?.ahead,
+      // A job that failed before the bot gave it an id (the dispatch POST was
+      // refused, or the org key could not be used) has its reason only here,
+      // in D1. Same current shape as the import_failed rewrite in
+      // pollPipelineJob, so the web chip and the chat's bpt_job_status show it.
+      ...(owned.state === "failed"
+        ? {
+            current: {
+              chapter: owned.start_chapter,
+              skill: "",
+              status: "",
+              startedAt: "",
+              errorKind: owned.error_kind ?? "failed",
+              error: owned.error_message ?? "failed before the AI service started it",
+            },
+          }
+        : {}),
     });
   }
 
