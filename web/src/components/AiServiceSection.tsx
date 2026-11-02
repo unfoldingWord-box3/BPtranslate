@@ -18,14 +18,18 @@ import {
   MenuItem,
   Snackbar,
   Stack,
+  Switch,
+  FormControlLabel,
+  FormHelperText,
   TextField,
   Typography,
 } from "@mui/material";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import SaveIcon from "@mui/icons-material/Save";
 import { useTranslation } from "react-i18next";
-import { api, ApiError, type AiProviderSettings } from "../sync/api";
+import { api, ApiError, type AiProviderSettings, type HelpStatus } from "../sync/api";
 import { adminKeyWarningCopyKey } from "../lib/aiErrorCopy";
+import { formatUsd } from "../help/money";
 
 type KeyStatus = { available: boolean; reason: string | null };
 
@@ -63,6 +67,11 @@ export function AiServiceSection() {
   const [settings, setSettings] = useState<AiProviderSettings | null>(null);
   const [loadError, setLoadError] = useState(false);
   const save = useSaveState();
+  // Help-assistant switch (api/src/help/helpRoutes.ts). Independent of the
+  // provider row, so it loads and saves on its own.
+  const [help, setHelp] = useState<HelpStatus | null>(null);
+  const [helpSaving, setHelpSaving] = useState(false);
+  const [helpLoadError, setHelpLoadError] = useState(false);
 
   // Draft form state, seeded from `settings` once loaded.
   const [draftProvider, setDraftProvider] = useState<string>(UI_DEFAULT_PROVIDER);
@@ -127,26 +136,91 @@ export function AiServiceSection() {
     }
   };
 
+  const loadHelp = () => {
+    setHelpLoadError(false);
+    api
+      .getHelpStatus()
+      .then(setHelp)
+      .catch(() => setHelpLoadError(true));
+  };
+
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- mount-time load; the same `load` backs the Retry button, so it must clear loadError at start or a retry keeps showing the failure alert while it refetches.
     void load();
+    loadHelp();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only load; `load` is a new function every render (the Retry button calls it directly), so listing it would refetch on every render.
   }, []);
 
+  const onHelpToggle = async (enabled: boolean) => {
+    setHelpSaving(true);
+    try {
+      const res = await api.setHelpChatEnabled(enabled);
+      setHelp((h) => (h ? { ...h, enabled: res.enabled } : h));
+    } catch {
+      save.setMsg(t("preferences.saveFailed"));
+    } finally {
+      setHelpSaving(false);
+    }
+  };
+
+  // The help switch has its own endpoint, so it renders even when the
+  // provider settings below fail to load.
+  const helpSwitch = (
+    <>
+      {helpLoadError && !help && (
+        <Alert
+          severity="error"
+          action={
+            <Button size="small" onClick={loadHelp}>
+              {t("common.retry")}
+            </Button>
+          }
+        >
+          {t("preferences.aiService.helpChat.loadFailed")}
+        </Alert>
+      )}
+
+      {help && (
+        <Box>
+          <FormControlLabel
+            control={
+              <Switch
+                checked={help.enabled}
+                disabled={helpSaving}
+                onChange={(e) => void onHelpToggle(e.target.checked)}
+              />
+            }
+            label={t("preferences.aiService.helpChat.label")}
+          />
+          <FormHelperText sx={{ mx: 0 }}>
+            {t("preferences.aiService.helpChat.helper", { cap: formatUsd(help.capUsd) })}{" "}
+            {t("preferences.aiService.helpChat.needsKey")}
+          </FormHelperText>
+        </Box>
+      )}
+    </>
+  );
+
   if (settings === null) {
-    return loadError ? (
-      <Alert
-        severity="error"
-        action={
-          <Button size="small" onClick={() => void load()}>
-            {t("common.retry")}
-          </Button>
-        }
-      >
-        {t("preferences.aiService.loadFailed")}
-      </Alert>
-    ) : (
-      <CircularProgress size={22} />
+    return (
+      <Stack spacing={2}>
+        {loadError ? (
+          <Alert
+            severity="error"
+            action={
+              <Button size="small" onClick={() => void load()}>
+                {t("common.retry")}
+              </Button>
+            }
+          >
+            {t("preferences.aiService.loadFailed")}
+          </Alert>
+        ) : (
+          <CircularProgress size={22} />
+        )}
+        {helpSwitch}
+        <Snackbar open={!!save.msg} autoHideDuration={4000} onClose={save.clear} message={save.msg ?? ""} />
+      </Stack>
     );
   }
 
@@ -366,6 +440,8 @@ export function AiServiceSection() {
             {t("preferences.save")}
           </Button>
         </Box>
+
+        {helpSwitch}
       </Stack>
 
       <Dialog open={clearOpen} onClose={() => !clearing && setClearOpen(false)} maxWidth="xs" fullWidth>

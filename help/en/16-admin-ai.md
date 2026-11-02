@@ -35,3 +35,6 @@ The section **AI service** sets which AI provider runs your pipeline jobs.
 4. Press **Save**.
 
 Once saved, the key is stored encrypted and is never shown again. You see **Configured** with the last characters of the key. Press **Replace** to enter a new key, or **Clear** to remove it. If a red or yellow notice says bringing your own key is not enabled on this deployment, a technical administrator must enable it first.
+
+## Let the team ask the AI help assistant
+Under the key settings, the switch **Let team members ask the AI help assistant** turns on the **Ask AI** area in the Help panel for everyone in your organization. It is off until you turn it on. The assistant uses your organization's AI key, so it only answers once an API key is saved. Each person can use up to a daily dollar amount, shown under the switch. Turn the switch off at any time to hide **Ask AI** again.

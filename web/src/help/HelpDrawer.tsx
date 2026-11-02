@@ -30,6 +30,7 @@ import { UiLangContext } from "../i18n/UiLangContext";
 import helpIndexJson from "./helpIndex.generated.json";
 import { articleForRoute, articlesFor, type HelpIndex } from "./guideMap";
 import { searchHelp } from "./search";
+import AskAi from "./AskAi";
 
 const helpIndex = helpIndexJson as unknown as HelpIndex;
 
@@ -87,7 +88,7 @@ export default function HelpDrawer({ open, openSeq, routeKey, initialArticle, on
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: 0 });
-  }, [articleId, query]);
+  }, [articleId, query, open, openSeq]);
 
   const article = articleId ? articles.find((a) => a.id === articleId) ?? null : null;
   // A 0-1 character query is treated as empty: keep showing the article / TOC.
@@ -121,6 +122,8 @@ export default function HelpDrawer({ open, openSeq, routeKey, initialArticle, on
       return <>{children}</>;
     },
     img({ src, alt }) {
+      // Only the guide's own screenshots; AI answers must not load arbitrary URLs.
+      if (typeof src !== "string" || !src.startsWith("/help/")) return <>{alt ?? ""}</>;
       return <img src={src} alt={alt ?? ""} loading="lazy" style={{ maxWidth: "100%", height: "auto" }} />;
     },
   };
@@ -138,6 +141,7 @@ export default function HelpDrawer({ open, openSeq, routeKey, initialArticle, on
       anchor="right"
       open={open}
       onClose={onClose}
+      keepMounted
       // MUI would restore focus to the element focused at open, but the phone
       // More-menu item that opens Help has unmounted by then; App picks the target.
       disableRestoreFocus
@@ -223,6 +227,17 @@ export default function HelpDrawer({ open, openSeq, routeKey, initialArticle, on
             </List>
           )}
         </Box>
+        {/* Not keyed on openSeq: an answer survives closing the panel to try
+            its steps; "New question" clears it. */}
+        <AskAi
+          open={open}
+          articles={articles}
+          lang={lang}
+          routeKey={routeKey}
+          onOpenArticle={select}
+          components={components}
+          bodySx={bodySx}
+        />
       </Box>
     </Drawer>
   );

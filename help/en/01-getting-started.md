@@ -44,5 +44,10 @@ Select the round button. The menu shows your user name and organization, and the
 
 If your Door43 account belongs to several organizations, a **Choose your organization** window may open after sign-in. Pick one, or select **Continue** to stay where you are.
 
+## Getting help
+Select the **?** button in the top bar to open this guide. On a phone, open your account menu (the round button) and select **Help**; in the classic editor it is in the **More** menu. It opens on the page for the screen you are on. Type in **Search help** to find a topic.
+
+If your admin has turned it on, the guide also has an **Ask AI** area at the bottom. Type a question and the app first shows up to three topics that may answer it under **Did one of these answer it?**. If none does, select **Ask AI**. The answer comes from this guide, and the topics it used appear under **From the guide:**. You can ask follow-up questions, or select **New question** to start over. Each person has a daily allowance, and the area shows how much is **left today**. When the allowance is used up, it says when it resets. Searching the guide always works.
+
 ## Next
 Go to [Books](#help:books) to open a book.

@@ -468,7 +468,10 @@ async function request<T>(
   // distinct sentinel callers can detect; the outbox already treats 403 as
   // fatal so it won't loop.
   const method = (init?.method ?? "GET").toUpperCase();
-  if (readOnly && method !== "GET" && method !== "HEAD") {
+  // Exemption: POST /api/help/ask is allowed for viewers, mirroring the server
+  // allowlist in api/src/viewerGuard.ts. Nothing else gets through.
+  const viewerAllowed = method === "POST" && path === "/api/help/ask";
+  if (readOnly && method !== "GET" && method !== "HEAD" && !viewerAllowed) {
     throw new ApiError(403, "read_only");
   }
 
@@ -1171,6 +1174,35 @@ export interface AiProviderCatalog {
   providers: readonly string[];
   models: Record<string, readonly string[]>;
 }
+export interface HelpStatus {
+  enabled: boolean;
+  configured: boolean;
+  provider: string | null;
+  model: string | null;
+  capUsd: number;
+  remainingUsd: number;
+  /** False when what is left is below one question's reservation (remainingUsd is then 0). */
+  canAsk: boolean;
+  /** False when a key is saved but no longer decrypts (server wrapping key rotated). */
+  keyUsable: boolean;
+}
+export interface HelpAskBody {
+  lang: string;
+  route: string;
+  messages: { role: "user" | "assistant"; content: string }[];
+}
+export interface HelpAskResponse {
+  answer: string;
+  articleIds: string[];
+  remainingUsd: number;
+}
+/** Error body of /api/help/ask (read it from ApiError.body). */
+export interface HelpAskErrorBody {
+  code?: string;
+  resetsAt?: string;
+  remainingUsd?: number;
+}
+
 export interface AiProviderSettings {
   provider: string;
   model: string | null;
@@ -2206,6 +2238,22 @@ export const api = {
     request<AiProviderSettings>(`/api/ai-provider`, {
       method: "DELETE",
       headers: { "If-Match": String(expectedVersion) },
+    }),
+  // ── In-app help assistant (api/src/help/helpRoutes.ts) ──
+  getHelpStatus: (lang?: string) =>
+    request<HelpStatus>(`/api/help/status${lang ? `?lang=${encodeURIComponent(lang)}` : ""}`),
+  // The model call can take up to 45 s server-side.
+  askHelp: (body: HelpAskBody, signal?: AbortSignal) =>
+    request<HelpAskResponse>(`/api/help/ask`, {
+      method: "POST",
+      body: JSON.stringify(body),
+      timeoutMs: 60_000,
+      signal,
+    }),
+  setHelpChatEnabled: (enabled: boolean) =>
+    request<{ enabled: boolean }>(`/api/help/settings`, {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
     }),
   getContextExportStatus: () =>
     request<ContextExportStatus>(`/api/translation-memory/export-status`),
