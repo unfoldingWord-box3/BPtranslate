@@ -21,6 +21,7 @@ import { adminUsers } from "./adminUserRoutes";
 import { articles } from "./articles";
 import { translationMemory } from "./translationMemory";
 import { aiProvider } from "./aiProvider";
+import { helpRoutes } from "./help/helpRoutes";
 import { l10n } from "./l10n";
 import { books } from "./bookImport";
 import { populateReferencedArticles } from "./articlePopulate";
@@ -92,6 +93,9 @@ export interface Env {
   // the shared BT_API_TOKEN path is unaffected. Rotating it orphans every
   // stored key — see aiKeyCrypto.ts.
   AI_KEY_WRAPPING_KEY?: string;
+  // Daily per-user spend cap in USD for the help assistant (api/src/help).
+  // Missing or invalid falls back to "2".
+  HELP_CHAT_DAILY_CAP_USD?: string;
   // Override the bot URL (defaults to https://uw-bt-bot.fly.dev/api/tn-quick
   // when unset). Useful for staging / local bot dev.
   TN_QUICK_URL?: string;
@@ -323,6 +327,7 @@ app.route("/api/articles", articles);
 app.route("/api/templates", templates);
 app.route("/api/translation-memory", translationMemory);
 app.route("/api/ai-provider", aiProvider);
+app.route("/api/help", helpRoutes);
 app.route("/api/l10n", l10n);
 app.route("/api/chat-links", chatLinkRoutes);
 

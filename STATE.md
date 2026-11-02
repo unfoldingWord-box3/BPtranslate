@@ -146,6 +146,12 @@ Highlights that bite repeatedly:
   (`curl -c`/`-b`) seeded via `POST /api/auth/dev`, plus an `x-csrf-token` header (read from the
   `be_csrf` cookie) for any mutating request. A Bearer token silently yields *unauthenticated*
   requests, not a 401 you can spot.
+- **`POST /api/pipelines/start` translate dedup is reachable locally with no AI key.** Before dedup
+  the route refuses only `ai_provider_not_configured` (row absent or `provider='default'`); a
+  configured-but-keyless row is refused later, at dispatch. So seed local D1 with
+  `INSERT INTO ai_provider_config (id, provider, model, version, updated_at) VALUES (1, 'claude', NULL, 1, unixepoch())`
+  plus a `pipeline_jobs` row in `state='running'`, and curl the route to see
+  `already_running` / 409 / `queued`. Delete the seeded rows afterwards (found during #745).
 - **Workspace roster is DB-backed as of PR-1 of #81, with a strict fail-soft chain.** `workspaces.ts`
   reads the roster from the `workspaces` registry table on the SHARED DB (migration 0058), loaded once
   per isolate by the async `primeWorkspaces(env)` that the entry points (`index.ts` fetch/scheduled,

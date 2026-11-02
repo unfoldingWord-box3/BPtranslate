@@ -18,8 +18,12 @@ import { normalizeRowIds, normalizeTranslateRowIdsJson } from "./translateOption
 import {
   PIPELINE_COVERAGE_WHERE,
   PIPELINE_DEDUP_WHERE,
+  PIPELINE_VERSE_RANGE_JOB_WHERE,
   coverageVerseRange,
   isNarrowerTranslateScope,
+  needsRowVerseLookup,
+  rowVerseLookupSql,
+  rowVerseSpan,
 } from "./pipelineDedupSql.ts";
 
 function assert(cond, msg) {
@@ -46,8 +50,19 @@ function makeDb() {
       state TEXT,
       created_at INTEGER
     );
+    CREATE TABLE tn_rows (id TEXT, book TEXT, chapter INTEGER, verse INTEGER, deleted_at INTEGER,
+                          PRIMARY KEY (book, id));
+    CREATE TABLE tq_rows (id TEXT, book TEXT, chapter INTEGER, verse INTEGER, deleted_at INTEGER,
+                          PRIMARY KEY (book, id));
   `);
   let seq = 0;
+
+  // A tn/tq row the row-scope lookup (#745) resolves to a verse.
+  function seedRow(table, id, verse, { chapter = 5, deleted = false } = {}) {
+    db.prepare(
+      `INSERT INTO ${table} (id, book, chapter, verse, deleted_at) VALUES (?, 'MRK', ?, ?, ?)`,
+    ).run(id, chapter, verse, deleted ? 1 : null);
+  }
 
   // Mirror buildTranslateOptions' persistence: rowIds stored normalized, omitted
   // entirely for a chapter-wide job; verseStart/verseEnd only when present.
@@ -92,8 +107,7 @@ function makeDb() {
 
   // Coverage conflict — the route's PIPELINE_COVERAGE_WHERE, bound through the
   // route's own coverageVerseRange (imported, not re-typed).
-  function findCovering(translate) {
-    const verses = coverageVerseRange(translate?.verseStart, translate?.verseEnd);
+  function findCovering(translate, verses = coverageVerseRange(translate?.verseStart, translate?.verseEnd)) {
     return db
       .prepare(
         `SELECT j.job_id, j.user_id
@@ -107,20 +121,36 @@ function makeDb() {
 
   // The route's full decision: exact identity first, then — only when the route's
   // own isNarrowerTranslateScope says the incoming request is the narrower side —
-  // the coverage query.
+  // the coverage query. Then (#745), only for a row-scoped request that the route's
+  // own needsRowVerseLookup admits: the cheap "any verse-range job here?" gate,
+  // the rowId → verse lookup, and the coverage query again with the rows' span.
+  // `lookups` counts row-table reads so a test can prove the gate kept them off
+  // the common path.
+  let lookups = 0;
   function resolveConflict(translate, pipelineType = "translate") {
     const exact = findDup(translate, pipelineType);
     if (exact) return exact;
     const verses = coverageVerseRange(translate?.verseStart, translate?.verseEnd);
-    const narrower = isNarrowerTranslateScope(
-      pipelineType,
-      normalizeRowIds(translate?.rowIds),
-      verses,
-    );
-    return narrower ? findCovering(translate) : undefined;
+    const norm = normalizeRowIds(translate?.rowIds);
+    const narrower = isNarrowerTranslateScope(pipelineType, norm, verses);
+    if (!narrower) return undefined;
+    const covering = findCovering(translate);
+    if (covering) return covering;
+    const rt = pipelineType === "translate" ? (translate?.resourceType ?? "tn") : null;
+    if (!needsRowVerseLookup(pipelineType, rt, norm, verses, 5, 5)) return undefined;
+    const gate = db
+      .prepare(`SELECT 1 AS hit FROM pipeline_jobs j WHERE ${PIPELINE_VERSE_RANGE_JOB_WHERE} LIMIT 1`)
+      .get("MRK", 5, 5, rt);
+    if (!gate) return undefined;
+    const sql = rowVerseLookupSql(rt, norm.length);
+    if (!sql) return undefined;
+    lookups++;
+    const rows = db.prepare(sql).all("MRK", 5, ...norm);
+    const span = rowVerseSpan(rows, norm.length);
+    return span ? findCovering(translate, span) : undefined;
   }
 
-  return { seed, findDup, findCovering, resolveConflict };
+  return { seed, seedRow, findDup, findCovering, resolveConflict, lookupCount: () => lookups };
 }
 
 const USER = 1;
@@ -285,8 +315,9 @@ console.log("\n[#347 item 1] the reverse direction stays allowed");
 
 console.log("\n[#347 item 1] a covering verse range blocks a narrower range inside it");
 {
-  const { seed, resolveConflict } = makeDb();
+  const { seed, seedRow, resolveConflict } = makeDb();
   seed("jobV68", USER, { verseStart: 6, verseEnd: 8 });
+  seedRow("tn_rows", "rowA", 7);
 
   const inner = resolveConflict({ verseStart: 6, verseEnd: 7 });
   assert(inner && inner.job_id === "jobV68", "verses 6-7 blocked by the covering 6-8 job");
@@ -307,11 +338,12 @@ console.log("\n[#347 item 1] a covering verse range blocks a narrower range insi
     resolveConflict({ verseEnd: 7 }) === undefined,
     "end-only request is not blocked by a verse-range job (only a chapter-wide one covers it)",
   );
-  // Documented GAP: a row-scoped request inside a covering verse-range job is NOT
-  // detected — that needs a rowId → verse lookup the start route does not do.
+  // Formerly a documented GAP (#745): a row-scoped request inside a covering
+  // verse-range job is now detected through the rowId → verse lookup.
+  const rowInRange = resolveConflict({ rowIds: ["rowA"] });
   assert(
-    resolveConflict({ rowIds: ["rowA"] }) === undefined,
-    "row-scoped request inside a verse-range job is not blocked (documented gap)",
+    rowInRange && rowInRange.job_id === "jobV68",
+    "row-scoped request for a row on verse 7 is blocked by the covering 6-8 job (#745, was the gap)",
   );
   // An INVERTED request range ({verseStart: 8, verseEnd: 3} — the schema allows
   // it, there is no ordering refine) must not be satisfied by a job that covers
@@ -329,6 +361,99 @@ console.log("\n[#347 item 1] a covering verse range blocks a narrower range insi
     resolveLow({ verseStart: 8, verseEnd: 3 }) === undefined,
     "inverted range 8-3 is NOT falsely blocked by a job covering verses 1-4",
   );
+}
+
+console.log("\n[#745] a row-scoped request inside a running verse-range job is caught");
+{
+  // The issue's shape: an admin drafts verses 2-4 from chat (bpt_draft sends a
+  // verse range), then someone re-runs AI on one note from the web (rowIds).
+  const OTHER = 2;
+  const { seed, seedRow, resolveConflict, lookupCount } = makeDb();
+  seed("jobV24", USER, { verseStart: 2, verseEnd: 4 });
+  seedRow("tn_rows", "n3", 3);
+  seedRow("tn_rows", "n3b", 3);
+  seedRow("tn_rows", "n4", 4);
+  seedRow("tn_rows", "n5", 5);
+  seedRow("tn_rows", "n1", 1);
+  seedRow("tn_rows", "nIntro", 0); // a chapter-intro note (verse 0)
+  seedRow("tn_rows", "nGone", 3, { deleted: true });
+  seedRow("tq_rows", "q3", 3);
+
+  // Same user → the route answers already_running with the running job's id;
+  // a different user gets the 409 conflict for the same job. The decision is
+  // made on job identity + user_id, so both resolve to jobV24 with its owner.
+  const v3 = resolveConflict({ rowIds: ["n3"] });
+  assert(v3 && v3.job_id === "jobV24" && v3.user_id === USER, "row on verse 3 → covered by the 2-4 job (same user: already_running)");
+  const { seed: seedO, seedRow: seedRowO, resolveConflict: resolveO } = makeDb();
+  seedO("jobV24other", OTHER, { verseStart: 2, verseEnd: 4 });
+  seedRowO("tn_rows", "n3", 3);
+  const v3other = resolveO({ rowIds: ["n3"] });
+  assert(
+    v3other && v3other.job_id === "jobV24other" && v3other.user_id === OTHER,
+    "row on verse 3 → covered by another user's 2-4 job (route answers the 409 conflict)",
+  );
+
+  // Rows at both ends of the range, and several rows all inside it.
+  const v4 = resolveConflict({ rowIds: ["n4"] });
+  assert(v4 && v4.job_id === "jobV24", "row on verse 4 (range end) is covered");
+  const many = resolveConflict({ rowIds: ["n3", "n3b", "n4"] });
+  assert(many && many.job_id === "jobV24", "several rows all on verses 3-4 are covered");
+
+  // Outside the range → still starts.
+  assert(resolveConflict({ rowIds: ["n5"] }) === undefined, "row on verse 5 is not covered (starts)");
+  assert(resolveConflict({ rowIds: ["n1"] }) === undefined, "row on verse 1 is not covered (starts)");
+
+  // Partial overlap: rows on verses 3 and 5 span 3-5, which the 2-4 job does not
+  // CONTAIN. The #347 rule is containment ("8-10 overlapping but not contained are
+  // not blocked" above), so this request proceeds — same rule, applied to the span.
+  assert(
+    resolveConflict({ rowIds: ["n3", "n5"] }) === undefined,
+    "rows on verses 3 and 5 (span 3-5, partly outside 2-4) are not blocked (#347 containment rule)",
+  );
+
+  // Unknown extent → never block. A row id that isn't in this chapter, or a
+  // soft-deleted row, leaves the lookup short of the requested count.
+  assert(
+    resolveConflict({ rowIds: ["n3", "nope"] }) === undefined,
+    "a request naming an unknown row id is not blocked (extent unknown)",
+  );
+  assert(resolveConflict({ rowIds: ["nGone"] }) === undefined, "a soft-deleted row is not blocked");
+  // A chapter-intro row (verse 0) is never inside a verse range.
+  assert(resolveConflict({ rowIds: ["nIntro"] }) === undefined, "a chapter-intro row (verse 0) is not blocked");
+
+  // resourceType separates: a tq row is not covered by a tn verse-range job.
+  assert(
+    resolveConflict({ resourceType: "tq", rowIds: ["q3"] }) === undefined,
+    "a tq row on verse 3 is not blocked by a tn verse-range job",
+  );
+
+  // Exact identity still wins: the row's own in-flight job is returned, not the
+  // covering one.
+  seed("jobRow3", USER, { rowIds: ["n3"] });
+  const own = resolveConflict({ rowIds: ["n3"] });
+  assert(own && own.job_id === "jobRow3", "exact identity still wins over row-scope coverage");
+
+  // A row-scoped JOB is not a covering verse-range job, and a chapter with no
+  // verse-range job never reaches the row table (the cheap gate).
+  const { seed: seedG, seedRow: seedRowG, resolveConflict: resolveG, lookupCount: gLookups } = makeDb();
+  seedG("jobRowOther", USER, { rowIds: ["n4"] });
+  seedRowG("tn_rows", "n3", 3);
+  assert(resolveG({ rowIds: ["n3"] }) === undefined, "no verse-range job → row-scoped request starts");
+  assert(gLookups() === 0, "no verse-range job in flight → the row table is never queried (gate)");
+  assert(lookupCount() > 0, "with a verse-range job in flight the lookup does run");
+
+  // A finished verse-range job does not cover.
+  const { seed: seedD, seedRow: seedRowD, resolveConflict: resolveD } = makeDb();
+  seedD("jobV24done", USER, { verseStart: 2, verseEnd: 4 }, "translate", "done");
+  seedRowD("tn_rows", "n3", 3);
+  assert(resolveD({ rowIds: ["n3"] }) === undefined, "a 'done' verse-range job does not block a row on verse 3");
+
+  // A tq verse-range job covers a tq row the same way.
+  const { seed: seedQ, seedRow: seedRowQ, resolveConflict: resolveQ } = makeDb();
+  seedQ("jobTqV24", USER, { resourceType: "tq", verseStart: 2, verseEnd: 4 });
+  seedRowQ("tq_rows", "q3", 3);
+  const tq = resolveQ({ resourceType: "tq", rowIds: ["q3"] });
+  assert(tq && tq.job_id === "jobTqV24", "a tq row on verse 3 is covered by a tq 2-4 job");
 }
 
 console.log("\n[#347 item 1] only non-terminal jobs cover");

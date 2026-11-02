@@ -25,8 +25,12 @@ import { buildTranslateOptions, normalizeRowIds, normalizeTranslateRowIdsJson } 
 import {
   PIPELINE_COVERAGE_WHERE,
   PIPELINE_DEDUP_WHERE,
+  PIPELINE_VERSE_RANGE_JOB_WHERE,
   coverageVerseRange,
   isNarrowerTranslateScope,
+  needsRowVerseLookup,
+  rowVerseLookupSql,
+  rowVerseSpan,
 } from "./pipelineDedupSql.ts";
 import { getAiProviderConfig, resolveDispatchAi, scrubSecret, type DispatchAi } from "./aiProvider.ts";
 import { decryptApiKey } from "./aiKeyCrypto.ts";
@@ -1673,7 +1677,7 @@ pipelines.post("/start", requireEditor, async (c) => {
   // sentinel vacuously, so chapter-wide and row-scoped behavior is unchanged; a
   // verse-range vs chapter-wide/row-scoped stays distinct, consistent with #316's
   // row-scoped-vs-chapter-wide choice. Non-translate jobs bind null → clause vacuous.
-  // API-surface-only today: all web callers send rowIds or nothing.
+  // Web callers send rowIds or nothing; the chat tool bpt_draft sends verse ranges.
   const dedupVerseStart =
     parsed.data.pipelineType === "translate" ? (parsed.data.translate?.verseStart ?? 0) : null;
   const dedupVerseEnd =
@@ -1715,9 +1719,9 @@ pipelines.post("/start", requireEditor, async (c) => {
   // One-way by construction: this runs ONLY when the request itself is narrower,
   // so the reverse direction — a chapter-wide request while a row-scoped job runs
   // — is untouched and proceeds exactly as before. Non-translate pipelines never
-  // reach it. See pipelineDedupSql.ts for the covering shapes and for the
-  // deliberately-open gap (row-scoped request inside a verse-range job, which
-  // would need a rowId → verse lookup this route does not do).
+  // reach it. See pipelineDedupSql.ts for the covering shapes and the gaps it
+  // leaves open on purpose. A row-scoped request inside a verse-range job is
+  // handled just below (#745).
   const isTranslateStart = parsed.data.pipelineType === "translate";
   const coverageVerses = coverageVerseRange(
     isTranslateStart ? parsed.data.translate?.verseStart : undefined,
@@ -1746,6 +1750,48 @@ pipelines.post("/start", requireEditor, async (c) => {
         coverageVerses.end,
       )
       .first<PublicJobSummary & { user_id: number }>();
+  }
+  // #745 — a row-scoped request ("re-run AI on this note") inside a running
+  // VERSE-RANGE translate (e.g. bpt_draft on verses 2-4). The row ids carry no
+  // verse numbers, so look them up, but only after a cheap check that a
+  // verse-range job is in flight here at all; every other start skips both
+  // queries. Then the same coverage query runs with the rows' verse span.
+  if (
+    !dup &&
+    needsRowVerseLookup(
+      parsed.data.pipelineType,
+      dedupResourceType,
+      dedupNormRowIds,
+      coverageVerses,
+      startChapter,
+      endChapter,
+    )
+  ) {
+    const rowIds = dedupNormRowIds!;
+    const verseRangeJob = await c.env.DB.prepare(
+      `SELECT 1 AS hit FROM pipeline_jobs j WHERE ${PIPELINE_VERSE_RANGE_JOB_WHERE} LIMIT 1`,
+    )
+      .bind(book, startChapter, endChapter, dedupResourceType)
+      .first<{ hit: number }>();
+    const lookupSql = verseRangeJob ? rowVerseLookupSql(dedupResourceType!, rowIds.length) : null;
+    if (lookupSql) {
+      const rows = await c.env.DB.prepare(lookupSql)
+        .bind(book, startChapter, ...rowIds)
+        .all<{ verse: number }>();
+      const span = rowVerseSpan(rows.results ?? [], rowIds.length);
+      if (span) {
+        dup = await c.env.DB.prepare(
+          `SELECT ${conflictColumns}
+             FROM pipeline_jobs j
+             LEFT JOIN users u ON u.id = j.user_id
+            WHERE ${PIPELINE_COVERAGE_WHERE}
+            ORDER BY j.created_at ASC
+            LIMIT 1`,
+        )
+          .bind(book, startChapter, endChapter, dedupResourceType, span.start, span.end)
+          .first<PublicJobSummary & { user_id: number }>();
+      }
+    }
   }
   if (dup) {
     if (dup.user_id === userId) {
