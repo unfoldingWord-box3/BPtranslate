@@ -20,6 +20,7 @@ import {
   exportContextPackUnderLease,
   queueContextExport,
   runContextExportExclusive,
+  sweepContextExportQueue,
 } from "./contextExportQueue.ts";
 import { commitContextPackToMaster, getBranchTipSha } from "./contextExportDcs.ts";
 import { gitBlobSha } from "./articleExport.ts";
@@ -98,7 +99,7 @@ const dcsCfg = { baseUrl: "https://dcs.example", token: "t", owner: "org", repo:
 
 // A pausable stand-in for one Workflow engine: records creates (rejecting a
 // repeated id, as Cloudflare Workflows does) and runs instances on demand.
-function harness() {
+function harness({ token = "service-token" } = {}) {
   const sqlite = new DatabaseSync(":memory:");
   const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations");
   for (const f of readdirSync(dir).filter((f) => f.endsWith(".sql")).sort()) sqlite.exec(readFileSync(join(dir, f), "utf8"));
@@ -111,6 +112,7 @@ function harness() {
   const env = {
     DB: db,
     WORKSPACE_SLUG: "ws",
+    ...(token ? { DCS_SERVICE_TOKEN: token } : {}),
     EXPORT_WORKFLOW: {
       async create(opts) {
         if (seen.has(opts.id)) throw new Error(`instance.already_exists: ${opts.id}`);
@@ -493,4 +495,39 @@ test("exportContextPackUnderLease: dry runs bypass the lease; queued runs need a
   assert.equal(h.created[0].params.contextOnly, true);
   assert.deepEqual(calls.map((c) => c.label), ["dry", "manual"]);
   assert.ok(calls.every((c) => c.holds));
+});
+
+// ── Codex review of #737: no service token ──────────────────────────────────
+// Without DCS_SERVICE_TOKEN every context export is a dry run that bypasses the
+// lease, so nothing would ever clear a pending flag a save set, and the */5
+// sweep would start a run every five minutes forever.
+
+test("without a service token a save starts its dry run as before but leaves nothing pending, and the sweep starts nothing", async () => {
+  const h = harness({ token: null });
+  await h.save("A");
+  assert.equal(h.created.length, 1, "the save still starts its (dry) run");
+  assert.equal(h.created[0].params.contextOnly, true);
+  assert.equal(h.lock(), undefined, "no pending flag is left for a run that never takes the lease");
+  const dry = await exportContextPackUnderLease({
+    env: h.env, instanceId: h.created[0].id, queued: true, dcsAllowed: false, shrinkOverride: false,
+    render: async () => ({ status: "dry_run", failureReason: "no_service_token" }),
+  });
+  assert.equal(dry.status, "dry_run");
+  for (let i = 0; i < 3; i++) await sweepContextExportQueue(h.env);
+  assert.equal(h.created.length, 1, "the sweep starts nothing");
+
+  // A row left pending from when a token was configured is skipped too.
+  h.sqlite.prepare(`INSERT INTO context_export_lock (workspace, pending) VALUES ('ws', 1)`).run();
+  await sweepContextExportQueue(h.env);
+  assert.equal(h.created.length, 1);
+});
+
+test("with a service token the sweep starts one run for pending saves with no live run, and none otherwise", async () => {
+  const h = harness();
+  await sweepContextExportQueue(h.env);
+  assert.equal(h.created.length, 0, "nothing pending");
+  h.sqlite.prepare(`INSERT INTO context_export_lock (workspace, pending) VALUES ('ws', 1)`).run();
+  await sweepContextExportQueue(h.env);
+  assert.equal(h.created.length, 1);
+  assert.equal(h.created[0].params.queued, true);
 });

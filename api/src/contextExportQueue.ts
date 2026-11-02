@@ -99,6 +99,16 @@ export async function contextExportNeedsRun(db: Db, key: string, now = nowSecond
   return !!row;
 }
 
+// The */5 cron's sweep for one workspace (index.ts). Without a service token
+// every run is a dry run that never takes the lease or clears `pending`, so
+// there is nothing to sweep (and a run per tick would never stop).
+export async function sweepContextExportQueue(
+  env: Pick<Env, "DB" | "EXPORT_WORKFLOW" | "WORKSPACE_SLUG" | "DCS_SERVICE_TOKEN">,
+): Promise<void> {
+  if (!env.DCS_SERVICE_TOKEN) return;
+  if (await contextExportNeedsRun(env.DB, env.WORKSPACE_SLUG ?? "default")) await startQueuedContextExport(env);
+}
+
 // Holders are `<Workflow instance id>#<nonce>`, one per step attempt.
 const SAME_INSTANCE = `substr(holder, 1, length(?5) + 1) = ?5 || '#'`;
 
@@ -297,14 +307,16 @@ export async function startQueuedContextExport(env: Pick<Env, "EXPORT_WORKFLOW" 
 // Fire-and-forget context-pack sync: every successful prefs/terminology write
 // or template approval calls this so the {org}/translation-context repo tracks
 // D1 without the translator ever thinking about git. It records the save and
-// starts a run only when none is in flight (see above). The catch swallows
-// everything (D1 or binding failures) — a sync hiccup must never fail the
-// save; the nightly export is the backstop.
+// starts a run only when none is in flight (see above). Without a service
+// token the run is a dry run that never takes the lease, so the save starts it
+// directly and records nothing pending (that flag would never be cleared).
+// The catch swallows everything (D1 or binding failures) — a sync hiccup must
+// never fail the save; the nightly export is the backstop.
 export type QueueContext = { env: Env; executionCtx: { waitUntil(p: Promise<unknown>): void } };
 export function queueContextExport(c: QueueContext): void {
   const key = c.env.WORKSPACE_SLUG ?? "default";
   const p = (async () => {
-    if (await markContextExportPending(c.env.DB, key)) await startQueuedContextExport(c.env);
+    if (!c.env.DCS_SERVICE_TOKEN || (await markContextExportPending(c.env.DB, key))) await startQueuedContextExport(c.env);
   })().catch((e: unknown) => {
     console.log("context export queue skipped", key, e instanceof Error ? e.message : String(e));
   });
