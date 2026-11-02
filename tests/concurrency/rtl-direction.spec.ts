@@ -80,10 +80,6 @@ const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
 //     authoring scaffolds, never target-language content.
 //   - TopBar — UI chrome only; it sets no `dir` of its own and inherits <html dir>,
 //     which the books/admin cases below already exercise.
-//
-// Known open bugs pinned as `test.fail` (an unexpected pass means the bug was
-// fixed — drop the `.fail`):
-//   - #451 — VerseScreen target lanes render LTR while projectConfig is null.
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const AR_UI = JSON.parse(
@@ -93,6 +89,15 @@ const AR_UI = JSON.parse(
 function arUi(key: string): string {
   const v = key.split(".").reduce<unknown>((o, k) => (o as Record<string, unknown>)?.[k], AR_UI);
   if (typeof v !== "string") throw new Error(`ar.json has no string at ${key}`);
+  return v;
+}
+const EN_UI = JSON.parse(
+  readFileSync(resolve(repoRoot, "web/src/i18n/locales/en.json"), "utf8"),
+) as Record<string, Record<string, unknown>>;
+/** English UI string at a dotted key. */
+function enUi(key: string): string {
+  const v = key.split(".").reduce<unknown>((o, k) => (o as Record<string, unknown>)?.[k], EN_UI);
+  if (typeof v !== "string") throw new Error(`en.json has no string at ${key}`);
   return v;
 }
 
@@ -505,41 +510,67 @@ test.describe("RTL paint on Arabic surfaces (#486)", () => {
     await context.close();
   });
 
-  // #451 (open, needs a product decision): versionIsRtl(null, "ULT") is false,
-  // so while /api/project-config has not answered (first load, or offline with
-  // nothing cached) VerseScreen paints an Arabic target lane LTR. Hold the
-  // config request open and look at the lane in that window. Correct behavior is
-  // EITHER not drawing the lane until the direction is known (#451 option A) OR
-  // drawing it RTL — so the assertion accepts both, and only an LTR-painted
-  // Arabic lane fails. Remove `.fail` once #451 ships.
-  test.fail("#451: Arabic lane is not painted LTR while project config is unresolved", async ({
+  // #451 (option A): the target lanes' direction comes from the project
+  // config, so while /api/project-config has not answered VerseScreen shows a
+  // spinner instead of guessing LTR, and paints the Arabic lane RTL once the
+  // config arrives. Offline with nothing cached it says so, with a Retry.
+  test("#451: verse screen waits for the project config, then paints the Arabic lane rtl", async ({
     browser,
-  }) => {
+  }, testInfo) => {
     const { context } = await newUserContext(browser, "rtl-451");
     track(context);
     const page = await context.newPage();
     await page.setViewportSize({ width: 1280, height: 900 });
     await blockDoor43(page);
-    // Never answer: the screen stays in its config-null state.
-    await page.route("**/api/project-config", () => {});
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    await page.route("**/api/project-config", async (route) => {
+      if (route.request().method() !== "GET") return route.continue();
+      await held;
+      const res = await route.fetch();
+      const json = await res.json();
+      json.config = { ...json.config, ...RTL_PROJECT };
+      return route.fulfill({ response: res, json });
+    });
     await page.goto(`/#/verse/${V}`);
-    // The original-language words render regardless of config, so the screen
-    // is up once they are.
-    await expect(page.locator("[data-original-word]").first()).toBeVisible({ timeout: 15_000 });
-    // Then give the lane a fixed, generous window to draw — a single probe
-    // right here would race a lane that commits a frame later, pass, and turn
-    // this test.fail into a flaky "unexpected pass". Today the lane appears
-    // within milliseconds, so the paint check below runs (and fails: #451).
-    // Under a "wait for the config" fix (option A) it never appears and the
-    // case passes after the window.
+    const spinner = page.getByRole("status").filter({ hasText: enUi("flowVerse.verse.directionLoading") });
+    await expect(spinner).toBeVisible({ timeout: 15_000 });
     const lane = sentence(page.locator("main"), RTL_FIXTURE.arabicUlt);
-    const drawn = await lane
-      .waitFor({ state: "visible", timeout: 10_000 })
-      .then(() => true)
-      .catch(() => false);
-    if (drawn) {
-      await expectRtlPaint(lane, "#451 VerseScreen lane, config pending", { latin: RTL_FIXTURE.latin });
-    }
+    await expect(lane).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath("451-pending.png") });
+    release();
+    await expectRtlSentence(lane, "#451 VerseScreen lane, after config");
+    await expect(spinner).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath("451-resolved.png") });
+    await context.close();
+  });
+
+  test("#451: offline with no cached config, verse screen says so and recovers on Retry", async ({
+    browser,
+  }, testInfo) => {
+    const { context } = await newUserContext(browser, "rtl-451-offline");
+    track(context);
+    const page = await context.newPage();
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await blockDoor43(page);
+    let offline = true;
+    await page.route("**/api/project-config", async (route) => {
+      if (route.request().method() !== "GET") return route.continue();
+      if (offline) return route.abort("internetdisconnected");
+      const res = await route.fetch();
+      const json = await res.json();
+      json.config = { ...json.config, ...RTL_PROJECT };
+      return route.fulfill({ response: res, json });
+    });
+    await page.goto(`/#/verse/${V}`);
+    const alert = page.getByRole("alert").filter({ hasText: enUi("flowVerse.verse.directionLoadFailed") });
+    await expect(alert).toBeVisible({ timeout: 15_000 });
+    const lane = sentence(page.locator("main"), RTL_FIXTURE.arabicUlt);
+    await expect(lane).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath("451-offline.png") });
+    offline = false;
+    await alert.getByRole("button", { name: enUi("common.retry") }).click();
+    await expectRtlSentence(lane, "#451 VerseScreen lane, after retry");
     await context.close();
   });
 

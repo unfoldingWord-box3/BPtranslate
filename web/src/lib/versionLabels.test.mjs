@@ -1,5 +1,5 @@
 import assert from "node:assert";
-import { versionLabel } from "./versionLabels.ts";
+import { versionDirection, versionLabel } from "./versionLabels.ts";
 
 // Minimal config stand-ins — only the label fields matter here.
 const en = {
@@ -51,5 +51,18 @@ check(
   versionLabel({ litLabel: "GLT", simLabel: "GST" }, "UHB"),
   "UHB",
 );
+
+// Direction is tri-state (issue #451): a target lane's direction is unknown
+// until the project config arrives, so the verse screen can wait instead of
+// guessing LTR. The originals are fixed by their script and never wait.
+check("null cfg ULT → unknown", versionDirection(null, "ULT"), null);
+check("null cfg UST → unknown", versionDirection(null, "UST"), null);
+check("null cfg UHB → rtl", versionDirection(null, "UHB"), "rtl");
+check("null cfg UGNT → ltr", versionDirection(null, "UGNT"), "ltr");
+check("rtl cfg ULT → rtl", versionDirection({ direction: "rtl" }, "ULT"), "rtl");
+check("rtl cfg UST → rtl", versionDirection({ direction: "rtl" }, "UST"), "rtl");
+check("ltr cfg ULT → ltr", versionDirection({ direction: "ltr" }, "ULT"), "ltr");
+check("rtl cfg UGNT → ltr", versionDirection({ direction: "rtl" }, "UGNT"), "ltr");
+check("ltr cfg UHB → rtl", versionDirection({ direction: "ltr" }, "UHB"), "rtl");
 
 console.log(`\nversionLabels: all ${pass} assertions passed.`);
