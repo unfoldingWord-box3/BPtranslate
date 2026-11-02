@@ -2,7 +2,7 @@
 // using the org's own AI key and the light model of its configured provider.
 // The per-user daily cap is reserved BEFORE the provider call (helpBudget.ts).
 // GET /api/help/status feeds the UI's "show Ask AI?" decision; PUT
-// /api/help/settings is the admin on/off switch (off by default, migration 0076).
+// /api/help/settings is the admin on/off switch (off by default, migration 0077).
 
 import { Hono } from "hono";
 import type { Env } from "../index";
