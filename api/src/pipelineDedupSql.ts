@@ -55,14 +55,25 @@ export const PIPELINE_DEDUP_WHERE = `j.book = ?1 AND j.start_chapter = ?2 AND j.
 //       verseStart) matches NEITHER shape: its extent is unknown, so it is
 //       treated as non-covering rather than falsely blocking.
 //
-// Two GAPS, both deliberate — each UNDER-blocks (the request proceeds as it does
-// today: duplicate work, serialized upstream, last apply wins, no corruption),
-// which is the safe side to err on:
-//   1. A ROW-SCOPED request inside a covering VERSE-RANGE job is not detected.
-//      Doing so needs a rowId → verse-number lookup (a query against the tn/tq
-//      rows table) which the start route does not otherwise perform, and the
-//      decision explicitly ruled out adding an expensive lookup on the hot start
-//      path.
+// A ROW-SCOPED request carries no verse numbers of its own, so this clause alone
+// (bound with the 0 sentinel) only catches it under shape (a). Shape (b) for a
+// row-scoped request (#745) runs this same clause a second time, bound with the
+// rows' verse span — see needsRowVerseLookup / PIPELINE_VERSE_RANGE_JOB_WHERE /
+// rowVerseLookupSql / rowVerseSpan below. The rule is unchanged: the span
+// [min verse, max verse] must be CONTAINED in the job's range, so rows on
+// verses 3 and 5 against a 2-4 job proceed, exactly like the verse-range request
+// 8-10 against a 6-8 job.
+//
+// Deliberate GAPS — each UNDER-blocks (the request proceeds as it does today:
+// duplicate work, serialized upstream, last apply wins, no corruption), which is
+// the safe side to err on:
+//   1. Row-scoped coverage by a verse-range job is decided on each row's leading
+//      `verse` column, not its full ref. A note on "1:1-3" has verse 1, so a 2-4
+//      job (which will touch it on apply — see translateRunCoversTnRow) does not
+//      block it. Never over-blocks: a row's leading verse is always one of the
+//      verses it covers. Also not caught: a request naming any row id the lookup
+//      can't find in that book/chapter (unknown, soft-deleted), and a multi-
+//      chapter row-scoped request; both leave the extent unknown.
 //   2. Chapter scope is matched by EQUALITY (?2/?3), not containment, so a
 //      multi-chapter job (e.g. a book-wide MRK 1-16 run) does not cover a
 //      narrower request scoped to MRK 5. That mirrors the exact-identity clause's
@@ -130,4 +141,71 @@ export function coverageVerseRange(
 ): { start: number; end: number } {
   const start = verseStart ?? 0;
   return { start, end: Math.max(start, verseEnd ?? start) };
+}
+
+// ── Row-scoped request inside a running verse-range job (#745) ──────────────
+//
+// Three steps, run by the route only after the coverage query above missed:
+//   1. needsRowVerseLookup — pure: is this a single-chapter tn/tq request scoped
+//      by rowIds with no verse range of its own?
+//   2. PIPELINE_VERSE_RANGE_JOB_WHERE — the cheap gate: is any verse-range
+//      translate for this book/chapter/resource in flight? Almost always no, so a
+//      row-scoped start never touches the rows table unless it might matter.
+//   3. rowVerseLookupSql + rowVerseSpan — the rows' verses, then
+//      PIPELINE_COVERAGE_WHERE again with that span as ?5/?6.
+
+export function needsRowVerseLookup(
+  pipelineType: string,
+  resourceType: string | null,
+  normalizedRowIds: string[] | undefined,
+  verses: { start: number; end: number },
+  startChapter: number,
+  endChapter: number,
+): boolean {
+  return (
+    pipelineType === "translate" &&
+    (resourceType === "tn" || resourceType === "tq") &&
+    normalizedRowIds !== undefined &&
+    verses.start === 0 &&
+    verses.end === 0 &&
+    startChapter === endChapter
+  );
+}
+
+// Same book/chapter/resource/state terms as PIPELINE_COVERAGE_WHERE, narrowed to
+// verse-range jobs (no $.rowIds, a stored verseStart — the only jobs shape (b)
+// can match). Binding: ?1 book ?2 startChapter ?3 endChapter ?4 resourceType.
+export const PIPELINE_VERSE_RANGE_JOB_WHERE = `j.book = ?1 AND j.start_chapter = ?2 AND j.end_chapter = ?3
+        AND j.pipeline_type = 'translate'
+        AND COALESCE(json_extract(j.options_json, '$.resourceType'), 'tn') = ?4
+        AND json_extract(j.options_json, '$.rowIds') IS NULL
+        AND json_extract(j.options_json, '$.verseStart') IS NOT NULL
+        AND j.state IN ${PIPELINE_ACTIVE_STATES_SQL}`;
+
+// The leading verse of each requested row. The table name comes from a fixed
+// map, never from input. Binding: ?1 book ?2 chapter ?3.. the normalized row ids.
+// No chunking: the StartBody schema caps translate.rowIds at 50, so at most 52
+// bindings, under D1's 100-parameter limit. (book, id) is the primary key, so
+// each id matches at most one row. Soft-deleted rows are left out.
+export function rowVerseLookupSql(resourceType: string, count: number): string | null {
+  const table = resourceType === "tn" ? "tn_rows" : resourceType === "tq" ? "tq_rows" : null;
+  if (!table || count < 1) return null;
+  const ids = Array.from({ length: count }, (_, i) => `?${i + 3}`).join(", ");
+  return `SELECT verse FROM ${table}
+          WHERE book = ?1 AND chapter = ?2 AND deleted_at IS NULL AND id IN (${ids})`;
+}
+
+// The [min, max] leading-verse span of the looked-up rows, or undefined when the
+// extent is unknown: fewer rows came back than were requested, or a row sits on
+// verse 0 (a chapter intro, which no verse range covers). Undefined means "don't
+// block" — the request proceeds.
+export function rowVerseSpan(
+  rows: { verse: number }[],
+  expectedCount: number,
+): { start: number; end: number } | undefined {
+  if (rows.length === 0 || rows.length !== expectedCount) return undefined;
+  const verses = rows.map((r) => Number(r.verse));
+  const start = Math.min(...verses);
+  if (!Number.isInteger(start) || start < 1) return undefined;
+  return { start, end: Math.max(...verses) };
 }
