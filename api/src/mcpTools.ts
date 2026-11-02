@@ -6,7 +6,9 @@
 // through readerFrom; writes (bpt_edit_row, bpt_approve: issue #670 part a;
 // bpt_bulk_set_state: part c) go through principalFrom, so every write carries
 // a real editor, and run the same PATCH / validate routes the web app uses, as
-// that user, pinned to the version the reviewer was shown. The template tools
+// that user, pinned to the version the reviewer was shown. bpt_draft (part b)
+// starts an AI draft through the web app's POST /api/pipelines/start, for
+// admins only, and bpt_job_status reads it back. The template tools
 // (bpt_templates_for_row, bpt_edit_template, bpt_approve_template) do the same
 // for note templates; their reads go through send("GET") as the linked user,
 // because the template routes are editor-only and getJson carries no user.
@@ -51,6 +53,14 @@ export interface McpSession {
   // HMAC of a bpt_bulk_set_state confirm token body under a server secret
   // (auth.ts chatConfirmMac); null when the secret is not configured.
   confirmMac: (data: string) => Promise<string | null>;
+  // The linked user's real role in this workspace is admin (chatLinks.ts
+  // chatIsAdmin). principal.role is capped at editor; bpt_draft asks this.
+  isAdmin: () => Promise<boolean>;
+  // Per-kind counts of what a pipeline job's apply staged, applied and
+  // rejected (pipelines.ts jobResultCounts): a second read that skips the
+  // route handlers, like packageRefs. bpt_job_status calls it only after the
+  // job route answered for the caller's own job.
+  jobResults: (jobId: string) => Promise<Record<string, { proposed: number; applied: number; rejected: number }>>;
 }
 
 export type LinkClaim =
@@ -1478,8 +1488,215 @@ const bulkSetState: ToolDef = {
   },
 };
 
+// ── AI draft from chat (issue #670 part b) ──────────────────────────────────
+// Starts a translate run for some notes or questions through the same
+// POST /api/pipelines/start the web app uses, as the linked user. Admin-only
+// (Benjamin, 2026-10-30): the chat principal is capped at editor, so the
+// tool asks session.isAdmin, which reads the user's real role in this
+// workspace. No daily cap for the pilot. Starting a job writes no edit_log
+// row; the chat origin is the job's session_key (chat/link-<id>), and the
+// apply later audits as source 'ai_pipeline' like any other run.
+
+const NOT_STARTED = "Nothing was started.";
+// The bot takes verses 1 to 200 (bp-assistant StartBodySchema).
+const MAX_DRAFT_VERSE = 200;
+
+const draft: ToolDef = {
+  name: "bpt_draft",
+  description:
+    "Start an AI draft (translate run) for some translation notes (kind tn) or questions (kind tq) in one chapter: either the rows with the given ids, or the rows of a verse range. Project admins only; anyone else is refused. Not for a whole chapter (use the web app): a range or id list that covers every row of that kind in the chapter is refused. The AI draft REPLACES the current text of every selected row, approved rows included, and they then need review again; the last approved text keeps publishing to Door43 only until the row is approved again. While it runs, tn drafts make only the selected notes read-only, but tq drafts make all of the chapter's questions read-only, for everyone in the project. It costs the project's AI budget. So tell the reviewer what will be replaced and get a clear yes first. Returns job_id and status running, queued (with queue_position: one run at a time per server) or already_running (this user already started the same draft; job_id is that run); follow it with bpt_job_status. status busy means another user's run already covers these rows: nothing new was started, and only that user (or the web app) can follow their run. Refused, with nothing started, when the book or chapter has no rows of that kind in this project, when the project has no AI key of its own set up (an admin adds one in the web app), or when it is not a gateway-language project. If the AI service refuses the run, the answer names the failed job and why; nothing is running then.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      book: { type: "string", description: "3-letter book code, e.g. TIT" },
+      kind: { type: "string", enum: ["tn", "tq"] },
+      chapter: { type: "integer", minimum: 1 },
+      ids: { type: "array", items: { type: "string", maxLength: 16 }, minItems: 1, maxItems: 50, description: "Row ids to draft. Use this or verse_start, not both." },
+      verse_start: { type: "integer", minimum: 1, maximum: MAX_DRAFT_VERSE, description: "First verse to draft. Use this or ids, not both." },
+      verse_end: { type: "integer", minimum: 1, maximum: MAX_DRAFT_VERSE, description: "Last verse, inclusive; defaults to verse_start" },
+    },
+    required: ["session_token", "book", "kind", "chapter"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const session = await principalFrom(args, ctx);
+    if (!(await session.isAdmin())) {
+      throw new ToolInputError(
+        `Starting an AI draft from chat is for project admins only, and ${session.principal.username} is not one here. An admin can start it, in chat or in the web app. ${NOT_STARTED}`,
+      );
+    }
+    const book = bookArg(args);
+    if (args.kind !== "tn" && args.kind !== "tq") throw new ToolInputError('kind must be "tn" or "tq"');
+    const kind: "tn" | "tq" = args.kind;
+    const chapter = intArg(args, "chapter", { min: 1, required: true })!;
+    const vs = intArg(args, "verse_start", { min: 1 });
+    const ve = intArg(args, "verse_end", { min: 1 });
+    let ids: string[] | undefined;
+    if (args.ids !== undefined && args.ids !== null) {
+      if (
+        !Array.isArray(args.ids) || args.ids.length < 1 || args.ids.length > 50 ||
+        !args.ids.every((x) => typeof x === "string" && x.length >= 1 && x.length <= 16)
+      ) {
+        throw new ToolInputError(`ids must be a list of 1 to 50 row ids. ${NOT_STARTED}`);
+      }
+      ids = args.ids as string[];
+    }
+    if (ids && (vs !== undefined || ve !== undefined)) throw new ToolInputError(`Give ids or a verse range, not both. ${NOT_STARTED}`);
+    // A whole chapter is a web-app action: it freezes every note in it.
+    if (!ids && vs === undefined) {
+      throw new ToolInputError(`Give ids or verse_start: to draft a whole chapter, use the web app. ${NOT_STARTED}`);
+    }
+    if (ve !== undefined && vs !== undefined && ve < vs) throw new ToolInputError(`verse_end is before verse_start. ${NOT_STARTED}`);
+    for (const [key, v] of [["verse_start", vs], ["verse_end", ve]] as const) {
+      if (v !== undefined && v > MAX_DRAFT_VERSE) throw new ToolInputError(`${key} must be at most ${MAX_DRAFT_VERSE}. ${NOT_STARTED}`);
+    }
+    // Only start a paid run that has rows to write: the chapter's rows of this
+    // kind, as the web app reads them. A selection covering all of them is a
+    // whole-chapter run, which belongs in the web app.
+    const where = `${book} ${chapter}`;
+    const { status: chStatus, body: chBody } = await session.getJson(`/api/chapters/${book}/${chapter}`);
+    if (chStatus !== 200 && chStatus !== 404) throw new Error(`BPtranslate API /api/chapters/${book}/${chapter} returned ${chStatus}`);
+    const rows = chStatus === 200 ? (((chBody as Record<string, unknown>)[kind] as Record<string, unknown>[] | undefined) ?? []) : [];
+    if (!rows.length) throw new ToolInputError(`There are no ${kind} notes in ${where} in this project, so there is nothing to draft. ${NOT_STARTED}`);
+    const WHOLE = `That is the whole chapter's ${kind}; to draft a whole chapter, use the web app. ${NOT_STARTED}`;
+    if (ids) {
+      const have = new Set(rows.map((r) => String(r.id)));
+      const missing = ids.filter((id) => !have.has(id));
+      if (missing.length) throw new ToolInputError(`${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} not a ${kind} row in ${where}. ${NOT_STARTED}`);
+      if (new Set(ids).size >= have.size) throw new ToolInputError(WHOLE);
+    } else {
+      const end = ve ?? vs!;
+      const verses = rows.map((r) => Number(r.verse)).filter((v) => Number.isInteger(v) && v >= 1);
+      if (!verses.some((v) => v >= vs! && v <= end)) {
+        throw new ToolInputError(`There are no ${kind} notes in ${where}:${vs}${end !== vs ? `-${end}` : ""}, so there is nothing to draft. ${NOT_STARTED}`);
+      }
+      if (vs! <= Math.min(...verses) && end >= Math.max(...verses)) throw new ToolInputError(WHOLE);
+    }
+    const translate = ids
+      ? { resourceType: kind, rowIds: ids }
+      : { resourceType: kind, verseStart: vs, verseEnd: ve ?? vs };
+    const { status, body } = await session.send("POST", "/api/pipelines/start", {
+      pipelineType: "translate",
+      book,
+      startChapter: chapter,
+      endChapter: chapter,
+      sessionKey: `chat/link-${session.principal.linkId}`,
+      translate,
+    });
+    const b = (body ?? {}) as Record<string, unknown>;
+    const scope = { book, kind, chapter, ...(ids ? { ids } : { verse_start: vs, verse_end: ve ?? vs }) };
+    if (status === 200) {
+      const st = String(b.status);
+      return {
+        status: st,
+        job_id: b.jobId,
+        ...scope,
+        ...(b.queuePosition !== undefined ? { queue_position: b.queuePosition } : {}),
+        message:
+          st === "already_running"
+            ? "This user already started this draft; job_id is that run. Nothing new was started."
+            : st === "queued"
+              ? `The draft is queued (position ${String(b.queuePosition ?? "?")}); one run goes at a time. Check on it with bpt_job_status.`
+              : "The draft is running. Check on it with bpt_job_status.",
+      };
+    }
+    // Another user's run: no job id, since bpt_job_status shows a run only to
+    // the user who started it.
+    if (status === 409 && b.error === "conflict") {
+      const e = (b.existing ?? {}) as Record<string, unknown>;
+      const who = String(e.started_by_username ?? "Another user");
+      return {
+        status: "busy",
+        started_by: e.started_by_username ?? null,
+        state: e.state ?? null,
+        ...scope,
+        message: `${who} already has an AI run on these rows (${String(e.state ?? "")}). ${NOT_STARTED} Only ${who} can follow that run, in chat or in the web app; the web app also shows it to everyone in the project's AI queue.`,
+      };
+    }
+    // Translate answers ai_provider_not_configured with no key; the older
+    // pipeline types answer ai_needs_org_key. Same meaning for a reviewer.
+    if (status === 409 && (b.error === "ai_provider_not_configured" || b.error === "ai_needs_org_key")) {
+      throw new ToolInputError(
+        `This project has no AI key of its own set up, so AI drafts cannot run. A project admin adds one in the web app. ${NOT_STARTED}`,
+      );
+    }
+    if (status === 400 && (b.error === "not_a_gl_project" || b.error === "no_source_for_resource")) {
+      throw new ToolInputError(`${String(b.message ?? "This project cannot run AI drafts for this resource.")} ${NOT_STARTED}`);
+    }
+    if (status === 503 && b.error === "pipeline_api_disabled") {
+      throw new ToolInputError(`AI drafting is switched off on this server. ${NOT_STARTED}`);
+    }
+    // The job was created but the AI service refused it, so it failed: name
+    // it and the reason. A plain refusal, so the assistant does not retry it
+    // as an internal error.
+    if (status === 502) {
+      throw new ToolInputError(
+        `The AI service refused the draft${b.jobId ? ` (job ${String(b.jobId)})` : ""}: ${String(b.message ?? b.error ?? "no reason given")}. Nothing is running: that job failed. Tell the reviewer; an admin can look at it in the web app.`,
+      );
+    }
+    throw new ToolInputError(`BPtranslate refused the draft (${String(b.error ?? status)}${b.message ? `: ${String(b.message)}` : ""}). ${NOT_STARTED}`);
+  },
+};
+
+const NO_SUCH_JOB = "No job with that id that you started in this project.";
+
+const jobStatus: ToolDef = {
+  name: "bpt_job_status",
+  description:
+    "Check on an AI draft run this user started (job_id from bpt_draft). Returns state (queued, dispatching, running, paused_for_outage, paused_for_usage_limit, done, failed, cancelled), queue_position while queued, progress (chapter, step, status) while running, error when it failed, and results: per kind (tn, tq), how many drafts the run proposed, how many were applied and how many rejected (empty until the run's output is staged), and, once done, kept_because_changed_by_people: tn notes the run left as they were because a person changed them after the run was queued (count and ids). Only the user who started the run can see it, and only in this project. Read-only.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      job_id: { type: "string", maxLength: 120 },
+    },
+    required: ["session_token", "job_id"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const session = await readerFrom(args, ctx);
+    if (typeof args.job_id !== "string" || !args.job_id.trim() || args.job_id.length > 120) throw new ToolInputError("job_id is required");
+    const jobId = args.job_id.trim();
+    // As the linked user: the route answers only for their own job (403 for
+    // anyone else's), from this workspace's database. 403 and 404 read the
+    // same so a job id cannot be probed.
+    const { status, body } = await session.send("GET", `/api/pipelines/${encodeURIComponent(jobId)}`);
+    const b = (body ?? {}) as Record<string, unknown>;
+    if (status === 403 || status === 404) throw new ToolInputError(NO_SUCH_JOB);
+    if (status === 503) throw new ToolInputError("AI drafting is switched off on this server.");
+    if (status !== 200) throw new Error(`bpt_job_status: BPtranslate answered ${status} (${String(b.error ?? "")})`);
+    const scope = (b.scope ?? {}) as Record<string, unknown>;
+    const cur = b.current as Record<string, unknown> | undefined;
+    const state = String(b.state ?? "");
+    // job_id is ours: for a running proxy job the route passes the bot's
+    // status through, whose jobId is the bot's own id.
+    return {
+      job_id: jobId,
+      pipeline_type: b.pipelineType ?? null,
+      book: scope.book ?? null,
+      start_chapter: scope.startChapter ?? null,
+      end_chapter: scope.endChapter ?? null,
+      state,
+      ...(b.queuePosition !== undefined ? { queue_position: b.queuePosition } : {}),
+      ...(cur && state !== "failed" ? { progress: { chapter: cur.chapter ?? null, step: cur.skill ?? null, status: cur.status ?? null } } : {}),
+      ...(cur && (cur.error || cur.errorKind) ? { error: { kind: cur.errorKind ?? null, message: cur.error ?? null } } : {}),
+      results: await session.jobResults(jobId),
+      // #729: notes the apply left alone because a person changed them after
+      // the run was queued.
+      ...(b.applySkipped
+        ? (() => {
+            const k = b.applySkipped as { tnTouched?: unknown; tnTouchedIds?: unknown };
+            return { kept_because_changed_by_people: { tn: Number(k.tnTouched ?? 0), tn_ids: Array.isArray(k.tnTouchedIds) ? k.tnTouchedIds : [] } };
+          })()
+        : {}),
+      updated_at: b.updatedAt ?? null,
+    };
+  },
+};
+
 export const TOOLS: ToolDef[] = [
   whoami, linkAccount, listBooks, packageStatus, chunkWork, getRow, chunkList, editRow, approve,
-  templatesForRow, editTemplate, approveTemplate, bulkSetState,
+  templatesForRow, editTemplate, approveTemplate, bulkSetState, draft, jobStatus,
 ];
 
