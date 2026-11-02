@@ -65,6 +65,7 @@ import { UiLanguageControl } from "./TopBar";
 import { LocalizationSection } from "./LocalizationSection";
 import { TerminologySection } from "./TerminologySection";
 import { useSaveState } from "./useSaveState";
+import { HelpButton } from "../help/HelpButton";
 
 const EXPORT_STATUS_I18N_KEY: Record<string, string> = {
   running: "preferences.exportStatus.running",
@@ -189,6 +190,7 @@ export function PreferencesWorkspace({ onNavigate, onBack, section, role }: Prop
               {t("preferences.title")}
             </Typography>
             <UiLanguageControl />
+            <HelpButton />
           </Stack>
           <Typography variant="caption" color="text.secondary">
             {cfg?.languageTitle ?? cfg?.languageName ?? cfg?.languageCode}
