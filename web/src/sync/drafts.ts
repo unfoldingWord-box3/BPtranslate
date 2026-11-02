@@ -482,22 +482,23 @@ export const drafts = {
   // then would leave that text nowhere if the op is dropped or discarded (#618
   // rule). Runs on the row's settle chain; it also skips when a newer set()
   // started after the request, so typing in the outbox-read window is kept.
-  clearRowUnlessHeld(key: string): Promise<boolean> {
+  // With `current` (what the editor shows, in the form its Save sends), a draft
+  // holding a refused save's text keeps the text still pending, as
+  // clearUnlessRefused does (rowDraftOnNoDiff): NoteCard's own refused save
+  // after an AI apply moved the row on (#724).
+  clearRowUnlessHeld(key: string, current?: Record<string, unknown>): Promise<boolean> {
     const requested = latestGenerationByKey.get(key);
     return onRowChain(
       key,
       async () => {
-        let queued: OutboxOp[] | null;
-        try {
-          queued = await outbox.list();
-        } catch {
-          queued = null;
-        }
-        return clearRowIf(
-          key,
-          (rec) =>
-            latestGenerationByKey.get(key) === requested && !liveRowOpHoldsDraft(rec, key, queued),
-        );
+        let cleared = false;
+        await settleRowNow(key, (rec, queued) => {
+          if (latestGenerationByKey.get(key) !== requested || liveRowOpHoldsDraft(rec, key, queued)) return undefined;
+          const next = current && rec.refused ? rowDraftOnNoDiff(rec, current, queued) : "clear";
+          cleared = next === "clear";
+          return next;
+        });
+        return cleared;
       },
       false,
     );

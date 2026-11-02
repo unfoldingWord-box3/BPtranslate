@@ -1983,7 +1983,7 @@ export function Shell({
       kind: "tn" | "tq" | "twl",
       row: T,
       patch: Partial<T>,
-      opts?: { restoredFromVersion?: number },
+      opts?: { restoredFromVersion?: number; draftRef?: { chapter: number; verse: number } },
     ) => {
       // Optimistic local apply mirrors what the server will do: any non-revert
       // patch clears the restored_from_version marker so the chip immediately
@@ -2007,7 +2007,8 @@ export function Shell({
       // Not for tN: NoteCard keeps its own draft until the save confirms, and
       // its no-diff clear (clearRowUnlessHeld) would drop a written-back draft
       // from a save it never held (find/replace, quote builder), leaving a
-      // brief phantom "unsaved" (#647 review A8).
+      // brief phantom "unsaved" (#647 review A8). NoteCard's own saves pass
+      // one in `opts` (#724), so their refused text outlives an AI apply.
       void outbox.enqueueRow(kind, row.id, row.version, patch as Record<string, unknown>, {
         ...opts,
         book: row.book,
