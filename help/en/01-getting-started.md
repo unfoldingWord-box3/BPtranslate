@@ -34,6 +34,7 @@ If a newer version of the app is available, a button **App update available — 
 ## Your account menu
 Select the round button. The menu shows your user name and organization, and these items:
 
+- **Start an AI run** (**Import from Door43** in a source project): on a phone only, and only for editors and admins, on a book's package and on the Scripture, Notes and Questions screens. It is first in the menu. On a wider screen it is an icon in the top bar instead. See [Translating scripture](#help:scripture).
 - **Organization**: switch organization. It appears only if you belong to more than one. Switching reloads the app, and it is blocked while unsaved edits are still syncing.
 - **Switch to dark mode**.
 - **Interface language**: choose the language of menus and buttons. Arabic, Persian and Urdu switch the screen to right-to-left. This does not change the text you translate.

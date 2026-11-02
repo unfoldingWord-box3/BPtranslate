@@ -3,7 +3,7 @@ id: scripture
 title: Translating scripture
 routes: [translateScripture]
 roles: [editor, admin]
-keywords: [scripture, verse, ult, ust, literal, simplified, draft, approve, bible text, edit verse, translate verse]
+keywords: [scripture, verse, ult, ust, literal, simplified, draft, approve, bible text, edit verse, translate verse, ai, ai run, import, door43]
 screenshots:
   - scripture-1 #/scripture/OBA/1/1
   - scripture-phone #/scripture/OBA/1/1 phone
@@ -39,6 +39,14 @@ After the last verse, you see **OBA 1 scripture complete** with the number of ve
 Alignment connects your words to the original words. Editing a verse keeps the alignment of the words you did not touch. If a save would remove the alignment of words you did not change, a window **This save would unalign words it didn't touch** lists them. Choose **Cancel** to go back, or **Save anyway**. Your typing is kept either way. Fix the unaligned words afterwards.
 
 On a wide screen, each box has an **Align** button. **Align both** opens both texts side by side. Both open the [Alignment](#help:alignment) screen.
+
+## Start an AI run
+Editors and admins have one more icon in the top bar:
+- In a translation project it is a sparkle icon, **Start an AI run**. Its menu has **Translate chapter** (the chapter's translation notes), **Translate questions** and **Import from Door43**. Admins also see **Pull Aquifer drafts** and **Re-source notes from English**. After you choose a run, a confirm window opens: type a chapter or a range under **Chapter or range** and press **Start**.
+- In a source project, one that does not translate from another language (such as unfoldingWord's English), it is a download icon, **Import from Door43**. It opens the import straight away, with no menu.
+- On a phone the icon is not in the top bar. It is the first item in your account menu, with the same name.
+
+A run locks its chapter for editing until it finishes. Admins follow the runs in [AI studio](#help:admin-ai).
 
 ## Good to know
 - If you only have view access, you see a notice and the boxes are read-only.

@@ -3,7 +3,7 @@ id: questions
 title: Translating questions
 routes: [questions]
 roles: [editor, admin]
-keywords: [questions, tq, translation questions, answer, expected answer, translate question, approve, save, draft, queue]
+keywords: [questions, tq, translation questions, answer, expected answer, translate question, approve, save, draft, queue, ai, ai run, import, door43]
 screenshots:
   - questions-1 #/questions/OBA/1/1
 ---
@@ -36,6 +36,14 @@ If the English source for a question is not available, the screen says so. This 
 
 ## When you finish a chapter
 You see **OBA 1 questions reviewed**, with a count of questions **Approved as-is**, **Edited** and the **Total**. Select **Continue to chapter 2** or **Review again**.
+
+## Start an AI run
+Editors and admins have one more icon in the top bar:
+- In a translation project it is a sparkle icon, **Start an AI run**. Its menu has **Translate chapter** (the chapter's translation notes), **Translate questions** and **Import from Door43**. Admins also see **Pull Aquifer drafts** and **Re-source notes from English**. After you choose a run, a confirm window opens: type a chapter or a range under **Chapter or range** and press **Start**.
+- In a source project, one that does not translate from another language (such as unfoldingWord's English), it is a download icon, **Import from Door43**. It opens the import straight away, with no menu.
+- On a phone the icon is not in the top bar. It is the first item in your account menu, with the same name.
+
+A run locks its chapter for editing until it finishes. Admins follow the runs in [AI studio](#help:admin-ai).
 
 ## Good to know
 - Your typing is kept in your browser until you select **Save**. The top bar shows **N unsaved**. See [Saving and working offline](#help:save-and-sync).
