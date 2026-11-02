@@ -303,6 +303,18 @@ function signingKey(env: Env): Uint8Array | null {
   return new TextEncoder().encode(env.JWT_SIGNING_KEY);
 }
 
+// HMAC-SHA256 (base64url) of a chat confirm token's body (mcpTools.ts
+// bpt_bulk_set_state), under the JWT signing key. The fixed prefix keeps
+// these MACs apart from JWT signatures made with the same key. null when the
+// key is not configured: the tool then refuses rather than sign with nothing.
+export async function chatConfirmMac(env: Env, data: string): Promise<string | null> {
+  const key = signingKey(env);
+  if (!key) return null;
+  const k = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const mac = await crypto.subtle.sign("HMAC", k, new TextEncoder().encode(`bpt_bulk_set_state:v1\n${data}`));
+  return btoa(String.fromCharCode(...new Uint8Array(mac))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
 export async function verifyToken(token: string, env: Env): Promise<AuthClaims | null> {
   const key = signingKey(env);
   if (!key) return null;
