@@ -539,6 +539,12 @@ export interface ApplyResult {
   // left unaccepted for a later pass / manual review, not silently clobbered.
   // See applyTqUpsert.
   tqSkippedConflict: number;
+  // Translate apply only (#601, option B): notes a person edited, approved,
+  // marked Not needed or restored after this job was queued. Their AI draft is
+  // not applied (the proposal stays unresolved) and the job's starter gets a
+  // banner alert listing them. See humanTouchedTnIds.
+  tnSkippedTouched: number;
+  tnSkippedTouchedIds: string[];
   // tw/ta article files updated in place by the translate apply (by path).
   articleUpdated: number;
   verseUpdated: number;
@@ -571,12 +577,14 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
   // was triggered on their behalf.
   const starter = await env.DB.prepare(
     `SELECT user_id, source_generation, source_owner, source_repo, source_ref,
-            source_stamps_json, pipeline_type
+            source_stamps_json, pipeline_type, created_at, edit_log_watermark
        FROM pipeline_jobs WHERE job_id = ?1`,
   )
     .bind(job.jobId)
     .first<{
       user_id: number;
+      created_at: number;
+      edit_log_watermark: number | null;
       source_generation: number | null;
       source_owner: string | null;
       source_repo: string | null;
@@ -621,6 +629,8 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
     tqCreated: 0,
     tqUpdated: 0,
     tqSkippedConflict: 0,
+    tnSkippedTouched: 0,
+    tnSkippedTouchedIds: [],
     articleUpdated: 0,
     verseUpdated: 0,
     affectedChapters: [],
@@ -638,7 +648,36 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
   // path) against article_units. Returns early so a translate job can never
   // trip deleteUnkeptTns.
   if (job.pipelineType === "translate") {
+    // Option B on #601: a note a person changed after this job was queued
+    // keeps their work. One query for the whole job (not one per row), so a
+    // whole-chapter apply stays inside the subrequest budget.
+    const proposalIds = new Map<PendingImportRow, string>();
     for (const p of tnProposals) {
+      const id = (JSON.parse(p.payload_json) as { id?: unknown }).id;
+      if (typeof id === "string") proposalIds.set(p, id);
+    }
+    const requested = tnProposals.length > 0 ? (await translateSelection(env, job.jobId))?.rowIds : null;
+    const touched = await humanTouchedTnIds(
+      env,
+      job.book,
+      { watermark: starter.edit_log_watermark, queuedAt: starter.created_at },
+      [...new Set(proposalIds.values())],
+      new Set(requested ?? []),
+    );
+    const skippedRefs: string[] = [];
+    let firstSkippedChapter: number | null = null;
+    for (const p of tnProposals) {
+      const proposedId = proposalIds.get(p);
+      if (proposedId !== undefined && touched.has(proposedId)) {
+        // Left unresolved, like a no_match: nothing accepts it later, and the
+        // one-retry import path skips it the same way.
+        result.tnSkippedTouched += 1;
+        result.tnSkippedTouchedIds.push(proposedId);
+        // Book intro is chapter 0; a chapter intro is verse 0 of its chapter.
+        skippedRefs.push(p.chapter === 0 ? "intro" : p.verse === 0 ? `${p.chapter}:intro` : `${p.chapter}:${p.verse}`);
+        firstSkippedChapter ??= p.chapter;
+        continue;
+      }
       const outcome = await applyTranslateTnRow(env, p, job, userId);
       if (outcome === "drafted") {
         affected.add(p.chapter);
@@ -667,6 +706,20 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
     // article_units row, or a concurrent human edit won the CAS).
     if (articleProposals.length > 0 && result.articleUpdated === 0) {
       await recordArticleNoApplyAlert(env, job, userId, articleProposals.length);
+    }
+    if (firstSkippedChapter !== null) {
+      await recordTnSkippedTouchedAlert(env, job, userId, skippedRefs, firstSkippedChapter);
+    }
+    // The job result the status and list APIs read (#601): output_json is the
+    // bot's own output, so the apply's skip report has its own column. Written
+    // on every tn translate apply, so a retry replaces it rather than adding.
+    if (tnProposals.length > 0) {
+      await env.DB.prepare(`UPDATE pipeline_jobs SET apply_skipped_json = ?2 WHERE job_id = ?1`)
+        .bind(
+          job.jobId,
+          result.tnSkippedTouched > 0 ? JSON.stringify(applySkippedOf(result)) : null,
+        )
+        .run();
     }
     result.affectedChapters = [...affected].sort((a, b) => a - b);
     return result;
@@ -1308,6 +1361,119 @@ async function recordArticleNoApplyAlert(
       .run();
   } catch (e) {
     console.error("article no-apply alert failed", { error: e instanceof Error ? e.message : String(e) });
+  }
+}
+
+// edit_log entries that count as a person changing a note (#601, option B):
+// a content edit (PATCH, history restore included), Approve, Not needed and
+// Restore. Keep and hint toggles are left out (the translate apply never writes
+// those bits, so they survive it, #602), and so is un-approve (the apply resets
+// the note to ai_draft anyway, #602). Sources: the web app (NULL), the chat
+// (`chat`) and the admin approve sweep (`admin_bulk_state`); machine writers
+// (ai_pipeline, hint_expansion, dcs_reimport, aquifer, nightly_finalize) are
+// not a person. Same action+source reading of edit_log as deleteUnkeptTns and
+// reimportClassify.ts.
+const HUMAN_TOUCH_ACTIONS = ["update", "validate", "trash", "untrash"] as const;
+const HUMAN_TOUCH_SOURCES = ["chat", "admin_bulk_state"] as const;
+
+// Ids among `ids` (this job's proposals) that a person touched after the job
+// was queued. Exact when the job carries an edit_log watermark (migration
+// 0076): a human edit_log row with id above it was written after the enqueue,
+// whatever second either landed in, for every row the job writes.
+// Jobs queued before that column (watermark NULL) fall back to seconds,
+// comparing edit_log.created_at with pipeline_jobs.created_at, where a touch in
+// the enqueue second itself is ambiguous: for a row the job was asked to
+// (re)draft by id (`requested`, a Redo) it is most likely the save made just
+// before asking, so only a later second counts; for any other row it counts,
+// the side that loses no work.
+// Bounded by `row_key IN (...)` (chunked under D1's bind limit) so a chapter
+// job reads only its own rows' history, not the book's. The window between
+// this read and the apply's write is covered by the #561/#602 route locks (the
+// job is 'running' while it applies), and a content edit is also caught by the
+// version CAS in applyTranslateTnRow.
+const TOUCH_ID_CHUNK = 80;
+async function humanTouchedTnIds(
+  env: Env,
+  book: string,
+  queued: { watermark: number | null; queuedAt: number },
+  ids: string[],
+  requested: Set<string>,
+): Promise<Set<string>> {
+  const out = new Set<string>();
+  const exact = queued.watermark !== null;
+  const fixed = 2 + HUMAN_TOUCH_ACTIONS.length + HUMAN_TOUCH_SOURCES.length;
+  const actions = HUMAN_TOUCH_ACTIONS.map((_, i) => `?${i + 3}`).join(", ");
+  const sources = HUMAN_TOUCH_SOURCES.map((_, i) => `?${i + 3 + HUMAN_TOUCH_ACTIONS.length}`).join(", ");
+  for (let i = 0; i < ids.length; i += TOUCH_ID_CHUNK) {
+    const chunk = ids.slice(i, i + TOUCH_ID_CHUNK);
+    const idPlaces = chunk.map((_, j) => `?${j + fixed + 1}`).join(", ");
+    const rs = await env.DB.prepare(
+      `SELECT row_key, MAX(created_at) AS last_touch FROM edit_log
+        WHERE kind = 'tn' AND book = ?1 AND ${exact ? "id > ?2" : "created_at >= ?2"}
+          AND action IN (${actions})
+          AND (source IS NULL OR source IN (${sources}))
+          AND row_key IN (${idPlaces})
+        GROUP BY row_key`,
+    )
+      .bind(book, exact ? queued.watermark : queued.queuedAt, ...HUMAN_TOUCH_ACTIONS, ...HUMAN_TOUCH_SOURCES, ...chunk)
+      .all<{ row_key: string; last_touch: number }>();
+    for (const r of rs.results ?? []) {
+      if (exact || r.last_touch > queued.queuedAt || !requested.has(r.row_key)) out.add(r.row_key);
+    }
+  }
+  return out;
+}
+
+/** pipeline_jobs.apply_skipped_json: what a translate apply left alone (#601). */
+export interface ApplySkipped {
+  tnTouched: number;
+  tnTouchedIds: string[];
+}
+function applySkippedOf(r: ApplyResult): ApplySkipped {
+  return { tnTouched: r.tnSkippedTouched, tnTouchedIds: r.tnSkippedTouchedIds };
+}
+
+// Banner alert for the job's starter listing the notes the translate apply left
+// alone because a person changed them after the job was queued (#601). Same
+// shape as recordArticleNoApplyAlert: server-side English text, one alert per
+// job (replaced on a retry), best-effort.
+const SKIPPED_REFS_SHOWN = 10;
+async function recordTnSkippedTouchedAlert(
+  env: Env,
+  job: ImportContext,
+  userId: number,
+  refs: string[],
+  chapter: number,
+): Promise<void> {
+  try {
+    const u = await env.DB.prepare(`SELECT dcs_username FROM users WHERE id = ?1`)
+      .bind(userId)
+      .first<{ dcs_username: string }>();
+    const username = u?.dcs_username;
+    if (!username) return;
+    const source = `translate_tn_skipped_touched:${job.jobId}`;
+    const shown = refs.slice(0, SKIPPED_REFS_SHOWN).join(", ");
+    const more = refs.length > SKIPPED_REFS_SHOWN ? ` and ${refs.length - SKIPPED_REFS_SHOWN} more` : "";
+    const one = refs.length === 1;
+    const message =
+      `AI translation of ${job.book}: ${one ? "1 note was" : `${refs.length} notes were`} left as people changed ` +
+      `${one ? "it" : "them"} (${job.book} ${shown}${more}). Someone edited, approved, marked Not needed or ` +
+      `restored ${one ? "it" : "them"} while the job waited in the queue, so the AI ${one ? "draft was" : "drafts were"} ` +
+      `not applied. Run the AI on a note again if you want a draft for it.`;
+    await env.DB.prepare(
+      `DELETE FROM system_alerts WHERE username = ?1 AND source = ?2 AND dismissed_at IS NULL`,
+    )
+      .bind(username, source)
+      .run();
+    await env.DB.prepare(
+      `INSERT INTO system_alerts (username, severity, source, message, link_url)
+       VALUES (?1, 'info', ?2, ?3, ?4)`,
+    )
+      // The book intro (chapter 0) is shown on chapter 1.
+      .bind(username, source, message, `#/${job.book}/${Math.max(1, chapter)}`)
+      .run();
+  } catch (e) {
+    console.error("tn skipped-touched alert failed", { error: e instanceof Error ? e.message : String(e) });
   }
 }
 

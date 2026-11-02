@@ -12,7 +12,7 @@ import { lexicon } from "./lexicon";
 import { align } from "./align";
 import { exports as exportsRoutes } from "./exports";
 import { tnQuick } from "./tnQuick";
-import { pipelines, pollAllNonTerminal } from "./pipelines";
+import { jobResultCounts, pipelines, pollAllNonTerminal } from "./pipelines";
 import { pendingImports } from "./pendingImports";
 import { alerts } from "./alerts";
 import { projectConfig } from "./projectConfigRoutes";
@@ -30,10 +30,11 @@ import { attachAuth, chatConfirmMac, chatWriteEnv, requireAuth, requireCsrf, min
 import { workspaceRoutes } from "./workspaceRoutes";
 import { handleMcp, isMcpPath } from "./mcp";
 import { chatLinkRoutes } from "./chatLinkRoutes";
-import { chatRoleFor, claimCode, lookupLink, revokeLink, type ChatLink } from "./chatLinks";
+import { chatIsAdmin, chatRoleFor, claimCode, lookupLink, revokeLink, type ChatLink } from "./chatLinks";
 import { readPackageRefs } from "./packageRefs";
 import { readSourceNotes } from "./sourceNotes";
 import { blockViewerWrites } from "./viewerGuard";
+import { sweepContextExportQueue } from "./contextExportQueue";
 import { listWorkspaces, resolveWorkspaceFresh, workspaceEnv, parseWorkspaceCookie, requireWorkspaceMatch, primeWorkspaces } from "./workspaces";
 
 export interface Env {
@@ -475,6 +476,16 @@ async function runScheduledTick(controller: ScheduledController, env: Env, _ctx:
       } catch (e) {
         console.error("cron syncTemplates failed", e instanceof Error ? e.message : String(e));
       }
+      // Context export queue sweep (#716, #722): saves left pending with no
+      // live run (the run's retries ran out, its follow-up could not be
+      // created, or it died and its lease ran out) get a run here instead of
+      // waiting for the next save. Skipped without a service token (every
+      // run is a dry run then). Isolated like the blocks above.
+      try {
+        await sweepContextExportQueue(env);
+      } catch (e) {
+        console.error("cron context export sweep failed", e instanceof Error ? e.message : String(e));
+      }
       // Stale-lock sweep for book_import_locks. Imports take 5-60s in
       // practice; anything past 10 minutes is a Worker that died mid-import
       // (OOM, isolate eviction) and left the row behind. The next POST for
@@ -565,6 +576,9 @@ export default {
           packageRefs: (book: string) => readPackageRefs(wsEnv, book),
           sourceNotes: (book: string, chapter: number) => readSourceNotes(wsEnv, book, chapter),
           confirmMac: (data: string) => chatConfirmMac(env, data),
+          isAdmin: () => chatIsAdmin(wsEnv, link.username),
+          // Read-only D1 exception to the route-handler rule; see McpSession.
+          jobResults: (jobId: string) => jobResultCounts(wsEnv, jobId),
         };
       };
       return handleMcp(request, {

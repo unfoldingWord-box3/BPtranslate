@@ -1291,7 +1291,7 @@ export function Shell({
     let firstFailure: { row: TnRow; status: number | null } | null = null;
     for (const row of list) {
       try {
-        const updated = await api.validateNote(row.id, book, true);
+        const updated = await api.validateNote(row.id, book, true, { bulk: true });
         applyLocalRowReplacement("tn", updated);
         approved += 1;
       } catch (e) {
@@ -1329,7 +1329,7 @@ export function Shell({
     let firstFailure: { row: TqRow; status: number | null } | null = null;
     for (const row of list) {
       try {
-        const updated = await api.validateQuestion(row.id, book, true);
+        const updated = await api.validateQuestion(row.id, book, true, { bulk: true });
         applyLocalRowReplacement("tq", updated);
         approved += 1;
       } catch (e) {

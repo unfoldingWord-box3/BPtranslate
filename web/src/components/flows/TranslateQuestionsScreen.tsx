@@ -113,6 +113,7 @@ import {
 import { realChapters } from "../../lib/bookSummary";
 import { resolveFlowChipStatus, flowChipKind, type FlowChipStatus } from "../../lib/flowStatusChip";
 import { drafts, rowKey } from "../../sync/drafts";
+import { useShowDraftEditors } from "../../sync/draftEditors";
 import {
   isEditorsPendingSave,
   pendingRevertSave,
@@ -556,6 +557,9 @@ export default function TranslateQuestionsScreen({
   const total = queueIds?.length ?? 0;
   const currentId = queueIds && cursor < queueIds.length ? queueIds[cursor] : null;
   const row = currentId ? (rowById.get(currentId) ?? null) : null;
+  // The selected question's editor is on screen; a draft on any other
+  // question (e.g. after Next) gets the unsaved-drafts reminder (#372).
+  useShowDraftEditors(row ? [rowKey("tq", book, row.id)] : []);
   const statusedCount = queueIds ? queueIds.filter((id) => statuses[id]).length : 0;
 
   // Re-seek the cursor when `verse`/`rowId` change while the queue is already

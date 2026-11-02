@@ -169,6 +169,7 @@ import { flowLaneSegmentsAcross, type FlowSegment } from "../../lib/flowHighligh
 import { isHebrewBook } from "../../lib/sourceSearch";
 import { realChapters } from "../../lib/bookSummary";
 import { drafts, rowKey } from "../../sync/drafts";
+import { useShowDraftEditors } from "../../sync/draftEditors";
 import {
   isEditorsPendingSave,
   pendingRevertSave,
@@ -180,6 +181,7 @@ import {
 import { onOutboxDrop, onOutboxResult, outbox, type OutboxOp } from "../../sync/outbox";
 import { pipelineStore, getSessionKey, type PipelineJob } from "../../sync/pipelineStore";
 import { jobLocksChapterNotes, jobLocksNote, lockJobReleased } from "../../lib/chapterLock";
+import { redoOutcome } from "../../lib/applySkipped";
 import {
   api,
   ApiError,
@@ -488,6 +490,9 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
   const total = queueIds?.length ?? 0;
   const currentId = queueIds && cursor < queueIds.length ? queueIds[cursor] : null;
   const row = currentId ? (rowById.get(currentId) ?? null) : null;
+  // The selected note's editor is on screen; a draft on any other note (e.g.
+  // after Next) gets the unsaved-drafts reminder (#372).
+  useShowDraftEditors(row ? [rowKey("tn", book, row.id)] : []);
   const statusedCount = queueIds ? queueIds.filter((id) => statuses[id]).length : 0;
 
   // Re-seek the cursor when `verse` changes while the queue is already built
@@ -1500,7 +1505,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
   // onComplete, a post-start already-terminal check, and the stuck-spinner timeout.
   const settleIntroRedo = useCallback(
     (
-      job: { job_id: string; state: string; error_message?: string | null },
+      job: { job_id: string; state: string; error_message?: string | null; apply_skipped_json?: string | null },
       opts?: { timedOut?: boolean },
     ) => {
       const pending = pendingIntroRedoRef.current;
@@ -1515,7 +1520,12 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
         say(t("flowTranslate.redoTimedOut"), "warning");
         return;
       }
-      if (job.state === "done") {
+      const outcome = redoOutcome(job, pending.rowId);
+      if (outcome === "kept") {
+        // The job finished but left this note alone: someone changed it after
+        // the job was queued (#601). Nothing new landed, so the draft stays.
+        say(t("flowTranslate.redoKeptYourEdit"), "info");
+      } else if (outcome === "drafted") {
         void drafts.clear(rowKey("tn", book, pending.rowId));
         void refetch().then(() => setReloadNonce((n) => n + 1));
         setToast(t("flowTranslate.toastNewDraft"));

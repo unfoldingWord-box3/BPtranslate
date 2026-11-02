@@ -789,8 +789,8 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
       try {
         const updated =
           kind === "tn"
-            ? await api.validateNote(row.id, book, true)
-            : await api.validateQuestion(row.id, book, true);
+            ? await api.validateNote(row.id, book, true, { bulk: true })
+            : await api.validateQuestion(row.id, book, true, { bulk: true });
         applyLocalRowReplacement(kind, updated);
         approved += 1;
       } catch (err) {
