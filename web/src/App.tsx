@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Alert, Box, Button, Chip, CircularProgress, IconButton, Link, Snackbar, Stack, Tooltip, Typography } from "@mui/material";
 import RefreshIcon from "@mui/icons-material/Refresh";
@@ -6,6 +6,7 @@ import { Shell } from "./components/Shell";
 import { ArticleWorkspace } from "./components/ArticleWorkspace";
 import { TopBar } from "./components/TopBar";
 import { FlowHeaderSlotContext } from "./components/flows/FlowHeader";
+import { FlowAccountAiRunContext, type OpenAiRun } from "./components/flows/FlowAiRunAction";
 import { SyncStatusBar } from "./components/SyncStatusBar";
 import { PipelineStatusBar } from "./components/PipelineStatusBar";
 import { AccountMenu } from "./components/AccountMenu";
@@ -489,6 +490,10 @@ export function App() {
   // The global flow bar's inline-start slot; screens portal their title row
   // into it through <FlowHeader> (#299).
   const [headerSlot, setHeaderSlot] = useState<HTMLElement | null>(null);
+  // On a phone, the flow screen's "Start an AI run" lives in the account menu;
+  // the screen registers it here (FlowAiRunAction, #481).
+  const [aiRunOpen, setAiRunOpen] = useState<OpenAiRun | null>(null);
+  const registerAiRun = useCallback((open: OpenAiRun | null) => setAiRunOpen(() => open), []);
   const isPhone = useLayoutBand().band === "phone";
 
   // Live in-session position for the Books screen's Continue card. `auth.me`
@@ -873,6 +878,7 @@ export function App() {
           // One row, not two (#299): the screen's own title row portals into the
           // inline-start slot through <FlowHeader>, beside these controls.
           <FlowHeaderSlotContext.Provider value={headerSlot}>
+          <FlowAccountAiRunContext.Provider value={registerAiRun}>
           <Stack sx={{ height: "100%", minHeight: 0 }}>
             <Stack
               direction="row"
@@ -959,6 +965,7 @@ export function App() {
                 username={auth.kind === "ready" ? auth.me?.username ?? null : null}
                 onLogout={handleSignOut}
                 isAdmin={auth.kind === "ready" && auth.role === "admin"}
+                onStartAiRun={aiRunOpen ?? undefined}
                 onOpenClassic={async () => {
                   // Candidates in order: the book on screen (its chapter and
                   // verse when known; classic has no chapter 0, so intros open
@@ -1076,6 +1083,7 @@ export function App() {
           </Suspense>
             </Box>
           </Stack>
+          </FlowAccountAiRunContext.Provider>
           </FlowHeaderSlotContext.Provider>
         ) : (
           <Shell

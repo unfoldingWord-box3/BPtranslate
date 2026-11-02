@@ -1216,7 +1216,7 @@ export default function TranslateScriptureScreen({
                   ? t("flowScripture.ofTotal", { n: total, total })
                   : t("flowScripture.verseOfTotal", { n: Math.min(cursor + 1, total), total })}
               </Typography>
-              {/* AI run for this chapter (#481): top bar on tablet+, "more"
+              {/* AI run for this chapter (#481): top bar on tablet+, account
                   menu on phone; nothing for viewers. */}
               <FlowAiRunAction
                 book={book}

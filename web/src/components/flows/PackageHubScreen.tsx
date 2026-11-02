@@ -712,7 +712,7 @@ export default function PackageHubScreen({ book, role, lastPosition }: PackageHu
                 {t("flowVerse.hub.chapterCount", { count: totals.chapters })}
               </Typography>
             )}
-            {/* AI run (#481): top bar on tablet+, "more" menu on phone;
+            {/* AI run (#481): top bar on tablet+, account menu on phone;
                 nothing for viewers. */}
             <FlowAiRunAction
               book={book}

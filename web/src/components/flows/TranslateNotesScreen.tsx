@@ -94,6 +94,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { FlowHeader, PHONE_COUNT_SX, PHONE_TITLE_SX } from "./FlowHeader";
+import { FlowAiRunAction } from "./FlowAiRunAction";
 import {
   Alert,
   Box,
@@ -295,7 +296,7 @@ function Lane({ label, text, segments, labelFontFamily, mark }: LaneProps) {
   );
 }
 
-export default function TranslateNotesScreen({ book, chapter, verse, rowId }: TranslateNotesScreenProps) {
+export default function TranslateNotesScreen({ book, chapter, verse, rowId, role }: TranslateNotesScreenProps) {
   const { t } = useTranslation();
   const theme = useTheme();
   const dark = theme.palette.mode === "dark";
@@ -2655,6 +2656,15 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
                 <ViewColumnIcon fontSize="small" />
               </IconButton>
             )}
+            {/* AI run for this chapter (#481): top bar on tablet+, account
+                menu on phone; nothing for viewers. */}
+            <FlowAiRunAction
+              book={book}
+              chapter={chapter}
+              role={role}
+              phone={!isTabletUp}
+              onImported={() => void refetch()}
+            />
             {/* compact prev/next — same cursor and disabled logic as the card
                 stack's Prev/Next; chevrons flip under RTL (the scripture
                 screen's scaleX pattern). 2026-08-10 markup round. */}

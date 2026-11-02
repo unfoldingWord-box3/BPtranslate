@@ -1,5 +1,6 @@
 // Tests for aiRunPlacement.ts — where a flow screen puts its "start an AI
-// run" trigger (#481, decision A). Run from web/:
+// run" trigger (#481: decision A, phones changed to the account menu on
+// 2026-11-02). Run from web/:
 //   node --experimental-strip-types --no-warnings src/lib/aiRunPlacement.test.mjs
 
 import { test } from "node:test";
@@ -18,10 +19,10 @@ test("viewers get no trigger at any band", () => {
   }
 });
 
-test("editors and admins: top bar on tablet and desktop, overflow menu on phone", () => {
+test("editors and admins: top bar on tablet and desktop, account menu on phone", () => {
   for (const role of ["admin", "editor"]) {
     assert.equal(aiRunPlacement(role, "desktop"), "topbar", `${role} desktop`);
     assert.equal(aiRunPlacement(role, "tablet"), "topbar", `${role} tablet`);
-    assert.equal(aiRunPlacement(role, "phone"), "overflow", `${role} phone`);
+    assert.equal(aiRunPlacement(role, "phone"), "accountMenu", `${role} phone`);
   }
 });

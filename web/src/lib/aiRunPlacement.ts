@@ -2,13 +2,14 @@
 // rule is unit-tested without a browser (aiRunPlacement.test.mjs).
 //
 // Decision A on #481: on tablet and desktop the trigger sits in the screen's
-// top bar; at the phone band it moves into the screen's overflow ("more")
-// menu, so the phone header (#517) gets no more crowded. Viewers get nothing.
+// top bar. At the phone band it goes into the account menu (Benjamin,
+// 2026-11-02), so the phone header (#517) gains no button at all and page
+// titles keep their room. Viewers get nothing.
 
 import type { LayoutBand } from "./layoutBands.ts";
 import type { Role } from "../sync/api.ts";
 
-export type AiRunPlacement = "hidden" | "topbar" | "overflow";
+export type AiRunPlacement = "hidden" | "topbar" | "accountMenu";
 
 /** Mirrors the server's `requireEditor` (api/src/auth.ts), which gates every AI route. */
 export function canRunAi(role: Role): boolean {
@@ -17,5 +18,5 @@ export function canRunAi(role: Role): boolean {
 
 export function aiRunPlacement(role: Role, band: LayoutBand): AiRunPlacement {
   if (!canRunAi(role)) return "hidden";
-  return band === "phone" ? "overflow" : "topbar";
+  return band === "phone" ? "accountMenu" : "topbar";
 }

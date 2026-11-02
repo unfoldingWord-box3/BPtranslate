@@ -1694,7 +1694,7 @@ export default function TranslateQuestionsScreen({
                 <ViewColumnIcon fontSize="small" />
               </IconButton>
             )}
-            {/* AI run for this chapter (#481): top bar on tablet+, "more"
+            {/* AI run for this chapter (#481): top bar on tablet+, account
                 menu on phone; nothing for viewers. */}
             <FlowAiRunAction
               book={book}

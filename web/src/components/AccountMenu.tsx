@@ -32,6 +32,7 @@ import {
 } from "@mui/material";
 import AddIcon from "@mui/icons-material/Add";
 import AdminPanelSettingsIcon from "@mui/icons-material/AdminPanelSettings";
+import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import ChatIcon from "@mui/icons-material/Chat";
 import CheckIcon from "@mui/icons-material/Check";
 import LanguageIcon from "@mui/icons-material/Language";
@@ -59,9 +60,15 @@ type Props = {
   onLogout?: () => void;
   isAdmin?: boolean;
   onOpenClassic?: () => void;
+  /**
+   * The current screen's "Start an AI run" on phones (#481), registered by
+   * FlowAiRunAction. Called with the avatar button, so the pipeline menu opens
+   * where the account menu was.
+   */
+  onStartAiRun?: (anchor: HTMLElement) => void;
 };
 
-export function AccountMenu({ username, onLogout, isAdmin, onOpenClassic }: Props) {
+export function AccountMenu({ username, onLogout, isAdmin, onOpenClassic, onStartAiRun }: Props) {
   const { t } = useTranslation();
   const [anchor, setAnchor] = useState<null | HTMLElement>(null);
   const [langAnchor, setLangAnchor] = useState<null | HTMLElement>(null);
@@ -118,6 +125,24 @@ export function AccountMenu({ username, onLogout, isAdmin, onOpenClassic }: Prop
           </Box>
         )}
         {(username || orgLanguageLabel) && <Divider />}
+
+        {/* First, because on phones this is the screen's own work action, not
+            an account setting. */}
+        {onStartAiRun && (
+          <MenuItem
+            onClick={() => {
+              const avatar = anchor;
+              setAnchor(null);
+              if (avatar) onStartAiRun(avatar);
+            }}
+          >
+            <ListItemIcon>
+              <AutoAwesomeIcon fontSize="small" sx={{ color: "text.secondary" }} />
+            </ListItemIcon>
+            <ListItemText primary={t("pipeline.startAiRun")} />
+          </MenuItem>
+        )}
+        {onStartAiRun && <Divider />}
 
         <WorkspaceSwitcher variant="submenuItem" />
 
