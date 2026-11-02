@@ -1393,11 +1393,12 @@ async function recordTnSkippedTouchedAlert(
     const source = `translate_tn_skipped_touched:${job.jobId}`;
     const shown = refs.slice(0, SKIPPED_REFS_SHOWN).join(", ");
     const more = refs.length > SKIPPED_REFS_SHOWN ? ` and ${refs.length - SKIPPED_REFS_SHOWN} more` : "";
-    const count = refs.length === 1 ? "1 note" : `${refs.length} notes`;
+    const one = refs.length === 1;
     const message =
-      `AI translation of ${job.book}: ${count} kept as people left them (${job.book} ${shown}${more}). ` +
-      `Someone edited, approved, marked Not needed or restored them while the job waited in the queue, ` +
-      `so their AI drafts were not applied. Run the AI on a note again if you want a draft for it.`;
+      `AI translation of ${job.book}: ${one ? "1 note was" : `${refs.length} notes were`} left as people changed ` +
+      `${one ? "it" : "them"} (${job.book} ${shown}${more}). Someone edited, approved, marked Not needed or ` +
+      `restored ${one ? "it" : "them"} while the job waited in the queue, so the AI ${one ? "draft was" : "drafts were"} ` +
+      `not applied. Run the AI on a note again if you want a draft for it.`;
     await env.DB.prepare(
       `DELETE FROM system_alerts WHERE username = ?1 AND source = ?2 AND dismissed_at IS NULL`,
     )
@@ -1407,7 +1408,8 @@ async function recordTnSkippedTouchedAlert(
       `INSERT INTO system_alerts (username, severity, source, message, link_url)
        VALUES (?1, 'info', ?2, ?3, ?4)`,
     )
-      .bind(username, source, message, `#/${job.book}/${chapter}`)
+      // The book intro (chapter 0) is shown on chapter 1.
+      .bind(username, source, message, `#/${job.book}/${Math.max(1, chapter)}`)
       .run();
   } catch (e) {
     console.error("tn skipped-touched alert failed", { error: e instanceof Error ? e.message : String(e) });
