@@ -64,9 +64,24 @@ test("link targets and image paths are not searchable", () => {
 
 test("Arabic proclitics: all forms match الحفظ", () => {
   const f = [art("x", "عنوان", [], [], "اضغط على الحفظ عند الانتهاء.")];
-  for (const q of ["حفظ", "الحفظ", "وحفظ", "بالحفظ", "للحفظ"]) {
+  for (const q of ["حفظ", "الحفظ", "والحفظ", "بالحفظ", "للحفظ"]) {
     assert.equal(searchHelp(f, q).length, 1, q);
   }
+});
+
+test("a 4-letter Arabic word keeps its first letter (كتاب is not ك + تاب)", () => {
+  const f = [art("t", "عنوان", [], [], "تابع الخطوات حتى النهاية.")];
+  assert.deepEqual(searchHelp(f, "كتاب"), []);
+});
+
+test("a one-letter proclitic is stripped from a word of 5+ letters", () => {
+  const f = [art("m", "عنوان", [], [], "افتح الملاحظات من القائمة.")];
+  assert.equal(searchHelp(f, "وملاحظات").length, 1);
+});
+
+test("a bare definite article is not a search term", () => {
+  const f = [art("x", "عنوان", [], [], "استخدم آلة الحفظ عند الانتهاء.")];
+  assert.deepEqual(searchHelp(f, "ال"), []);
 });
 
 test("English query unaffected by Arabic proclitic stripping", () => {

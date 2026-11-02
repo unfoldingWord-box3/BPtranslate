@@ -40,6 +40,8 @@ interface Props {
   routeKey: string | null;
   initialArticle?: string;
   onClose: () => void;
+  /** Runs once the close transition ends; App returns focus to whatever opened the panel. */
+  onClosed?: () => void;
 }
 
 const bodySx = {
@@ -58,7 +60,7 @@ const bodySx = {
   "& img": { border: "1px solid", borderColor: "divider", borderRadius: 4 },
 } as const;
 
-export default function HelpDrawer({ open, openSeq, routeKey, initialArticle, onClose }: Props) {
+export default function HelpDrawer({ open, openSeq, routeKey, initialArticle, onClose, onClosed }: Props) {
   const { t } = useTranslation();
   const { lang } = useContext(UiLangContext);
   const theme = useTheme();
@@ -136,7 +138,13 @@ export default function HelpDrawer({ open, openSeq, routeKey, initialArticle, on
       anchor="right"
       open={open}
       onClose={onClose}
-      slotProps={{ paper: { sx: { width: isPhone ? "100%" : 420, maxWidth: "100%" }, "aria-label": t("help.title") } as object }}
+      // MUI would restore focus to the element focused at open, but the phone
+      // More-menu item that opens Help has unmounted by then; App picks the target.
+      disableRestoreFocus
+      slotProps={{
+        paper: { sx: { width: isPhone ? "100%" : 420, maxWidth: "100%" }, role: "dialog", "aria-modal": true, "aria-label": t("help.title") } as object,
+        transition: { onExited: onClosed },
+      }}
     >
       <Box sx={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
         <Box sx={{ p: 1.5, borderBlockEnd: "1px solid", borderColor: "divider" }}>

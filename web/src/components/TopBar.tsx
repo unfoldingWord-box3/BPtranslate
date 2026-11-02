@@ -947,8 +947,9 @@ export function TopBar({
         {isNarrow && (
           <MenuItem
             onClick={() => {
+              const moreButton = moreAnchor;
               closeMore();
-              openHelp();
+              openHelp(undefined, moreButton);
             }}
           >
             <ListItemIcon>
