@@ -24,7 +24,9 @@ export function isAiProviderNotConfigured(e: unknown): boolean {
 // the org's key.
 export const AI_NEEDS_ORG_KEY = "ai_needs_org_key";
 
-/** Pipeline types switched off until they can run on the org's own key. */
+/** Pipeline types switched off until they can run on the org's own key. Their
+ *  start actions were removed from the AI menu (#470); this set still gates
+ *  Retry on old failed jobs of these types in the job history. */
 export const PIPELINE_TYPES_NEEDING_ORG_KEY: ReadonlySet<string> = new Set(["generate", "notes", "tqs"]);
 
 /** Note and template "Draft with AI" are switched off. Flip to false when a
