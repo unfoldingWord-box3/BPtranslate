@@ -25,7 +25,7 @@ import { RTL_FIXTURE } from "./global-setup";
 // workspace check, and GET /api/l10n/overrides. main.tsx fetches the overrides
 // once at boot, outside App and before /api/auth/me returns, so on a first load
 // it still claims "default" and gets a 409 (harmless: the bundled strings stand
-// and the reload fetches them again; tracked separately, see the PR for #749).
+// and the reload fetches them again; tracked in #766).
 // That 409 also makes sync/api.ts reload the tab, which raced App's own
 // reconcile and usually tore the page down before App's children mounted, so
 // the bug showed only now and then. The spec answers the overrides itself, so
@@ -78,3 +78,38 @@ for (const [name, hash] of [
     await context.close();
   });
 }
+
+// The hold must never become a reload loop. Here /api/auth/me keeps naming
+// workspaces the tab can never match (the server itself resolves a different
+// one), so the reconcile cannot converge. The tab may reload a bounded number
+// of times (App's reconcile once, sync/api.ts's 409 handler once), then must
+// render the app instead of holding or reloading forever.
+test("#749: a workspace the server keeps reporting differently does not reload-loop", async ({ browser }) => {
+  const { context } = await newUserContext(browser, "ws-first-load-loop");
+  const page = await context.newPage();
+  await page.route("https://git.door43.org/**", (route) =>
+    route.fulfill({ status: 404, body: "not mocked" }),
+  );
+  // A new name on every call, so the slug the reconcile stores never matches
+  // what the next /api/auth/me reports.
+  let calls = 0;
+  await page.route("**/api/auth/me", async (route) => {
+    const res = await route.fetch();
+    const json = await res.json();
+    return route.fulfill({ response: res, json: { ...json, workspace: `never-matches-749-${++calls}` } });
+  });
+  let navigations = 0;
+  page.on("framenavigated", (f) => {
+    if (f === page.mainFrame()) navigations++;
+  });
+  await page.goto(`/#/verse/${RTL_FIXTURE.book}/${RTL_FIXTURE.chapter}/${RTL_FIXTURE.verse}`);
+  // The screen's own title, not the "signing in" spinner. Its data may fail
+  // (409s are expected while the workspaces disagree); it must just render.
+  await expect(page.getByRole("heading", { level: 1 })).toBeVisible({ timeout: 60_000 });
+  const settled = navigations;
+  await page.waitForTimeout(5_000);
+  console.log(`[#749 loop guard] navigations: ${navigations}`);
+  expect(navigations, "the tab kept reloading").toBe(settled);
+  expect(navigations, "more reloads than the two one-shot guards allow").toBeLessThanOrEqual(3);
+  await context.close();
+});
