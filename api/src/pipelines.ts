@@ -702,14 +702,32 @@ export async function dispatchNext(env: Env): Promise<void> {
       : undefined;
   const isArticleJob =
     job.pipeline_type === "translate" && (optResourceType === "tw" || optResourceType === "ta");
+  // A translate verse range rides at the TOP level of the bot's start body:
+  // bp-assistant's options schema is strict and has no verse keys (its
+  // StartBodySchema reads verseStart/verseEnd beside book/startChapter), so
+  // left in options the whole start is a 400. options_json keeps them, because
+  // the dedup SQL, the chapter lock and the internal runner read them there.
+  let upstreamOptions = options;
+  let verseScope: { verseStart?: unknown; verseEnd?: unknown } = {};
+  if (job.pipeline_type === "translate" && options && typeof options === "object") {
+    const { verseStart, verseEnd, ...rest } = options as Record<string, unknown>;
+    if (verseStart != null || verseEnd != null) {
+      upstreamOptions = rest;
+      verseScope = {
+        ...(verseStart != null ? { verseStart } : {}),
+        ...(verseEnd != null ? { verseEnd } : {}),
+      };
+    }
+  }
   const upstreamBody: Record<string, unknown> = {
     pipelineType: job.pipeline_type,
     ...(isArticleJob
       ? {}
       : { book: job.book, startChapter: job.start_chapter, endChapter: job.end_chapter }),
+    ...verseScope,
     username,
     sessionKey: job.session_key,
-    ...(options ? { options } : {}),
+    ...(upstreamOptions ? { options: upstreamOptions } : {}),
   };
 
   // Per-org AI provider config (migration 0066): translate jobs only. Read
@@ -1939,7 +1957,8 @@ pipelines.post("/start", requireEditor, async (c) => {
   if (state === "failed") {
     // This job won the slot but the upstream POST failed during its own
     // dispatch. Surface it so the menu toasts instead of pretending success.
-    return c.json({ error: "upstream_error", message: after?.error_message ?? "dispatch failed" }, 502);
+    // jobId: the failed row, so a caller (the chat's bpt_draft) can name it.
+    return c.json({ error: "upstream_error", message: after?.error_message ?? "dispatch failed", jobId }, 502);
   }
   // Still queued — something else holds the slot or is ahead by priority.
   const snap = await queueSnapshot(c.env);

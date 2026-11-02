@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 
 import { pipelines, jobResultCounts } from "./pipelines.ts";
+import { chapters } from "./chapters.ts";
 import { attachAuth, chatWriteEnv, requireCsrf } from "./auth.ts";
 import { chatIsAdmin } from "./chatLinks.ts";
 import { requireWorkspaceMatch } from "./workspaces.ts";
@@ -102,6 +103,7 @@ async function fresh({ orgKey = true } = {}) {
   app.use("*", requireCsrf);
   app.use("/api/*", blockViewerWrites);
   app.route("/api/pipelines", pipelines);
+  app.route("/api/chapters", chapters);
 
   const WORKSPACE_SLUG = `d${++slugSeq}`;
   clearProjectConfigCache(WORKSPACE_SLUG);

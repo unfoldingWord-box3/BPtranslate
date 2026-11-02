@@ -1498,11 +1498,13 @@ const bulkSetState: ToolDef = {
 // apply later audits as source 'ai_pipeline' like any other run.
 
 const NOT_STARTED = "Nothing was started.";
+// The bot takes verses 1 to 200 (bp-assistant StartBodySchema).
+const MAX_DRAFT_VERSE = 200;
 
 const draft: ToolDef = {
   name: "bpt_draft",
   description:
-    "Start an AI draft (translate run) for some translation notes (kind tn) or questions (kind tq) in one chapter: either the rows with the given ids, or the rows of a verse range. Project admins only; anyone else is refused. The run fills the rows with AI drafts that need review, and while it runs those chapters are read-only for everyone in the project, so confirm with the reviewer first. Returns job_id and status running, queued (with queue_position: one run at a time per server) or already_running (this user already started the same draft; job_id is that run). status busy means another user's run already covers it; nothing new was started. Follow a run with bpt_job_status. Refused, with nothing started, when the project has no AI key of its own set up (an admin adds one in the web app) or is not a gateway-language project.",
+    "Start an AI draft (translate run) for some translation notes (kind tn) or questions (kind tq) in one chapter: either the rows with the given ids, or the rows of a verse range. Project admins only; anyone else is refused. Not for a whole chapter (use the web app): a range or id list that covers every row of that kind in the chapter is refused. The AI draft REPLACES the current text of every selected row, approved rows included, and they then need review again; the last approved text keeps publishing to Door43 only until the row is approved again. While it runs, tn drafts make only the selected notes read-only, but tq drafts make all of the chapter's questions read-only, for everyone in the project. It costs the project's AI budget. So tell the reviewer what will be replaced and get a clear yes first. Returns job_id and status running, queued (with queue_position: one run at a time per server) or already_running (this user already started the same draft; job_id is that run); follow it with bpt_job_status. status busy means another user's run already covers these rows: nothing new was started, and only that user (or the web app) can follow their run. Refused, with nothing started, when the book or chapter has no rows of that kind in this project, when the project has no AI key of its own set up (an admin adds one in the web app), or when it is not a gateway-language project. If the AI service refuses the run, the answer names the failed job and why; nothing is running then.",
   inputSchema: {
     type: "object",
     properties: {
@@ -1511,8 +1513,8 @@ const draft: ToolDef = {
       kind: { type: "string", enum: ["tn", "tq"] },
       chapter: { type: "integer", minimum: 1 },
       ids: { type: "array", items: { type: "string", maxLength: 16 }, minItems: 1, maxItems: 50, description: "Row ids to draft. Use this or verse_start, not both." },
-      verse_start: { type: "integer", minimum: 1, description: "First verse to draft. Use this or ids, not both." },
-      verse_end: { type: "integer", minimum: 1, description: "Last verse, inclusive; defaults to verse_start" },
+      verse_start: { type: "integer", minimum: 1, maximum: MAX_DRAFT_VERSE, description: "First verse to draft. Use this or ids, not both." },
+      verse_end: { type: "integer", minimum: 1, maximum: MAX_DRAFT_VERSE, description: "Last verse, inclusive; defaults to verse_start" },
     },
     required: ["session_token", "book", "kind", "chapter"],
     additionalProperties: false,
@@ -1543,9 +1545,34 @@ const draft: ToolDef = {
     if (ids && (vs !== undefined || ve !== undefined)) throw new ToolInputError(`Give ids or a verse range, not both. ${NOT_STARTED}`);
     // A whole chapter is a web-app action: it freezes every note in it.
     if (!ids && vs === undefined) {
-      throw new ToolInputError(`Give ids or verse_start. To draft a whole chapter, use the web app. ${NOT_STARTED}`);
+      throw new ToolInputError(`Give ids or verse_start: to draft a whole chapter, use the web app. ${NOT_STARTED}`);
     }
     if (ve !== undefined && vs !== undefined && ve < vs) throw new ToolInputError(`verse_end is before verse_start. ${NOT_STARTED}`);
+    for (const [key, v] of [["verse_start", vs], ["verse_end", ve]] as const) {
+      if (v !== undefined && v > MAX_DRAFT_VERSE) throw new ToolInputError(`${key} must be at most ${MAX_DRAFT_VERSE}. ${NOT_STARTED}`);
+    }
+    // Only start a paid run that has rows to write: the chapter's rows of this
+    // kind, as the web app reads them. A selection covering all of them is a
+    // whole-chapter run, which belongs in the web app.
+    const where = `${book} ${chapter}`;
+    const { status: chStatus, body: chBody } = await session.getJson(`/api/chapters/${book}/${chapter}`);
+    if (chStatus !== 200 && chStatus !== 404) throw new Error(`BPtranslate API /api/chapters/${book}/${chapter} returned ${chStatus}`);
+    const rows = chStatus === 200 ? (((chBody as Record<string, unknown>)[kind] as Record<string, unknown>[] | undefined) ?? []) : [];
+    if (!rows.length) throw new ToolInputError(`There are no ${kind} notes in ${where} in this project, so there is nothing to draft. ${NOT_STARTED}`);
+    const WHOLE = `That is the whole chapter's ${kind}; to draft a whole chapter, use the web app. ${NOT_STARTED}`;
+    if (ids) {
+      const have = new Set(rows.map((r) => String(r.id)));
+      const missing = ids.filter((id) => !have.has(id));
+      if (missing.length) throw new ToolInputError(`${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} not a ${kind} row in ${where}. ${NOT_STARTED}`);
+      if (new Set(ids).size >= have.size) throw new ToolInputError(WHOLE);
+    } else {
+      const end = ve ?? vs!;
+      const verses = rows.map((r) => Number(r.verse)).filter((v) => Number.isInteger(v) && v >= 1);
+      if (!verses.some((v) => v >= vs! && v <= end)) {
+        throw new ToolInputError(`There are no ${kind} notes in ${where}:${vs}${end !== vs ? `-${end}` : ""}, so there is nothing to draft. ${NOT_STARTED}`);
+      }
+      if (vs! <= Math.min(...verses) && end >= Math.max(...verses)) throw new ToolInputError(WHOLE);
+    }
     const translate = ids
       ? { resourceType: kind, rowIds: ids }
       : { resourceType: kind, verseStart: vs, verseEnd: ve ?? vs };
@@ -1574,15 +1601,17 @@ const draft: ToolDef = {
               : "The draft is running. Check on it with bpt_job_status.",
       };
     }
+    // Another user's run: no job id, since bpt_job_status shows a run only to
+    // the user who started it.
     if (status === 409 && b.error === "conflict") {
       const e = (b.existing ?? {}) as Record<string, unknown>;
+      const who = String(e.started_by_username ?? "Another user");
       return {
         status: "busy",
-        job_id: b.jobId,
         started_by: e.started_by_username ?? null,
         state: e.state ?? null,
         ...scope,
-        message: `${String(e.started_by_username ?? "Another user")} already has an AI run on this (${String(e.state ?? "")}). ${NOT_STARTED}`,
+        message: `${who} already has an AI run on these rows (${String(e.state ?? "")}). ${NOT_STARTED} Only ${who} can follow that run, in chat or in the web app; the web app also shows it to everyone in the project's AI queue.`,
       };
     }
     // Translate answers ai_provider_not_configured with no key; the older
@@ -1598,8 +1627,15 @@ const draft: ToolDef = {
     if (status === 503 && b.error === "pipeline_api_disabled") {
       throw new ToolInputError(`AI drafting is switched off on this server. ${NOT_STARTED}`);
     }
-    if (status === 502) throw new Error(`bpt_draft: the AI service refused the run (${String(b.message ?? b.error ?? status)})`);
-    throw new ToolInputError(`BPtranslate refused the draft (${String(b.error ?? status)}). ${NOT_STARTED}`);
+    // The job was created but the AI service refused it, so it failed: name
+    // it and the reason. A plain refusal, so the assistant does not retry it
+    // as an internal error.
+    if (status === 502) {
+      throw new ToolInputError(
+        `The AI service refused the draft${b.jobId ? ` (job ${String(b.jobId)})` : ""}: ${String(b.message ?? b.error ?? "no reason given")}. Nothing is running: that job failed. Tell the reviewer; an admin can look at it in the web app.`,
+      );
+    }
+    throw new ToolInputError(`BPtranslate refused the draft (${String(b.error ?? status)}${b.message ? `: ${String(b.message)}` : ""}). ${NOT_STARTED}`);
   },
 };
 
