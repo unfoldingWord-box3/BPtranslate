@@ -342,6 +342,15 @@ test("bpt_job_status: the starter sees state and progress, and result counts onc
     pi.run(started.data.job_id, "tn", BOOK, 4, null, null);
     const s2 = await call("bpt_job_status", { job_id: started.data.job_id });
     assert.deepEqual(s2.data.results, { tn: { proposed: 4, applied: 2, rejected: 1 } });
+
+    // #729: notes the apply left alone because a person changed them after
+    // the job was queued.
+    sqlite
+      .prepare(`UPDATE pipeline_jobs SET state = 'done', apply_skipped_json = ? WHERE job_id = ?`)
+      .run(JSON.stringify({ tnTouched: 1, tnTouchedIds: ["t003"] }), started.data.job_id);
+    const s3 = await call("bpt_job_status", { job_id: started.data.job_id });
+    assert.equal(s3.data.state, "done");
+    assert.deepEqual(s3.data.kept_because_changed_by_people, { tn: 1, tn_ids: ["t003"] });
   });
 });
 
