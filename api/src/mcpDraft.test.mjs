@@ -387,6 +387,15 @@ test("bpt_draft: a run the bot refuses comes back as a plain refusal with the fa
       assert.equal(j.state, "failed");
       assert.match(r.data.error, new RegExp(j.job_id));
       assert.match(r.data.error, /Nothing is running/);
+
+      // The failed job never reached the bot (no upstream id); its stored
+      // reason still reaches bpt_job_status.
+      const st = await call("bpt_job_status", { job_id: j.job_id });
+      assert.equal(st.isError, false, JSON.stringify(st.data));
+      assert.equal(st.data.state, "failed");
+      assert.ok(st.data.error?.kind, JSON.stringify(st.data));
+      assert.match(String(st.data.error.message), /503/);
+      assert.equal(st.data.progress, undefined);
     },
     { startStatus: 503 },
   );
