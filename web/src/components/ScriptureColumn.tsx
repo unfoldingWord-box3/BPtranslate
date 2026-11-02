@@ -366,11 +366,14 @@ function ScriptureColumnInner({
     el?.scrollIntoView({ behavior: "smooth", block: "center" });
   }, [findScrollTarget, mode, chapter, activeVerse, onSelectVerse]);
 
+  // targetDirKnown is a dependency because the stacked body mounts only once
+  // the direction gate opens (#728): without it, a deep link opened with no
+  // cached config never scrolls to its verse.
   useEffect(() => {
     if (mode === "stacked") {
       activeRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
     }
-  }, [activeVerse, mode]);
+  }, [activeVerse, mode, targetDirKnown]);
 
   // Stacked mode does its own activeRef scroll; columns/book modes react to
   // the shared scrollNonce. The button asks the shell to bump the nonce, and
