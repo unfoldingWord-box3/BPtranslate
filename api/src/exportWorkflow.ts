@@ -92,12 +92,9 @@ import {
   renderContextPack,
   contextRepoOwner,
   contextRepoName,
-  VALIDATED_TN_EXAMPLES_SQL,
-  VALIDATED_TQ_EXAMPLES_SQL,
-  type TranslationPrefsForRender,
-  type ValidatedTnRow,
-  type ValidatedTqRow,
-  type TemplateForRender,
+  loadContextPackInputs,
+  loadQueuedContextInputs,
+  sameQueuedContextInputs,
 } from "./contextExport.ts";
 import { contextShrinkRefused, shrinkDetailCode, hasSemanticContent } from "./contextExportLib.ts";
 import { fetchEnSourceMaps } from "./contextSourceFetch.ts";
@@ -107,7 +104,6 @@ import {
   finalizeContextExport,
   getLatestContextExportStats,
 } from "./contextExportResults.ts";
-import type { TermImport } from "./translationMemoryLib.ts";
 import { workspaceEnv, resolveWorkspace, primeWorkspaces } from "./workspaces.ts";
 import { chapterShrinkRefused, formatChapterRange, mergeTsvChapterRange, missingOutOfRangeIds, type ChapterRange } from "./exportChapterMerge.ts";
 import { activePipelineForChapter } from "./chapterLock";
@@ -580,46 +576,11 @@ export class ExportWorkflow extends WorkflowEntrypoint<Env, ExportParams> {
       return empty("failed", "not_a_gl_project");
     }
 
-    // Load prefs / terms / validated rows from D1.
-    const prefsRow = await this.env.DB.prepare(
-      `SELECT audience, purpose, register, script_notes, instructions_md, common_issues_md
-         FROM translation_prefs WHERE id = 1`,
-    ).first<TranslationPrefsForRender>();
-    const prefs: TranslationPrefsForRender = prefsRow ?? {
-      audience: null,
-      purpose: null,
-      register: "default",
-      script_notes: null,
-      instructions_md: null,
-      common_issues_md: null,
-    };
+    // Load prefs / terms / validated rows / templates from D1. Prefs, terms
+    // and templates are re-read after each tip fetch below (#712), so `let`.
+    let inputs = await loadContextPackInputs(this.env.DB);
 
-    const termRs = await this.env.DB.prepare(
-      `SELECT concept_id, source_term, target_term, status, replacement, comment, tw_link
-         FROM terminology WHERE deleted_at IS NULL
-         ORDER BY concept_id, source_term, status`,
-    ).all<TermImport>();
-    const terms = termRs.results ?? [];
-
-    // Selectors live in contextExport.ts — they carry the `admin_bulk_state IS
-    // NULL` rule that keeps bulk-approved rows out of the few-shot gold.
-    const tnRs = await this.env.DB.prepare(VALIDATED_TN_EXAMPLES_SQL).all<ValidatedTnRow>();
-    const tqRs = await this.env.DB.prepare(VALIDATED_TQ_EXAMPLES_SQL).all<ValidatedTqRow>();
-    const tnRows = tnRs.results ?? [];
-    const tqRows = tqRs.results ?? [];
-
-    const templateRs = await this.env.DB.prepare(
-      `SELECT template_id, support_ref, sheet_order, type, target_md
-         FROM template_units
-        WHERE translation_state = 'validated'
-          AND deleted_at IS NULL
-          AND origin = 'sheet'
-          AND target_md IS NOT NULL AND TRIM(target_md) <> ''
-        ORDER BY support_ref, sheet_order, template_id`,
-    ).all<TemplateForRender>();
-    const templates = templateRs.results ?? [];
-
-    const sourceFetch = await fetchEnSourceMaps(this.env, cfg, tnRows, tqRows);
+    const sourceFetch = await fetchEnSourceMaps(this.env, cfg, inputs.tnRows, inputs.tqRows);
     // A resource whose translationSource repo was left blank in Setup has NO
     // upstream source: fetchEnSourceMaps SKIPS it (empty map) and still fetches
     // the sourced resources, returning ok with `skipped`. That must NOT fail the
@@ -647,12 +608,14 @@ export class ExportWorkflow extends WorkflowEntrypoint<Env, ExportParams> {
       repo: contextRepoName(),
     };
 
-    // CAS retry loop: re-render from D1 on parent conflict (max 3).
+    // CAS retry loop (max 3 attempts): retries on a parent conflict, and when
+    // D1 changed between the render and the tip fetch (see below).
     // Repo existence is invariant across retries — probe at most once.
     let repoChecked = false;
     const maxAttempts = 3;
     let lastReason: string | null = null;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const { prefs, terms, tnRows, tqRows, templates } = inputs;
       const rendered = renderContextPack({
         cfg,
         prefs,
@@ -802,6 +765,20 @@ export class ExportWorkflow extends WorkflowEntrypoint<Env, ExportParams> {
           };
         }
 
+        // #712: an overlapping run (another save's export) may have read D1
+        // later and committed already. Re-read the saved-and-queued inputs now
+        // that the tip is fixed: if they still match the render, every commit
+        // already in the tip read no newer save, and a commit after this point
+        // fails our CAS. If they moved, render again from the new read rather
+        // than publish a pack that misses the newer save.
+        const fresh = await loadQueuedContextInputs(this.env.DB);
+        if (!sameQueuedContextInputs(fresh, inputs)) {
+          inputs = { ...inputs, ...fresh };
+          lastReason = "d1_changed_during_export";
+          console.warn("context pack inputs changed during export; re-rendering", { attempt });
+          continue;
+        }
+
         const commit = await commitContextPackToMaster(
           dcsCfgCtx,
           files,
@@ -862,6 +839,7 @@ export class ExportWorkflow extends WorkflowEntrypoint<Env, ExportParams> {
       status: "failed",
       failureReason: lastReason ?? "cas_retries_exhausted",
     });
+    await this.recordSnapshot("CONTEXT", "ctx", null, null, 0, `error:${lastReason ?? "cas_retries_exhausted"}`);
     return empty("failed", lastReason ?? "cas_retries_exhausted");
   }
 
