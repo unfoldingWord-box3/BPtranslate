@@ -149,12 +149,23 @@ aiProvider.get("/", requireAdmin, async (c) => {
 // does: a rotated wrapping secret leaves a key that looks configured but fails
 // every run with ai_provider_key_decrypt_failed. The plaintext is discarded
 // unread and never logged.
+/** True when a configured key still decrypts (false after an AI_KEY_WRAPPING_KEY rotation). */
+export async function keyDecrypts(
+  ai: Extract<DispatchAi, { kind: "configured" }>,
+  wrappingKeySecret: string | undefined,
+): Promise<boolean> {
+  try {
+    await decryptApiKey(wrappingKeySecret!, ai.ciphertext, ai.iv);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 aiProvider.get("/status", requireEditor, async (c) => {
   const ai = resolveDispatchAi(await getAiProviderConfig(c.env.DB), c.env.AI_KEY_WRAPPING_KEY);
   if (ai.kind === "error") return c.json({ available: false, reason: ai.reason });
-  try {
-    await decryptApiKey(c.env.AI_KEY_WRAPPING_KEY!, ai.ciphertext, ai.iv);
-  } catch {
+  if (!(await keyDecrypts(ai, c.env.AI_KEY_WRAPPING_KEY))) {
     return c.json({ available: false, reason: "ai_provider_key_decrypt_failed" });
   }
   return c.json({ available: true, reason: null });

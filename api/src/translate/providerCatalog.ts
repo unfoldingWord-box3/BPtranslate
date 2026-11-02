@@ -25,6 +25,8 @@ export type ModelPrice = { label: string; inputPer1M: number; outputPer1M: numbe
 
 export type ProviderConfig = {
   defaultModel: string;
+  /** Cheap model for light jobs such as the help assistant (api/src/help). */
+  lightModel: string;
   baseUrl?: string;
   modelAliases: Record<string, string>;
   models: Record<string, ModelPrice>;
@@ -35,6 +37,7 @@ export type CatalogProvider = "claude" | "openai" | "gemini" | "xai";
 export const PROVIDER_CATALOG: Record<CatalogProvider, ProviderConfig> = {
   claude: {
     defaultModel: "claude-sonnet-5",
+    lightModel: "claude-haiku-4-5",
     modelAliases: {
       opus: "claude-opus-5",
       haiku: "claude-haiku-4-5-20251001",
@@ -48,6 +51,7 @@ export const PROVIDER_CATALOG: Record<CatalogProvider, ProviderConfig> = {
   },
   openai: {
     defaultModel: "gpt-5.6-terra",
+    lightModel: "gpt-5.6-luna",
     modelAliases: {},
     models: {
       "gpt-5.5": { label: "GPT 5.5", inputPer1M: 5.0, outputPer1M: 30.0 },
@@ -58,6 +62,7 @@ export const PROVIDER_CATALOG: Record<CatalogProvider, ProviderConfig> = {
   },
   gemini: {
     defaultModel: "gemini-3.6-flash",
+    lightModel: "gemini-3.8-flash",
     modelAliases: {
       opus: "gemini-3.1-pro-preview",
     },
@@ -72,6 +77,7 @@ export const PROVIDER_CATALOG: Record<CatalogProvider, ProviderConfig> = {
   },
   xai: {
     defaultModel: "grok-4.5",
+    lightModel: "grok-4.3",
     baseUrl: "https://api.x.ai/v1",
     modelAliases: {},
     models: {
