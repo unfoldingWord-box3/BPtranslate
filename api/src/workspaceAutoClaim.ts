@@ -30,6 +30,7 @@ import type { Env } from "./index";
 import { claimWorkspace, explicitWorkspaces, isClaimBlocked, listWorkspaces } from "./workspaces.ts";
 import { listUserTeams, roleFromTeams, teamRoleNames, type DcsTeam } from "./dcsTeams.ts";
 import { isIdent } from "./repoUrl.ts";
+import { orgLogin } from "./dcsSchemas.ts";
 
 export type AutoClaimOutcome =
   | "disabled" // WORKSPACE_AUTOCLAIM is not "true" — the default
@@ -71,13 +72,13 @@ export interface AutoClaimResult {
 }
 
 // DCS's own casing for `orgLower`, taken from the teams payload we already hold
-// (`organization.username`). Issue #306: the claimed `workspaces.org` becomes
+// (`organization.name`, falling back to the deprecated `username`). Issue #306: the claimed `workspaces.org` becomes
 // VIEWER_ORG for every downstream comparison, so it must carry DCS's casing —
 // and the teams response is DCS, so this needs no extra round-trip the way the
 // manual claim route's canonicalOrgName lookup does.
 function canonicalOrgFromTeams(teams: DcsTeam[], orgLower: string): string | null {
   for (const t of teams) {
-    const name = (t?.organization?.username ?? "").trim();
+    const name = orgLogin(t?.organization).trim();
     if (name && name.toLowerCase() === orgLower) return name;
   }
   return null;

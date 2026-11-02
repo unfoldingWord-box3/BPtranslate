@@ -26,7 +26,7 @@
 // accordion replaces the tile grid below `tablet`; the two-pane shell collapses
 // below `md`.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { FlowHeader } from "./FlowHeader";
 import { useTranslation } from "react-i18next";
 import {
@@ -269,6 +269,7 @@ function LintBadge({ book }: { book: string }) {
 
   useEffect(() => {
     let cancelled = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- blank the badge before fetching the new book's lint report; without it the badge shows the previous book's report until the fetch lands.
     setReport(null);
     setFailed(false);
     api
@@ -374,8 +375,6 @@ function BookDetailPanel({
 
   const [summary, setSummary] = useState<BookSummary | null>(null);
   const [message, setMessage] = useState<string | null>(null);
-  const [warning, setWarning] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [justImported, setJustImported] = useState(false);
   const [repullOpen, setRepullOpen] = useState(false);
   // The "Bring in this book" source sheet (docs/ux-simplification.md §1.3).
@@ -395,6 +394,7 @@ function BookDetailPanel({
   }, [book]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch the summary on mount and on book change; loadSummary also runs after an import, and it sets state only after the await.
     void loadSummary();
   }, [loadSummary]);
 
@@ -402,8 +402,6 @@ function BookDetailPanel({
   // sources first, then the POST, including the has_local_edits discard
   // confirm. This callback is the shared post-import path.
   const handleImported = (res: Awaited<ReturnType<typeof api.importBook>>) => {
-    setError(null);
-    setWarning(null);
     const sources = importedSourceRepos(res.sources);
     setMessage(
       sources.length
@@ -500,16 +498,6 @@ function BookDetailPanel({
               {message}
             </Alert>
           )}
-          {warning && (
-            <Alert severity="warning" sx={{ mt: 2 }} onClose={() => setWarning(null)}>
-              {warning}
-            </Alert>
-          )}
-          {error && (
-            <Alert severity="error" sx={{ mt: 2 }} onClose={() => setError(null)}>
-              {error}
-            </Alert>
-          )}
         </PanelBody>
         <PanelFoot state={effectiveImported ? t("import.imported") : t("flowBooks.detail.notYetImported")} />
       </Panel>
@@ -565,8 +553,11 @@ export default function BooksScreen({ role, lastPosition, book: routeBook }: Boo
   // afterwards the user's click wins.
   const seededRef = useRef(false);
   // Read inside refetchBooks without making the callback depend on the route.
+  // Synced after every commit (no deps), before the passive effect that fetches.
   const routeBookRef = useRef(routeBook);
-  routeBookRef.current = routeBook;
+  useLayoutEffect(() => {
+    routeBookRef.current = routeBook;
+  });
 
   const setStatus = useCallback((s: BooksFetchStatus) => {
     statusRef.current = s;
@@ -599,12 +590,18 @@ export default function BooksScreen({ role, lastPosition, book: routeBook }: Boo
   }, [setStatus]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- mount-time load; refetchBooks also backs Retry and runs after imports. It shows loading only before the first successful load, so a background refresh keeps the current grid.
     void refetchBooks();
   }, [refetchBooks]);
 
-  useEffect(() => {
+  // Follow a new #/books/:book route, adjusted during render on a routeBook
+  // change. selected is also written by the click handler and the first-load
+  // seed, so it can't be derived from routeBook.
+  const [prevRouteBook, setPrevRouteBook] = useState(routeBook);
+  if (prevRouteBook !== routeBook) {
+    setPrevRouteBook(routeBook);
     if (routeBook) setSelected(routeBook);
-  }, [routeBook]);
+  }
 
   // Keep the URL truthful once the user picks a different book, so a reload or
   // a shared link reopens the pane they were looking at rather than the book

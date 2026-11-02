@@ -19,7 +19,7 @@
 // The sweep's own safety rules (never touches content, deleted or trashed rows;
 // stamps admin_bulk_state so AI few-shot examples exclude it) live server-side
 // in reviewState.ts; this page only explains them.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
 import {
@@ -49,6 +49,7 @@ import type { FlowScreenContext } from "./types";
 import {
   api,
   ApiError,
+  isChapterLockedBody,
   type BookListEntry,
   type BookSummary,
   type ReviewSweepApplyResponse,
@@ -107,8 +108,11 @@ export default function AdminReviewStateScreen({ role, me }: FlowScreenContext) 
   const [actionError, setActionError] = useState<string | null>(null);
   // The book currently selected, readable from async callbacks so a late
   // response for a previously selected book can be dropped.
+  // Synced after every commit (no deps), before any effect or response reads it.
   const bookRef = useRef(book);
-  bookRef.current = book;
+  useLayoutEffect(() => {
+    bookRef.current = book;
+  });
   // While a dry run is in flight, the dialog is open, or a sweep is running,
   // every scope control is locked so the scope cannot drift from what is shown.
   const locked = checking || pending != null || applying;
@@ -158,6 +162,7 @@ export default function AdminReviewStateScreen({ role, me }: FlowScreenContext) 
   useEffect(() => {
     if (!book) return;
     const ctrl = new AbortController();
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- on book change, blank the summary and reset the chapter pickers and last result before fetching; without it the pickers and result keep showing the previous book until the new summary lands.
     setSummary(null);
     setFrom(null);
     setTo(null);
@@ -173,6 +178,7 @@ export default function AdminReviewStateScreen({ role, me }: FlowScreenContext) 
   // Default the pickers to the book's first chapter once its summary lands.
   useEffect(() => {
     if (chapters.length && from == null && to == null) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- seeds the pickers once a summary lands; from/to are also written by the user and by the book-change reset, so they can't be derived from chapters.
       setFrom(chapters[0].chapter);
       setTo(chapters[0].chapter);
     }
@@ -194,6 +200,8 @@ export default function AdminReviewStateScreen({ role, me }: FlowScreenContext) 
   const errorText = (e: unknown) => {
     if (e instanceof ApiError) {
       if (e.status === 403) return t("adminPages.reviewState.errForbidden");
+      // An approve sweep over notes an AI translation is rewriting (issue #602).
+      if (isChapterLockedBody(e.body)) return t("adminPages.reviewState.errLockedByTranslate");
       const code = (e.body as { error?: string } | undefined)?.error;
       return `${e.status} — ${code ?? t("adminPages.common.loadFailed")}`;
     }

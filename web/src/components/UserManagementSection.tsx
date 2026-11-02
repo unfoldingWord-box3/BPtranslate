@@ -89,6 +89,7 @@ export function UserManagementSection() {
   }, []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- mount-time load; the same `load` backs Retry and runs after every add/remove, so it clears loadError at start rather than leaving a stale failure alert during the refetch.
     void load();
   }, [load]);
 

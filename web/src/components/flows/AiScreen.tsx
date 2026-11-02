@@ -45,12 +45,17 @@ import type { FlowScreenContext } from "./types";
 import { PipelineMenu } from "../PipelineMenu";
 import { AiServiceSection } from "../AiServiceSection";
 import { pipelineStore, type PipelineJob } from "../../sync/pipelineStore";
-import { useProjectConfig } from "../../hooks/useProjectConfig";
+import { useProjectConfig, isTranslationProject } from "../../hooks/useProjectConfig";
+import {
+  isAiNeedsOrgKey,
+  isAiProviderNotConfigured,
+  PIPELINE_TYPES_NEEDING_ORG_KEY,
+} from "../../lib/aiProviderErrors";
+import { errorCopy, orgKeyStatusCopyKey } from "../../lib/aiErrorCopy";
 import {
   api,
   ApiError,
   type BookListEntry,
-  type PipelineErrorKind,
   type PipelineState,
   type PipelineType,
 } from "../../sync/api";
@@ -77,44 +82,6 @@ function typeLabel(type: PipelineType, t: TFunction): string {
   return key ? t(key) : type;
 }
 
-// Friendly PipelineErrorKind copy — mirrors docs/flows/ui/l1-ai.html's
-// ERROR_COPY verbatim (same enum, same intent: no bare enum string in front
-// of a translator).
-const ERROR_COPY_KEY: Record<PipelineErrorKind, string> = {
-  // Fly bot kinds.
-  transient_outage: "aiStudio.errors.transient_outage",
-  auth_error: "aiStudio.errors.auth_error",
-  usage_limit: "aiStudio.errors.usage_limit",
-  sdk_error: "aiStudio.errors.sdk_error",
-  non_success_result: "aiStudio.errors.non_success_result",
-  missing_output: "aiStudio.errors.missing_output",
-  stale_output: "aiStudio.errors.stale_output",
-  interrupted: "aiStudio.errors.interrupted",
-  import_failed: "aiStudio.errors.import_failed",
-  // Internal translate-runner kinds (#445/#471). The Record<PipelineErrorKind>
-  // type makes this exhaustive: a new runner code with no copy fails typecheck.
-  rate_limited: "aiStudio.errors.rate_limited",
-  provider_overloaded: "aiStudio.errors.provider_overloaded",
-  timeout: "aiStudio.errors.timeout",
-  network_error: "aiStudio.errors.network_error",
-  invalid_key: "aiStudio.errors.invalid_key",
-  model_not_found: "aiStudio.errors.model_not_found",
-  context_too_long: "aiStudio.errors.context_too_long",
-  output_too_long: "aiStudio.errors.output_too_long",
-  empty_output: "aiStudio.errors.empty_output",
-  provider_error: "aiStudio.errors.provider_error",
-  provider_not_supported_internal: "aiStudio.errors.provider_not_supported_internal",
-  resource_not_supported_internal: "aiStudio.errors.resource_not_supported_internal",
-  checks_failed: "aiStudio.errors.checks_failed",
-  internal_error_after_call: "aiStudio.errors.internal_error_after_call",
-  internal_error: "aiStudio.errors.internal_error",
-};
-
-function errorCopy(kind: PipelineErrorKind | null, t: TFunction): string {
-  const key = kind ? (ERROR_COPY_KEY[kind] as string | undefined) : undefined;
-  return key ? t(key) : t("aiStudio.unrecognizedError", { kind });
-}
-
 // Human-readable display of the PipelineState enum. The enum values themselves
 // (used in logic and sent to the API) are never translated — only what the
 // user sees.
@@ -139,6 +106,12 @@ function scopeOf(job: PipelineJob, t: TFunction): string {
   return job.start_chapter === job.end_chapter
     ? `${job.book} ${job.start_chapter}`
     : `${job.book} ${job.start_chapter}–${job.end_chapter}`;
+}
+
+// A fresh session key per Retry click; the timestamp keeps it unique across
+// clicks and reloads. Only called from the Retry handler, never during render.
+function retrySessionKey(pipelineType: string): string {
+  return `retry-${pipelineType}-${Date.now()}`;
 }
 
 function timeAgo(unixSeconds: number | null | undefined, t: TFunction): string {
@@ -188,8 +161,14 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
   const pickedChapter = Math.max(1, parseInt(chapterInput, 10) || 1);
 
   const [jobs, setJobs] = useState<PipelineJob[]>([]);
-  const [jobsUnavailable, setJobsUnavailable] = useState(false);
+  // Pipelines are gated `requireEditor` server-side, so a viewer's jobs list
+  // is "not visible for your role", not an error.
+  const jobsUnavailable = role === "viewer";
   const [aiDisabled, setAiDisabled] = useState(false);
+  // i18n key for "this org's AI key is missing or unusable" (#551 part E), or
+  // null. Separate from aiDisabled, which is the deployment-level "no AI
+  // service on this server" state.
+  const [orgKeyCopy, setOrgKeyCopy] = useState<string | null>(null);
   const [pendingCount, setPendingCount] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
   const [retrying, setRetrying] = useState<string | null>(null);
@@ -225,11 +204,7 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
   // Treat that as "not visible for your role", not an error, and skip the
   // rest of the AI machinery for that role.
   useEffect(() => {
-    if (role === "viewer") {
-      setJobsUnavailable(true);
-      return;
-    }
-    setJobsUnavailable(false);
+    if (role === "viewer") return;
     return pipelineStore.subscribe(setJobs);
   }, [role]);
 
@@ -256,9 +231,29 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
     };
   }, [role]);
 
+  // Org-level probe: does this org have a usable AI key? Only editors need it
+  // as a banner; admins get the same line inside AiServiceSection below, which
+  // also updates live on Save / Clear key. A failed probe shows nothing.
+  useEffect(() => {
+    if (role !== "editor") return;
+    let cancelled = false;
+    api
+      .getAiProviderStatus()
+      .then((res) => {
+        if (!cancelled) setOrgKeyCopy(res.available ? null : orgKeyStatusCopyKey(res.reason));
+      })
+      .catch(() => {
+        /* best effort */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [role]);
+
   // Drafts-ready banner for the currently-picked scope.
   useEffect(() => {
     if (!pickedBook || role === "viewer") {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- zero the drafts-ready count when no book is picked or the role is viewer; without it the banner keeps the previous scope's count after the scope is cleared.
       setPendingCount(0);
       return;
     }
@@ -303,7 +298,7 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
   async function handleRetry(job: PipelineJob) {
     if (aiDisabled || retrying) return;
     setRetrying(job.job_id);
-    const sessionKey = `retry-${job.pipeline_type}-${Date.now()}`;
+    const sessionKey = retrySessionKey(job.pipeline_type);
     try {
       await pipelineStore.start({
         pipelineType: job.pipeline_type,
@@ -312,7 +307,12 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
       });
       setNotice(t("aiStudio.retryQueuedFor", { scope: scopeOf(job, t) }));
     } catch (e) {
-      if (e instanceof ApiError && e.status === 503) {
+      // Checked before the bare 409 below, which would misread it as "already running".
+      if (isAiProviderNotConfigured(e)) {
+        setNotice(t("pipeline.aiKeyNotConfigured"));
+      } else if (isAiNeedsOrgKey(e)) {
+        setNotice(t("ai.needsOrgKey"));
+      } else if (e instanceof ApiError && e.status === 503) {
         setAiDisabled(true);
         setNotice(t("aiStudio.retryUnavailable"));
       } else if (e instanceof ApiError && e.status === 409) {
@@ -380,10 +380,13 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
           <Alert severity="info" icon={<AutoAwesomeIcon fontSize="small" />}>
             <Typography sx={{ fontWeight: 700, fontSize: "0.9rem" }}>{t("aiStudio.notConfiguredTitle")}</Typography>
             <Typography variant="body2" sx={{ mt: 0.25 }}>
-              {t("aiStudio.notConfiguredBodyBefore")}
-              <code>BT_API_TOKEN</code>
-              {t("aiStudio.notConfiguredBodyAfter")}
+              {t("aiStudio.notConfiguredBody")}
             </Typography>
+          </Alert>
+        )}
+        {orgKeyCopy && role === "editor" && (
+          <Alert severity="info" icon={<AutoAwesomeIcon fontSize="small" />}>
+            {t(orgKeyCopy)}
           </Alert>
         )}
         {lockingJob && (
@@ -466,14 +469,21 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
             confirmation (mirror PipelineMenu's confirm pattern) and its
             enable-conditions: role === "admin", book imported, translation
             project. startBookAiTranslate (web/src/lib/aiTranslate.ts) is kept
-            intact for that day; the control is unreachable until then. */}
-        <Tooltip title={t("aiStudio.translateWholeBookDisabled")}>
-          <span>
-            <Button size="small" variant="outlined" color="secondary" disabled>
-              {t("aiStudio.translateWholeBook")}
-            </Button>
-          </span>
-        </Tooltip>
+            intact for that day; the control is unreachable until then.
+
+            Gated on isTranslationProject(cfg) (#497): a source-language
+            (authoring) workspace should not advertise a greyed-out action that
+            can never apply to it — matching the mode-gate on the button this
+            replaced. */}
+        {isTranslationProject(cfg) && (
+          <Tooltip title={t("aiStudio.translateWholeBookDisabled")}>
+            <span>
+              <Button size="small" variant="outlined" color="secondary" disabled>
+                {t("aiStudio.translateWholeBook")}
+              </Button>
+            </span>
+          </Tooltip>
+        )}
       </Stack>
 
       <Box
@@ -627,6 +637,35 @@ function requestedByLabel(job: PipelineJob, me: FlowScreenContext["me"], t: TFun
   return t("aiStudio.requestedBy", { name: job.started_by_username || t("aiStudio.someoneElse") });
 }
 
+// The stored error_message under the friendly copy (#678). The friendly copy
+// is per-kind and generic; this is the specific reason (e.g. the provider's
+// "model_not_found" body), which otherwise only showed in a vanishing toast.
+// Clamped to two lines so a long JSON body can't stretch the Runs table; the
+// tooltip has the full text.
+function ErrorMessageDetail({ message }: { message: string | null }) {
+  if (!message) return null;
+  return (
+    <Tooltip title={message}>
+      <Typography
+        variant="caption"
+        color="text.secondary"
+        sx={{
+          display: "-webkit-box",
+          WebkitLineClamp: 2,
+          WebkitBoxOrient: "vertical",
+          overflow: "hidden",
+          overflowWrap: "anywhere",
+          maxWidth: 360,
+          fontSize: "0.7rem",
+          mt: 0.25,
+        }}
+      >
+        {message}
+      </Typography>
+    </Tooltip>
+  );
+}
+
 function JobRow({ job, me, aiDisabled, retrying, cancelling, onRetry, onCancel, onDismiss }: JobRowProps) {
   const { t } = useTranslation();
   const mine = isMine(job, me);
@@ -651,8 +690,9 @@ function JobRow({ job, me, aiDisabled, retrying, cancelling, onRetry, onCancel, 
               {job.error_kind ?? "unknown_error"}
             </Typography>
             <Typography variant="caption" color="warning.main" sx={{ display: "block" }}>
-              {errorCopy(job.error_kind, t)}
+              {errorCopy(job.error_kind, t, job.error_message)}
             </Typography>
+            <ErrorMessageDetail message={job.error_message} />
           </Box>
         ) : (
           <Typography variant="caption" color="text.secondary">
@@ -726,14 +766,21 @@ function JobRowActions({
                 ? t("aiStudio.notConfiguredTitle")
                 : job.pipeline_type === "translate"
                   ? t("aiStudio.cantRetryTranslate")
-                  : ""
+                  : PIPELINE_TYPES_NEEDING_ORG_KEY.has(job.pipeline_type)
+                    ? t("ai.needsOrgKey")
+                    : ""
             }
           >
             <span>
               <Button
                 size="small"
                 onClick={onRetry}
-                disabled={aiDisabled || retrying || job.pipeline_type === "translate"}
+                disabled={
+                  aiDisabled ||
+                  retrying ||
+                  job.pipeline_type === "translate" ||
+                  PIPELINE_TYPES_NEEDING_ORG_KEY.has(job.pipeline_type)
+                }
                 startIcon={retrying ? <CircularProgress size={12} /> : undefined}
               >
                 {t("common.retry")}
@@ -772,9 +819,12 @@ function JobCard({ job, me, aiDisabled, retrying, cancelling, onRetry, onCancel,
       </Stack>
       <Box sx={{ mt: 1 }}>
         {job.state === "failed" ? (
-          <Typography variant="caption" color="warning.main">
-            {errorCopy(job.error_kind, t)}
-          </Typography>
+          <>
+            <Typography variant="caption" color="warning.main" sx={{ display: "block" }}>
+              {errorCopy(job.error_kind, t, job.error_message)}
+            </Typography>
+            <ErrorMessageDetail message={job.error_message} />
+          </>
         ) : (
           <Typography variant="caption" color="text.secondary">
             {progressText(job, t)}

@@ -1,0 +1,56 @@
+[
+  {
+    "id": 52654,
+    "name": "acq_ol",
+    "full_name": "",
+    "email": "",
+    "avatar_url": "https://git.door43.org/avatars/4944fe6a3a87da0627f71fa6681719ff",
+    "description": "",
+    "website": "",
+    "location": "",
+    "visibility": "public",
+    "repo_admin_change_team_access": true,
+    "username": "acq_ol",
+    "repo_languages": [
+      "acq"
+    ],
+    "repo_subjects": [
+      "Open Bible Stories"
+    ],
+    "repo_metadata_types": [
+      "rc"
+    ]
+  },
+  {
+    "id": 53543,
+    "name": "AFII",
+    "full_name": "",
+    "email": "",
+    "avatar_url": "https://git.door43.org/avatars/6b46f701dfc6be289dacfb28188205d6",
+    "description": "",
+    "website": "",
+    "location": "",
+    "visibility": "public",
+    "repo_admin_change_team_access": true,
+    "username": "AFII",
+    "repo_languages": null,
+    "repo_subjects": null,
+    "repo_metadata_types": null
+  },
+  {
+    "id": 53167,
+    "name": "aquifer-on-dcs",
+    "full_name": "",
+    "email": "",
+    "avatar_url": "https://git.door43.org/avatars/3f74880a387cde4590a3e3ded6471fef",
+    "description": "",
+    "website": "",
+    "location": "",
+    "visibility": "public",
+    "repo_admin_change_team_access": true,
+    "username": "aquifer-on-dcs",
+    "repo_languages": null,
+    "repo_subjects": null,
+    "repo_metadata_types": null
+  }
+]

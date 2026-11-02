@@ -76,6 +76,7 @@ export function UnsavedToasts({ book, onSaveVerseDraft, onJumpTo }: Props) {
       obs.observe(el);
       observers.push(obs);
     }
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- seeds visibility from a DOM query for each draft's cell, which only exists after commit; it re-arms the IntersectionObservers on every draft-list change.
     setVisibleKeys(initialVisible);
     return () => observers.forEach((o) => o.disconnect());
   }, [draftList]);

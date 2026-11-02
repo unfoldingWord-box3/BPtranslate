@@ -25,6 +25,7 @@ export function useAlerts(authReady: boolean): {
 
   useEffect(() => {
     if (!authReady) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- refresh() only sets state after its await resolves; the rule cannot see past the call.
     void refresh();
     const onVis = () => {
       if (document.visibilityState === "visible") void refresh();

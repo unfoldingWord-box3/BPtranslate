@@ -19,6 +19,7 @@
 // ordering that actually works.
 
 import { spawn, spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -98,6 +99,12 @@ const api = spawn(
     // to the real git.door43.org so org detect / book import stay real.
     "--var",
     "DCS_BASE_URL:http://127.0.0.1:8799",
+    // Translate jobs run only on the org's own AI key (#551), so the spec saves
+    // a dummy one, which needs a wrapping key. A throwaway generated per run
+    // (the D1 above is wiped every run, so nothing outlives it); never a real
+    // secret. Overrides whatever api/.dev.vars has.
+    "--var",
+    `AI_KEY_WRAPPING_KEY:${randomBytes(32).toString("base64")}`,
   ],
   spawnOpts,
 );

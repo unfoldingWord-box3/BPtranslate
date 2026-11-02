@@ -79,6 +79,7 @@ export function OuterDropZone() {
   useEffect(() => {
     if (!draggedPanelId) clear();
     // Every new drag starts disarmed, including a second drag of the same panel.
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- runs after commit with clear(), which writes hoverKeyRef; a ref write cannot move into render, and splitting the two would let the arm reset and the hover wipe drift apart.
     setArmed(false);
   }, [draggedPanelId, clear]);
 

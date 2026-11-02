@@ -30,6 +30,7 @@ import { useProjectConfig, isTranslationProject } from "../hooks/useProjectConfi
 import { useTemplates } from "../hooks/useTemplates";
 import { useTemplateAiDraft } from "../hooks/useTemplateAiDraft";
 import { useTemplateBulkDraft } from "../hooks/useTemplateBulkDraft";
+import { AI_NEEDS_ORG_KEY, QUICK_DRAFTS_NEED_ORG_KEY } from "../lib/aiProviderErrors";
 import { MarkdownView } from "./MarkdownView";
 import { TemplateHistoryDialog } from "./TemplateHistoryDialog";
 import { HelpButton } from "../help/HelpButton";
@@ -165,7 +166,8 @@ export function TemplateWorkspace({ templateId, onNavigate, onBack }: Props) {
   const bulkMessage = useMemo(() => {
     if (!bulkResult) return null;
     const { drafted, failed, reason, lastErrorCode } = bulkResult;
-    if (reason === "disabled") return t("templates.draftAllDisabled");
+    if (reason === "disabled")
+      return lastErrorCode === AI_NEEDS_ORG_KEY ? t("ai.needsOrgKey") : t("templates.draftAllDisabled");
     if (reason === "aborted_failures")
       return t("templates.draftAllFailed", { n: drafted, code: lastErrorCode ?? "unknown" });
     if (reason === "cancelled") return t("templates.draftAllCancelled", { n: drafted });
@@ -231,15 +233,21 @@ export function TemplateWorkspace({ templateId, onNavigate, onBack }: Props) {
               </Button>
             </Stack>
           ) : draftableUnits.length > 0 ? (
-            <Button
-              size="small"
-              variant="outlined"
-              startIcon={<AutoAwesomeIcon fontSize="small" />}
-              onClick={handleDraftAll}
-              sx={{ alignSelf: "flex-start", fontSize: 11 }}
-            >
-              {t("templates.draftAll", { n: draftableUnits.length })}
-            </Button>
+            // #551: template drafting can't use the org's own AI key yet.
+            <Tooltip title={QUICK_DRAFTS_NEED_ORG_KEY ? t("ai.needsOrgKey") : ""}>
+              <span style={{ alignSelf: "flex-start" }}>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  startIcon={<AutoAwesomeIcon fontSize="small" />}
+                  onClick={handleDraftAll}
+                  disabled={QUICK_DRAFTS_NEED_ORG_KEY}
+                  sx={{ fontSize: 11 }}
+                >
+                  {t("templates.draftAll", { n: draftableUnits.length })}
+                </Button>
+              </span>
+            </Tooltip>
           ) : null}
           {bulkMessage ? (
             <Alert
@@ -415,7 +423,10 @@ interface EditorProps {
 function TemplateEditor({ templateId, direction, onServerChange }: EditorProps) {
   const { t } = useTranslation();
   const [unit, setUnit] = useState<TemplateUnit | null>(null);
-  const [loading, setLoading] = useState(false);
+  // Starts true: this editor is always mounted keyed by its template (see the
+  // callers), so the load effect below runs once per mount and needs no
+  // synchronous loading/staleDraft reset of its own.
+  const [loading, setLoading] = useState(true);
   const [draft, setDraft] = useState("");
   const [preview, setPreview] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -432,8 +443,6 @@ function TemplateEditor({ templateId, direction, onServerChange }: EditorProps) 
   // can't race — is what makes leaving and coming back non-destructive.
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    setStaleDraft(false);
     api
       .getTemplate(templateId)
       .then(async (u) => {
@@ -518,9 +527,13 @@ function TemplateEditor({ templateId, direction, onServerChange }: EditorProps) 
   const isValidated = state === "validated";
   const isDraftState = state === "ai_draft" || state === "edited";
 
-  useEffect(() => {
+  // Collapse again once the unit leaves the validated state (adjusted during
+  // render; the expander only exists while validated).
+  const [prevValidated, setPrevValidated] = useState(isValidated);
+  if (isValidated !== prevValidated) {
+    setPrevValidated(isValidated);
     if (!isValidated) setExpanded(false);
-  }, [isValidated]);
+  }
   const collapsedValidated = isValidated && !expanded && !dirty;
 
   const {
@@ -534,6 +547,7 @@ function TemplateEditor({ templateId, direction, onServerChange }: EditorProps) 
 
   useEffect(() => {
     if (aiDraftError) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- consumes a one-shot AI-draft error from useTemplateAiDraft and clears it in the hook; the AI result path is kept on its post-commit timing rather than reworked into render.
       setErrorMsg(aiDraftError);
       clearAiDraftError();
     }
@@ -544,6 +558,7 @@ function TemplateEditor({ templateId, direction, onServerChange }: EditorProps) 
     // validated out from under us) — apply the fresh row so a retry uses the
     // current version instead of resubmitting the stale one and 409ing again.
     if (aiConflictUnit) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- applies a one-shot AI 409 rebase: applyServerUnit reads/clears the drafts store and onServerChange refetches the parent rail, so this has to run after commit.
       applyServerUnit(aiConflictUnit);
       clearAiConflict();
       onServerChange();
@@ -627,7 +642,15 @@ function TemplateEditor({ templateId, direction, onServerChange }: EditorProps) 
             <HistoryIcon fontSize="small" />
           </IconButton>
         </Tooltip>
-        <Tooltip title={isValidated ? t("templates.draftDisabledValidated") : ""}>
+        <Tooltip
+          title={
+            QUICK_DRAFTS_NEED_ORG_KEY
+              ? t("ai.needsOrgKey") // #551: can't use the org's own AI key yet
+              : isValidated
+                ? t("templates.draftDisabledValidated")
+                : ""
+          }
+        >
           <span>
             <Button
               size="small"
@@ -639,7 +662,7 @@ function TemplateEditor({ templateId, direction, onServerChange }: EditorProps) 
                   <AutoAwesomeIcon sx={{ fontSize: "18px !important" }} />
                 )
               }
-              disabled={dirty || saving || aiDrafting || isValidated}
+              disabled={QUICK_DRAFTS_NEED_ORG_KEY || dirty || saving || aiDrafting || isValidated}
               onClick={handleDraftWithAi}
             >
               {t("templates.draftWithAi")}

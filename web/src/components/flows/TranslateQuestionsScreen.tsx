@@ -91,7 +91,7 @@ import ViewColumnIcon from "@mui/icons-material/ViewColumn";
 
 import { LockBanner } from "./FlowBanners";
 import { FlowStatusChip, type FlowStatusKind } from "./FlowStatusChip";
-import { isAquiferDraftRow, unescapeNewlines, waitForOp } from "./translateShared";
+import { escapeNewlines, isAquiferDraftRow, unescapeNewlines, waitForOp } from "./translateShared";
 import { useSwipeNav } from "./useSwipeNav";
 import type { FlowScreenContext } from "./types";
 
@@ -99,6 +99,8 @@ import { useBook } from "../../hooks/useBook";
 import { useChapter } from "../../hooks/useChapter";
 import { useProjectConfig, isTranslationProject } from "../../hooks/useProjectConfig";
 import { useSourceQuestions } from "../../hooks/useSourceQuestions";
+import { useSourcePlan } from "../../hooks/sourcePlans";
+import { chapterHasSource } from "../../lib/sourceNotePlan";
 import { useUnsavedGuard } from "../../hooks/useUnsavedGuard";
 import { resolveSourceRef } from "../../lib/sourceRef";
 import {
@@ -110,7 +112,15 @@ import {
 import { realChapters } from "../../lib/bookSummary";
 import { resolveFlowChipStatus, flowChipKind, type FlowChipStatus } from "../../lib/flowStatusChip";
 import { drafts, rowKey } from "../../sync/drafts";
-import { onOutboxResult, outbox } from "../../sync/outbox";
+import {
+  isEditorsPendingSave,
+  pendingRevertSave,
+  revertMarks,
+  rowSaveEnded,
+  withPendingReverts,
+  type PendingRowSave,
+} from "../../sync/draftSaveState";
+import { onOutboxDrop, onOutboxResult, outbox, type OutboxOp } from "../../sync/outbox";
 import { api, ApiError, type ChapterLockedBody, type TqRow } from "../../sync/api";
 import { SCRIPTURE_FONT_STACK } from "../../theme";
 
@@ -465,13 +475,17 @@ export default function TranslateQuestionsScreen({
   // The English source question/answer live in the PUBLISHED source repo, not in
   // D1: in a translation-mode workspace the row's OWN question/response ARE the
   // target being drafted (useSourceQuestions.ts:3-7; ResourceColumn.tsx:376-380
-  // wires it exactly this way). Null projection = no tQ source configured → the
-  // source lines degrade to a plain statement rather than echoing the target.
+  // wires it exactly this way). Null projection = no project-wide tQ source;
+  // with no English question the source lines degrade to a plain statement
+  // rather than echoing the target, worded per chapter (sourcePlan below).
   const sourceProjection = useMemo(
     () => resolveSourceRef(projectConfig?.translationSource, "tq"),
     [projectConfig],
   );
   const sourceQuestions = useSourceQuestions(translationMode ? book : null, sourceProjection);
+  // Which chapters have a source at all: a Door43 override can give a chapter
+  // one when the project has no project-wide tQ repo (#697).
+  const sourcePlan = useSourcePlan(translationMode ? book : null, "tq", sourceProjection);
 
   const { status, data, refetch, applyLocalRowPatch, applyLocalRowReplacement } = useChapter(
     book,
@@ -500,6 +514,7 @@ export default function TranslateQuestionsScreen({
     const seed: Record<string, CardStatus> = {};
     for (const r of ordered) if (r.translation_state === "validated") seed[r.id] = "approved";
     const firstOpen = ordered.findIndex((r) => !seed[r.id]);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- builds and seeds the frozen per-chapter queue (cursor, statuses, view) once the chapter payload lands; queue progression is kept on its proven post-commit timing, as in TranslateScriptureScreen.
     setQueue({ key: chapterKey, ids: ordered.map((r) => r.id) });
     setStatuses(seed);
     setEditedIds(new Set());
@@ -545,36 +560,36 @@ export default function TranslateQuestionsScreen({
   // built for the current chapter — e.g. editing the URL from #/questions/RUT/1
   // to #/questions/RUT/1/9, or a second "N unsaved" jump to a different question
   // in the same chapter. Cross-chapter deep links are handled by the queue
-  // rebuild above. Guarded on an actual change (via the refs) so it never fires
-  // on plain Prev/Next, a status change, or unrelated re-renders. Mirrors the
-  // notes screen's re-seek effect; `rowId` wins over `verse`.
-  const prevVerseRef = useRef(verse);
-  const prevRowIdRef = useRef(rowId);
-  useEffect(() => {
-    if (prevVerseRef.current === verse && prevRowIdRef.current === rowId) return;
-    prevVerseRef.current = verse;
-    prevRowIdRef.current = rowId;
-    if (!queueIds || queueIds.length === 0) return;
-    if (rowId != null) {
-      const rowIdx = queueIds.indexOf(rowId);
+  // rebuild above. Guarded on an actual change (compared with the previous
+  // values) so it never fires on plain Prev/Next, a status change, or unrelated
+  // re-renders. Mirrors the notes screen's re-seek; `rowId` wins over `verse`.
+  // Adjusted during render (React's "adjust state when a prop changes"
+  // pattern, as in TranslateScriptureScreen) with the previous verse/rowId held
+  // in state; the commit this skips only re-showed the card that was already
+  // open, so no row is hydrated or stashed differently.
+  const [prevVerse, setPrevVerse] = useState(verse);
+  const [prevRowId, setPrevRowId] = useState(rowId);
+  if (prevVerse !== verse || prevRowId !== rowId) {
+    setPrevVerse(verse);
+    setPrevRowId(rowId);
+    if (queueIds && queueIds.length > 0) {
+      const rowIdx = rowId != null ? queueIds.indexOf(rowId) : -1;
       if (rowIdx >= 0) {
         setCursor(rowIdx);
         setView("cards");
-        return;
+      } else if (verse == null) {
+        // The verse segment was dropped (Back/Forward or a manual URL edit).
+        // Restore the same no-verse init the queue-build path uses.
+        const firstOpen = queueIds.findIndex((id) => !statuses[id]);
+        setCursor(firstOpen < 0 ? 0 : firstOpen);
+        setView(firstOpen < 0 ? "done" : "cards");
+      } else {
+        const seekIdx = queueIds.findIndex((id) => (rowById.get(id)?.verse ?? -Infinity) >= verse);
+        setCursor(seekIdx < 0 ? queueIds.length - 1 : seekIdx);
+        setView("cards");
       }
     }
-    if (verse == null) {
-      // The verse segment was dropped (Back/Forward or a manual URL edit).
-      // Restore the same no-verse init the queue-build path uses.
-      const firstOpen = queueIds.findIndex((id) => !statuses[id]);
-      setCursor(firstOpen < 0 ? 0 : firstOpen);
-      setView(firstOpen < 0 ? "done" : "cards");
-      return;
-    }
-    const seekIdx = queueIds.findIndex((id) => (rowById.get(id)?.verse ?? -Infinity) >= verse);
-    setCursor(seekIdx < 0 ? queueIds.length - 1 : seekIdx);
-    setView("cards");
-  }, [verse, rowId, queueIds, rowById, statuses]);
+  }
 
   // Question rows in THIS book holding persisted unsaved typing (IndexedDB
   // drafts from this browser). Drives the list pane's "Unsaved" chip so a
@@ -608,7 +623,28 @@ export default function TranslateQuestionsScreen({
   // ── editor state ─────────────────────────────────────────────────────────
   // One value + one baseline per field; one drafts record for the pair.
   const [values, setValues] = useState<Record<Field, string>>({ question: "", response: "" });
+  // `baseline` (state) is what render reads for dirtyFields; `baselineRef` is
+  // the same value for handlers and effects, several of which read it after an
+  // await. Always write both through setBaseline so they never disagree (the
+  // ReviewQueue pattern, #636).
+  const [baseline, setBaselineState] = useState<Record<Field, string>>({ question: "", response: "" });
   const baselineRef = useRef<Record<Field, string>>({ question: "", response: "" });
+  const setBaseline = useCallback((next: Record<Field, string>) => {
+    baselineRef.current = next;
+    setBaselineState(next);
+  }, []);
+  // The patch of this screen's save for row `id` while it can still land.
+  // Until then the draft keeps a field typed back to the baseline but
+  // differing from what was sent (withPendingReverts, #632 item 2). Cleared by
+  // that save's outcome (the listener below the persist effect), never by a
+  // version check: the row can reach a new version before the save lands
+  // (review A2).
+  const sentRef = useRef<(PendingRowSave & { id: string }) | null>(null);
+  // Ops this screen heard end since it mounted, so a draft lookup's outbox
+  // read cannot restore a save that ended while the read was in flight (#658).
+  const endedOpsRef = useRef(new Set<string>());
+  // Re-runs the persist effect when the protection ends.
+  const [sentTick, setSentTick] = useState(0);
   // "Hydration for this key has started" — set synchronously, guards against
   // re-entering the hydrate branch and against a stale async lookup landing
   // after a newer row change.
@@ -629,12 +665,18 @@ export default function TranslateQuestionsScreen({
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ text: string; severity: "info" | "warning" } | null>(null);
-  const [conflictNotice, setConflictNotice] = useState<string | null>(null);
+  // The row a settled 409 belongs to — not a bare flag. The outbox listener
+  // hears every conflict in this book, including leftover ops from earlier
+  // sessions or another tab; a flag painted "another editor changed THIS
+  // note" on whatever card happened to be open (2026-10-03 report). Keyed by
+  // id, the banner shows only on its own card; conflicts on other rows stay
+  // in SyncStatusBar's conflict panel, which lists every conflicted op.
+  const [conflictRowId, setConflictRowId] = useState<string | null>(null);
   const [chapterLock, setChapterLock] = useState<ChapterLockedBody | null>(null);
 
   const say = useCallback((text: string, severity: "info" | "warning" = "warning") => {
     setNotice({ text, severity });
-  }, []);
+  }, [setNotice]);
 
   // Hydrate both fields on card change: a persisted draft (unsaved typing
   // from this browser) wins over the row's own content.
@@ -674,13 +716,27 @@ export default function TranslateQuestionsScreen({
     };
     if (hydratedKeyRef.current !== nonceKey) {
       hydratedKeyRef.current = nonceKey;
-      baselineRef.current = { ...fallback };
+      setBaseline({ ...fallback });
       setValues(fallback);
       setEditingField(null);
     }
     let cancelled = false;
-    void drafts.get(key).then((rec) => {
+    // The outbox is read alongside the draft (#658): returning to this screen
+    // while its save is pending starts with no sentRef, so a field typed back
+    // to its baseline would drop out of the drafts store.
+    void Promise.all([drafts.get(key), outbox.listWithUncommitted().catch(() => [] as OutboxOp[])]).then(([rec, ops]) => {
       if (cancelled || hydratedKeyRef.current !== nonceKey) return;
+      if (sentRef.current?.id !== row.id) {
+        const pending = pendingRevertSave(rec, ops, { rowKind: "tq", id: row.id, book }, endedOpsRef.current);
+        // Only the fields this screen edits.
+        const kept: PendingRowSave = { patch: {}, shown: {}, opId: pending?.opId };
+        for (const f of FIELDS) {
+          if (typeof pending?.patch[f] !== "string") continue;
+          kept.patch[f] = pending.patch[f];
+          kept.shown[f] = pending.shown[f];
+        }
+        if (Object.keys(kept.patch).length > 0) sentRef.current = { id: row.id, ...kept };
+      }
       const payload = rec?.payload as
         | { patch?: Record<string, unknown>; baseline?: Record<string, unknown> }
         | undefined;
@@ -693,7 +749,7 @@ export default function TranslateQuestionsScreen({
           const baselineVal = payload.baseline?.[f];
           if (typeof baselineVal === "string") nextBaseline[f] = unescapeNewlines(baselineVal);
         }
-        baselineRef.current = nextBaseline;
+        setBaseline(nextBaseline);
         setValues(nextValues);
       }
       // Mark this key fully settled — sync setup AND the async lookup have
@@ -711,7 +767,7 @@ export default function TranslateQuestionsScreen({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [row?.id, book, reloadNonce, settledKey]);
 
-  const dirtyFields = FIELDS.filter((f) => values[f] !== baselineRef.current[f]);
+  const dirtyFields = FIELDS.filter((f) => values[f] !== baseline[f]);
   const hasDiff = dirtyFields.length > 0;
 
   // Stash every keystroke. Nothing leaves the browser here — the draft store
@@ -750,15 +806,20 @@ export default function TranslateQuestionsScreen({
     const key = rowKey("tq", book, row.id);
     const nonceKey = `${key}#${reloadNonce}`;
     if (settledKey !== nonceKey) return;
-    const patch: Record<string, string> = {};
+    const diff: Record<string, string> = {};
+    for (const f of FIELDS) {
+      if (values[f] !== baselineRef.current[f]) diff[f] = values[f];
+    }
+    const sent = sentRef.current && sentRef.current.id === row.id ? sentRef.current : undefined;
+    const patch = withPendingReverts(diff, values, sent?.patch);
+    // Record kept type-backs so a remount can restore the protection (#658).
+    const reverted = revertMarks(diff, patch, sent);
     const baseline: Record<string, string> = {};
     for (const f of FIELDS) {
-      if (values[f] === baselineRef.current[f]) continue;
-      patch[f] = values[f];
-      baseline[f] = baselineRef.current[f];
+      if (f in patch) baseline[f] = baselineRef.current[f];
     }
     if (Object.keys(patch).length > 0) {
-      void drafts.set(key, { patch, baseline }, row.version, {
+      void drafts.set(key, { patch, baseline, ...(reverted ? { reverted } : {}) }, row.version, {
         kind: "row",
         rowKind: "tq",
         id: row.id,
@@ -770,7 +831,45 @@ export default function TranslateQuestionsScreen({
       void drafts.clear(key);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [values, row?.id, row?.version, book, reloadNonce, settledKey]);
+  }, [values, row?.id, row?.version, book, reloadNonce, settledKey, sentTick]);
+
+  // End the type-back protection when this screen's pending save can no
+  // longer land: confirmed, refused, dropped as "locked", or discarded. A 409
+  // that waits for keep-mine, or a save still queued after waitForOp gave up,
+  // keeps it. On a 200 the baseline takes the sent values in the same tick
+  // (also after a keep-mine, where saveDraft no longer moves it), and the
+  // persist effect re-runs against it, so a kept revert stays a draft.
+  useEffect(() => {
+    const end = (op: OutboxOp, ok: boolean) => {
+      endedOpsRef.current.add(op.id);
+      const sent = sentRef.current;
+      if (!sent || !isEditorsPendingSave(sent, op, { rowKind: "tq", id: sent.id, book })) return;
+      sentRef.current = null;
+      if (ok && hydratedKeyRef.current?.startsWith(`${rowKey("tq", book, sent.id)}#`)) {
+        // The display form of what was sent: this screen's own text as typed,
+        // or, for a save recovered from the outbox (#658), the form its mark
+        // recorded. Only this screen's fields.
+        const moved = { ...baselineRef.current };
+        for (const f of FIELDS) {
+          const shown = sent.shown[f];
+          if (typeof shown === "string") moved[f] = shown;
+        }
+        setBaseline(moved);
+      }
+      setSentTick((n) => n + 1);
+    };
+    const offResult = onOutboxResult((op, result) => {
+      if (rowSaveEnded(result)) end(op, result.kind === "ok");
+    });
+    const offDrop = onOutboxDrop((op) => end(op, false));
+    return () => {
+      offResult();
+      offDrop();
+      // A save from the previous book can no longer be heard here, so its
+      // protection must not outlive the listener.
+      sentRef.current = null;
+    };
+  }, [book, setBaseline]);
 
   useUnsavedGuard(hasDiff);
 
@@ -792,7 +891,7 @@ export default function TranslateQuestionsScreen({
         // Only a settled conflict is a question for the user: the outbox
         // auto-heals the healable ones and still notifies listeners.
         if (result.kind === "conflict" && op.status === "conflict") {
-          setConflictNotice(t("flowQuestions.conflict"));
+          setConflictRowId(op.target.id);
         }
       }),
     [book, t],
@@ -845,7 +944,7 @@ export default function TranslateQuestionsScreen({
       if (nxt === -1) setView("done");
       else setCursor(nxt);
     },
-    [queueIds, statuses, reviewing, cursor, nextUnstatused],
+    [queueIds, statuses, reviewing, cursor, nextUnstatused, setView, setCursor],
   );
 
   // Swipe anywhere on the card stack to page between questions — the same
@@ -866,13 +965,19 @@ export default function TranslateQuestionsScreen({
   async function saveDraft(target: TqRow): Promise<boolean> {
     const patch: { question?: string; response?: string } = {};
     const baseline: Record<string, string> = {};
+    // The same fields as typed (real newlines): the display form the drafts
+    // store and the type-back protection compare against.
+    const shown: Record<string, string> = {};
     for (const f of FIELDS) {
       if (values[f] === baselineRef.current[f]) continue;
-      patch[f] = values[f];
-      baseline[f] = baselineRef.current[f];
+      // Sent in the stored escaped form; see escapeNewlines.
+      patch[f] = escapeNewlines(values[f]);
+      baseline[f] = escapeNewlines(baselineRef.current[f]);
+      shown[f] = values[f];
     }
     if (Object.keys(patch).length === 0) return true;
     applyLocalRowPatch("tq", target.id, patch);
+    sentRef.current = { id: target.id, patch: { ...patch }, shown };
     const op = await outbox.enqueueRow("tq", target.id, target.version, patch, { book, baseline });
     const result = await waitForOp(op.id);
     if (result === null) {
@@ -881,7 +986,7 @@ export default function TranslateQuestionsScreen({
     }
     if (result.kind !== "ok") {
       if (result.kind === "conflict") {
-        setConflictNotice(t("flowQuestions.conflict"));
+        setConflictRowId(target.id);
       } else if (result.kind === "locked") {
         setChapterLock(result.lockBody);
         say(t("flowQuestions.aiRunDropped"));
@@ -890,7 +995,13 @@ export default function TranslateQuestionsScreen({
       }
       return false;
     }
-    baselineRef.current = { ...values };
+    setBaseline({ ...values });
+    // The outbox's 200 handler clears a draft holding only the saved text, but
+    // only one written before it ran. A draft re-written at a newer version
+    // between that clear and the baseline move above holds only the saved text
+    // and the persist effect won't re-run for the moved baseline, so drop it;
+    // newer typing stays (#616 review, #618).
+    void drafts.clearRowIfSaved(rowKey("tq", book, target.id), shown);
     setEditedIds((prev) => new Set(prev).add(target.id));
     // Mirror the server's demotion locally so the row object stays consistent
     // with what a refetch will report: a content edit demotes an AI draft or a
@@ -964,7 +1075,7 @@ export default function TranslateQuestionsScreen({
   }
 
   function reloadRow() {
-    setConflictNotice(null);
+    setConflictRowId(null);
     void refetch().then(() => setReloadNonce((n) => n + 1));
   }
 
@@ -1230,7 +1341,7 @@ export default function TranslateQuestionsScreen({
           <LockBanner pipelineType={chapterLock.pipelineType} startedAt={chapterLock.startedAt} />
         )}
 
-        {conflictNotice && (
+        {row && conflictRowId === row.id && (
           <Alert
             severity="warning"
             action={
@@ -1239,7 +1350,7 @@ export default function TranslateQuestionsScreen({
               </Button>
             }
           >
-            {conflictNotice}
+            {t("flowQuestions.conflict")}
           </Alert>
         )}
 
@@ -1444,7 +1555,7 @@ export default function TranslateQuestionsScreen({
                 targetLabel={targetLabel}
                 sourceLangLabel={sourceLangLabel}
                 translationMode={translationMode}
-                hasSourceProjection={sourceProjection !== null}
+                hasSourceProjection={chapterHasSource(sourcePlan, row.chapter)}
                 chipKind={chip.kind}
                 chipLabel={chip.label}
                 hl={HL}
@@ -1474,7 +1585,7 @@ export default function TranslateQuestionsScreen({
                 targetLabel={targetLabel}
                 sourceLangLabel={sourceLangLabel}
                 translationMode={translationMode}
-                hasSourceProjection={sourceProjection !== null}
+                hasSourceProjection={chapterHasSource(sourcePlan, row.chapter)}
                 chipKind={chip.kind}
                 chipLabel={chip.label}
                 hl={HL}

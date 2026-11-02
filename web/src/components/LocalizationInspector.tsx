@@ -171,6 +171,7 @@ export function LocalizationInspector() {
 
   useEffect(() => {
     if (!active) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- this effect owns the document mousemove listener and its rAF; resetting the inspector state in the same effect keeps teardown and reset in step when active/engaged change.
       setPaused(false);
       setBarPos(null);
     }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { drafts, hasUnsavedDrafts } from "../sync/drafts";
 
 // Warn before a full-page unload (reload — including the "App update available"
@@ -35,8 +35,12 @@ export function useUnsavedGuard(panelDirty: boolean): void {
 
   // Read through a ref so the listener can stay installed once (stable identity)
   // and always see the latest dirtiness without re-adding on every change.
+  // Synced after every commit (no deps), before paint, so the listener never
+  // sees a value older than what is on screen.
   const activeRef = useRef(false);
-  activeRef.current = panelDirty || hasDrafts;
+  useLayoutEffect(() => {
+    activeRef.current = panelDirty || hasDrafts;
+  });
 
   useEffect(() => {
     const handler = (e: BeforeUnloadEvent) => {

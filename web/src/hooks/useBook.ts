@@ -7,6 +7,11 @@
 // Edits in book mode flow through the same outbox; the verse version used
 // for `If-Match` comes from this cache. Server responses are adopted via
 // onOutboxResult so the cache stays current alongside useChapter.
+//
+// Every local change goes through `mutate` (a CacheOp, lib/bookCache.ts). While
+// a fetch for that chapter is in flight the op is also recorded and replayed
+// onto the response, so a (re)load that lands late never clobbers an
+// optimistic edit made after it started (#562).
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -21,6 +26,9 @@ import {
 } from "../sync/api";
 import { fetchWithRetry } from "../sync/fetchWithRetry";
 import { onOutboxResult } from "../sync/outbox";
+import { rebuiltRow, rowWithLivePatches } from "../sync/outboxTargeting";
+import { onRowRebuild } from "../sync/rowRebuild";
+import { applyCacheOp, ChapterFetchTracker, type CacheOp } from "../lib/bookCache";
 
 export type ChapterState =
   | { kind: "unloaded" }
@@ -32,36 +40,49 @@ export interface UseBookReturn {
   summary: BookSummary | null;
   summaryStatus: "idle" | "loading" | "ready" | "error";
   chapters: Map<number, ChapterState>;
+  /** Load a chapter once; a no-op when it is already ready or loading. */
   loadChapter: (ch: number) => void;
+  /** Re-fetch an already-cached chapter in place (keeps showing the old data until the new lands). */
+  reloadChapter: (ch: number) => void;
   applyLocalVerse: (verse: VerseDto) => void;
   applyLocalRowPatch: (
     kind: "tn" | "tq" | "twl",
     chapter: number,
     id: string,
     patch: Partial<TnRow & TqRow & TwlRow>,
+    onlyAtVersion?: number,
   ) => void;
+  /** Swap in a full server row; skipped when the cached copy is newer. */
+  applyLocalRowReplacement: (kind: "tn" | "tq" | "twl", row: TnRow | TqRow | TwlRow) => void;
+  /** Add a row to its chapter's cache (after `afterId` when given). No-op if present. */
+  applyLocalRowInsert: (kind: "tn" | "tq" | "twl", row: TnRow | TqRow | TwlRow, position?: { afterId?: string }) => void;
+  applyLocalRowDelete: (kind: "tn" | "tq" | "twl", chapter: number, id: string, onlyAtVersion?: number) => void;
 }
 
 export function useBook(book: string, enabled: boolean): UseBookReturn {
   const [summary, setSummary] = useState<BookSummary | null>(null);
   const [summaryStatus, setSummaryStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [chapters, setChapters] = useState<Map<number, ChapterState>>(new Map());
-  const inFlight = useRef<Set<number>>(new Set());
+  // One tracker per (book, enabled). Dropped in the abort effect's cleanup and
+  // recreated on first use: cleanups run before any new effect, whereas a
+  // child's effect can ask for a chapter of the new book before this hook's
+  // reset effect runs.
+  const trackerRef = useRef<ChapterFetchTracker | null>(null);
+  const getTracker = useCallback(() => (trackerRef.current ??= new ChapterFetchTracker()), []);
 
   // Reset everything when the book changes or the hook is disabled — the
   // cache is per-book, not global.
   useEffect(() => {
     if (!enabled) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- the per-book cache is reset here when the book changes or the hook is disabled, in the same effect that starts the summary fetch. Deriving it in render would show the previous book's chapters for a render after a book change.
       setSummary(null);
       setSummaryStatus("idle");
       setChapters(new Map());
-      inFlight.current.clear();
       return;
     }
     setSummary(null);
     setSummaryStatus("loading");
     setChapters(new Map());
-    inFlight.current.clear();
     const ctrl = new AbortController();
     fetchWithRetry(
       (signal) => api.getBookSummary(book, signal),
@@ -88,91 +109,121 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
   // When the book toggles or `enabled` drops, abort every in-flight chapter
   // load (the effect above already clears the cache).
   useEffect(() => {
+    // The ref holds one Map for the hook's lifetime (never reassigned), so
+    // capturing it here is the same object the cleanup would have read.
+    const ctrls = chapterCtrls.current;
     return () => {
-      for (const ctrl of chapterCtrls.current.values()) ctrl.abort();
-      chapterCtrls.current.clear();
+      for (const ctrl of ctrls.values()) ctrl.abort();
+      ctrls.clear();
+      trackerRef.current = null;
     };
   }, [book, enabled]);
+
+  // Fetch a chapter under `token` and adopt it unless a newer fetch superseded
+  // it. A reload aborts the fetch it replaces.
+  const fetchChapter = useCallback(
+    (ch: number, token: number, reload: boolean) => {
+      const tracker = getTracker();
+      if (reload) chapterCtrls.current.get(ch)?.abort();
+      const ctrl = new AbortController();
+      chapterCtrls.current.set(ch, ctrl);
+      // Only drop our own controller: a reload that aborted us has already
+      // registered its own, and deleting that one would leave a later reload
+      // unable to abort it (stale response could land last).
+      const release = () => {
+        if (chapterCtrls.current.get(ch) === ctrl) chapterCtrls.current.delete(ch);
+      };
+      fetchWithRetry((signal) => api.getChapter(book, ch, signal), { signal: ctrl.signal })
+        .then((data) => {
+          release();
+          if (ctrl.signal.aborted) return;
+          const merged = tracker.land(ch, token, data);
+          if (!merged) return;
+          setChapters((prev) => new Map(prev).set(ch, { kind: "ready", data: merged }));
+        })
+        .catch((e) => {
+          release();
+          const current = tracker.fail(ch, token);
+          if (!current || ctrl.signal.aborted) return;
+          if (e instanceof DOMException && e.name === "AbortError") return;
+          setChapters((prev) => {
+            const cur = prev.get(ch);
+            if (reload) {
+              // Best effort: a ready cache keeps its previous payload. A reload
+              // that superseded a first load leaves it "loading", so let it retry.
+              return cur?.kind === "loading" ? new Map(prev).set(ch, { kind: "unloaded" }) : prev;
+            }
+            return new Map(prev).set(ch, {
+              kind: "error",
+              error: e instanceof ApiError ? `HTTP ${e.status}` : String(e),
+            });
+          });
+        });
+    },
+    [book, getTracker],
+  );
 
   const loadChapter = useCallback(
     (ch: number) => {
       if (!enabled) return;
-      if (inFlight.current.has(ch)) return;
-      setChapters((prev) => {
-        const cur = prev.get(ch);
-        if (cur && cur.kind !== "unloaded") return prev;
-        const next = new Map(prev);
-        next.set(ch, { kind: "loading" });
-        return next;
-      });
-      inFlight.current.add(ch);
-      const ctrl = new AbortController();
-      chapterCtrls.current.set(ch, ctrl);
-      fetchWithRetry(
-        (signal) => api.getChapter(book, ch, signal),
-        { signal: ctrl.signal },
-      )
-        .then((data) => {
-          inFlight.current.delete(ch);
-          chapterCtrls.current.delete(ch);
-          if (ctrl.signal.aborted) return;
-          setChapters((prev) => {
-            const next = new Map(prev);
-            next.set(ch, { kind: "ready", data });
-            return next;
-          });
-        })
-        .catch((e) => {
-          inFlight.current.delete(ch);
-          chapterCtrls.current.delete(ch);
-          if (ctrl.signal.aborted) return;
-          if (e instanceof DOMException && e.name === "AbortError") return;
-          setChapters((prev) => {
-            const next = new Map(prev);
-            next.set(ch, {
-              kind: "error",
-              error: e instanceof ApiError ? `HTTP ${e.status}` : String(e),
-            });
-            return next;
-          });
-        });
+      // Ready or already loading: nothing to do (no refetch, so a cached
+      // chapter's optimistic edits stay put).
+      const token = getTracker().beginLoad(ch);
+      if (token === null) return;
+      setChapters((prev) => new Map(prev).set(ch, { kind: "loading" }));
+      fetchChapter(ch, token, false);
     },
-    [book, enabled],
+    [enabled, getTracker, fetchChapter],
   );
 
-  const applyLocalVerse = useCallback<UseBookReturn["applyLocalVerse"]>((verse) => {
-    setChapters((prev) => {
-      const cur = prev.get(verse.chapter);
-      if (!cur || cur.kind !== "ready") return prev;
-      const data = cur.data;
-      const byVersion = data.verses[verse.bible_version] ?? {};
-      const nextByVersion = { ...byVersion, [verse.verse]: verse };
-      const next = new Map(prev);
-      next.set(verse.chapter, {
-        kind: "ready",
-        data: {
-          ...data,
-          verses: { ...data.verses, [verse.bible_version]: nextByVersion },
-        },
-      });
-      return next;
-    });
-  }, []);
+  const reloadChapter = useCallback(
+    (ch: number) => {
+      if (!enabled) return;
+      fetchChapter(ch, getTracker().beginReload(ch), true);
+    },
+    [enabled, getTracker, fetchChapter],
+  );
 
-  const applyLocalRowPatch = useCallback<UseBookReturn["applyLocalRowPatch"]>(
-    (kind, chapter, id, patch) => {
+  // Apply a local change to a ready chapter, and record it so a fetch already
+  // in flight for that chapter replays it on landing.
+  const mutate = useCallback(
+    (ch: number, op: CacheOp) => {
+      getTracker().record(ch, op);
       setChapters((prev) => {
-        const cur = prev.get(chapter);
+        const cur = prev.get(ch);
         if (!cur || cur.kind !== "ready") return prev;
-        const data = cur.data;
-        const list = data[kind] as Array<TnRow | TqRow | TwlRow>;
-        const nextList = list.map((r) => (r.id === id ? { ...r, ...patch } : r));
-        const next = new Map(prev);
-        next.set(chapter, { kind: "ready", data: { ...data, [kind]: nextList } as ChapterPayload });
-        return next;
+        const data = applyCacheOp(cur.data, op);
+        return data === cur.data ? prev : new Map(prev).set(ch, { kind: "ready", data });
       });
     },
-    [],
+    [getTracker],
+  );
+
+  const applyLocalVerse = useCallback<UseBookReturn["applyLocalVerse"]>(
+    (verse) => mutate(verse.chapter, { t: "verse", verse }),
+    [mutate],
+  );
+
+  // Shell patches the chapter-0 cache on every tn edit; applyCacheOp returns
+  // the same payload when the row isn't one of that chapter's, so no churn.
+  const applyLocalRowPatch = useCallback<UseBookReturn["applyLocalRowPatch"]>(
+    (kind, chapter, id, patch, onlyAtVersion) => mutate(chapter, { t: "patch", kind, id, patch, onlyAtVersion }),
+    [mutate],
+  );
+
+  const applyLocalRowReplacement = useCallback<UseBookReturn["applyLocalRowReplacement"]>(
+    (kind, row) => mutate(row.chapter, { t: "replace", kind, row }),
+    [mutate],
+  );
+
+  const applyLocalRowInsert = useCallback<UseBookReturn["applyLocalRowInsert"]>(
+    (kind, row, position) => mutate(row.chapter, { t: "insert", kind, row, afterId: position?.afterId }),
+    [mutate],
+  );
+
+  const applyLocalRowDelete = useCallback<UseBookReturn["applyLocalRowDelete"]>(
+    (kind, chapter, id, onlyAtVersion) => mutate(chapter, { t: "delete", kind, id, onlyAtVersion }),
+    [mutate],
   );
 
   // Adopt outbox results so verses edited via book mode stay coherent with
@@ -180,7 +231,7 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
   // duplicate updates are idempotent.
   useEffect(() => {
     if (!enabled) return;
-    return onOutboxResult((op, result) => {
+    return onOutboxResult((op, result, queued) => {
       if (result.kind !== "ok") return;
       if (op.target.kind === "verse") {
         const v = result.updated as VerseDto;
@@ -190,23 +241,39 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
       if (op.target.kind === "row") {
         const u = result.updated as TnRow | TqRow | TwlRow;
         if (!u || u.book !== book) return;
-        const rowKind = op.target.rowKind;
-        setChapters((prev) => {
-          const cur = prev.get(u.chapter);
-          if (!cur || cur.kind !== "ready") return prev;
-          const data = cur.data;
-          const list = data[rowKind] as Array<TnRow | TqRow | TwlRow>;
-          const nextList = list.map((r) => (r.id === u.id ? u : r));
-          const next = new Map(prev);
-          next.set(u.chapter, {
-            kind: "ready",
-            data: { ...data, [rowKind]: nextList } as ChapterPayload,
-          });
-          return next;
-        });
+        // Later saves still queued for the row stay on top (#620).
+        mutate(u.chapter, { t: "replace", kind: op.target.rowKind, row: rowWithLivePatches(u, op, queued) });
       }
     });
-  }, [book, enabled, applyLocalVerse]);
+  }, [book, enabled, applyLocalVerse, mutate]);
 
-  return { summary, summaryStatus, chapters, loadChapter, applyLocalVerse, applyLocalRowPatch };
+  // A row op that never landed: put the server's row back, with the row's
+  // saves still waiting on top (#637 item 1). One "rebuild" cache op, the same
+  // one useChapter applies (rowRebuildAction's guards: a newer cached row is
+  // kept; a missing row goes back, in server order, only after its own
+  // refused or discarded delete). It is recorded, so a fetch in flight
+  // replays it, and it carries the server row just read, so no copy kept here
+  // can be older than the cache.
+  useEffect(() => {
+    if (!enabled) return;
+    return onRowRebuild(({ target, server, queued, cause, mayInsert }) => {
+      if (server.book !== book) return;
+      const rebuilt = rebuiltRow(server, target, queued, cause);
+      if (!rebuilt) return;
+      mutate(rebuilt.chapter, { t: "rebuild", kind: target.rowKind, row: rebuilt, mayInsert });
+    });
+  }, [book, enabled, mutate]);
+
+  return {
+    summary,
+    summaryStatus,
+    chapters,
+    loadChapter,
+    reloadChapter,
+    applyLocalVerse,
+    applyLocalRowPatch,
+    applyLocalRowReplacement,
+    applyLocalRowInsert,
+    applyLocalRowDelete,
+  };
 }

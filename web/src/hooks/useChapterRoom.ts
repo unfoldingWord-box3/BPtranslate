@@ -61,7 +61,9 @@ export interface UseChapterRoomHandlers {
 
 export function useChapterRoom(
   book: string,
-  chapter: number,
+  // null = no room (lets a caller subscribe conditionally without breaking
+  // the rules of hooks).
+  chapter: number | null,
   handlers: UseChapterRoomHandlers,
 ): void {
   const handlersRef = useRef(handlers);
@@ -70,6 +72,7 @@ export function useChapterRoom(
   }, [handlers]);
 
   useEffect(() => {
+    if (chapter === null) return;
     const cleanup = openChapterRoom(book, chapter, {
       onEvent: (raw) => {
         const ev = raw as WireEvent | null;

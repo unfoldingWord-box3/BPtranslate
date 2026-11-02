@@ -28,6 +28,7 @@ export function useTranslationPrefs(enabled: boolean): {
 
   useEffect(() => {
     if (!enabled) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- reset to idle when the hook is disabled. Deriving the empty value in render instead would show the old result for a render when it is re-enabled, before the refetch marks it loading.
       setPrefs(null);
       setError(null);
       setLoading(false);
@@ -71,6 +72,7 @@ export function useContextExportStatus(enabled: boolean): {
 
   useEffect(() => {
     if (!enabled) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- reset to idle when the hook is disabled. Deriving the empty value in render instead would show the old result for a render when it is re-enabled, before the refetch marks it loading.
       setStatus(null);
       setError(null);
       setLoading(false);
@@ -113,6 +115,7 @@ export function useTerms(
 
   useEffect(() => {
     if (!enabled) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- reset to idle when the hook is disabled. Deriving the empty value in render instead would show the old result for a render when it is re-enabled, before the refetch marks it loading.
       setTerms([]);
       setError(null);
       setLoading(false);
@@ -155,6 +158,7 @@ export function useExamples(
 
   useEffect(() => {
     if (!enabled) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- reset to idle when the hook is disabled. Deriving the empty value in render instead would show the old result for a render when it is re-enabled, before the refetch marks it loading.
       setExamples([]);
       setError(null);
       setLoading(false);

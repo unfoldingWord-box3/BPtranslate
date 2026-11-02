@@ -80,7 +80,11 @@ export function UltAlignmentStrip({
   const origKey = (slice: number, position: number) => `${slice}:${position}`;
   const lexFocus = focus?.side === "original" ? focus : null;
   const lexWord = lexFocus ? slices[lexFocus.slice]?.words[lexFocus.position] ?? null : null;
-  const lexAnchor = lexFocus ? origEls.current.get(origKey(lexFocus.slice, lexFocus.position)) ?? null : null;
+  // A function, not the element (#594): Popper resolves it itself, so this
+  // render never reads the ref map. The word's button is mounted whenever
+  // lexWord exists (the same slices render both), so the lookup finds it.
+  const lexKey = lexFocus ? origKey(lexFocus.slice, lexFocus.position) : null;
+  const lexAnchor = lexKey ? () => origEls.current.get(lexKey) as HTMLElement : null;
   // Hover-only (desktop, not pinned): let the pointer pass through the
   // popover, so it never sits between the mouse and the next line of words.
   const lexHoverOnly = hover?.side === "original" && !sameFocus(hover, pinned);
@@ -260,7 +264,7 @@ export function UltAlignmentStrip({
       })}
       <Popper
         id="ult-align-lex"
-        open={Boolean(lexWord && lexAnchor)}
+        open={Boolean(lexWord)}
         anchorEl={lexAnchor}
         placement="bottom"
         sx={{ zIndex: theme.zIndex.tooltip, pointerEvents: lexHoverOnly ? "none" : "auto" }}
