@@ -245,10 +245,22 @@ test("(e) request limits -> 400", async () => {
   }
   const long = (n) => "x".repeat(n);
   const turns = (aLen) => [m("user", "q"), m("assistant", long(aLen)), m("user", "more")];
-  assert.equal((await send("POST", "/api/help/ask", { body: ask({ messages: turns(8001) }) })).status, 400);
+  // A long earlier answer (e.g. Arabic at full max output) is truncated, not refused.
+  assert.equal((await send("POST", "/api/help/ask", { body: ask({ messages: turns(8001) }) })).status, 200);
   assert.equal((await send("POST", "/api/help/ask", { body: ask({ messages: turns(8000) }) })).status, 200);
   const ok = await send("POST", "/api/help/ask", { body: ask({ messages: Array.from({ length: 9 }, (_, i) => m(i % 2 ? "assistant" : "user")), route: "r".repeat(64) }) });
   assert.equal(ok.status, 200);
+});
+
+test("a long assistant turn is truncated server-side so the follow-up still works", async () => {
+  const { send, calls } = await setup();
+  const long = "ج".repeat(20_000);
+  const res = await send("POST", "/api/help/ask", {
+    body: ask({ messages: [{ role: "user", content: "q" }, { role: "assistant", content: long }, { role: "user", content: "more" }] }),
+  });
+  assert.equal(res.status, 200);
+  assert.equal(calls[0].messages[1].content.length, 8000);
+  assert.equal(calls[0].messages[1].content, long.slice(0, 8000));
 });
 
 test("(f) an error that echoes the API key leaks no key text", async () => {
@@ -306,9 +318,26 @@ test("(1) PUT /settings on an empty DB does not break the AI key form's If-Match
 test("status reports enabled/configured/model/cap", async () => {
   const { send } = await setup();
   const j = await (await send("GET", "/api/help/status")).json();
-  assert.deepEqual(j, { enabled: true, configured: true, provider: "claude", model: "claude-haiku-4-5", capUsd: 2, remainingUsd: 2 });
+  assert.deepEqual(j, { enabled: true, configured: true, provider: "claude", model: "claude-haiku-4-5", capUsd: 2, remainingUsd: 2, canAsk: true });
   const d = await (await (await setup({ provider: "default" })).send("GET", "/api/help/status")).json();
   assert.equal(d.configured, false);
+  assert.equal(d.canAsk, false);
+});
+
+test("status: less left than one question's worst case reads as $0 and canAsk false", async () => {
+  const { send, db } = await setup();
+  const minAsk = worstFor("claude", { messages: [{ role: "user", content: "?" }], route: "" });
+  const day = utcDay(new Date());
+  // Leave just under one minimal question's reservation.
+  db.prepare("INSERT INTO help_chat_usage (user_id, day, spent_micros) VALUES (1, ?, ?)").run(day, 2_000_000 - (minAsk - 1));
+  let j = await (await send("GET", "/api/help/status")).json();
+  assert.equal(j.remainingUsd, 0);
+  assert.equal(j.canAsk, false);
+  // Exactly one minimal question's worth left: still askable.
+  db.prepare("UPDATE help_chat_usage SET spent_micros = ? WHERE user_id = 1").run(2_000_000 - minAsk);
+  j = await (await send("GET", "/api/help/status")).json();
+  assert.equal(j.canAsk, true);
+  assert.ok(j.remainingUsd > 0);
 });
 
 test("system prompt is route-independent; route goes in the user turn", async () => {

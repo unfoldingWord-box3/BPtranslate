@@ -63,7 +63,11 @@ runWithRetry("mltest migrations apply", () => tryRun("npx", d1(["migrations", "a
 // Onboarding + book import happen in the Playwright "setup" project
 // (tests/guide/seed.setup.ts), through the app's API, once the servers are up.
 
-const spawnOpts = { cwd: apiDir, stdio: "inherit", shell: true };
+// Own process group on POSIX (detached), so shutdown can signal the whole group:
+// with shell: true the child pid is the shell, and killing only it would leave
+// wrangler/workerd and vite holding the ports.
+const ownGroup = process.platform !== "win32";
+const spawnOpts = { cwd: apiDir, stdio: "inherit", shell: true, detached: ownGroup };
 const api = spawn(
   "npx",
   [
@@ -81,15 +85,20 @@ const web = spawn("npm", ["--workspace", "web", "run", "dev", "--", "--port", St
   cwd: repoRoot,
   stdio: "inherit",
   shell: true,
+  detached: ownGroup,
   env: { ...process.env, VITE_API_PROXY: `http://127.0.0.1:${apiPort}` },
 });
 
-function killTree(child) {
-  if (!child.pid || child.killed) return;
+function killTree(child, signal = "SIGTERM") {
+  if (!child.pid) return;
   if (process.platform === "win32") {
     spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" });
   } else {
-    child.kill();
+    try {
+      process.kill(-child.pid, signal); // the whole group: shell, wrangler/workerd, vite
+    } catch {
+      /* group already gone */
+    }
   }
 }
 
@@ -99,7 +108,13 @@ function shutdown(code) {
   shuttingDown = true;
   killTree(api);
   killTree(web);
-  process.exit(code ?? 0);
+  if (!ownGroup) process.exit(code ?? 0);
+  // workerd can ignore SIGTERM; force anything still alive after a grace period.
+  setTimeout(() => {
+    killTree(api, "SIGKILL");
+    killTree(web, "SIGKILL");
+    process.exit(code ?? 0);
+  }, 2000);
 }
 api.on("exit", (code) => shutdown(code ?? 0));
 web.on("exit", (code) => shutdown(code ?? 0));

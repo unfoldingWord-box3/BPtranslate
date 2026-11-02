@@ -36,7 +36,7 @@ Select the round button. The menu shows your user name and organization, and the
 
 - **Organization**: switch organization. It appears only if you belong to more than one. Switching reloads the app, and it is blocked while unsaved edits are still syncing.
 - **Switch to dark mode**.
-- **Interface language**: choose the language of menus and buttons. Arabic and Urdu switch the screen to right-to-left. This does not change the text you translate.
+- **Interface language**: choose the language of menus and buttons. Arabic, Persian and Urdu switch the screen to right-to-left. This does not change the text you translate.
 - **Reading text size**: make the text smaller or larger.
 - **Classic editor**: see [Classic editor](#help:classic-editor).
 - **Admin**: admins only.

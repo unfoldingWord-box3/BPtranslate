@@ -39,7 +39,8 @@ export type HelpRouteDeps = {
 };
 
 const MAX_MESSAGES = 10;
-// Users type short questions; assistant turns are echoed answers, which run longer.
+// Users type short questions; assistant turns are echoed answers, which run
+// longer and are truncated to MAX_ASSISTANT_CONTENT (it also bounds the reservation).
 const MAX_USER_CONTENT = 2000;
 const MAX_ASSISTANT_CONTENT = 8000;
 
@@ -58,11 +59,13 @@ function parseBody(body: unknown): Parsed | string {
     const m = b.messages[i] as Record<string, unknown> | null;
     const want = i % 2 === 0 ? "user" : "assistant";
     if (!m || typeof m !== "object" || m.role !== want) return `message ${i + 1} must have role "${want}" (roles alternate, starting with "user")`;
-    const max = want === "user" ? MAX_USER_CONTENT : MAX_ASSISTANT_CONTENT;
-    if (typeof m.content !== "string" || m.content.trim() === "" || m.content.length > max) {
-      return `message ${i + 1} content must be a non-empty string of at most ${max} characters`;
+    if (typeof m.content !== "string" || m.content.trim() === "") return `message ${i + 1} content must be a non-empty string`;
+    if (want === "user" && m.content.length > MAX_USER_CONTENT) {
+      return `message ${i + 1} content must be at most ${MAX_USER_CONTENT} characters`;
     }
-    messages.push({ role: want, content: m.content });
+    // An earlier answer echoed back can run long (Arabic at full max output):
+    // truncate it rather than refuse the follow-up.
+    messages.push({ role: want, content: want === "assistant" ? m.content.slice(0, MAX_ASSISTANT_CONTENT) : m.content });
   }
   if (messages[messages.length - 1].role !== "user") return 'the last message must have role "user"';
   return { lang: b.lang, route: b.route, messages };
@@ -124,6 +127,15 @@ export function makeHelpRoutes(deps: HelpRouteDeps = {}) {
     } catch (e) {
       if (!isMissingSchemaError(e)) throw e;
     }
+    // Below the reservation of the shortest possible question, /ask can only 429:
+    // report $0 and let the UI disable Ask instead of showing "$0.06 left".
+    let canAsk = false;
+    if (enabled && ai.kind === "configured" && model) {
+      const { system } = buildSystemPrompt(c.req.query("lang") || "en");
+      const minimal = withRouteContext([{ role: "user", content: "?" }], "")[0].content;
+      canAsk = left >= worstCaseMicros(ai.provider, inputTokenBound([system, minimal]), maxOutputFor(ai.provider));
+      if (!canAsk) left = 0;
+    }
     return c.json({
       enabled,
       configured: ai.kind === "configured",
@@ -131,6 +143,7 @@ export function makeHelpRoutes(deps: HelpRouteDeps = {}) {
       model,
       capUsd: usdOf(cap),
       remainingUsd: usdOf(left),
+      canAsk,
     });
   });
 

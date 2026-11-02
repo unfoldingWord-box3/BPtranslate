@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { api, type ProjectConfig, type ProjectConfigResponse } from "../sync/api";
 import { getBuiltinLayouts } from "../lib/builtinLayouts";
 import { validateLayoutSpec, type LayoutSpec } from "../lib/layoutSpec";
@@ -37,15 +37,32 @@ let cache: ProjectConfigResponse | null = persisted ? { config: persisted } : nu
 let inflight: Promise<ProjectConfigResponse> | null = null;
 const subscribers = new Set<(c: ProjectConfigResponse) => void>();
 
+// Whether the last config fetch failed (offline, server down). useProjectConfig
+// keeps returning the cached value on failure, which is null when nothing was
+// ever cached; this lets a screen that cannot render without the config say so
+// instead of waiting forever (issue #451).
+let loadFailed = false;
+const loadFailedSubscribers = new Set<() => void>();
+
+function setLoadFailed(next: boolean) {
+  if (loadFailed === next) return;
+  loadFailed = next;
+  for (const s of loadFailedSubscribers) s();
+}
+
 function publish(next: ProjectConfigResponse): ProjectConfigResponse {
   cache = next;
   writePersisted(next.config);
+  setLoadFailed(false);
   for (const s of subscribers) s(next);
   return next;
 }
 
 function load(): Promise<ProjectConfigResponse> {
   if (inflight) return inflight;
+  // A new fetch supersedes an earlier failure: while it is in flight the
+  // config is loading, not failed.
+  setLoadFailed(false);
   inflight = api
     .getProjectConfig()
     .then((res) => {
@@ -54,9 +71,30 @@ function load(): Promise<ProjectConfigResponse> {
     })
     .catch((err) => {
       inflight = null;
+      setLoadFailed(true);
       throw err;
     });
   return inflight;
+}
+
+function subscribeLoadFailed(cb: () => void): () => void {
+  loadFailedSubscribers.add(cb);
+  return () => {
+    loadFailedSubscribers.delete(cb);
+  };
+}
+
+// True once a config fetch has failed and no later fetch has succeeded.
+export function useProjectConfigLoadFailed(): boolean {
+  return useSyncExternalStore(subscribeLoadFailed, () => loadFailed);
+}
+
+// Try the config fetch again after a failure. load() clears the failed flag,
+// so the caller shows its loading state while the retry is in flight.
+export function retryProjectConfig(): void {
+  load().catch(() => {
+    /* load() has set the failed flag again */
+  });
 }
 
 export function useProjectConfig(): ProjectConfig | null {
