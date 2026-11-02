@@ -742,11 +742,13 @@ export async function applyTsvRows(
   // admin_bulk_state is part of the pristine predicate (isReimportableRow, issue
   // #394) and exists on tn_rows/tq_rows only — twl has no such column. Drop it
   // from this list and the guard receives `undefined` and silently stops firing.
+  // translation_state is there for the same reason ('validated' blocks
+  // overwrite, issues #414/#732).
   const pristineCols =
     kind === "tn"
-      ? "version, updated_by, deleted_at, trashed_at, preserve, hint, admin_bulk_state"
+      ? "version, updated_by, deleted_at, trashed_at, preserve, hint, admin_bulk_state, translation_state"
       : kind === "tq"
-        ? "version, updated_by, deleted_at, admin_bulk_state"
+        ? "version, updated_by, deleted_at, admin_bulk_state, translation_state"
         : "version, updated_by, deleted_at";
   const existing = new Map<string, Record<string, unknown>>();
   const ids = incoming.map((r) => r.id);
@@ -960,6 +962,7 @@ export async function applyTsvRows(
       latestSource: (cur.latest_source as string | null) ?? null,
       deleted_at: cur.deleted_at as number | null,
       admin_bulk_state: (cur.admin_bulk_state as string | null) ?? null,
+      translation_state: (cur.translation_state as string | null) ?? null,
       trashed_at: cur.trashed_at as number | null,
       preserve: cur.preserve as number | null,
       hint: cur.hint as number | null,
@@ -1392,11 +1395,16 @@ function buildTsvUpdateStmt(
 ): D1PreparedStatement {
   const deletedGuard = resurrect || reclaim ? "deleted_at IS NOT NULL" : "deleted_at IS NULL";
   const ownerGuard = reseedAi || reclaim ? "" : "updated_by IS NULL AND ";
+  // An approval is a state flip with no version bump, so version-CAS cannot see
+  // one that lands between the read and this write: re-assert it here (#414).
+  // Not for resurrect/reclaim: those write into a TOMBSTONE, whose review state
+  // describes deleted content, and reset it below instead.
+  const approvedGuard = kind === "twl" || resurrect || reclaim ? "" : " AND translation_state IS NOT 'validated'";
   const pristine = reclaim
     ? deletedGuard
     : kind === "tn"
-      ? `${ownerGuard}${deletedGuard} AND trashed_at IS NULL AND preserve = 0 AND hint = 0`
-      : `${ownerGuard}${deletedGuard}`;
+      ? `${ownerGuard}${deletedGuard} AND trashed_at IS NULL AND preserve = 0 AND hint = 0${approvedGuard}`
+      : `${ownerGuard}${deletedGuard}${approvedGuard}`;
   const clearDeleted = resurrect || reclaim ? "deleted_at = NULL, " : "";
   const clearOwner = reseedAi || reclaim ? "updated_by = NULL, " : "";
   // Reclaim ONLY (tn): master's row is starting a fresh life in this slot, the
@@ -1423,11 +1431,22 @@ function buildTsvUpdateStmt(
       ? "restored_from_version = NULL, review_kind = NULL, review_reason = NULL, "
       : "restored_from_version = NULL, "
     : "";
+  // Resurrect and reclaim (tn/tq): master's content now fills a deleted slot.
+  // It is a master-owned row nobody has reviewed, exactly like a fresh INSERT
+  // (tryInsertTsvRow leaves all five NULL), so the deleted row's review state
+  // must not carry onto it: a kept 'validated' would label unreviewed content
+  // approved and make it an AI few-shot example, a kept admin_bulk_state or
+  // pre_draft_json would describe the old content, and draft_meta_json /
+  // source_row_hash describe an AI draft that is gone (Codex review of #733).
+  const resetReviewState =
+    (resurrect || reclaim) && kind !== "twl"
+      ? "translation_state = NULL, pre_draft_json = NULL, admin_bulk_state = NULL, draft_meta_json = NULL, source_row_hash = NULL, "
+      : "";
   const newVersion = oldVersion + 1;
   if (kind === "tn") {
     return env.DB.prepare(
       `UPDATE tn_rows
-          SET ${clearDeleted}${clearOwner}${clearProtections}${clearReviewMeta}ref_raw = ?1, chapter = ?2, verse = ?3, tags = ?4,
+          SET ${clearDeleted}${clearOwner}${clearProtections}${clearReviewMeta}${resetReviewState}ref_raw = ?1, chapter = ?2, verse = ?3, tags = ?4,
               support_reference = ?5, quote = ?6, occurrence = ?7, note = ?8,
               sort_order = ?9, version = ?10, updated_at = ?11
         WHERE id = ?12 AND book = ?13 AND ${pristine} AND version = ?14`,
@@ -1440,7 +1459,7 @@ function buildTsvUpdateStmt(
   if (kind === "tq") {
     return env.DB.prepare(
       `UPDATE tq_rows
-          SET ${clearDeleted}${clearOwner}${clearReviewMeta}ref_raw = ?1, chapter = ?2, verse = ?3, tags = ?4,
+          SET ${clearDeleted}${clearOwner}${clearReviewMeta}${resetReviewState}ref_raw = ?1, chapter = ?2, verse = ?3, tags = ?4,
               quote = ?5, occurrence = ?6, question = ?7, response = ?8,
               sort_order = ?9, version = ?10, updated_at = ?11
         WHERE id = ?12 AND book = ?13 AND ${pristine} AND version = ?14`,
@@ -2584,11 +2603,14 @@ async function softDeleteRemovedTsvRows(
       : `deleted_at IS NULL`;
   const writeGuard =
     kind === "tn"
-      ? `deleted_at IS NULL AND trashed_at IS NULL AND preserve = 0 AND hint = 0 AND version = ?4`
-      : `deleted_at IS NULL AND version = ?4`;
-  // twl has no admin_bulk_state column (only tn/tq carry the bulk review-state
-  // stamp), so select a literal NULL for it there and keep one row shape.
-  const bulkStateCol = kind === "twl" ? "NULL AS admin_bulk_state" : "admin_bulk_state";
+      ? `deleted_at IS NULL AND trashed_at IS NULL AND preserve = 0 AND hint = 0 AND translation_state IS NOT 'validated' AND version = ?4`
+      : kind === "tq"
+        ? `deleted_at IS NULL AND translation_state IS NOT 'validated' AND version = ?4`
+        : `deleted_at IS NULL AND version = ?4`;
+  // twl has no admin_bulk_state or translation_state column (only tn/tq carry
+  // the review state), so select literal NULLs for it there and keep one row shape.
+  const bulkStateCol =
+    kind === "twl" ? "NULL AS admin_bulk_state, NULL AS translation_state" : "admin_bulk_state, translation_state";
   const now = Math.floor(Date.now() / 1000);
   let deleted = 0;
   let skippedLocked = 0;
@@ -2613,6 +2635,7 @@ async function softDeleteRemovedTsvRows(
         version: number;
         updated_by: number | null;
         admin_bulk_state: string | null;
+        translation_state: string | null;
         latest_source: string | null;
       }>();
     const targets = (rs.results ?? []).filter(
@@ -2623,6 +2646,7 @@ async function softDeleteRemovedTsvRows(
           latestSource: r.latest_source ?? null,
           deleted_at: null,
           admin_bulk_state: r.admin_bulk_state ?? null,
+          translation_state: r.translation_state ?? null,
           trashed_at: null,
           preserve: 0,
           hint: 0,

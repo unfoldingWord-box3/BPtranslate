@@ -82,6 +82,10 @@ export interface ReimportableRow {
   // explicitly; if it is dropped from either, this field arrives `undefined`,
   // the guard below silently never fires, and #394 is back with no test failing.
   admin_bulk_state?: string | null;
+  // tn/tq translation_state. 'validated' blocks overwrite (issue #414 / #732).
+  // MUST be selected by the caller, like admin_bulk_state, or the guard below
+  // never fires. twl and verse have no such column, and pass undefined.
+  translation_state?: string | null;
   // tn-only human-owned protections. Ignored for tq/twl/verse.
   trashed_at?: number | null;
   preserve?: number | null;
@@ -117,9 +121,20 @@ export interface ReimportableRow {
 // deliberate statement about this row — makes it non-pristine here. Content
 // drift on master for such a row is reported as `skipped_edited`, the same
 // visible outcome as any other human-owned row.
+//
+// AN APPROVED ROW ALSO BLOCKS OVERWRITE (issues #414 and #732). Approving a row
+// (POST /rows/{tn,tq}/:id/validate) is a state flip: it leaves updated_by alone
+// and its edit_log action ('validate') is not a create/update, so latestSource
+// still reads ai_pipeline for an AI draft a person approved without editing,
+// and still reads nothing for a bulk-approved imported row once a hand approval
+// has cleared its stamp. Either would pass the two cases above, and the reimport
+// would rewrite approved content while the 'validated' label and pre_draft_json
+// stayed put. Every write of 'validated' is a person's approval or a stamped
+// bulk approval, so an untouched imported row (state NULL) is unaffected.
 export function isReimportableRow(r: ReimportableRow): boolean {
   if (r.deleted_at != null) return false;
   if (r.admin_bulk_state != null) return false;
+  if (r.translation_state === "validated") return false;
   if (r.kind === "tn") {
     if (r.trashed_at != null) return false;
     if (Number(r.preserve ?? 0) !== 0) return false;
