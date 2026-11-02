@@ -114,6 +114,7 @@
 //     are Continue/Review, not paging.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FlowHeader, PHONE_COUNT_SX, PHONE_TITLE_SX } from "./FlowHeader";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import {
@@ -241,6 +242,10 @@ export default function TranslateScriptureScreen({
   // md+ (>=900px, the words screen's breakpoint): master-detail side by side
   // instead of the phone's single verse-at-a-time column (see file header).
   const wide = useMediaQuery(theme.breakpoints.up("md"));
+  // Phone (<560): the title row shares one bar with the account controls
+  // (#299), so it shows the passage reference instead of the long title and
+  // drops secondary icons (#517).
+  const isTabletUp = useMediaQuery(theme.breakpoints.up("tablet"));
   // Chevron glyphs don't flip with CSS direction on their own — mirror them
   // under RTL so "back"/"previous" keep pointing the right way.
   const chevronFlip = theme.direction === "rtl" ? { transform: "scaleX(-1)" } : undefined;
@@ -305,6 +310,7 @@ export default function TranslateScriptureScreen({
       if (s.done === 1 && verseNums.includes(s.verse)) seed[s.verse] = "approved";
     }
     const firstOpen = verseNums.findIndex((v) => !seed[v]);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- builds and seeds the frozen per-chapter queue (cursor, statuses, view) once the chapter payload lands; queue progression is kept on its proven post-commit timing.
     setQueue({ key: chapterKey, verses: verseNums });
     setStatuses(seed);
     if (verse != null) {
@@ -338,31 +344,32 @@ export default function TranslateScriptureScreen({
   // for the current chapter — e.g. editing the URL from #/scripture/JON/2 to
   // #/scripture/JON/2/7, or Back/Forward between two verses of the same
   // chapter. Cross-chapter deep links are handled above, by the queue rebuild
-  // itself. Guarded on an actual change of `verse` (via the ref, not just its
-  // presence in the dep array) so this never fires on plain cursor navigation
-  // (Prev/Next), a status change, or unrelated re-renders — only a real prop
-  // change moves the cursor here. Mirrors TranslateNotesScreen's verse re-seek
-  // effect (#389).
-  const prevVerseRef = useRef(verse);
-  useEffect(() => {
-    if (prevVerseRef.current === verse) return;
-    prevVerseRef.current = verse;
-    if (!queueVerses || queueVerses.length === 0) return;
-    if (verse == null) {
-      // The verse segment was dropped (e.g. #/scripture/JON/2/7 → #/scripture/
-      // JON/2 via Back/Forward or a manual URL edit). Restore the same
-      // no-verse init the mount/queue-build path uses: first still-open
-      // verse, or the done view when every verse in the chapter is already
-      // statused.
-      const firstOpen = queueVerses.findIndex((v) => !statuses[v]);
-      setCursor(firstOpen < 0 ? 0 : firstOpen);
-      setView(firstOpen < 0 ? "done" : "verses");
-      return;
+  // itself. Guarded on an actual change of `verse` (via prevVerse, not just a
+  // re-render) so this never fires on plain cursor navigation (Prev/Next), a
+  // status change, or unrelated re-renders — only a real prop change moves the
+  // cursor here. Mirrors TranslateNotesScreen's verse re-seek effect (#389),
+  // but adjusted during render (React's "adjust state when a prop changes"
+  // pattern) with the previous verse held in state.
+  const [prevVerse, setPrevVerse] = useState(verse);
+  if (prevVerse !== verse) {
+    setPrevVerse(verse);
+    if (queueVerses && queueVerses.length > 0) {
+      if (verse == null) {
+        // The verse segment was dropped (e.g. #/scripture/JON/2/7 → #/scripture/
+        // JON/2 via Back/Forward or a manual URL edit). Restore the same
+        // no-verse init the mount/queue-build path uses: first still-open
+        // verse, or the done view when every verse in the chapter is already
+        // statused.
+        const firstOpen = queueVerses.findIndex((v) => !statuses[v]);
+        setCursor(firstOpen < 0 ? 0 : firstOpen);
+        setView(firstOpen < 0 ? "done" : "verses");
+      } else {
+        const seekIdx = queueVerses.findIndex((v) => v >= verse);
+        setCursor(seekIdx < 0 ? queueVerses.length - 1 : seekIdx);
+        setView("verses");
+      }
     }
-    const seekIdx = queueVerses.findIndex((v) => v >= verse);
-    setCursor(seekIdx < 0 ? queueVerses.length - 1 : seekIdx);
-    setView("verses");
-  }, [verse, queueVerses, statuses]);
+  }
 
   // ── per-lane rows + baselines ────────────────────────────────────────────
   const bases = useMemo<Record<TargetLane, VerseDto | null>>(
@@ -437,6 +444,7 @@ export default function TranslateScriptureScreen({
   useEffect(() => {
     if (view === "done") {
       clearLaneBlurTimeout();
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- paired with clearing the pending blur timer (an external side effect) in the same step; deriving focus mode from view instead would re-arm it when view flips back without a focus event.
       setLaneFocused(false);
     }
   }, [view, clearLaneBlurTimeout]);
@@ -489,7 +497,6 @@ export default function TranslateScriptureScreen({
         }
       });
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [book, chapter, verseNum, bases]);
 
   // Adopt new SERVER content while the lane is clean (a sibling editor's save,
@@ -1171,25 +1178,15 @@ export default function TranslateScriptureScreen({
           : { overflowY: "auto" }),
       }}
     >
-      {/* topbar (at md+ the root doesn't scroll, so sticky is simply inert).
+      {/* topbar — rendered into the global flow bar via FlowHeader (#299).
           Hidden in phone focus mode (issue #164) to free space for the
           keyboard — same convention as TranslateNotesScreen.tsx. */}
       {!focusMode && (
-        <Box
-          sx={{
-            position: "sticky",
-            insetBlockStart: 0,
-            zIndex: 20,
-            flex: "none",
-            bgcolor: "background.paper",
-            borderBlockEnd: "1px solid",
-            borderColor: "divider",
-          }}
-        >
+        <FlowHeader>
           <Box
-            sx={{ maxWidth: wide ? 1440 : COLUMN_PX, mx: "auto", paddingInline: 2, paddingBlock: 1.5 }}
+            sx={{ maxWidth: wide ? 1440 : COLUMN_PX, mx: "auto", paddingInline: isTabletUp ? 2 : 1, paddingBlock: 1.5 }}
           >
-            <Stack direction="row" alignItems="center" spacing={1.25}>
+            <Stack direction="row" alignItems="center" spacing={isTabletUp ? 1.25 : 0.5}>
               <IconButton
                 aria-label={t("flowScripture.backToPackage", { book })}
                 onClick={() => {
@@ -1199,12 +1196,12 @@ export default function TranslateScriptureScreen({
               >
                 <ChevronLeftIcon fontSize="small" sx={chevronFlip} />
               </IconButton>
-              <Box sx={{ minWidth: 0 }}>
+              <Box sx={isTabletUp ? { minWidth: 0 } : PHONE_TITLE_SX}>
                 <Typography component="h1" sx={{ fontSize: "1.0625rem", fontWeight: 700, m: 0 }}>
-                  {t("flowScripture.title")}
+                  {isTabletUp ? t("flowScripture.title") : t("common.passageRef", { book, chapter })}
                 </Typography>
                 <Typography variant="caption" color="text.secondary" component="p" sx={{ m: 0 }}>
-                  {sub}
+                  {isTabletUp ? sub : t("flowScripture.title")}
                 </Typography>
               </Box>
               <Box sx={{ flex: 1 }} />
@@ -1215,6 +1212,7 @@ export default function TranslateScriptureScreen({
                   color: "text.secondary",
                   fontVariantNumeric: "tabular-nums",
                   whiteSpace: "nowrap",
+                  ...(isTabletUp ? {} : PHONE_COUNT_SX),
                 }}
               >
                 {done
@@ -1259,7 +1257,7 @@ export default function TranslateScriptureScreen({
               />
             </Box>
           </Box>
-        </Box>
+        </FlowHeader>
       )}
 
       {/* md+ desk (the words screen's pattern, after docs/mockups/desktop-first/

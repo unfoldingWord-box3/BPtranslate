@@ -1,7 +1,7 @@
 // PackageHubScreen — the book-package navigation hub at #/package/{book}.
-// This screen REPLACES the FlowNav pill bar: it is where a translator lands
+// This screen REPLACES the old flows pill bar: it is where a translator lands
 // after picking a book, and the "Back to {book} package" chevron on every
-// work screen points here. It renders no FlowNav, no tabs, no pills — tappable
+// work screen points here. It renders no pill bar, no tabs, no pills — tappable
 // surface rows in the visual language TranslateNotesScreen calibrated (same
 // COLUMN_PX, topbar, card tokens, back chevron).
 //
@@ -76,6 +76,7 @@
 // for the "{source} to {target}" sub-line (TranslateNotesScreen:547-549).
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { FlowHeader } from "./FlowHeader";
 import { useTranslation } from "react-i18next";
 import {
   Alert,
@@ -98,7 +99,6 @@ import { useTheme } from "@mui/material/styles";
 import useMediaQuery from "@mui/material/useMediaQuery";
 import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
-import TuneIcon from "@mui/icons-material/Tune";
 
 import type { FlowScreenContext } from "./types";
 import { api, ApiError, type BookSummary, type ExportSnapshot } from "../../sync/api";
@@ -413,6 +413,7 @@ function LifecycleCard({ book, name, chapters, admin, wide, cardSx }: LifecycleC
 
   useEffect(() => {
     if (!admin) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- blank the snapshots and clear the error before fetching for the new book; without it the previous book's export rows show until the fetch lands.
     setSnapshots(null);
     setSnapshotsError(false);
     void loadSnapshots();
@@ -672,16 +673,7 @@ export default function PackageHubScreen({ book, role, lastPosition }: PackageHu
   return (
     <Box sx={{ height: "100%", minHeight: 0, overflowY: "auto", textAlign: "start" }}>
       {/* topbar */}
-      <Box
-        sx={{
-          position: "sticky",
-          insetBlockStart: 0,
-          zIndex: 20,
-          bgcolor: "background.paper",
-          borderBlockEnd: "1px solid",
-          borderColor: "divider",
-        }}
-      >
+      <FlowHeader>
         <Box sx={{ maxWidth: wide ? 1440 : COLUMN_PX, mx: "auto", paddingInline: 2, paddingBlock: 1.5 }}>
           <Stack direction="row" alignItems="center" spacing={1.25}>
             <IconButton
@@ -715,23 +707,11 @@ export default function PackageHubScreen({ book, role, lastPosition }: PackageHu
                 {t("flowVerse.hub.chapterCount", { count: totals.chapters })}
               </Typography>
             )}
-            {role === "admin" && (
-              <IconButton
-                aria-label={t("flowVerse.hub.openAdminDesk")}
-                title={t("flowBooks.menu.admin")}
-                onClick={() => {
-                  location.hash = "#/admin/progress";
-                }}
-                sx={{ bgcolor: skip.soft, width: 34, height: 34, flex: "none" }}
-              >
-                <TuneIcon fontSize="small" />
-              </IconButton>
-            )}
           </Stack>
           {/* Progress lives on the lifecycle card below (A4), fed by the A2
               rollup — not duplicated in this topbar. */}
         </Box>
-      </Box>
+      </FlowHeader>
 
       <Box
         sx={{
@@ -886,7 +866,7 @@ export default function PackageHubScreen({ book, role, lastPosition }: PackageHu
 
             {/* Verse view (#447): the alignment-joined original/literal/
                 simplified fidelity surface (VerseScreen, #/verse) was built but
-                left unreachable once FlowNav retires (#173) — relink it here.
+                left unreachable once the old pill bar retired (#173) — relink it here.
                 It opens at the last worked verse in this book when known
                 (#453), else 1:1; the screen's own topbar pages between verses
                 from there. */}

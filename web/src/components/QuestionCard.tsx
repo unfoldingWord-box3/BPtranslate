@@ -20,6 +20,9 @@ import { useTranslation } from "react-i18next";
 import type { TqRow } from "../sync/api";
 import type { SourceQuestion } from "../hooks/useSourceQuestions";
 import { drafts, rowKey, draftDirtyBorderSx } from "../sync/drafts";
+import { tqCardBaseline, tsvToDisplay } from "../lib/tqRowFields";
+import { reconcileField } from "../lib/twlRowFields";
+import { useRefusedSaveHold } from "../hooks/useRefusedSaveHold";
 
 // Translation-review card for translationQuestions — the tQ analogue of
 // NoteCard's translation mode. Only rendered in a gateway-language project
@@ -34,10 +37,6 @@ const RTL_CHAR = /[֐-׿؀-ۿ]/; // Hebrew + Arabic ranges (target drafts are Ar
 
 function isRtl(text: string): boolean {
   return RTL_CHAR.test(text);
-}
-
-function tsvToDisplay(s: string | null): string {
-  return (s ?? "").replace(/\\n/g, "\n");
 }
 
 interface Props {
@@ -76,8 +75,30 @@ function QuestionCardInner({
   const [question, setQuestion] = useState(tsvToDisplay(row.question));
   const [response, setResponse] = useState(tsvToDisplay(row.response));
 
-  useEffect(() => setQuestion(tsvToDisplay(row.question)), [row.id, row.version, row.question]);
-  useEffect(() => setResponse(tsvToDisplay(row.response)), [row.id, row.version, row.response]);
+  // When the row's values change (an optimistic Save, the server's answer, a
+  // remote edit), a field adopts the new value only if the user hasn't edited
+  // it since the last baseline. Resetting on every version bump dropped text
+  // typed between Save and the server's answer, and cleared its draft (#617).
+  const baselineRef = useRef(tqCardBaseline(row));
+  // Text of a refused save stays when the row is rebuilt to the server's copy
+  // (#637 item 1); discarding that save puts the row's value back.
+  const { noteSave, rowChanged, decide } = useRefusedSaveHold("tq", row.id, row.book, (released) => {
+    const base = baselineRef.current;
+    if ("question" in released) setQuestion((q) => (q === released.question ? base.question : q));
+    if ("response" in released) setResponse((r) => (r === released.response ? base.response : r));
+  });
+  useEffect(() => {
+    const prev = baselineRef.current;
+    const next = tqCardBaseline({ question: row.question, response: row.response });
+    baselineRef.current = next;
+    const released = rowChanged(row.version);
+    const pick = (field: string, p: string, n: string, local: string): string => {
+      const d = decide(field, local, released);
+      return d === "keep" ? local : d === "adopt" ? n : reconcileField(p, n, local);
+    };
+    setQuestion((q) => pick("question", prev.question, next.question, q));
+    setResponse((r) => pick("response", prev.response, next.response, r));
+  }, [row.question, row.response, row.version, rowChanged, decide]);
 
   const draftKey = useMemo(() => rowKey("tq", row.book, row.id), [row.book, row.id]);
 
@@ -115,9 +136,12 @@ function QuestionCardInner({
         verse: row.verse,
       });
     } else {
-      void drafts.clear(draftKey);
+      // Keeps a refused save's text (#647): these fields equal the cached
+      // row, which still carries it. The shown values tell a refused field
+      // still pending from one since saved over.
+      void drafts.clearUnlessRefused(draftKey, { question, response });
     }
-  }, [draftKey, isDirty, diff, row.version, row.id, row.book, row.chapter, row.verse, locked]);
+  }, [draftKey, isDirty, diff, row.version, row.id, row.book, row.chapter, row.verse, locked, question, response]);
 
   // ── Derived translation state (mirrors NoteCard) ──
   const translationState = row.translation_state ?? null;
@@ -126,10 +150,13 @@ function QuestionCardInner({
   const isUntranslated =
     translationState == null && !(row.question && row.question.trim());
 
+  // Leaving the validated state collapses the card again, adjusted during render.
   const [expanded, setExpanded] = useState(false);
-  useEffect(() => {
+  const [prevIsValidated, setPrevIsValidated] = useState(isValidated);
+  if (prevIsValidated !== isValidated) {
+    setPrevIsValidated(isValidated);
     if (!isValidated) setExpanded(false);
-  }, [isValidated]);
+  }
   const collapsedValidated = isValidated && !expanded && !isDirty;
 
   const stateChip: { label: string; color: string } | null =
@@ -145,6 +172,7 @@ function QuestionCardInner({
 
   const handleSave = () => {
     if (!isDirty) return;
+    noteSave(diff, row.version);
     onSave(diff);
   };
 

@@ -55,8 +55,6 @@ export interface AlignmentTabProps {
   // Confirm-before-save when the edit would unalign a previously aligned word
   // (forwarded to AlignmentPanel; see its onConfirmUnalign prop).
   onConfirmUnalign?: (lostWords: string[], commit: () => void) => void;
-  panelRef?: Ref<AlignmentPanelHandle>;
-  onOpenDual?: () => void;
   // Restore a previously-saved verse version from the panel's history button.
   onRestoreVersion?: (content: unknown, plainText: string | null) => void;
 }
@@ -74,6 +72,10 @@ interface Props {
   // notes/words for verses 6,7,8,9 all show when the user navigates to v=7.
   displayVerseRange: readonly [number, number];
   tn: TnRow[];
+  // Book-introduction notes (chapter 0) to list before the chapter's own notes;
+  // see selectBookIntroRows. They are not in `tn`, so cards built for them
+  // (members of this list) omit the verse-bound controls.
+  bookIntroTn?: TnRow[];
   tq: TqRow[];
   twl: TwlRow[];
   activeNoteId: string | null;
@@ -133,6 +135,14 @@ interface Props {
   // Chapter is locked for editing because an AI pipeline is mid-flight.
   // Hides "new" buttons, propagates read-only to children.
   locked?: boolean;
+  // Whether that lock reaches the note cards (keep-mode, or read-only under a
+  // chapter-wide translate). False under a single-note or verse-range
+  // redraft, which locks only its own notes via translateLockedNoteIds
+  // (issue #607). Defaults to `locked`.
+  noteCardsLocked?: boolean;
+  // Pipeline type of the job holding the lock. A translate run makes every
+  // note read-only, kept and hint notes included (issue #561).
+  lockPipelineType?: string | null;
   // Toggle the TN's preserve bit ("survive future AI pipeline sweeps").
   // Threaded through to NoteCard. Always available, regardless of lock.
   onSetNotePreserve?: (id: string, value: boolean) => void;
@@ -150,6 +160,10 @@ interface Props {
   onNoteTranslate?: (id: string) => void;
   // Rows with an in-flight single-note / chapter translate run (spinner).
   translatingNoteIds?: Set<string>;
+  // Notes an in-flight translate run will write — a single-note or verse-range
+  // redraft's own notes, or every note under a chapter-wide run. Read-only
+  // until it finishes, since the server refuses edits to them (issue #606).
+  translateLockedNoteIds?: Set<string>;
   // ── Translation mode, tQ analogues ── Approve/un-approve + single-question
   // Translate for translationQuestions. Absent in the English root project.
   onQuestionApprove?: (id: string, value: boolean) => void;
@@ -209,6 +223,12 @@ interface Props {
   panelMode?: PanelMode;
   onSetPanelMode?: (mode: PanelMode) => void;
   alignmentProps?: AlignmentTabProps;
+  // The alignment panel's imperative handle and its "Side-by-side" action, kept
+  // out of `alignmentProps`: a ref (or a callback that reaches refs) inside that
+  // memoized object made the React Compiler flag every field read of it during
+  // render (#594).
+  alignmentPanelRef?: Ref<AlignmentPanelHandle>;
+  onOpenDualAligner?: () => void;
   alignmentBadge?: string;
   // Per-resource checkoff for the active verse (in-context "done" + bulk).
   checkoff?: ResourceCheckoff;
@@ -219,6 +239,11 @@ interface Props {
   // (panelMode) and unaffected.
   visibleTabs?: ResourceTab[];
   initialTab?: ResourceTab;
+  // Switch to `tab` after mount, once per new `nonce` (#535): a ?twl= link
+  // reached while the column is already open must show Words. The value
+  // present at mount is ignored (initialTab covers mount), and so is a tab
+  // this layout doesn't show.
+  requestTab?: { tab: ResourceTab; nonce: number } | null;
 }
 
 type Pinned = Record<PinKey, boolean>;
@@ -262,6 +287,7 @@ export function ResourceColumn({
   activeVerse,
   displayVerseRange,
   tn,
+  bookIntroTn,
   tq,
   twl,
   activeNoteId,
@@ -293,12 +319,15 @@ export function ResourceColumn({
   onQuestionDelete,
   onQuestionCreate,
   locked = false,
+  noteCardsLocked = locked,
+  lockPipelineType = null,
   onSetNotePreserve,
   onSetNoteHint,
   onNoteApprove,
   onApproveAllNotes,
   onNoteTranslate,
   translatingNoteIds,
+  translateLockedNoteIds,
   onQuestionApprove,
   onApproveAllQuestions,
   onQuestionTranslate,
@@ -323,10 +352,13 @@ export function ResourceColumn({
   panelMode = "resources",
   onSetPanelMode,
   alignmentProps,
+  alignmentPanelRef,
+  onOpenDualAligner,
   alignmentBadge,
   checkoff,
   visibleTabs,
   initialTab,
+  requestTab,
 }: Props) {
   const { t } = useTranslation();
   // Translation mode: only gateway-language projects (translationSource != null)
@@ -412,14 +444,29 @@ export function ResourceColumn({
     if (panelMode !== "resources") onSetPanelMode?.("resources");
     setResourceTab(tab);
   };
+  const seenTabRequest = useRef(requestTab?.nonce);
+  // Bumped when a requested tab switch lands, so the scroll effect below re-runs
+  // in the commit where the new tab's rows exist. Shell sets the active row in
+  // the same commit as the request, while the old tab is still mounted, so the
+  // scroll effect's own run finds no row to scroll to.
+  const [tabRequestScroll, setTabRequestScroll] = useState(0);
+  useEffect(() => {
+    if (!requestTab || requestTab.nonce === seenTabRequest.current) return;
+    seenTabRequest.current = requestTab.nonce;
+    if (tabs.includes(requestTab.tab)) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- the switch lands one commit after Shell's active-row change, so the scroll effect runs once against the old tab and again (via tabRequestScroll) against the new one; moving it into render collapses those runs into one and can change where the list ends up.
+      setResourceTab(requestTab.tab);
+      setTabRequestScroll((n) => n + 1);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the request nonce by design: a switch happens once per new request. `tabs` is a fresh array every render and `requestTab.tab` only matters alongside a new nonce.
+  }, [requestTab?.nonce]);
 
   // Lazily mount the Search iframe on first visit, then keep it alive (the body
   // toggles its visibility rather than unmounting). Avoids loading the external
   // tool on every page load for users who never open the tab.
+  // Latched during render (React's "adjust state when a prop changes" pattern).
   const [searchVisited, setSearchVisited] = useState(false);
-  useEffect(() => {
-    if (panelMode === "search") setSearchVisited(true);
-  }, [panelMode]);
+  if (panelMode === "search" && !searchVisited) setSearchVisited(true);
 
   const [rangeStart, rangeEnd] = displayVerseRange;
   // When a UST verse bridge widens the range to span multiple verses (e.g. ISA
@@ -517,6 +564,7 @@ export function ResourceColumn({
   const noteFocusRef = useRef<{ id: string; dir: "up" | "down" } | null>(null);
   const [recentNoteMove, setRecentNoteMove] = useState<{ id: string; dir: "up" | "down" } | null>(null);
   const noteFlashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- runs after every commit on purpose: it consumes the focus request the arrow handlers leave in noteFocusRef and clears it on first read, so the setState fires once per move, never in a loop.
   useLayoutEffect(() => {
     const pending = noteFocusRef.current;
     if (!pending) return;
@@ -578,6 +626,7 @@ export function ResourceColumn({
   }, [dragId, dragOver, computeNeighbors, onReorderPreview]);
 
   const scrollBodyRef = useRef<HTMLDivElement | null>(null);
+  const bookIntroIds = useMemo(() => new Set((bookIntroTn ?? []).map((r) => r.id)), [bookIntroTn]);
 
   // Auto-scroll the list while a reorder drag hovers near its top/bottom edge.
   // Native HTML5 DnD only auto-scrolls the window, never a nested overflow
@@ -632,6 +681,7 @@ export function ResourceColumn({
   //     pinned and the user wants to jump into that verse's group)
   //   - pinned.* (pin toggles, so the user lands on the same conceptual
   //     spot they were viewing before the layout reshuffled)
+  //   - tabRequestScroll (a requestTab switch landed; see above)
   // Priority: active note > active word > active-verse group in any pinned
   // section. Without any of those, no scroll.
   const prevNonceRef = useRef(scrollNonce);
@@ -648,7 +698,7 @@ export function ResourceColumn({
       prevPinnedRef.current.notes !== pinned.notes ||
       prevPinnedRef.current.words !== pinned.words ||
       prevPinnedRef.current.questions !== pinned.questions;
-    prevPinnedRef.current = pinned;
+    prevPinnedRef.current = { notes: pinned.notes, words: pinned.words, questions: pinned.questions };
     // The verse-group / verse-end fallbacks below reposition the whole list to
     // a verse boundary. They're meant for navigation (button, verse change, pin
     // toggle) — NOT for incidental re-runs like clearing the active note when a
@@ -660,7 +710,8 @@ export function ResourceColumn({
     if (activeNoteId) {
       target = root.querySelector<HTMLElement>(`[data-note-id="${activeNoteId}"]`);
     } else if (activeWordId) {
-      target = root.querySelector<HTMLElement>(`[data-word-id="${activeWordId}"]`);
+      // Escaped: activeWordId can come from the URL (#/{book}/{ch}/{vs}?twl=).
+      target = root.querySelector<HTMLElement>(`[data-word-id="${CSS.escape(activeWordId)}"]`);
     }
     if (navTriggered && !target && (pinned.notes || pinned.words || pinned.questions)) {
       target = root.querySelector<HTMLElement>(`[data-verse-group="${activeVerse}"]`);
@@ -710,6 +761,7 @@ export function ResourceColumn({
     pinned.notes,
     pinned.words,
     pinned.questions,
+    tabRequestScroll,
   ]);
 
   return (
@@ -798,7 +850,7 @@ export function ResourceColumn({
             // whose useState(computedInitial) seeds the correct state
             // synchronously, closing the race.
             key={`${alignmentProps.bibleVersion}:${alignmentProps.chapter}:${alignmentProps.verseNum}`}
-            ref={alignmentProps.panelRef}
+            ref={alignmentPanelRef}
             book={alignmentProps.book}
             chapter={alignmentProps.chapter}
             verseNum={alignmentProps.verseNum}
@@ -811,7 +863,7 @@ export function ResourceColumn({
             onConfirmUnalign={alignmentProps.onConfirmUnalign}
             onCancel={alignmentProps.onCancel}
             onDirtyChange={alignmentProps.onDirtyChange}
-            onOpenDual={alignmentProps.onOpenDual}
+            onOpenDual={onOpenDualAligner}
             onRestoreVersion={alignmentProps.onRestoreVersion}
           />
         ) : (
@@ -849,6 +901,7 @@ export function ResourceColumn({
             onNoteApprove={onNoteApprove}
             onApproveAllNotes={onApproveAllNotes}
             renderNoteCard={renderNoteCard}
+            bookIntroRows={bookIntroTn}
           />
         )}
 
@@ -954,6 +1007,11 @@ export function ResourceColumn({
     const idx = samePeers.indexOf(r);
     const prevNote = idx > 0 ? samePeers[idx - 1] : null;
     const nextNote = idx < samePeers.length - 1 ? samePeers[idx + 1] : null;
+    // A book-introduction row (chapter 0, shown on the first chapter): it has
+    // no verse here, so no change-verse / AI Suggest / quote build, and the
+    // hover preview would point at this chapter's verse 0. Insert-after adds
+    // another chapter-0 row (Shell.onNoteInsertAfter, #562).
+    const foreign = bookIntroIds.has(r.id);
     return (
       <Fragment key={r.id}>
         {showBefore && <DropIndicator />}
@@ -974,8 +1032,8 @@ export function ResourceColumn({
           onDelete={() => onNoteDelete(r.id)}
           onRestore={() => onNoteRestore(r.id)}
           onInsertAfter={() => onNoteInsertAfter(r.id)}
-          verseOptions={verseOptions}
-          onChangeVerse={(v, vEnd) => onNoteChangeVerse(r.id, v, vEnd)}
+          verseOptions={foreign ? undefined : verseOptions}
+          onChangeVerse={foreign ? undefined : (v, vEnd) => onNoteChangeVerse(r.id, v, vEnd)}
           onFocus={() => onNoteFocus(r)}
           onGripDragStart={() => setDragId(r.id)}
           onMoveUp={
@@ -998,7 +1056,7 @@ export function ResourceColumn({
           }
           flashArrow={recentNoteMove?.id === r.id ? recentNoteMove.dir : null}
           onReorderHover={
-            onReorderPreview
+            onReorderPreview && !foreign
               ? (entering) =>
                   onReorderPreview(
                     entering
@@ -1032,17 +1090,19 @@ export function ResourceColumn({
             setDragId(null);
             setDragOver(null);
           }}
-          onStartAi={onNoteStartAi ? (live) => onNoteStartAi(r, live) : undefined}
+          onStartAi={onNoteStartAi && !foreign ? (live) => onNoteStartAi(r, live) : undefined}
           isAiPending={isNoteAiPending?.(r.id) ?? false}
           aiRecentlyCompletedAt={noteAiRecentlyCompletedAt?.(r.id) ?? null}
           onVisibilityChange={onNoteVisibilityChange}
-          locked={locked}
+          locked={noteCardsLocked}
+          createLocked={locked}
+          lockPipelineType={lockPipelineType}
           onSetPreserve={
             onSetNotePreserve ? (value) => onSetNotePreserve(r.id, value) : undefined
           }
           onSetHint={onSetNoteHint ? (value) => onSetNoteHint(r.id, value) : undefined}
           onTranslateQuote={
-            onNoteTranslateQuote ? (english) => onNoteTranslateQuote(r, english) : undefined
+            onNoteTranslateQuote && !foreign ? (english) => onNoteTranslateQuote(r, english) : undefined
           }
           quoteBuildMode={quoteBuildActiveNoteId === r.id}
           quoteBuildSelectionCount={
@@ -1051,13 +1111,14 @@ export function ResourceColumn({
           quoteBuildAppliedAt={
             quoteBuildAppliedTo?.noteId === r.id ? quoteBuildAppliedTo.nonce : null
           }
-          onStartQuoteBuild={onStartQuoteBuild ? () => onStartQuoteBuild(r.id) : undefined}
+          onStartQuoteBuild={onStartQuoteBuild && !foreign ? () => onStartQuoteBuild(r.id) : undefined}
           translationMode={translationMode}
           sourceNote={translationMode ? (sourceNotes.get(r.id) ?? null) : null}
           onApprove={onNoteApprove ? () => onNoteApprove(r.id, true) : undefined}
           onUnapprove={onNoteApprove ? () => onNoteApprove(r.id, false) : undefined}
           onTranslate={onNoteTranslate ? () => onNoteTranslate(r.id) : undefined}
           isTranslating={translatingNoteIds?.has(r.id) ?? false}
+          rowTranslateLocked={translateLockedNoteIds?.has(r.id) ?? false}
         />
         {showAfter && <DropIndicator />}
       </Fragment>

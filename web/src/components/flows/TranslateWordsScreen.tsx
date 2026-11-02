@@ -10,8 +10,8 @@
 // Route: #/words/{book} (list + detail are internal state, like the artifact's
 // two views — no sub-route). The back chevron aims at #/package/{book}, the
 // per-book hub screen. Translation-primary by construction: NO authoring
-// chrome (no populate / add-by-id / search rail — those live on ArticlesScreen
-// and ArticleWorkspace), no FlowNav, hash nav + back-chevrons only.
+// chrome (no populate / add-by-id / search rail — those live on
+// ArticleWorkspace), no pill bar, hash nav + back-chevrons only.
 //
 // ── 2026-08-10 list restructure + responsive layouts (Benjamin) ─────────────
 //
@@ -134,6 +134,7 @@
 // contract ArticlesScreen.tsx:575-586 implements.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FlowHeader } from "./FlowHeader";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import {
@@ -169,6 +170,7 @@ import { pipelineStore, getSessionKey } from "../../sync/pipelineStore";
 import { MarkdownView } from "../MarkdownView";
 import { realChapterNumbers } from "../../lib/bookSummary";
 import { resolveFlowChipStatus, flowChipKind, type FlowChipStatus } from "../../lib/flowStatusChip";
+import { isAiProviderNotConfigured } from "../../lib/aiProviderErrors";
 
 export interface TranslateWordsScreenProps extends FlowScreenContext {
   book: string;
@@ -886,18 +888,8 @@ export default function TranslateWordsScreen({ role, book }: TranslateWordsScree
           : { overflowY: "auto" }),
       }}
     >
-      {/* topbar (at md+ the root doesn't scroll, so sticky is simply inert) */}
-      <Box
-        sx={{
-          position: "sticky",
-          insetBlockStart: 0,
-          zIndex: 20,
-          flex: "none",
-          bgcolor: "background.paper",
-          borderBlockEnd: "1px solid",
-          borderColor: "divider",
-        }}
-      >
+      {/* topbar — rendered into the global flow bar via FlowHeader (#299) */}
+      <FlowHeader>
         <Box sx={{ maxWidth: wide ? 1440 : COLUMN_PX, mx: "auto", paddingInline: 2, paddingBlock: 1.5 }}>
           <Stack direction="row" alignItems="center" spacing={1.25}>
             <IconButton
@@ -942,7 +934,7 @@ export default function TranslateWordsScreen({ role, book }: TranslateWordsScree
             />
           </Box>
         </Box>
-      </Box>
+      </FlowHeader>
 
       {wide ? (
         /* desk (docs/mockups/desktop-first/_design.css .desk/.rail/.panel):
@@ -1161,16 +1153,16 @@ function ArticleDetail({
   // is how we learn (no capability flag exists up front).
   const [aiUnavailable, setAiUnavailable] = useState<string | null>(null);
   const [lang, setLang] = useState<Lang>(sessionLang);
-
-  const setLangRemembered = (l: Lang) => {
-    sessionLang = l;
-    setLang(l);
-  };
+  // Remember the choice for the next mount of this screen (this tab only).
+  useEffect(() => {
+    sessionLang = lang;
+  }, [lang]);
 
   // Load full units, then let a persisted draft (unsaved typing from this
   // browser) win over the server's target — mirrors ArticlesScreen:513-560.
   useEffect(() => {
     let cancelled = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- draft-hydration load: re-runs on reloadKey without a remount, its resets stay paired with the async draft-store restore below, and the editingPath reset feeds the focus/scroll effect above, so moving it into render would reorder the two.
     setParts(null);
     setLoadError(null);
     setStaleDraft(false);
@@ -1391,8 +1383,13 @@ function ArticleDetail({
       setRedoing(false);
       const body = (e as { body?: { error?: string } } | null)?.body;
       const code = body?.error ?? "";
+      // 409 ai_provider_not_configured = this org has no AI key of its own (#551).
+      // A notice, not the session lock below: an admin can add a key mid-session,
+      // and Redo must work again without a reload.
       // 503 pipeline_api_disabled = BT_API_TOKEN unset (api/src/pipelines.ts:995).
-      if ((e instanceof ApiError && e.status === 503) || code === "pipeline_api_disabled") {
+      if (isAiProviderNotConfigured(e)) {
+        setNotice({ text: t("pipeline.aiKeyNotConfigured"), severity: "warning" });
+      } else if ((e instanceof ApiError && e.status === 503) || code === "pipeline_api_disabled") {
         setAiUnavailable(t("flowWords.aiUnavailable"));
       } else {
         setNotice({
@@ -1474,7 +1471,7 @@ function ArticleDetail({
         onClick={() => {
           if (lang !== value) {
             setEditingPath(null);
-            setLangRemembered(value);
+            setLang(value);
           }
         }}
         aria-pressed={active}
@@ -1695,17 +1692,7 @@ function ArticleDetail({
     >
       {/* topbar (pane: the panel-top chrome — title, no back chevron) */}
       {!focusMode && (
-        <Box
-          sx={{
-            position: "sticky",
-            insetBlockStart: 0,
-            zIndex: pane ? 10 : 20,
-            flex: "none",
-            bgcolor: "background.paper",
-            borderBlockEnd: "1px solid",
-            borderColor: "divider",
-          }}
-        >
+        <FlowHeader inline={pane} zIndex={10}>
           <Box
             sx={{
               maxWidth: pane ? "none" : COLUMN_PX,
@@ -1741,7 +1728,7 @@ function ArticleDetail({
               </Box>
             </Stack>
           </Box>
-        </Box>
+        </FlowHeader>
       )}
 
       <Box

@@ -19,6 +19,7 @@ import {
   buildQuoteFromSelection,
   tokenKey,
   collectSourceWordNodes,
+  quotePickUnchanged,
 } from "./quoteBuilder.ts";
 import { matchSourceTokens } from "./highlight.ts";
 import { isCharacterWrapper, isSourceWordContainer } from "./usfm.ts";
@@ -398,6 +399,22 @@ function verseObjectsOf(rawUsfm, ch, v) {
     isSourceWordContainer(keyterm.find((o) => o && o.type === "milestone" && o.tag === "zaln") ?? { type: "milestone", tag: "zaln" }),
     "the shared predicate DOES descend a \\zaln alignment milestone",
   );
+}
+
+// ── quotePickUnchanged (issue #593 / PR #557) ──────────────────────────────
+// The notes screen's quote picker skips the PATCH when the pick equals the
+// stored quote. UHB legacy order (consonant-dagesh-vowel) vs an NFC stored
+// quote must count as the same; a null stored occurrence means 1.
+{
+  const legacy = "בַּיּוֹם"; // בּ+dagesh+patah...
+  const stored = legacy.normalize("NFC");
+  assert(legacy !== stored, "premise: legacy and NFC spellings differ byte-wise");
+  assert(quotePickUnchanged({ quote: legacy, occurrence: 1 }, stored, 1), "legacy vs NFC quote, same occurrence → unchanged");
+  assert(quotePickUnchanged({ quote: legacy, occurrence: 1 }, stored, null), "null stored occurrence counts as 1");
+  assert(!quotePickUnchanged({ quote: legacy, occurrence: 2 }, stored, 1), "different occurrence → changed");
+  assert(!quotePickUnchanged({ quote: legacy, occurrence: 2 }, stored, null), "occurrence 2 vs null (=1) → changed");
+  assert(!quotePickUnchanged({ quote: "καὶ", occurrence: 1 }, "", null), "a quote picked for an empty row → changed");
+  assert(!quotePickUnchanged({ quote: "καὶ", occurrence: 1 }, "καὶ ἐγένετο", 1), "different words → changed");
 }
 
 if (failed > 0) {

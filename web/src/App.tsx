@@ -1,10 +1,11 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Alert, Box, Button, Chip, CircularProgress, Link, Snackbar, Stack, Tooltip, Typography } from "@mui/material";
+import { Alert, Box, Button, Chip, CircularProgress, IconButton, Link, Snackbar, Stack, Tooltip, Typography } from "@mui/material";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import { Shell } from "./components/Shell";
 import { ArticleWorkspace } from "./components/ArticleWorkspace";
-import { TopBar, UiLanguageControl } from "./components/TopBar";
+import { TopBar } from "./components/TopBar";
+import { FlowHeaderSlotContext } from "./components/flows/FlowHeader";
 import { SyncStatusBar } from "./components/SyncStatusBar";
 import { PipelineStatusBar } from "./components/PipelineStatusBar";
 import { AccountMenu } from "./components/AccountMenu";
@@ -12,8 +13,10 @@ import { TemplateWorkspace } from "./components/TemplateWorkspace";
 import { ReviewQueue } from "./components/ReviewQueue";
 import { PreferencesWorkspace, ALL_SECTIONS as PREFS_SECTIONS, type Section as PrefsSection } from "./components/PreferencesWorkspace";
 import { LocalizationInspector } from "./components/LocalizationInspector";
+import { legacyFlowRedirect } from "./lib/legacyFlowRoutes";
 import { useBook } from "./hooks/useBook";
 import { useAlerts } from "./hooks/useAlerts";
+import { useLayoutBand } from "./hooks/useLayoutBand";
 import { useAppVersion } from "./hooks/useAppVersion";
 import {
   authLogout,
@@ -28,7 +31,10 @@ import {
   type Role,
 } from "./sync/api";
 import { setPipelineUser } from "./sync/pipelineStore";
-import { getWorkspaceSlug, setWorkspaceSlug, setWorkspaceIsFallback } from "./sync/workspace";
+import { api } from "./sync/api";
+import { getWorkspaceSlug, setWorkspaceSlug } from "./sync/workspace";
+import { adoptBeforeEditors, nothingToAdopt } from "./sync/adoptionGate";
+import { needsAdoptionGate } from "./sync/legacyAdoption";
 import {
   WorkspaceChoiceDialog,
   markChooseWsPending,
@@ -36,22 +42,15 @@ import {
 } from "./components/WorkspaceChoiceDialog";
 
 type Location =
-  | { view: "chapter"; book: string; chapter: number; verse: number }
+  | { view: "chapter"; book: string; chapter: number; verse: number; twlRowId?: string | null }
   | { view: "article"; resource: "tw" | "ta"; articleId: string | null }
   | { view: "templates"; templateId: string | null }
   | { view: "preferences"; section: PrefsSection }
   | { view: "review"; book: string; chapter: number }
-  | { view: "home" }
-  | { view: "scripture"; book: string; chapter: number; verse: number }
-  | { view: "align"; book: string; chapter: number; verse: number }
-  | { view: "flowArticles" }
-  | { view: "words"; book: string; chapter: number; verse: number; rowId?: string | null }
   | { view: "ai" }
   | { view: "style" }
   | { view: "curate"; templateId: string | null }
-  | { view: "setup" }
   | { view: "books"; book: string | null }
-  | { view: "team" }
   | { view: "observe" }
   | { view: "verse"; book: string; chapter: number; verse: number }
   | { view: "notes"; book: string; chapter: number; verse: number | null; rowId: string | null }
@@ -60,7 +59,7 @@ type Location =
   | { view: "translateWords"; book: string }
   | { view: "translateScripture"; book: string; chapter: number; verse: number | null }
   | { view: "translateAlign"; book: string; chapter: number; verse: number; mode: "single" | "dual" }
-  | { view: "admin"; section: "team" | "setup" | "workflow" | "progress" };
+  | { view: "admin"; section: "team" | "setup" | "workflow" | "progress" | "review" };
 
 // The position (book/chapter/verse) a route represents, for recording the
 // user's last location so the Books "Continue" card can jump them back. Returns
@@ -68,12 +67,11 @@ type Location =
 // {BOOK} is a book with no chapter/verse: browsing, not working, so it must not
 // overwrite a precise stored position with 1:1) and every non-scripture view.
 //
-// NOTE on view names (#200): the redesign routes the issue targets parse to the
-// `translate*` views, NOT the same-named old-flow views. `#/scripture/{BOOK}
-// [/{CH}[/{VS}]]` → `translateScripture` (the `ts` regex claims the 1–3
-// segment arity ahead of the old 3-segment `scripture`); `#/alignment/{BOOK}/
-// {CH}[/{VS}]` → `translateAlign`. `translateScripture` carries the verse when
-// the URL had one (#389); a chapter-only hash still records verse 1.
+// NOTE on view names (#200): the redesign routes parse to the `translate*`
+// views. `#/scripture/{BOOK}[/{CH}[/{VS}]]` → `translateScripture`;
+// `#/alignment/{BOOK}/{CH}[/{VS}]` → `translateAlign`. `translateScripture`
+// carries the verse when the URL had one (#389); a chapter-only hash still
+// records verse 1.
 function positionFromLoc(loc: Location): { book: string; chapter: number; verse: number } | null {
   switch (loc.view) {
     case "chapter":
@@ -89,19 +87,12 @@ function positionFromLoc(loc: Location): { book: string; chapter: number; verse:
   }
 }
 
-// Flow screens (docs/flows port) are lazy so their weight isn't paid on the
-// classic editor routes. Stubs today; replaced screen-by-screen in this stack.
-const HomeScreen = lazy(() => import("./components/flows/HomeScreen"));
-const ScriptureScreen = lazy(() => import("./components/flows/ScriptureScreen"));
-const AlignScreen = lazy(() => import("./components/flows/AlignScreen"));
-const ArticlesScreen = lazy(() => import("./components/flows/ArticlesScreen"));
-const WordsScreen = lazy(() => import("./components/flows/WordsScreen"));
+// Flow screens are lazy so their weight isn't paid on the classic editor
+// routes.
 const AiScreen = lazy(() => import("./components/flows/AiScreen"));
 const StyleScreen = lazy(() => import("./components/flows/StyleScreen"));
 const CurateScreen = lazy(() => import("./components/flows/CurateScreen"));
-const SetupScreen = lazy(() => import("./components/flows/SetupScreen"));
 const BooksScreen = lazy(() => import("./components/flows/BooksScreen"));
-const TeamScreen = lazy(() => import("./components/flows/TeamScreen"));
 const ObserveScreen = lazy(() => import("./components/flows/ObserveScreen"));
 const VerseScreen = lazy(() => import("./components/flows/VerseScreen"));
 const TranslateNotesScreen = lazy(() => import("./components/flows/TranslateNotesScreen"));
@@ -114,6 +105,7 @@ const AdminTeamScreen = lazy(() => import("./components/flows/AdminTeamScreen"))
 const AdminSetupScreen = lazy(() => import("./components/flows/AdminSetupScreen"));
 const AdminWorkflowScreen = lazy(() => import("./components/flows/AdminWorkflowScreen"));
 const AdminProgressScreen = lazy(() => import("./components/flows/AdminProgressScreen"));
+const AdminReviewStateScreen = lazy(() => import("./components/flows/AdminReviewStateScreen"));
 
 // OBA (Obadiah) is the shortest book in the canon — one chapter, 21 verses.
 // Used as the fallback book code for partial routes (e.g. a hash with a
@@ -148,6 +140,13 @@ function safeDecode(s: string): string {
 }
 
 function parseHash(): Location {
+  // Hashes of the old flows screens retired in #173 (bookmarks, history) are
+  // rewritten to the screen that does that job now, then parsed as that hash.
+  // replaceState doesn't fire hashchange, so the parse below is what renders.
+  // Keep the query string: the boot flags (?_choose_ws, ?_auth_denied) are read
+  // from it after this runs.
+  const legacy = legacyFlowRedirect(location.hash);
+  if (legacy) history.replaceState(null, "", location.pathname + location.search + legacy);
   const pm = location.hash.match(/^#\/preferences(?:\/(\w+))?$/);
   if (pm) {
     const s = pm[1] as PrefsSection | undefined;
@@ -217,28 +216,13 @@ function parseHash(): Location {
       rowId: qn[4] ? safeDecode(qn[4]) : null,
     };
   }
-  // Flow screens (docs/flows port). Parameterless routes are single reserved
-  // tokens; none collide with 3-letter USFM book codes in the catch-all below.
-  if (/^#\/home$/.test(location.hash)) return { view: "home" };
-  if (/^#\/articles$/.test(location.hash)) return { view: "flowArticles" };
-  if (/^#\/ai$/.test(location.hash)) return { view: "ai" };
-  if (/^#\/style$/.test(location.hash)) return { view: "style" };
-  if (/^#\/setup$/.test(location.hash)) return { view: "setup" };
+  // Flow screens. Parameterless routes are single reserved tokens; none
+  // collide with 3-letter USFM book codes in the catch-all below.
   const bk = location.hash.match(/^#\/books(?:\/([A-Za-z0-9]+))?$/);
   if (bk) return { view: "books", book: bk[1] ? bk[1].toUpperCase() : null };
-  if (/^#\/team$/.test(location.hash)) return { view: "team" };
-  if (/^#\/observe$/.test(location.hash)) return { view: "observe" };
-  const cu = location.hash.match(/^#\/curate(?:\/(.+))?$/);
-  if (cu) {
-    return { view: "curate", templateId: decodeURIComponent(cu[1] ?? "") || null };
-  }
-  // Titus-redesign routes. These deliberately claim the short arities of
-  // #/scripture and #/words ahead of the fv catch-all below: the 1–2 segment
-  // forms open the new translate screens, while the 3-segment (verse-level)
-  // form for #/words still opens the old flows screen until it is retired.
-  // #/scripture now claims its 3-segment verse form too (#389): the new
-  // TranslateScriptureScreen seeks to the deep-linked verse on mount, so it no
-  // longer needs to give way to the old 3-segment ScriptureScreen route below.
+  // Titus-redesign routes. They must sit above the book-code catch-all at the
+  // end, which is unanchored and would read "package" or "words" as a book.
+  // TranslateScriptureScreen seeks to a deep-linked verse on mount (#389).
   const pk = location.hash.match(/^#\/package\/([A-Za-z0-9]+)$/);
   if (pk) {
     return { view: "package", book: pk[1].toUpperCase() };
@@ -246,23 +230,6 @@ function parseHash(): Location {
   const wb = location.hash.match(/^#\/words\/([A-Za-z0-9]+)$/);
   if (wb) {
     return { view: "translateWords", book: wb[1].toUpperCase() };
-  }
-  // #/words/{book}/{ch}[/{vs}][?row={id}]: the old flows twl (word-links)
-  // screen's own route contract, claimed ahead of the fv catch-all below so
-  // the optional ?row= tail (the SyncStatusBar "N unsaved" jump menu) reaches
-  // it — mirrors the #/notes and #/questions forms above (#335).
-  const wl = location.hash.match(/^#\/words\/([A-Za-z0-9]+)\/(\d+)(?:\/(\d+))?(?:\?row=([^&]+))?$/);
-  if (wl) {
-    return {
-      view: "words",
-      book: wl[1].toUpperCase(),
-      chapter: parseInt(wl[2], 10),
-      verse: wl[3] ? parseInt(wl[3], 10) : 1,
-      // Guarded decode (see the #/notes case above): a mangled percent
-      // sequence must not throw out of parseHash and blank the app; a wrong
-      // id just degrades to the verse's first row.
-      rowId: wl[4] ? safeDecode(wl[4]) : null,
-    };
   }
   const ts = location.hash.match(/^#\/scripture\/([A-Za-z0-9]+)(?:\/(\d+))?(?:\/(\d+))?$/);
   if (ts) {
@@ -274,13 +241,21 @@ function parseHash(): Location {
     };
   }
   // Redesigned admin desk (#/admin/{section}); AdminDesk renders the rail.
-  const ad = location.hash.match(/^#\/admin\/(team|setup|workflow|progress)$/);
+  const ad = location.hash.match(/^#\/admin\/(team|setup|workflow|progress|review)$/);
   if (ad) {
-    return { view: "admin", section: ad[1] as "team" | "setup" | "workflow" | "progress" };
+    return { view: "admin", section: ad[1] as "team" | "setup" | "workflow" | "progress" | "review" };
   }
-  // #/alignment (redesign) is distinct from the old 3-segment #/align, which
-  // still flows to the fv catch-all below. Must sit above the final book-code
-  // catch-all, which is unanchored and would swallow "alignment" as a book.
+  // The desk More-tools screens, under #/admin/* since #537 (their old
+  // #/ai, #/style, #/curate, #/observe hashes redirect via legacyFlowRedirect).
+  if (location.hash === "#/admin/ai") return { view: "ai" };
+  if (location.hash === "#/admin/style") return { view: "style" };
+  if (location.hash === "#/admin/observe") return { view: "observe" };
+  const cu = location.hash.match(/^#\/admin\/curate(?:\/(.+))?$/);
+  if (cu) {
+    return { view: "curate", templateId: safeDecode(cu[1] ?? "") || null };
+  }
+  // #/alignment (redesign). Must sit above the final book-code catch-all,
+  // which is unanchored and would swallow "alignment" as a book.
   const al = location.hash.match(/^#\/alignment\/([A-Za-z0-9]+)\/(\d+)(?:\/(\d+))?(\/dual)?$/);
   if (al) {
     return {
@@ -292,23 +267,28 @@ function parseHash(): Location {
     };
   }
   const fv = location.hash.match(
-    /^#\/(scripture|align|words|verse)(?:\/([A-Za-z0-9]+)(?:\/(\d+))?(?:\/(\d+))?)?$/,
+    /^#\/verse(?:\/([A-Za-z0-9]+)(?:\/(\d+))?(?:\/(\d+))?)?$/,
   );
   if (fv) {
     return {
-      view: fv[1] as "scripture" | "align" | "words" | "verse",
-      book: fv[2] ? fv[2].toUpperCase() : DEFAULT_BOOK,
-      chapter: fv[3] ? parseInt(fv[3], 10) : 1,
-      verse: fv[4] ? parseInt(fv[4], 10) : 1,
+      view: "verse",
+      book: fv[1] ? fv[1].toUpperCase() : DEFAULT_BOOK,
+      chapter: fv[2] ? parseInt(fv[2], 10) : 1,
+      verse: fv[3] ? parseInt(fv[3], 10) : 1,
     };
   }
   const m = location.hash.match(/^#\/?([A-Za-z0-9]+)(?:\/(\d+))?(?:\/(\d+))?/);
   if (!m) return { view: "books", book: null };
+  // Optional ?twl={id} tail: open the word-links tab with that row selected.
+  // The drafts jump menu and the retired #/words/{book}/{ch}/{vs} bookmarks
+  // use it, since the classic editor is where word links are edited (#173).
+  const tw = location.hash.match(/[?&]twl=([^&]+)/);
   return {
     view: "chapter",
     book: m[1].toUpperCase(),
     chapter: m[2] ? parseInt(m[2], 10) : 1,
     verse: m[3] ? parseInt(m[3], 10) : 1,
+    twlRowId: tw ? safeDecode(tw[1]) : null,
   };
 }
 
@@ -476,8 +456,10 @@ export function App() {
   useEffect(() => onAuthRefreshed(() => setSessionExpired(false)), []);
 
   const navigate = (book: string, chapter: number, verse?: number) => {
+    // Verse 1 is the default (omitted); verse 0 is the chapter-intro tile and
+    // must survive the round trip or the jump lands on verse 1 instead.
     location.hash =
-      verse !== undefined && verse > 1
+      verse !== undefined && verse !== 1
         ? `#/${book}/${chapter}/${verse}`
         : `#/${book}/${chapter}`;
   };
@@ -495,13 +477,19 @@ export function App() {
     verse: 1,
   });
   const lastScripturePos = positionFromLoc(loc);
-  if (lastScripturePos) {
-    lastScriptureRef.current = lastScripturePos;
-  }
+  // Written after commit (no deps) on scripture routes only.
+  useLayoutEffect(() => {
+    if (lastScripturePos) lastScriptureRef.current = lastScripturePos;
+  });
   const backToScripture = () => {
     const { book, chapter, verse } = lastScriptureRef.current;
     navigate(book, chapter, verse);
   };
+
+  // The global flow bar's inline-start slot; screens portal their title row
+  // into it through <FlowHeader> (#299).
+  const [headerSlot, setHeaderSlot] = useState<HTMLElement | null>(null);
+  const isPhone = useLayoutBand().band === "phone";
 
   // Live in-session position for the Books screen's Continue card. `auth.me`
   // is fetched once at boot and never refreshed, so without this the card
@@ -510,19 +498,24 @@ export function App() {
   // lastScriptureRef above (a ref, so it can't trigger a re-render), this is
   // state — BooksScreen needs to actually re-render when it changes.
   const [livePosition, setLivePosition] = useState<{ book: string; chapter: number; verse: number } | null>(null);
-  useEffect(() => {
-    // Track the same routes the server-side push does (classic chapter + the
-    // redesign scripture routes), so the card updates in-session no matter which
-    // UI the translator works in (#200). The prev-comparison keeps this a no-op
-    // when the position is unchanged.
+  // Track the same routes the server-side push does (classic chapter + the
+  // redesign scripture routes), so the card updates in-session no matter which
+  // UI the translator works in (#200). Adjusted during render on a loc change
+  // (React's "adjust state when a prop changes" pattern); non-scripture routes
+  // keep the previous value. The prev-comparison keeps this a no-op when the
+  // position is unchanged.
+  const [livePositionLoc, setLivePositionLoc] = useState<Location | null>(null);
+  if (livePositionLoc !== loc) {
+    setLivePositionLoc(loc);
     const pos = positionFromLoc(loc);
-    if (!pos) return;
-    setLivePosition((prev) =>
-      prev && prev.book === pos.book && prev.chapter === pos.chapter && prev.verse === pos.verse
-        ? prev
-        : pos,
-    );
-  }, [loc]);
+    if (pos) {
+      setLivePosition((prev) =>
+        prev && prev.book === pos.book && prev.chapter === pos.chapter && prev.verse === pos.verse
+          ? prev
+          : pos,
+      );
+    }
+  }
 
   // Workspace reconciliation. The server's be_ws cookie is the source of
   // truth for which org's D1 database we're talking to; localStorage is just
@@ -536,12 +529,9 @@ export function App() {
     if (auth.kind !== "ready") return;
     const serverWs = auth.me?.workspace;
     if (serverWs === undefined) return;
-    const serverIsFallback = auth.me?.workspaceIsFallback;
     if (serverWs === getWorkspaceSlug()) {
-      // Slug already agrees — still sync the fallback flag (it's cheap and
-      // keeps outbox.ts's outboxDbName() correct even if it was never set,
-      // e.g. an install that predates the fallback flag).
-      if (serverIsFallback !== undefined) setWorkspaceIsFallback(serverIsFallback);
+      // Slug confirmed. Legacy adoption for a fallback workspace runs in the
+      // adoption hold below, before any editor renders (#502).
       try { sessionStorage.removeItem(WS_RECONCILED_KEY); } catch { /* private mode */ }
       return;
     }
@@ -549,7 +539,6 @@ export function App() {
     try { alreadyTried = sessionStorage.getItem(WS_RECONCILED_KEY) === "1"; } catch { /* private mode */ }
     if (alreadyTried) return; // already reloaded once this session — don't loop
     setWorkspaceSlug(serverWs);
-    if (serverIsFallback !== undefined) setWorkspaceIsFallback(serverIsFallback);
     try { sessionStorage.setItem(WS_RECONCILED_KEY, "1"); } catch { /* private mode */ }
     location.reload();
   }, [auth]);
@@ -576,11 +565,29 @@ export function App() {
   // auth is not "ready".
   const { alerts, dismiss } = useAlerts(auth.kind === "ready");
 
+  // Legacy adoption hold (#502, sync/adoptionGate.ts). When /api/auth/me
+  // confirms a NAMED fallback slug, records older builds left under the
+  // legacy database name are moved in before any editor mounts, because
+  // editors read their draft only once, at mount. Decided during render (an
+  // effect would run after the editors' own mount effects). Bounded: past
+  // ADOPTION_WAIT_MS adoption is skipped for this boot and the hold lifts.
+  // Every other boot (slug "default", a non-fallback org) never holds.
+  const [adoptionSettled, setAdoptionSettled] = useState(false);
+  const holdForAdoption =
+    !adoptionSettled &&
+    auth.kind === "ready" &&
+    needsAdoptionGate(auth.me, getWorkspaceSlug()) &&
+    !nothingToAdopt();
+  useEffect(() => {
+    if (!holdForAdoption) return;
+    void adoptBeforeEditors(getWorkspaceSlug()).then(() => setAdoptionSettled(true));
+  }, [holdForAdoption]);
+
   useEffect(() => {
     setPipelineUser(auth.kind === "ready" ? auth.me?.userId ?? null : null);
   }, [auth]);
 
-  if (auth.kind === "loading") {
+  if (auth.kind === "loading" || holdForAdoption) {
     return (
       // 100dvh with a 100vh fallback — see the height comment on the main Shell
       // Box further down; plain 100vh sits under mobile browsers' URL bar.
@@ -790,6 +797,7 @@ export function App() {
           // switcher, export, verse-list toggle, lint counts) are simply not
           // passed, so each hides itself.
           <Stack sx={{ height: "100%", minHeight: 0 }}>
+            {/* eslint-disable react-hooks/refs -- deliberate render-time read: article routes never write lastScriptureRef, so this is the position the last committed scripture route left. It stays a ref so remembering a position never re-renders App. */}
             <TopBar
               showNavigation={false}
               book={lastScriptureRef.current.book}
@@ -799,6 +807,7 @@ export function App() {
               username={auth.kind === "ready" ? auth.me?.username ?? null : null}
               onLogout={handleSignOut}
             />
+            {/* eslint-enable react-hooks/refs */}
             <Box sx={{ flex: 1, minHeight: 0 }}>
               <ArticleWorkspace
                 resource={loc.resource}
@@ -823,17 +832,10 @@ export function App() {
           />
         ) : loc.view === "review" ? (
           <ReviewQueue book={loc.book} chapter={loc.chapter} onNavigate={navigate} />
-        ) : loc.view === "home" ||
-          loc.view === "scripture" ||
-          loc.view === "align" ||
-          loc.view === "flowArticles" ||
-          loc.view === "words" ||
-          loc.view === "ai" ||
+        ) : loc.view === "ai" ||
           loc.view === "style" ||
           loc.view === "curate" ||
-          loc.view === "setup" ||
           loc.view === "books" ||
-          loc.view === "team" ||
           loc.view === "observe" ||
           loc.view === "notes" ||
           loc.view === "questions" ||
@@ -861,13 +863,46 @@ export function App() {
           //
           // The "N unsaved drafts" reminder (UnsavedToasts) is intentionally NOT
           // mounted here — it requires a `book` in scope (Shell resolves it via
-          // its own useChapter instance), but most flow views (home, books, team,
-          // setup, style, curate, ai, observe, package, admin) have no
+          // its own useChapter instance), but most flow views (books, style,
+          // curate, ai, observe, package, admin) have no
           // book/chapter in `loc` at all. Hoisting it needs either new data
           // plumbing or a redesign of its in-place Save action — scoped as a
           // separate follow-up rather than risking a silent no-op or a
           // half-working Save button on those screens.
+          //
+          // One row, not two (#299): the screen's own title row portals into the
+          // inline-start slot through <FlowHeader>, beside these controls.
+          <FlowHeaderSlotContext.Provider value={headerSlot}>
           <Stack sx={{ height: "100%", minHeight: 0 }}>
+            <Stack
+              direction="row"
+              alignItems="center"
+              sx={{
+                flex: "none",
+                minHeight: 44,
+                borderBlockEnd: "1px solid",
+                borderColor: "divider",
+                bgcolor: "background.paper",
+              }}
+            >
+              {/* The controls now share the row with the screen title, so on a
+                  phone the title and subtitle truncate instead of wrapping one
+                  word per line. The work screens swap in a short passage
+                  reference there so it stays whole (PHONE_TITLE_SX, #517), and
+                  the controls' padding tightens to leave the row more room.
+                  overflow: hidden is the last resort for a toolbar too wide for
+                  even the shrunken row (the update chip on a phone): the row
+                  is cut off at the slot's edge instead of painting under the
+                  toolbar, where its buttons could not be clicked anyway. */}
+              <Box
+                ref={setHeaderSlot}
+                sx={{
+                  flex: 1,
+                  minWidth: 0,
+                  overflow: "hidden",
+                  "& h1, & h1 + p": { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
+                }}
+              />
             <Stack
               direction="row"
               alignItems="center"
@@ -875,17 +910,33 @@ export function App() {
               spacing={0.5}
               role="toolbar"
               aria-label={t("topbar.chromeStrip.ariaLabel")}
-              sx={{
-                flex: "none",
-                minHeight: 44,
-                paddingInline: 1.5,
-                paddingBlock: 0.5,
-                borderBlockEnd: "1px solid",
-                borderColor: "divider",
-                bgcolor: "background.paper",
-              }}
+              sx={{ flex: "none", paddingInline: isPhone ? 0.75 : 1.5, paddingBlock: 0.5 }}
             >
-              {updateAvailable && (
+              {/* On a phone the update prompt is a small orange refresh
+                  button with its name as label and tooltip (#522): the
+                  full-text chip alone took ~330px of a 360px bar. */}
+              {updateAvailable && isPhone && (
+                <Tooltip
+                  title={
+                    <Stack spacing={0.25}>
+                      <Typography variant="caption" sx={{ fontWeight: 600 }}>
+                        {t("sync.updateAvailable")}
+                      </Typography>
+                      <Typography variant="caption">{t("sync.updateAvailableTooltip")}</Typography>
+                    </Stack>
+                  }
+                >
+                  <IconButton
+                    size="small"
+                    aria-label={t("sync.updateAvailable")}
+                    onClick={() => window.location.reload()}
+                    sx={{ color: "#E59D33", border: "1px solid #E59D33", padding: "3px" }}
+                  >
+                    <RefreshIcon sx={{ fontSize: 16 }} />
+                  </IconButton>
+                </Tooltip>
+              )}
+              {updateAvailable && !isPhone && (
                 <Tooltip title={t("sync.updateAvailableTooltip")}>
                   <Chip
                     size="small"
@@ -902,13 +953,58 @@ export function App() {
                   />
                 </Tooltip>
               )}
-              <SyncStatusBar onNavigate={navigate} flowRouting />
+              <SyncStatusBar onNavigate={navigate} flowRouting compact={isPhone} />
               <PipelineStatusBar />
-              <UiLanguageControl />
               <AccountMenu
                 username={auth.kind === "ready" ? auth.me?.username ?? null : null}
                 onLogout={handleSignOut}
+                isAdmin={auth.kind === "ready" && auth.role === "admin"}
+                onOpenClassic={async () => {
+                  // Candidates in order: the book on screen (its chapter and
+                  // verse when known; classic has no chapter 0, so intros open
+                  // chapter 1) — except on the Books screen, whose selected
+                  // book may not be imported — then where the user last was.
+                  // Only an imported book opens a usable editor, and the last
+                  // position is per-user, not per-workspace (#255), so check
+                  // the workspace's book list; fall back to its first imported
+                  // book, or the Books screen when nothing is imported. If the
+                  // list can't load, trust the first candidate.
+                  const candidates: { book: string; chapter: number; verse: number }[] = [];
+                  if ("book" in loc && loc.book && loc.view !== "books") {
+                    candidates.push({
+                      book: loc.book,
+                      chapter: ("chapter" in loc && loc.chapter) || 1,
+                      verse: ("verse" in loc ? loc.verse : null) ?? 1,
+                    });
+                  }
+                  const last =
+                    livePosition ??
+                    (auth.kind === "ready" && auth.me?.lastBook && auth.me.lastChapter != null && auth.me.lastVerse != null
+                      ? { book: auth.me.lastBook, chapter: auth.me.lastChapter, verse: auth.me.lastVerse }
+                      : null);
+                  if (last) candidates.push(last);
+                  let target = candidates[0] ?? { book: "OBA", chapter: 1, verse: 1 };
+                  try {
+                    const { books } = await api.getBooks();
+                    const imported = new Set(books.map((b) => b.book));
+                    const hit = candidates.find((c) => imported.has(c.book));
+                    if (hit) target = hit;
+                    else if (books.length > 0) target = { book: books[0].book, chapter: 1, verse: 1 };
+                    else {
+                      // Nothing imported: classic has nothing to open, so send
+                      // the user to the Books screen to bring one in.
+                      location.hash = "#/books";
+                      return;
+                    }
+                  } catch {
+                    // Offline or a failed read: keep the optimistic target, the
+                    // same trust the Books screen gave the last position before
+                    // its list loaded.
+                  }
+                  navigate(target.book, target.chapter, target.verse);
+                }}
               />
+            </Stack>
             </Stack>
             <Box sx={{ flex: 1, minHeight: 0 }}>
           <Suspense
@@ -918,24 +1014,12 @@ export function App() {
               </Stack>
             }
           >
-            {loc.view === "home" ? (
-              <HomeScreen role={auth.role} me={auth.me} onNavigate={navigate} />
-            ) : loc.view === "scripture" ? (
-              <ScriptureScreen role={auth.role} me={auth.me} onNavigate={navigate} book={loc.book} chapter={loc.chapter} verse={loc.verse} />
-            ) : loc.view === "align" ? (
-              <AlignScreen role={auth.role} me={auth.me} onNavigate={navigate} book={loc.book} chapter={loc.chapter} verse={loc.verse} />
-            ) : loc.view === "flowArticles" ? (
-              <ArticlesScreen role={auth.role} me={auth.me} onNavigate={navigate} />
-            ) : loc.view === "words" ? (
-              <WordsScreen role={auth.role} me={auth.me} onNavigate={navigate} book={loc.book} chapter={loc.chapter} verse={loc.verse} rowId={loc.rowId ?? undefined} />
-            ) : loc.view === "ai" ? (
+            {loc.view === "ai" ? (
               <AiScreen role={auth.role} me={auth.me} onNavigate={navigate} />
             ) : loc.view === "style" ? (
               <StyleScreen role={auth.role} me={auth.me} onNavigate={navigate} />
             ) : loc.view === "curate" ? (
               <CurateScreen role={auth.role} me={auth.me} onNavigate={navigate} templateId={loc.templateId} />
-            ) : loc.view === "setup" ? (
-              <SetupScreen role={auth.role} me={auth.me} onNavigate={navigate} />
             ) : loc.view === "books" ? (
               <BooksScreen
                 role={auth.role}
@@ -949,8 +1033,6 @@ export function App() {
                     : null)
                 }
               />
-            ) : loc.view === "team" ? (
-              <TeamScreen role={auth.role} me={auth.me} onNavigate={navigate} />
             ) : loc.view === "observe" ? (
               <ObserveScreen role={auth.role} me={auth.me} onNavigate={navigate} />
             ) : loc.view === "notes" ? (
@@ -983,6 +1065,8 @@ export function App() {
                 <AdminSetupScreen role={auth.role} me={auth.me} onNavigate={navigate} />
               ) : loc.section === "workflow" ? (
                 <AdminWorkflowScreen role={auth.role} me={auth.me} onNavigate={navigate} />
+              ) : loc.section === "review" ? (
+                <AdminReviewStateScreen role={auth.role} me={auth.me} onNavigate={navigate} />
               ) : (
                 <AdminProgressScreen role={auth.role} me={auth.me} onNavigate={navigate} />
               )
@@ -992,12 +1076,14 @@ export function App() {
           </Suspense>
             </Box>
           </Stack>
+          </FlowHeaderSlotContext.Provider>
         ) : (
           <Shell
             key={loc.book}
             book={loc.book}
             chapter={loc.chapter}
             initialVerse={loc.verse}
+            initialWordId={loc.twlRowId ?? null}
             onNavigate={navigate}
             bookHook={bookHook}
             onLogout={handleSignOut}

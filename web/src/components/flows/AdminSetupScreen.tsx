@@ -332,7 +332,7 @@ export default function AdminSetupScreen({ role, me, onNavigate }: AdminSetupScr
 
             <WizardPanel />
 
-            {/* AI service (provider/model/key) moved to the AI studio (#/ai,
+            {/* AI service (provider/model/key) moved to the AI studio (#/admin/ai,
                 AiScreen.tsx) under #479 — configuring the AI now lives on the
                 same screen where it's used. Classic #/preferences keeps its own
                 copy until classic retires (#173). */}

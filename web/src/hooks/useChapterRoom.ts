@@ -8,6 +8,7 @@
 
 import { useEffect, useRef } from "react";
 import { openChapterRoom } from "../sync/wsClient";
+import { parseReviewStateSwept, type ReviewStateSweptEvent } from "../lib/reviewStateSweep";
 import type { TnRow, TqRow, TwlRow, VerseDto, VerseStatus, LaneCheckState, VerseLaneCheck, CheckLane, LaneReplacementEvent } from "../sync/api";
 
 type RowKind = "tn" | "tq" | "twl";
@@ -47,6 +48,9 @@ export interface UseChapterRoomHandlers {
   // An AI pipeline wrote rows into this chapter out of band — the row list is
   // stale. Optional: tabs that don't care (or aren't this chapter) can ignore it.
   onPipelineApplied?: (book: string, chapter: number, pipelineType: string) => void;
+  // An admin bulk-set this chapter's review state (#296/#395) — the rows'
+  // translation_state is stale; content and version are not. Optional.
+  onReviewStateSwept?: (event: ReviewStateSweptEvent) => void;
   // A scripture lane froze for a replacement — quarantine queued edits for the
   // lane's bible_version and stop editing it. Optional.
   onLaneFreeze?: (event: LaneReplacementEvent) => void;
@@ -57,7 +61,9 @@ export interface UseChapterRoomHandlers {
 
 export function useChapterRoom(
   book: string,
-  chapter: number,
+  // null = no room (lets a caller subscribe conditionally without breaking
+  // the rules of hooks).
+  chapter: number | null,
   handlers: UseChapterRoomHandlers,
 ): void {
   const handlersRef = useRef(handlers);
@@ -66,6 +72,7 @@ export function useChapterRoom(
   }, [handlers]);
 
   useEffect(() => {
+    if (chapter === null) return;
     const cleanup = openChapterRoom(book, chapter, {
       onEvent: (raw) => {
         const ev = raw as WireEvent | null;
@@ -119,6 +126,11 @@ export function useChapterRoom(
           typeof ev.pipeline_type === "string"
         ) {
           handlersRef.current.onPipelineApplied?.(ev.book, ev.chapter, ev.pipeline_type);
+          return;
+        }
+        const swept = parseReviewStateSwept(ev);
+        if (swept) {
+          handlersRef.current.onReviewStateSwept?.(swept);
           return;
         }
       },

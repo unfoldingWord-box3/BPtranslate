@@ -766,4 +766,29 @@ console.log("[autoClaim] a claimed slot exports to its own org, never the deploy
   }
 }
 
+console.log("[autoClaim] org objects carrying only `name` (Door43 deprecates `username`, #581)");
+{
+  const realFetch = globalThis.fetch;
+  try {
+    const sharedSql = sharedDbSqlite();
+    const pool1Sql = poolDbSqlite();
+    registerPoolRows(sharedSql, "pool1");
+    const baseEnv = makeEnv(sharedSql, { DB_POOL1: pool1Sql });
+
+    globalThis.fetch = stubDcs({
+      id: 17,
+      login: "nina",
+      orgs: [{ name: "NewOrg" }],
+      teams: [{ name: "BE-Admins", organization: { name: "NewOrg" } }],
+    });
+
+    await signIn(baseEnv, "state-nina-1");
+
+    const slot = rows(sharedSql, "SELECT slug, org FROM workspaces WHERE slug = 'pool1'")[0];
+    assert(slot && slot.org === "NewOrg", `name-only teams still claim, with Door43's casing; got ${JSON.stringify(slot)}`);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
 console.log("workspaceAutoClaim: all assertions passed");

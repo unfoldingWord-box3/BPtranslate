@@ -176,7 +176,7 @@ facts; the fix column is the smallest change that removes the friction.
 | Previous chapter | **No control exists** in the redesign — next-chapter only (`TranslateScriptureScreen.tsx:1311-1324`, Notes `:1152`, Questions `:1156`). Going back = URL surgery or 3 clicks. | Symmetric prev/next (classic TopBar already has it, `TopBar.tsx:695-770`). |
 | Keyboard | **Two shortcuts in the whole app**, both off the default path (arrow keys on legacy `VerseScreen.tsx:280-293`; Ctrl+F in classic `ScriptureColumn.tsx:273-280`). No Cmd+S, no approve-and-advance. | Add Save/Approve+advance and chapter nav keys to the translate screens. |
 | Set source overrides | Leave the book, land on the longest admin page, re-pick the book from a 66-entry select seeded with `me.lastBook` (the last *edited* book, not the one you were looking at — `AdminSetupScreen.tsx:348`). | Part 1's source sheet. |
-| Run export / see result | Two rail destinations: run on `#/admin/workflow`, history on `#/observe` (read-only, `adminSurfaceMap.ts:144`). | Part 1's Publish button shows its own results; Workflow keeps the org-wide view. |
+| Run export / see result | Two rail destinations: run on `#/admin/workflow`, history on `#/admin/observe` (read-only, `adminSurfaceMap.ts:144`). | Part 1's Publish button shows its own results; Workflow keeps the org-wide view. |
 | Verse status | Three mechanisms, three confirm policies: side effect of Approve verse; one-click rail checkboxes; Board bulk with double confirm. Accidentally hiding a lane (click its header letter, `TimelineRail.tsx:146-175`) is only undoable from the Board dialog. | Consolidate under the progress rollup work (Part 1 prerequisite). |
 
 ### 2.3 Confirm-policy inconsistency

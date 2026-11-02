@@ -68,7 +68,7 @@
 //   a limit message.
 //
 // ── Deliberate omissions ───────────────────────────────────────────────────
-//   * No FlowNav — the redesigned screens navigate by back-chevron + hash
+//   * No pill bar — the redesigned screens navigate by back-chevron + hash
 //     (TranslateWordsScreen.tsx:12-14 precedent).
 //   * No read-only "reference" panel (AlignScreen.tsx:741-808) — not in the
 //     redesign spec; the verse list's status chips carry that signal now.
@@ -94,6 +94,7 @@
 // chevronFlip convention.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FlowHeader, PHONE_COUNT_SX, PHONE_TITLE_SX } from "./FlowHeader";
 import {
   Alert,
   Box,
@@ -285,9 +286,13 @@ export default function TranslateAlignScreen({
 
   // ── interaction mode (form-factor policy; AlignScreen.tsx:193-199) ───────
   const [interactionChoice, setInteractionChoice] = useState<"drag" | "tap" | null>(null);
-  useEffect(() => {
-    setInteractionChoice(null); // band change resets to the band's default
-  }, [isDesktop, isTabletUp]);
+  // A band change resets to the band's default (adjusted during render).
+  const band = `${isDesktop}|${isTabletUp}`;
+  const [prevBand, setPrevBand] = useState(band);
+  if (band !== prevBand) {
+    setPrevBand(band);
+    setInteractionChoice(null);
+  }
   const interaction: "drag" | "tap" = !isTabletUp
     ? "tap"
     : (interactionChoice ?? (isDesktop ? "drag" : "tap"));
@@ -318,6 +323,7 @@ export default function TranslateAlignScreen({
   // the same three guards the drag canvas uses (AlignScreen.tsx:220-248).
   useEffect(() => {
     tapEditKeyRef.current = null;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- the reset is paired with tapEditKeyRef and the async crash-draft restore, and the persist effect below relies on it committing after the verse-nav cleanup flush (see the tapEditKeyRef comment); a render-time reset would change that ordering.
     setTapState(computedInitial);
     if (!computedInitial || !targetVerse) return;
     const baseVersion = targetVerse.version;
@@ -402,9 +408,11 @@ export default function TranslateAlignScreen({
   );
   const streamWords = useMemo(() => streamWordsOf(tapState), [tapState]);
   const [dismissedGhosts, setDismissedGhosts] = useState<Set<string>>(new Set());
-  useEffect(() => {
+  const [prevGhostVerse, setPrevGhostVerse] = useState(verse);
+  if (verse !== prevGhostVerse) {
+    setPrevGhostVerse(verse);
     setDismissedGhosts(new Set());
-  }, [verse]);
+  }
   const ghosts = useMemo(
     () => computeGhosts(displayCards, streamWords, suggestions, dismissedGhosts),
     [displayCards, streamWords, suggestions, dismissedGhosts],
@@ -479,7 +487,7 @@ export default function TranslateAlignScreen({
       );
       applyLocalVerse({ ...row, content, plain_text: plain } as VerseDto);
     },
-    [book, chapter, applyLocalVerse, canEdit],
+    [book, chapter, applyLocalVerse, canEdit, setNotice],
   );
 
   const confirmUnalignFor = useCallback(
@@ -489,7 +497,7 @@ export default function TranslateAlignScreen({
         lostWords,
         commit,
       }),
-    [book, chapter, verse],
+    [book, chapter, verse, setPendingLoss],
   );
 
   const handlePanelSave = useCallback(
@@ -521,7 +529,7 @@ export default function TranslateAlignScreen({
       return;
     }
     commit();
-  }, [canEdit, tapState, targetVerse, lane, enqueueAlignment, draftKey, book, chapter]);
+  }, [canEdit, tapState, targetVerse, lane, enqueueAlignment, draftKey, book, chapter, setNotice, setPendingLoss]);
 
   const handleTapReset = useCallback(() => {
     tapEditKeyRef.current = null;
@@ -574,7 +582,7 @@ export default function TranslateAlignScreen({
       }
       enqueueText("text_edit");
     },
-    [book, chapter, applyLocalVerse, canEdit],
+    [book, chapter, applyLocalVerse, canEdit, setNotice, setPendingLoss],
   );
 
   const dualProps = useMemo(() => {
@@ -606,9 +614,7 @@ export default function TranslateAlignScreen({
       onSave: saveFor(LANE_LEFT, litSlice.targetVerse),
       onConfirmUnalign: confirmUnalignFor(litSlice.targetVerse, LANE_LEFT),
       onDirtyChange: setDualLeftDirty,
-      panelRef: dualLeftRef,
       onReadingDirtyChange: setDualLeftReadingDirty,
-      readingRef: dualLeftReadingRef,
     };
     const right: PanelSlot = {
       bibleVersion: LANE_RIGHT,
@@ -619,9 +625,7 @@ export default function TranslateAlignScreen({
       onSave: saveFor(LANE_RIGHT, simSlice.targetVerse),
       onConfirmUnalign: confirmUnalignFor(simSlice.targetVerse, LANE_RIGHT),
       onDirtyChange: setDualRightDirty,
-      panelRef: dualRightRef,
       onReadingDirtyChange: setDualRightReadingDirty,
-      readingRef: dualRightReadingRef,
     };
     const labelVerse = litSlice.targetVerse ?? simSlice.targetVerse;
     return {
@@ -801,19 +805,11 @@ export default function TranslateAlignScreen({
   );
 
   const topbar = (
-    <Box
-      sx={{
-        position: "sticky",
-        insetBlockStart: 0,
-        zIndex: 20,
-        flex: "none",
-        bgcolor: "background.paper",
-        borderBlockEnd: "1px solid",
-        borderColor: "divider",
-      }}
-    >
-      <Box sx={{ maxWidth: wide ? 1440 : COLUMN_PX, mx: "auto", paddingInline: 2, paddingBlock: 1.5 }}>
-        <Stack direction="row" alignItems="center" spacing={1.25}>
+    <FlowHeader>
+      <Box sx={{ maxWidth: wide ? 1440 : COLUMN_PX, mx: "auto", paddingInline: isTabletUp ? 2 : 1, paddingBlock: 1.5 }}>
+        {/* Phone: tighter gaps and no "fully aligned" caption, so the row
+            fits beside the account controls it now shares (#299). */}
+        <Stack direction="row" alignItems="center" spacing={isTabletUp ? 1.25 : 0.5}>
           <IconButton
             aria-label={t("flowAlign.desk.backToPackage", { book })}
             onClick={() => {
@@ -823,18 +819,22 @@ export default function TranslateAlignScreen({
           >
             <ChevronLeftIcon fontSize="small" sx={chevronFlip} />
           </IconButton>
-          <Box sx={{ minWidth: 0 }}>
+          {/* Phone: the passage reference is the title and the screen name the
+              caption, so the row keeps its orientation beside the account
+              controls (#517). */}
+          <Box sx={isTabletUp ? { minWidth: 0 } : PHONE_TITLE_SX}>
             <Typography component="h1" sx={{ fontSize: "1.0625rem", fontWeight: 700, m: 0 }}>
-              {t("flowAlign.desk.title")}
+              {isTabletUp ? t("flowAlign.desk.title") : t("common.passageRef", { book, chapter })}
             </Typography>
             <Typography variant="caption" color="text.secondary" component="p" sx={{ m: 0 }}>
-              {sub}
+              {isTabletUp ? sub : t("flowAlign.desk.title")}
             </Typography>
           </Box>
           {/* jump to the scripture screen for this chapter — the package
               back-chevron above only returns to the package hub, not
-              scripture itself */}
-          {isTabletUp ? (
+              scripture itself. Dropped on phones, where the row has no room
+              for it; the package hub still reaches scripture (#517). */}
+          {isTabletUp && (
             <Button
               size="small"
               startIcon={<MenuBookIcon fontSize="small" />}
@@ -845,16 +845,6 @@ export default function TranslateAlignScreen({
             >
               {t("flowScripture.title")}
             </Button>
-          ) : (
-            <IconButton
-              aria-label={t("flowAlign.desk.backToScripture")}
-              onClick={() => {
-                location.hash = `#/scripture/${book}/${chapter}`;
-              }}
-              sx={{ width: 34, height: 34, flex: "none" }}
-            >
-              <MenuBookIcon fontSize="small" />
-            </IconButton>
           )}
           <Box sx={{ flex: 1 }} />
           {/* compact prev/next flanking the count (top-and-bottom controls,
@@ -864,11 +854,11 @@ export default function TranslateAlignScreen({
             aria-label={t("flowScripture.prevVerse")}
             onClick={() => goVerse(prevVerse)}
             disabled={prevVerse == null}
-            sx={{ width: 34, height: 34, flex: "none" }}
+            sx={{ width: isTabletUp ? 34 : 30, height: isTabletUp ? 34 : 30, flex: "none" }}
           >
             <ChevronLeftIcon fontSize="small" sx={chevronFlip} />
           </IconButton>
-          <Box sx={{ textAlign: "end" }}>
+          <Box sx={{ textAlign: "end", ...(isTabletUp ? {} : { minWidth: 0, flexShrink: PHONE_COUNT_SX.flexShrink }) }}>
             <Typography
               variant="body2"
               sx={{
@@ -876,6 +866,7 @@ export default function TranslateAlignScreen({
                 color: "text.secondary",
                 fontVariantNumeric: "tabular-nums",
                 whiteSpace: "nowrap",
+                ...(isTabletUp ? {} : PHONE_COUNT_SX),
               }}
             >
               {t("flowScripture.verseOfTotal", {
@@ -883,20 +874,22 @@ export default function TranslateAlignScreen({
                 total: totalVerses || "—",
               })}
             </Typography>
-            <Typography
-              variant="caption"
-              color="text.secondary"
-              component="p"
-              sx={{ m: 0, fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}
-            >
-              {t("flowAlign.desk.fullyAligned", { n: alignedCount, total: totalVerses || 0 })}
-            </Typography>
+            {isTabletUp && (
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                component="p"
+                sx={{ m: 0, fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}
+              >
+                {t("flowAlign.desk.fullyAligned", { n: alignedCount, total: totalVerses || 0 })}
+              </Typography>
+            )}
           </Box>
           <IconButton
             aria-label={t("flowScripture.nextVerse")}
             onClick={() => goVerse(nextVerse)}
             disabled={nextVerse == null}
-            sx={{ width: 34, height: 34, flex: "none" }}
+            sx={{ width: isTabletUp ? 34 : 30, height: isTabletUp ? 34 : 30, flex: "none" }}
           >
             <ChevronRightIcon fontSize="small" sx={chevronFlip} />
           </IconButton>
@@ -916,7 +909,7 @@ export default function TranslateAlignScreen({
           />
         </Box>
       </Box>
-    </Box>
+    </FlowHeader>
   );
 
   // ── loading / error states (topbar chrome + sibling-style body) ──────────
@@ -1427,6 +1420,10 @@ export default function TranslateAlignScreen({
           lexiconMap={lexiconMap}
           left={dualProps.left}
           right={dualProps.right}
+          leftPanelRef={dualLeftRef}
+          rightPanelRef={dualRightRef}
+          leftReadingRef={dualLeftReadingRef}
+          rightReadingRef={dualRightReadingRef}
           onSaveReading={handleSaveReading}
           onPrevVerse={prevVerse != null ? () => dualNavTo(prevVerse) : undefined}
           onNextVerse={nextVerse != null ? () => dualNavTo(nextVerse) : undefined}

@@ -84,6 +84,79 @@ export type TemplateForRender = {
   template_id: string;
 };
 
+// The D1 reads a context pack renders from (#712). The export re-reads the
+// saved-and-queued part (prefs, terms, templates: every save of these queues a
+// context export) after fetching master's tip, and renders again if it moved,
+// so an older overlapping run can't publish a pack that misses a newer save.
+// Validated tN/tQ example rows queue no export and are not re-checked: they
+// reach the pack on the next export, as before.
+export type QueuedContextInputs = {
+  prefs: TranslationPrefsForRender;
+  terms: TermImport[];
+  templates: TemplateForRender[];
+};
+
+export type ContextPackInputs = QueuedContextInputs & {
+  tnRows: ValidatedTnRow[];
+  tqRows: ValidatedTqRow[];
+};
+
+type InputsDb = {
+  prepare(sql: string): {
+    first<T>(): Promise<T | null>;
+    all<T>(): Promise<{ results?: T[] }>;
+  };
+};
+
+export async function loadQueuedContextInputs(db: InputsDb): Promise<QueuedContextInputs> {
+  const prefsRow = await db.prepare(
+    `SELECT audience, purpose, register, script_notes, instructions_md, common_issues_md
+       FROM translation_prefs WHERE id = 1`,
+  ).first<TranslationPrefsForRender>();
+  const prefs: TranslationPrefsForRender = prefsRow ?? {
+    audience: null,
+    purpose: null,
+    register: "default",
+    script_notes: null,
+    instructions_md: null,
+    common_issues_md: null,
+  };
+
+  const termRs = await db.prepare(
+    `SELECT concept_id, source_term, target_term, status, replacement, comment, tw_link
+       FROM terminology WHERE deleted_at IS NULL
+       ORDER BY concept_id, source_term, status`,
+  ).all<TermImport>();
+
+  const templateRs = await db.prepare(
+    `SELECT template_id, support_ref, sheet_order, type, target_md
+       FROM template_units
+      WHERE translation_state = 'validated'
+        AND deleted_at IS NULL
+        AND origin = 'sheet'
+        AND target_md IS NOT NULL AND TRIM(target_md) <> ''
+      ORDER BY support_ref, sheet_order, template_id`,
+  ).all<TemplateForRender>();
+
+  return { prefs, terms: termRs.results ?? [], templates: templateRs.results ?? [] };
+}
+
+export async function loadContextPackInputs(db: InputsDb): Promise<ContextPackInputs> {
+  const queued = await loadQueuedContextInputs(db);
+  // Selectors carry the `admin_bulk_state IS NULL` rule that keeps
+  // bulk-approved rows out of the few-shot gold (see the SQL above).
+  const tnRs = await db.prepare(VALIDATED_TN_EXAMPLES_SQL).all<ValidatedTnRow>();
+  const tqRs = await db.prepare(VALIDATED_TQ_EXAMPLES_SQL).all<ValidatedTqRow>();
+  return { ...queued, tnRows: tnRs.results ?? [], tqRows: tqRs.results ?? [] };
+}
+
+// Terms can tie on their ORDER BY keys, so compare them as a sorted set.
+export function sameQueuedContextInputs(a: QueuedContextInputs, b: QueuedContextInputs): boolean {
+  const key = (x: QueuedContextInputs) =>
+    JSON.stringify([x.prefs, x.templates, x.terms.map((t) => JSON.stringify(t)).sort()]);
+  return key(a) === key(b);
+}
+
 /**
  * Composite key for EN source maps. tN/tQ row IDs are only unique per book
  * (migration 0015 composite PK), so keying by bare `id` would let identical

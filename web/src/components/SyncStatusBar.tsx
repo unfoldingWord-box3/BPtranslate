@@ -196,7 +196,7 @@ export function useSyncSummary(): SyncSummary {
   // Tick once a second when pending > 0 so the "stale progress" heuristic
   // can flip the pill to offline-style without waiting for the next outbox
   // event. Cheap: 1Hz timer only when there's actually work outstanding.
-  const [now, setNow] = useState(Date.now());
+  const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (pending === 0) return;
     const t = setInterval(() => setNow(Date.now()), 1000);
@@ -226,9 +226,26 @@ interface Props {
   // resolves to the classic Shell catch-all and ejects the user out of the new
   // UI (#229). Classic mounts leave this unset and keep the onNavigate path.
   flowRouting?: boolean;
+  // Phone width in the flow header bar, which the chrome shares with the
+  // screen title (#299): the steady-state "saved" and the offline chips shrink
+  // to their icons, and "N unsaved" to its icon and number (#522). Each keeps
+  // its name as an aria-label and a tooltip (hold to see it on touch).
+  compact?: boolean;
 }
 
-export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRouting }: Props = {}) {
+// Tooltip body for a compact chip: its name on top, the longer hint under it.
+function namedTip(name: string, hint: string): ReactNode {
+  return (
+    <Stack spacing={0.25}>
+      <Typography variant="caption" sx={{ fontWeight: 600 }}>
+        {name}
+      </Typography>
+      <Typography variant="caption">{hint}</Typography>
+    </Stack>
+  );
+}
+
+export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRouting, compact }: Props = {}) {
   const { t } = useTranslation();
   const { pending, conflicts, failed, effectivelyOffline, online, draftCount, activeDrafts, quarantinedDrafts } =
     useSyncSummary();
@@ -249,6 +266,7 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
   const liveDropOp =
     confirmDropOp && failed.some((f) => f.id === confirmDropOp.id) ? confirmDropOp : null;
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- drops the click-time snapshot once its op leaves the failed list, so a later re-fail of the same op can't reopen the dialog; render already reads liveDropOp, so nothing stale paints.
     if (confirmDropOp && !liveDropOp) setConfirmDropOp(null);
   }, [confirmDropOp, liveDropOp]);
 
@@ -361,7 +379,17 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
     // Kindle warning accent (#E59D33 from CLAUDE.md brand palette) — offline
     // is a transient state, not a failure, so the MUI default error red is
     // wrong tone.
-    inline = (
+    inline = compact ? (
+      <Tooltip title={namedTip(offlineLabel, offlineTooltip)}>
+        <CloudQueueIcon
+          role="img"
+          tabIndex={0}
+          aria-label={offlineLabel}
+          fontSize="small"
+          sx={{ color: "#E59D33", marginInline: 0.5 }}
+        />
+      </Tooltip>
+    ) : (
       <Tooltip title={offlineTooltip}>
         <Chip
           icon={<CloudQueueIcon />}
@@ -385,6 +413,19 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
           size="small"
           variant="outlined"
           color="primary"
+        />
+      </Tooltip>
+    );
+  } else if (draftCount === 0 && compact) {
+    inline = (
+      <Tooltip title={t("sync.savedTooltip")}>
+        <CloudDoneIcon
+          role="img"
+          tabIndex={0}
+          aria-label={t("sync.saved")}
+          fontSize="small"
+          color="success"
+          sx={{ opacity: 0.6, marginInline: 0.5 }}
         />
       </Tooltip>
     );
@@ -424,18 +465,18 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
     // article route instead so "jump to unsaved" still lands the user on the
     // editor holding the draft.
     if (m.kind === "article") {
-      location.hash = `#/articles/${m.resource}/${encodeURIComponent(m.articleId)}`;
+      location.assign(`#/articles/${m.resource}/${encodeURIComponent(m.articleId)}`);
     } else if (m.kind === "template") {
       // Same reasoning as articles: no scripture reference to navigate to, so
       // route to the template's own hash instead of calling onNavigate with
       // book/chapter/verse this variant does not carry.
-      location.hash = `#/templates/${encodeURIComponent(m.templateId)}`;
+      location.assign(`#/templates/${encodeURIComponent(m.templateId)}`);
     } else if (m.kind === "verse") {
       // 3-segment #/scripture/B/C/V: App.tsx's `ts` route accepts the optional
       // verse segment and TranslateScriptureScreen seeds its cursor from it on
       // mount, so this lands the translator on the exact drafted verse, not
       // just the top of the chapter (#229, #389).
-      if (flowRouting) location.hash = `#/scripture/${m.book}/${m.chapter}/${m.verse}`;
+      if (flowRouting) location.assign(`#/scripture/${m.book}/${m.chapter}/${m.verse}`);
       else onNavigate?.(m.book, m.chapter, m.verse);
     } else {
       // Row draft — branch by rowKind so tq/twl don't land on Translate Notes.
@@ -444,20 +485,20 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
           // Carry the exact row id so the notes screen lands on the note that
           // holds the draft, not just the verse's first card — several notes
           // can share a verse, and the point of this jump is telling them apart.
-          location.hash = `#/notes/${m.book}/${m.chapter}/${m.verse}?row=${encodeURIComponent(m.id)}`;
+          location.assign(`#/notes/${m.book}/${m.chapter}/${m.verse}?row=${encodeURIComponent(m.id)}`);
         } else if (m.rowKind === "tq") {
           // Carry verse + exact row id (like tn) so the questions screen lands
           // on the question holding the draft, not just the chapter — several
           // questions can share a verse, and telling them apart is the point of
           // this jump. parseHash accepts the verse and ?row= tail (#335).
-          location.hash = `#/questions/${m.book}/${m.chapter}/${m.verse}?row=${encodeURIComponent(m.id)}`;
+          location.assign(`#/questions/${m.book}/${m.chapter}/${m.verse}?row=${encodeURIComponent(m.id)}`);
         } else {
-          // twl row-level landing (#335): the flows WordsScreen (the old
-          // 3-segment #/words/{book}/{ch}/{vs} route — distinct from the
-          // 1-segment #/words/{book} tW/tA article screen) is where twl rows
-          // are actually authored in the new UI. It now accepts the same
-          // verse + ?row= tail as tn/tq and selects the exact drafted link.
-          location.hash = `#/words/${m.book}/${m.chapter}/${m.verse}?row=${encodeURIComponent(m.id)}`;
+          // twl row: the new UI has no word-links editor since the old flows
+          // words screen retired (#173), so open the classic editor at that
+          // verse. ?twl= starts its resource column on the Words tab with this
+          // row active; the row's WordsTable entry restores the draft from the
+          // drafts store (same rowKey).
+          location.assign(`#/${m.book}/${m.chapter}/${m.verse}?twl=${encodeURIComponent(m.id)}`);
         }
       } else {
         onNavigate?.(m.book, m.chapter, m.verse);
@@ -466,13 +507,19 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
     setDraftMenuEl(null);
   };
 
+  // Compact form keeps the number and moves the word into the name.
+  const unsavedName = `${draftCount} ${t("sync.unsaved")}`;
+  const draftsLabel = compact ? String(draftCount) : unsavedName;
+  const draftsAria = compact ? { "aria-label": unsavedName } : {};
+
   let draftsChip: ReactNode = null;
   if (draftCount > 0 && onNavigate) {
     draftsChip = (
-      <Tooltip title={t("sync.jumpToUnsaved")}>
+      <Tooltip title={compact ? namedTip(unsavedName, t("sync.jumpToUnsaved")) : t("sync.jumpToUnsaved")}>
         <Chip
           icon={<EditNoteIcon />}
-          label={`${draftCount} ${t("sync.unsaved")}`}
+          label={draftsLabel}
+          {...draftsAria}
           size="small"
           variant="outlined"
           clickable
@@ -502,7 +549,8 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
       <Tooltip title={draftsTooltip}>
         <Chip
           icon={<EditNoteIcon />}
-          label={`${draftCount} ${t("sync.unsaved")}`}
+          label={draftsLabel}
+          {...draftsAria}
           size="small"
           variant="outlined"
           sx={draftDirtyColorSx}
@@ -556,7 +604,9 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
                   onClick={(e) => {
                     // Stop the MenuItem's navigate onClick from also firing.
                     e.stopPropagation();
-                    void drafts.clear(d.key);
+                    // discard, not clear: an editor holding a refused save's
+                    // text lets it go too (#637 item 1).
+                    void drafts.discard(d.key);
                   }}
                   sx={{ p: 0.25 }}
                 >
@@ -723,7 +773,7 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
                         variant="text"
                         color="error"
                         onClick={async () => {
-                          for (const d of quarantinedDrafts) await drafts.clear(d.key);
+                          for (const d of quarantinedDrafts) await drafts.discard(d.key);
                         }}
                         sx={{ minWidth: 0, py: 0, fontSize: 11 }}
                       >
@@ -778,7 +828,7 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
                       <IconButton
                         size="small"
                         color="error"
-                        onClick={() => void drafts.clear(d.key)}
+                        onClick={() => void drafts.discard(d.key)}
                         sx={{ p: 0.25 }}
                       >
                         <DeleteOutlineIcon fontSize="inherit" />

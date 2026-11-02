@@ -445,8 +445,17 @@ export function ReviewRail({
                     </Box>
                   )}
                 </Box>
+                {/* Quote/question and note snippet are project-language text:
+                    direction follows the content (dir="auto", #256), so an
+                    Arabic line reads RTL under an LTR UI (#533). */}
                 {item.secondary && (
-                  <Typography variant="caption" color="text.secondary" noWrap component="div">
+                  <Typography
+                    variant="caption"
+                    color="text.secondary"
+                    noWrap
+                    component="div"
+                    dir="auto"
+                  >
                     {item.secondary}
                   </Typography>
                 )}
@@ -456,6 +465,7 @@ export function ReviewRail({
                     color="text.secondary"
                     noWrap
                     component="div"
+                    dir="auto"
                     sx={{ opacity: 0.85 }}
                   >
                     {item.snippet}

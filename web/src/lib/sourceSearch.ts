@@ -6,7 +6,7 @@
 // matches the token's raw surface text.
 
 import i18n from "../i18n";
-import { normalizeStrong } from "../hooks/useLexicon";
+import { normalizeStrong } from "./lexiconKeys";
 import { nfc } from "./hebrew";
 import { GREEK, HEBREW } from "./scriptDetect.ts";
 

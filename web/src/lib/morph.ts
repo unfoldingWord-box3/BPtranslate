@@ -18,7 +18,7 @@
 //
 //   • `en`  — the stable English id. `Morpheme.pos` and `Morpheme.features`
 //             keep exactly these values, because consumers match on them
-//             (`CONTENT_POS.has(m.pos)` in flows/VerseSpineModel.tsx, and
+//             (`CONTENT_POS.has(m.pos)` in flows/VerseSpineModel.ts, and
 //             `pos === "verb"` below, which decides possessive vs. object
 //             glossing of a pronominal suffix). Renaming one is a logic change.
 //   • `key` — the i18next key under the `morph.*` namespace, used only when a

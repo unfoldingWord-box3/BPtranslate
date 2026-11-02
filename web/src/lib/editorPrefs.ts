@@ -191,3 +191,43 @@ export function useShowSourceUlt(): [boolean, (next: boolean) => void] {
   }, []);
   return [on, setShowSourceUlt];
 }
+
+// ── ULT alignment strip in the flows notes screen ───────────────────────────
+//
+// Whether TranslateNotesScreen draws the source ULT lane (above) as a read-only
+// alignment strip instead of plain text: original-language words on one row,
+// ULT prose below, hover/tap on either side lights the aligned group on both
+// (issue #431). Only meaningful while the source ULT lane is on; the screen
+// offers the toggle only then. Defaults OFF, so the lane stays #430's plain
+// text until a translator opts in.
+const SHOW_SOURCE_ULT_ALIGNMENT_KEY = "be:showSourceUltAlignment";
+
+export function getShowSourceUltAlignment(): boolean {
+  try {
+    return localStorage.getItem(SHOW_SOURCE_ULT_ALIGNMENT_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+const showSourceUltAlignmentListeners = new Set<(on: boolean) => void>();
+
+export function setShowSourceUltAlignment(next: boolean): void {
+  try {
+    localStorage.setItem(SHOW_SOURCE_ULT_ALIGNMENT_KEY, String(next));
+  } catch {
+    /* quota or private mode — soft fail, still notify so the UI stays live */
+  }
+  for (const listener of showSourceUltAlignmentListeners) listener(next);
+}
+
+export function useShowSourceUltAlignment(): [boolean, (next: boolean) => void] {
+  const [on, setOnState] = useState<boolean>(getShowSourceUltAlignment);
+  useEffect(() => {
+    showSourceUltAlignmentListeners.add(setOnState);
+    return () => {
+      showSourceUltAlignmentListeners.delete(setOnState);
+    };
+  }, []);
+  return [on, setShowSourceUltAlignment];
+}

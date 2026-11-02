@@ -1395,4 +1395,50 @@ function countNodes(nodes) {
   assert(plain === "“Thus says.", `extractPlainText reflects a curled tree (got ${JSON.stringify(plain)})`);
 }
 
+// ─── #684: `\ts\*` in the usfm-js 3.5.0 shape is an in-flow marker on import ───
+// usfm-js 3.5.0 emits `\ts\*` as {tag:"ts\\*"} (no type, no content). The import
+// parser only knew the legacy {tag:"ts", content:"\\*"}, so a doubled chunk marker
+// was never absorbed and a marker abutting words fused them in plain_text.
+{
+  // End-to-end through real usfm-js output: `\ts\* \v 17 \ts\*` → v16 keeps its
+  // trailing marker, v17's doubled leading copy is absorbed, body preserved.
+  const raw = "\\id TST\n\\c 1\n\\v 16 sixteen content.\n\\ts\\*\n\\v 17 \\ts\\*\n\\q1 seventeen content\n";
+  const out = extractVersesForRange(raw, 1, 1);
+  const v16 = out.find((v) => v.verse === 16);
+  const v17 = out.find((v) => v.verse === 17);
+  assert(v16 && v17, `#684 e2e: v16 + v17 extracted`);
+  assert(lastSignificantVo(v16)?.tag === "ts\\*", `#684 e2e: v16 keeps its trailing \\ts\\* (3.5.0 shape)`);
+  assert(firstVo(v17)?.tag !== "ts\\*", `#684 e2e: v17's doubled leading \\ts\\* is absorbed (got ${v17.contentJson})`);
+  assert(v17.plainText === "seventeen content", `#684 e2e: v17 body preserved (got ${JSON.stringify(v17.plainText)})`);
+}
+{
+  // Direct: prev trails a 3.5.0-shape ts, curr leads with one → curr's copy dropped.
+  const prev = [{ type: "text", text: "done.\n" }, { tag: "ts\\*", nextChar: "\n" }];
+  const curr = [{ tag: "ts\\*", nextChar: "\n" }, { type: "text", text: "next" }];
+  const out = dropDoubledLeadingMarkers(prev, curr);
+  assert(out.length === 1 && out[0].text === "next", `#684: doubled 3.5.0-shape \\ts\\* absorbed (got ${JSON.stringify(out)})`);
+}
+{
+  // Non-regression: the real uW trailing run `\ts\* \q1` (ts now counts as part of
+  // the run) still tail-aligns against a doubled leading \q1 — exactly the \q1 is
+  // dropped, nothing else.
+  const prev = [{ type: "text", text: "done.\n\n" }, { tag: "ts\\*", nextChar: "\n" }, { tag: "q1", type: "quote", nextChar: " " }];
+  const curr = [{ tag: "q1", type: "quote", nextChar: " " }, { type: "text", text: "next" }];
+  const out = dropDoubledLeadingMarkers(prev, curr);
+  assert(out.length === 1 && out[0].text === "next", `#684: trailing \\ts\\* \\q1 still de-dups a leading \\q1 (got ${JSON.stringify(out)})`);
+}
+{
+  // A leading \ts\* that does NOT double the previous trailing run is kept.
+  const prev = [{ type: "text", text: "done.\n" }, { tag: "q1", type: "quote", nextChar: " " }];
+  const curr = [{ tag: "ts\\*", nextChar: "\n" }, { type: "text", text: "next" }];
+  assert(dropDoubledLeadingMarkers(prev, curr) === curr, `#684: non-matching leading \\ts\\* left alone`);
+}
+{
+  // plain_text: a \ts\* (any shape) is a word separator, like \p / \q1.
+  for (const ts of [{ tag: "ts\\*" }, { tag: "ts*" }, { tag: "ts", content: "\\*" }]) {
+    const plain = extractPlainText({ verseObjects: [{ type: "text", text: "end" }, ts, { type: "text", text: "start" }] });
+    assert(plain === "end start", `#684: ${JSON.stringify(ts)} separates words in plain_text (got ${JSON.stringify(plain)})`);
+  }
+}
+
 console.log("\nAll parser smoke checks passed.");

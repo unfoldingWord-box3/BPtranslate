@@ -1,6 +1,7 @@
 // Admin surface parity map — the one registry linking the classic admin surface
-// (#/preferences, PreferencesWorkspace.tsx) to the new admin desk (#/admin/* +
-// the desk rail's More-tools pages). Nothing imports this at runtime; it is
+// (#/preferences, PreferencesWorkspace.tsx) to the new admin desk (#/admin/*,
+// which since #537 includes the desk rail's More-tools pages: #/admin/ai,
+// #/admin/style, #/admin/curate, #/admin/observe). Nothing imports this at runtime; it is
 // documentation-as-data, enforced by adminSurfaceMap.test.mjs.
 //
 // THE RULE: when you add, move, or remove an admin-facing feature or section in
@@ -21,7 +22,7 @@ export type ClassicSurface = {
 export type DeskSurface = {
   /**
    * AdminDesk nav identity: an `AdminSection` key — every rail entry (the top
-   * 4 admin sections and the four former-FlowNav "More tools" pages) is one
+   * 4 admin sections and the four former pill-bar "More tools" pages) is one
    * since #186 unified them onto the same union ("progress", "setup", "ai", …).
    */
   page: string;
@@ -104,7 +105,7 @@ export const ADMIN_SURFACES: AdminSurfaceEntry[] = [
     label: "AI service (provider / model / API key)",
     classic: { section: "aiService", file: PREFS },
     desk: { page: "ai", file: "src/components/flows/AiScreen.tsx", anchor: "<AiServiceSection" },
-    notes: "Moved from the admin Setup desk to the AI studio (#/ai) under #479 so config and use share one screen. Classic #/preferences keeps its copy until classic retires (#173).",
+    notes: "Moved from the admin Setup desk to the AI studio (#/admin/ai; #/ai until #537) under #479 so config and use share one screen. Classic #/preferences keeps its copy until classic retires (#173).",
   },
   {
     id: "progress",
@@ -131,6 +132,18 @@ export const ADMIN_SURFACES: AdminSurfaceEntry[] = [
       "\"Run export now\" confirm dialog: scope a manual export to one resource (tn/tq/twl/ult/ust) and, for tn/tq/twl on a specific book, a chapter range — e.g. \"Mark 13-14 translation notes\" instead of the whole book.",
   },
   {
+    id: "reviewState",
+    label: "Review state (bulk-approve or reopen a chapter range for tn / tq)",
+    classic: null,
+    desk: {
+      page: "review",
+      file: "src/components/flows/AdminReviewStateScreen.tsx",
+      anchor: "function AdminReviewStateScreen",
+    },
+    notes:
+      "Desk-only by design (#296): new admin features land on the desk, and classic #/preferences is slated to retire (#173), so no classic port is planned. Calls POST /api/books/:book/review-state — dry run first, then an explicit confirm.",
+  },
+  {
     id: "aiPipelines",
     label: "AI studio (run AI pipelines)",
     classic: null,
@@ -148,6 +161,7 @@ export const ADMIN_SURFACES: AdminSurfaceEntry[] = [
     label: "Templates (note template curation)",
     classic: null,
     desk: { page: "templates", file: "src/components/flows/CurateScreen.tsx", anchor: "function CurateScreen" },
+    notes: "Desk key \"templates\", hash #/admin/curate[/{templateId}] (#/curate until #537). Not the classic #/templates note-template workspace.",
   },
   {
     id: "observe",

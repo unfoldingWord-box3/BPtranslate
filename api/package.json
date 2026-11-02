@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --no-warnings --test \"src/**/*.test.mjs\"",
     "check:ta-refs": "node --experimental-strip-types --no-warnings src/taSupportReferences.check.mjs",
+    "check:bot-models": "node --experimental-strip-types --no-warnings src/botModels.check.mjs",
     "deploy": "npm run db:migrate:remote && wrangler deploy --env production",
     "db:migrate:local": "wrangler d1 migrations apply bptranslate_dev --local",
     "db:migrate:remote": "wrangler d1 migrations apply bptranslate --remote --env production",

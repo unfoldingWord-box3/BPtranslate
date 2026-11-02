@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import i18n from "../i18n";
 import { ApiError, api, type TemplateUnit } from "../sync/api";
+import { AI_NEEDS_ORG_KEY } from "../lib/aiProviderErrors";
 
 /** Stable, NEVER-translated classification of a draft failure. This is the
  *  logic value: CurateEditor keys its "AI is disabled for this screen" latch
@@ -19,6 +20,7 @@ import { ApiError, api, type TemplateUnit } from "../sync/api";
  *  (`errorCode`) plus a display-only label (`error`). */
 export type TemplateDraftErrorCode =
   | "disabled"
+  | "needs_org_key"
   | "service_unavailable"
   | "too_large"
   | "version_mismatch"
@@ -36,6 +38,8 @@ function classifyTemplateDraftError(err: unknown): TemplateDraftErrorCode | null
     switch (code) {
       case "template_draft_disabled":
         return "disabled";
+      case AI_NEEDS_ORG_KEY:
+        return "needs_org_key";
       case "model_call_failed":
         return "service_unavailable";
       case "body_too_large":
@@ -53,12 +57,14 @@ function classifyTemplateDraftError(err: unknown): TemplateDraftErrorCode | null
 }
 
 // DISPLAY ONLY — rendered as the workspace's error banner. Translated on every
-// call (never at module load) so the active UI language wins. HTTP statuses and
-// BT_API_TOKEN are interpolated/literal, never translated.
+// call (never at module load) so the active UI language wins. HTTP statuses are
+// interpolated, never translated.
 function describeTemplateDraftError(code: TemplateDraftErrorCode, err: unknown): string {
   switch (code) {
     case "disabled":
       return i18n.t("messages.aiDraft.notConfiguredToken");
+    case "needs_org_key":
+      return i18n.t("ai.needsOrgKey");
     case "service_unavailable":
       return i18n.t("messages.aiDraft.serviceUnavailable");
     case "too_large":

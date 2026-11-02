@@ -1,7 +1,7 @@
 // a2-import: All roles — the default landing screen. Port of docs/flows/ui/a2-import.html.
 //
 // 2026-08-11 (Benjamin): this screen is the redesign's top-level entry, and two
-// decisions landed together: (1) the old FlowNav pill bar (which pointed at the
+// decisions landed together: (1) the old flows pill bar (which pointed at the
 // retired flows routes) is replaced by the redesign's own sticky topbar idiom
 // (see PackageHubScreen) — title, org/language sub, Tune button opening a menu
 // shown to every role; (2) the per-book source-overrides editor was duplicated
@@ -26,7 +26,8 @@
 // accordion replaces the tile grid below `tablet`; the two-pane shell collapses
 // below `md`.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { FlowHeader } from "./FlowHeader";
 import { useTranslation } from "react-i18next";
 import {
   Accordion,
@@ -36,12 +37,7 @@ import {
   Box,
   Button,
   CircularProgress,
-  IconButton,
   Link,
-  ListItemIcon,
-  ListItemText,
-  Menu,
-  MenuItem,
   Popover,
   Stack,
   TextField,
@@ -50,9 +46,6 @@ import {
 } from "@mui/material";
 import { useTheme } from "@mui/material/styles";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
-import TuneIcon from "@mui/icons-material/Tune";
-import MenuBookIcon from "@mui/icons-material/MenuBook";
-import AdminPanelSettingsIcon from "@mui/icons-material/AdminPanelSettings";
 import ArrowForwardIcon from "@mui/icons-material/ArrowForward";
 import {
   api,
@@ -276,6 +269,7 @@ function LintBadge({ book }: { book: string }) {
 
   useEffect(() => {
     let cancelled = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- blank the badge before fetching the new book's lint report; without it the badge shows the previous book's report until the fetch lands.
     setReport(null);
     setFailed(false);
     api
@@ -381,8 +375,6 @@ function BookDetailPanel({
 
   const [summary, setSummary] = useState<BookSummary | null>(null);
   const [message, setMessage] = useState<string | null>(null);
-  const [warning, setWarning] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [justImported, setJustImported] = useState(false);
   const [repullOpen, setRepullOpen] = useState(false);
   // The "Bring in this book" source sheet (docs/ux-simplification.md §1.3).
@@ -402,6 +394,7 @@ function BookDetailPanel({
   }, [book]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch the summary on mount and on book change; loadSummary also runs after an import, and it sets state only after the await.
     void loadSummary();
   }, [loadSummary]);
 
@@ -409,8 +402,6 @@ function BookDetailPanel({
   // sources first, then the POST, including the has_local_edits discard
   // confirm. This callback is the shared post-import path.
   const handleImported = (res: Awaited<ReturnType<typeof api.importBook>>) => {
-    setError(null);
-    setWarning(null);
     const sources = importedSourceRepos(res.sources);
     setMessage(
       sources.length
@@ -483,7 +474,7 @@ function BookDetailPanel({
                     </Button>
                   </>
                 )}
-                {/* "AI Translate whole book" moved to the AI studio (#/ai),
+                {/* "AI Translate whole book" moved to the AI studio (#/admin/ai),
                     disabled pending a product decision (issue #480). It fans
                     out to two pipeline jobs per chapter, so it does not belong
                     next to the ordinary Open / Re-pull actions. */}
@@ -505,16 +496,6 @@ function BookDetailPanel({
           {message && (
             <Alert severity="success" sx={{ mt: 2 }} onClose={() => setMessage(null)}>
               {message}
-            </Alert>
-          )}
-          {warning && (
-            <Alert severity="warning" sx={{ mt: 2 }} onClose={() => setWarning(null)}>
-              {warning}
-            </Alert>
-          )}
-          {error && (
-            <Alert severity="error" sx={{ mt: 2 }} onClose={() => setError(null)}>
-              {error}
             </Alert>
           )}
         </PanelBody>
@@ -550,12 +531,10 @@ function BookDetailPanel({
   );
 }
 
-export default function BooksScreen({ role, onNavigate, lastPosition, book: routeBook }: BooksScreenProps) {
+export default function BooksScreen({ role, lastPosition, book: routeBook }: BooksScreenProps) {
   const { t } = useTranslation();
   const theme = useTheme();
-  const { skip } = theme.palette.flows;
   const gridView = useMediaQuery(theme.breakpoints.up("tablet"));
-  const [menuAnchor, setMenuAnchor] = useState<HTMLElement | null>(null);
   // Shared app-wide config cache (BookDetailPanel below already subscribes to
   // it) — read here only to label the topbar; no new fetch.
   const projectConfig = useProjectConfig();
@@ -574,8 +553,11 @@ export default function BooksScreen({ role, onNavigate, lastPosition, book: rout
   // afterwards the user's click wins.
   const seededRef = useRef(false);
   // Read inside refetchBooks without making the callback depend on the route.
+  // Synced after every commit (no deps), before the passive effect that fetches.
   const routeBookRef = useRef(routeBook);
-  routeBookRef.current = routeBook;
+  useLayoutEffect(() => {
+    routeBookRef.current = routeBook;
+  });
 
   const setStatus = useCallback((s: BooksFetchStatus) => {
     statusRef.current = s;
@@ -608,12 +590,18 @@ export default function BooksScreen({ role, onNavigate, lastPosition, book: rout
   }, [setStatus]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- mount-time load; refetchBooks also backs Retry and runs after imports. It shows loading only before the first successful load, so a background refresh keeps the current grid.
     void refetchBooks();
   }, [refetchBooks]);
 
-  useEffect(() => {
+  // Follow a new #/books/:book route, adjusted during render on a routeBook
+  // change. selected is also written by the click handler and the first-load
+  // seed, so it can't be derived from routeBook.
+  const [prevRouteBook, setPrevRouteBook] = useState(routeBook);
+  if (prevRouteBook !== routeBook) {
+    setPrevRouteBook(routeBook);
     if (routeBook) setSelected(routeBook);
-  }, [routeBook]);
+  }
 
   // Keep the URL truthful once the user picks a different book, so a reload or
   // a shared link reopens the pane they were looking at rather than the book
@@ -651,19 +639,12 @@ export default function BooksScreen({ role, onNavigate, lastPosition, book: rout
       return next;
     });
 
-  // Redesign topbar (PackageHubScreen idiom): sticky, title + sub, quiet icon
-  // buttons. No back chevron — this screen IS the redesign's top-level entry.
+  // Redesign topbar (PackageHubScreen idiom): title + sub, rendered into the
+  // global flow bar. No back chevron — this screen IS the redesign's top-level
+  // entry. The Classic-editor / Admin jumps that used to sit in a Tune menu
+  // here now live in the account menu, on every flow screen (#299).
   const topbar = (
-    <Box
-      sx={{
-        position: "sticky",
-        insetBlockStart: 0,
-        zIndex: 20,
-        bgcolor: "background.paper",
-        borderBlockEnd: "1px solid",
-        borderColor: "divider",
-      }}
-    >
+    <FlowHeader>
       <Box sx={{ maxWidth: 1180, mx: "auto", paddingInline: 2, paddingBlock: 1.5 }}>
         <Stack direction="row" alignItems="center" spacing={1.25}>
           <Box sx={{ minWidth: 0 }}>
@@ -676,55 +657,9 @@ export default function BooksScreen({ role, onNavigate, lastPosition, book: rout
                 : t("flowBooks.subFallback")}
             </Typography>
           </Box>
-          <Box sx={{ flex: 1 }} />
-          <IconButton
-            aria-label={t("flowBooks.menu.open")}
-            title={t("flowBooks.menu.label")}
-            aria-haspopup="menu"
-            aria-expanded={Boolean(menuAnchor)}
-            aria-controls={menuAnchor ? "books-screen-menu" : undefined}
-            onClick={(e) => setMenuAnchor(e.currentTarget)}
-            sx={{ bgcolor: skip.soft, width: 34, height: 34, flex: "none" }}
-          >
-            <TuneIcon fontSize="small" />
-          </IconButton>
-          <Menu id="books-screen-menu" anchorEl={menuAnchor} open={Boolean(menuAnchor)} onClose={() => setMenuAnchor(null)}>
-            <MenuItem
-              onClick={() => {
-                setMenuAnchor(null);
-                // Same live position the Continue card uses — `me` is a
-                // boot-time snapshot, so reading it here would send the user
-                // to last session's verse while the card above showed this
-                // session's.
-                onNavigate(
-                  resolvedLastPosition?.book ?? "OBA",
-                  resolvedLastPosition?.chapter ?? 1,
-                  resolvedLastPosition?.verse ?? 1,
-                );
-              }}
-            >
-              <ListItemIcon>
-                <MenuBookIcon fontSize="small" />
-              </ListItemIcon>
-              <ListItemText>{t("flowBooks.menu.classicEditor")}</ListItemText>
-            </MenuItem>
-            {role === "admin" && (
-              <MenuItem
-                onClick={() => {
-                  setMenuAnchor(null);
-                  location.hash = "#/admin/progress";
-                }}
-              >
-                <ListItemIcon>
-                  <AdminPanelSettingsIcon fontSize="small" />
-                </ListItemIcon>
-                <ListItemText>{t("flowBooks.menu.admin")}</ListItemText>
-              </MenuItem>
-            )}
-          </Menu>
         </Stack>
       </Box>
-    </Box>
+    </FlowHeader>
   );
 
   const listPane =

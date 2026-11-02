@@ -8,10 +8,10 @@
 //     docs/mockups/desktop-first/_design.css translated to the MUI/sx idiom
 //     the flows screens already use.
 //   * <900px: the rail collapses into a tap-to-open menu at the top (the same
-//     pattern the old FlowNav used, which Benjamin found more intuitive on
+//     pattern the old flows pill bar used, which Benjamin found more intuitive on
 //     mobile than a horizontal scroll strip — 2026-08-17).
 //
-// Sections navigate by hash (#/admin/* and the More-tools hashes) so
+// Sections navigate by hash (#/admin/*, More tools included) so
 // back/forward work; the active section is tinted with the Inspire highlight
 // like every other selected row in the redesign. Screens render inside as
 // children — this file owns ONLY the chrome, never data.
@@ -27,6 +27,7 @@ import {
   Typography,
 } from "@mui/material";
 import { alpha, useTheme } from "@mui/material/styles";
+import { FlowHeader } from "./FlowHeader";
 import useMediaQuery from "@mui/material/useMediaQuery";
 import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
 import MenuIcon from "@mui/icons-material/Menu";
@@ -38,6 +39,7 @@ import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import PaletteIcon from "@mui/icons-material/Palette";
 import ArticleIcon from "@mui/icons-material/Article";
 import VisibilityIcon from "@mui/icons-material/Visibility";
+import FactCheckIcon from "@mui/icons-material/FactCheck";
 
 const INSPIRE = "#31ADE3";
 
@@ -46,6 +48,7 @@ export type AdminSection =
   | "setup"
   | "workflow"
   | "progress"
+  | "review"
   | "ai"
   | "style"
   | "templates"
@@ -58,18 +61,20 @@ type NavItem = { key: AdminSection; labelKey: string; icon: ReactNode; hash: str
 const SECTIONS: NavItem[] = [
   { key: "progress", labelKey: "adminDesk.nav.progress", icon: <InsightsIcon fontSize="small" />, hash: "#/admin/progress" },
   { key: "workflow", labelKey: "adminDesk.nav.workflow", icon: <AccountTreeIcon fontSize="small" />, hash: "#/admin/workflow" },
+  { key: "review", labelKey: "adminDesk.nav.review", icon: <FactCheckIcon fontSize="small" />, hash: "#/admin/review" },
   { key: "team", labelKey: "adminDesk.nav.team", icon: <GroupsIcon fontSize="small" />, hash: "#/admin/team" },
   { key: "setup", labelKey: "adminDesk.nav.setup", icon: <TuneIcon fontSize="small" />, hash: "#/admin/setup" },
 ];
 
-// More-tools sections — same first-class treatment as SECTIONS above, but each
-// keeps its own pre-existing hash (#/ai etc.) rather than the #/admin/{key}
-// pattern, so bookmarks and links into these pages keep working (#186).
+// More-tools sections — same first-class treatment as SECTIONS above (#186).
+// They moved from their own hashes (#/ai, #/style, #/curate, #/observe) under
+// #/admin/* in #537; the old hashes redirect (lib/legacyFlowRoutes.ts) so
+// bookmarks keep working. Templates keeps its screen's "curate" slug.
 const TOOLS: NavItem[] = [
-  { key: "ai", labelKey: "adminDesk.nav.ai", icon: <AutoAwesomeIcon fontSize="small" />, hash: "#/ai" },
-  { key: "style", labelKey: "adminDesk.nav.style", icon: <PaletteIcon fontSize="small" />, hash: "#/style" },
-  { key: "templates", labelKey: "adminDesk.nav.templates", icon: <ArticleIcon fontSize="small" />, hash: "#/curate" },
-  { key: "observe", labelKey: "adminDesk.nav.observe", icon: <VisibilityIcon fontSize="small" />, hash: "#/observe" },
+  { key: "ai", labelKey: "adminDesk.nav.ai", icon: <AutoAwesomeIcon fontSize="small" />, hash: "#/admin/ai" },
+  { key: "style", labelKey: "adminDesk.nav.style", icon: <PaletteIcon fontSize="small" />, hash: "#/admin/style" },
+  { key: "templates", labelKey: "adminDesk.nav.templates", icon: <ArticleIcon fontSize="small" />, hash: "#/admin/curate" },
+  { key: "observe", labelKey: "adminDesk.nav.observe", icon: <VisibilityIcon fontSize="small" />, hash: "#/admin/observe" },
 ];
 
 export function AdminDesk({ current, children }: { current: AdminSection; children: ReactNode }) {
@@ -80,7 +85,7 @@ export function AdminDesk({ current, children }: { current: AdminSection; childr
   const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
 
   const go = (hash: string) => {
-    location.hash = hash;
+    location.assign(hash);
     setAnchorEl(null);
   };
 
@@ -206,45 +211,54 @@ export function AdminDesk({ current, children }: { current: AdminSection; childr
       </MenuItem>
     );
   };
+  // Rendered into the global flow bar (FlowHeader), beside the account
+  // controls, rather than as a card of its own under it (#299).
   const collapsedNav = (
-    <Box
-      component="nav"
-      aria-label={t("adminDesk.a11y.adminSections")}
-      sx={{
-        display: "flex",
-        alignItems: "center",
-        gap: 1,
-        bgcolor: "background.paper",
-        border: "1px solid",
-        borderColor: "divider",
-        borderRadius: "14px",
-        padding: 1,
-      }}
-    >
-      {booksExit}
-      <Button
-        startIcon={<MenuIcon />}
-        onClick={(e) => setAnchorEl(e.currentTarget)}
-        aria-haspopup="menu"
-        aria-expanded={anchorEl ? true : undefined}
+    <FlowHeader>
+      <Box
+        component="nav"
+        aria-label={t("adminDesk.a11y.adminSections")}
         sx={{
-          minHeight: 44,
-          flex: 1,
-          justifyContent: "flex-start",
-          textAlign: "start",
-          color: "text.primary",
-          fontWeight: 600,
+          display: "flex",
+          alignItems: "center",
+          gap: 1,
+          paddingBlock: 0.5,
+          paddingInline: 1,
         }}
       >
-        {t(currentLabelKey)}
-      </Button>
-      <Menu anchorEl={anchorEl} open={Boolean(anchorEl)} onClose={() => setAnchorEl(null)}>
-        <ListSubheader disableSticky>{t("adminDesk.groups.admin")}</ListSubheader>
-        {SECTIONS.map(menuItem)}
-        <ListSubheader disableSticky>{t("adminDesk.groups.moreTools")}</ListSubheader>
-        {TOOLS.map(menuItem)}
-      </Menu>
-    </Box>
+        {booksExit}
+        <Button
+          startIcon={<MenuIcon />}
+          onClick={(e) => setAnchorEl(e.currentTarget)}
+          aria-haspopup="menu"
+          aria-expanded={anchorEl ? true : undefined}
+          sx={{
+            minHeight: 44,
+            flex: 1,
+            minWidth: 0,
+            justifyContent: "flex-start",
+            textAlign: "start",
+            color: "text.primary",
+            fontWeight: 600,
+          }}
+        >
+          {/* It shares the row with the account controls, so a long section
+              name truncates rather than pushing into them. */}
+          <Box
+            component="span"
+            sx={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+          >
+            {t(currentLabelKey)}
+          </Box>
+        </Button>
+        <Menu anchorEl={anchorEl} open={Boolean(anchorEl)} onClose={() => setAnchorEl(null)}>
+          <ListSubheader disableSticky>{t("adminDesk.groups.admin")}</ListSubheader>
+          {SECTIONS.map(menuItem)}
+          <ListSubheader disableSticky>{t("adminDesk.groups.moreTools")}</ListSubheader>
+          {TOOLS.map(menuItem)}
+        </Menu>
+      </Box>
+    </FlowHeader>
   );
 
   return (

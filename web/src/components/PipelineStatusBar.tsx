@@ -236,7 +236,20 @@ export function PipelineStatusBar({ toast, onToastClear, hideChip }: Props = {})
   const [pendingFocus, setPendingFocus] = useState<string | null>(null);
   const chipRef = useRef<HTMLDivElement | null>(null);
 
-  useEffect(() => pipelineStore.subscribe(setJobs), []);
+  // When the current job list arrived, in epoch seconds. Sampled here rather
+  // than with Date.now() during render; the store emits a fresh array on every
+  // change, so this is the same moment the "done in the last 24h" filter below
+  // used to read the clock.
+  const [jobsAtSec, setJobsAtSec] = useState(() => Math.floor(Date.now() / 1000));
+
+  useEffect(
+    () =>
+      pipelineStore.subscribe((list) => {
+        setJobs(list);
+        setJobsAtSec(Math.floor(Date.now() / 1000));
+      }),
+    [],
+  );
   useEffect(
     () =>
       pipelineStore.onFocusRequest((jobId) => {
@@ -246,7 +259,6 @@ export function PipelineStatusBar({ toast, onToastClear, hideChip }: Props = {})
   );
 
   const { active, queued, doneRecent, failed } = useMemo(() => {
-    const nowSec = Math.floor(Date.now() / 1000);
     return {
       // 'dispatching' counts as active — it's claimed the bot slot and locks
       // the chapter, same as running.
@@ -258,10 +270,10 @@ export function PipelineStatusBar({ toast, onToastClear, hideChip }: Props = {})
           j.state === "paused_for_usage_limit",
       ),
       queued: jobs.filter((j) => j.state === "queued"),
-      doneRecent: jobs.filter((j) => j.state === "done" && nowSec - j.updated_at < 24 * 3600),
+      doneRecent: jobs.filter((j) => j.state === "done" && jobsAtSec - j.updated_at < 24 * 3600),
       failed: jobs.filter((j) => j.state === "failed"),
     };
-  }, [jobs]);
+  }, [jobs, jobsAtSec]);
 
   const hasAnything = active.length + queued.length + doneRecent.length + failed.length > 0;
 

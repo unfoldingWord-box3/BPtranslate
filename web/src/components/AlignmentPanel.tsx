@@ -51,7 +51,8 @@ import { lostAlignedWords } from "../lib/alignmentDelta";
 import { useLexicon, type LexiconEntry } from "../hooks/useLexicon";
 import { useAlignmentSuggestions } from "../hooks/useAlignmentSuggestions";
 import { useProjectConfig } from "../hooks/useProjectConfig";
-import { versionLabel } from "../lib/versionLabels";
+import { versionIsRtl, versionLabel } from "../lib/versionLabels";
+import { isHebrewBook } from "../lib/sourceSearch";
 import {
   computeGhosts,
   dismissedGhostKey,
@@ -326,6 +327,7 @@ export const AlignmentPanel = forwardRef<AlignmentPanelHandle, Props>(
     // `initial` stays computedInitial so the restored state reads as dirty
     // (state !== initial) and can be saved or reset.
     useEffect(() => {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- the synchronous reset must land before the async crash-draft restore below so the restore wins (see the comment above); a render-time reset would change that ordering.
       setInitial(computedInitial);
       setState(computedInitial);
       setSelectedUnaligned(new Set());
@@ -375,9 +377,12 @@ export const AlignmentPanel = forwardRef<AlignmentPanelHandle, Props>(
     // the user navigates to a different verse / edits a different bible, but NOT
     // on same-verse re-sync after a save (computedInitial churns then; the
     // coordinate doesn't), so rejected ghosts stay rejected across a save.
-    useEffect(() => {
+    const ghostScope = `${verseNum}|${bibleVersion}`;
+    const [prevGhostScope, setPrevGhostScope] = useState(ghostScope);
+    if (ghostScope !== prevGhostScope) {
+      setPrevGhostScope(ghostScope);
       setDismissedGhosts(new Set());
-    }, [verseNum, bibleVersion]);
+    }
 
     const dirty = state !== initial && state !== null;
     useEffect(() => {
@@ -402,6 +407,37 @@ export const AlignmentPanel = forwardRef<AlignmentPanelHandle, Props>(
       }, 400);
       return () => clearTimeout(t);
     }, [state, dirty, verse, book, chapter, verseNum, bibleVersion]);
+
+    // Map Hebrew tokens to alignment groups by source-token POSITION.
+    // `strong|occurrence` is NOT unique: occurrence numbers the exact surface
+    // text (cantillation included), so same-Strong words with different
+    // pointing all carry occurrence 1 (three אֶל forms in ZEC 1:3 are each
+    // H0413|1 — 236 such collisions across ZEC) and the strong-keyed map lit
+    // the wrong word. Each group source word resolves to a position via the
+    // same text→strong fallback chain displayGroups sorts by; the strip's
+    // tokens carry their walk position natively. Positions in `hover` are
+    // union-relative (see highlightTypes.ts); these maps are own-relative and
+    // translate via posOffset at the comparison sites. Declared above the drop
+    // handlers that read it, so the React Compiler can preserve the memo (a
+    // read before the declaration made it treat the map as mutable).
+    const sourceIndexMap = useMemo(() => buildSourceIndexMap(sourceVerse), [sourceVerse]);
+
+    // Also above the handlers that read it (handleMergeGroups), for the same
+    // React Compiler reason as sourceIndexMap.
+    const displayGroups = useMemo(() => {
+      if (!state) return [];
+      const sortKey = (g: (typeof state.groups)[number]) => {
+        if (g.source.length === 0) return Number.MAX_SAFE_INTEGER;
+        const pos = resolveSourcePos(g.source[0], sourceIndexMap);
+        return pos >= 0 ? pos : Number.MAX_SAFE_INTEGER;
+      };
+      const sorted = [...state.groups].sort((a, b) => sortKey(a) - sortKey(b));
+      const stripped = stripCompoundOverlaps(sorted);
+      const merged = mergeAdjacentSameSource(stripped);
+      // Collapse same-position duplicates (one physical Hebrew token the AI
+      // stamped with occurrences>actual — see mergeSamePositionGroups).
+      return mergeSamePositionGroups(merged, (g) => groupPositionKey(g, sourceIndexMap));
+    }, [state, sourceIndexMap]);
 
     const handleTargetsDrop = (dest: string, wordIds: string[]) => {
       if (!state || wordIds.length === 0) return;
@@ -582,33 +618,6 @@ export const AlignmentPanel = forwardRef<AlignmentPanelHandle, Props>(
       }
       return map;
     }, [state]);
-    // Map Hebrew tokens to alignment groups by source-token POSITION.
-    // `strong|occurrence` is NOT unique: occurrence numbers the exact surface
-    // text (cantillation included), so same-Strong words with different
-    // pointing all carry occurrence 1 (three אֶל forms in ZEC 1:3 are each
-    // H0413|1 — 236 such collisions across ZEC) and the strong-keyed map lit
-    // the wrong word. Each group source word resolves to a position via the
-    // same text→strong fallback chain displayGroups sorts by; the strip's
-    // tokens carry their walk position natively. Positions in `hover` are
-    // union-relative (see highlightTypes.ts); these maps are own-relative and
-    // translate via posOffset at the comparison sites.
-    const sourceIndexMap = useMemo(() => buildSourceIndexMap(sourceVerse), [sourceVerse]);
-
-    const displayGroups = useMemo(() => {
-      if (!state) return [];
-      const sortKey = (g: (typeof state.groups)[number]) => {
-        if (g.source.length === 0) return Number.MAX_SAFE_INTEGER;
-        const pos = resolveSourcePos(g.source[0], sourceIndexMap);
-        return pos >= 0 ? pos : Number.MAX_SAFE_INTEGER;
-      };
-      const sorted = [...state.groups].sort((a, b) => sortKey(a) - sortKey(b));
-      const stripped = stripCompoundOverlaps(sorted);
-      const merged = mergeAdjacentSameSource(stripped);
-      // Collapse same-position duplicates (one physical Hebrew token the AI
-      // stamped with occurrences>actual — see mergeSamePositionGroups).
-      return mergeSamePositionGroups(merged, (g) => groupPositionKey(g, sourceIndexMap));
-    }, [state, sourceIndexMap]);
-
     const posMaps = useMemo(() => {
       const posToGroupId = new Map<number, string>();
       const sourcePosById = new Map<string, number>();
@@ -735,6 +744,15 @@ export const AlignmentPanel = forwardRef<AlignmentPanelHandle, Props>(
       },
       [hoverLink, hover, posMaps, posOffset],
     );
+
+    // Reading direction of each side, set as `dir` on the word containers so
+    // the chips lay out in reading order regardless of the UI language (#532).
+    // Target words follow the project's language (an Arabic ULT is RTL even
+    // under an English UI); source words follow the book's original language
+    // (Hebrew OT RTL, Greek NT LTR).
+    const projectConfig = useProjectConfig();
+    const targetDir: "rtl" | "ltr" = versionIsRtl(projectConfig, bibleVersion) ? "rtl" : "ltr";
+    const sourceDir: "rtl" | "ltr" = isHebrewBook(book) ? "rtl" : "ltr";
 
     const hctx: HighlightCtx = useMemo(
       () => ({
@@ -972,6 +990,7 @@ export const AlignmentPanel = forwardRef<AlignmentPanelHandle, Props>(
               onToggleColorize={toggleColorize}
               onToggleHoverLink={toggleHoverLink}
               hctx={hctx}
+              targetDir={targetDir}
             />
             <SectionHeader count={displayGroups.length} />
             <Box
@@ -1007,6 +1026,8 @@ export const AlignmentPanel = forwardRef<AlignmentPanelHandle, Props>(
                 hctx={hctx}
                 sourcePos={posMaps.sourcePosById}
                 posOffset={posOffset}
+                sourceDir={sourceDir}
+                targetDir={targetDir}
               />
             </Box>
             <ActionBar
@@ -1087,6 +1108,7 @@ function InventoryStrip({
   onToggleColorize,
   onToggleHoverLink,
   hctx,
+  targetDir,
 }: {
   state: AlignmentState;
   bibleVersion: string;
@@ -1102,6 +1124,7 @@ function InventoryStrip({
   onToggleColorize: () => void;
   onToggleHoverLink: () => void;
   hctx: HighlightCtx;
+  targetDir: "rtl" | "ltr";
 }) {
   const { t } = useTranslation();
   const projectConfig = useProjectConfig();
@@ -1231,6 +1254,7 @@ function InventoryStrip({
         </Button>
       </Stack>
       <Box
+        dir={targetDir}
         sx={{
           display: "flex",
           flexWrap: "wrap",
@@ -1536,6 +1560,8 @@ function AlignmentCards({
   hctx,
   sourcePos,
   posOffset,
+  sourceDir,
+  targetDir,
 }: {
   groups: AlignmentGroup[];
   ghostByGroup: Map<string, Ghost>;
@@ -1560,6 +1586,8 @@ function AlignmentCards({
   // union offset — for card keys and the position-keyed hover identity.
   sourcePos: Map<string, number>;
   posOffset: number;
+  sourceDir: "rtl" | "ltr";
+  targetDir: "rtl" | "ltr";
 }) {
   const { t } = useTranslation();
   // Precompute the per-verse TWL hint lookup once (see buildTwHintMap) so each
@@ -1570,15 +1598,15 @@ function AlignmentCards({
   );
   return (
     <Box
-      dir="rtl"
+      dir={sourceDir}
       sx={{
         display: "flex",
         flexWrap: "wrap",
         gap: 1,
         alignContent: "flex-start",
-        // Card visual order follows Hebrew reading flow (RTL) — the cards
-        // are sorted by source position by displayGroups, and RTL lays the
-        // first card to the right.
+        // Card visual order follows the source's reading flow — the cards
+        // are sorted by source position by displayGroups, so Hebrew (RTL)
+        // lays the first card to the right and Greek (LTR) to the left.
         pt: 0.5,
       }}
     >
@@ -1602,7 +1630,7 @@ function AlignmentCards({
           onGroupDragEnd={onGroupDragEnd}
         >
           <Box
-            dir="rtl"
+            dir={sourceDir}
             sx={{
               display: "flex",
               flexWrap: "wrap",
@@ -1652,7 +1680,10 @@ function AlignmentCards({
               </IconButton>
             </Tooltip>
           )}
-          <Stack direction="row" spacing={0.5} flexWrap="wrap" rowGap={0.5} dir="ltr">
+          {/* useFlexGap: Stack's default spacing is a one-sided margin, which
+              lands on the wrong side when this row's dir differs from the
+              UI's (the RTL emotion cache mirrors it by UI language). */}
+          <Stack direction="row" spacing={0.5} useFlexGap flexWrap="wrap" dir={targetDir}>
             {g.targets.length === 0 ? (
               ghost ? (
                 <GhostChip
