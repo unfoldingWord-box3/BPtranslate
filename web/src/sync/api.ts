@@ -1518,8 +1518,15 @@ export interface PipelineStatusResponse {
    */
   queuePosition?: number;
   queueAhead?: number;
-  /** Notes (#601) or questions (#725) a translate apply left alone because a person changed them after the job was queued. */
-  applySkipped?: { tnTouched?: number; tnTouchedIds?: string[]; tqTouched?: number; tqTouchedIds?: string[] };
+  /** Notes (#601), questions (#725) or tW/tA articles (#734, by path) a translate apply left alone because a person changed them after the job was queued. */
+  applySkipped?: {
+    tnTouched?: number;
+    tnTouchedIds?: string[];
+    tqTouched?: number;
+    tqTouchedIds?: string[];
+    articleTouched?: number;
+    articleTouchedPaths?: string[];
+  };
 }
 
 // AI pipeline proposal staged in pending_imports. The server parses payload
