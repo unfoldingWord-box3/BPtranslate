@@ -827,6 +827,27 @@ test.describe("RTL target lanes wait for the project config (#728)", () => {
     });
   }
 
+  // The stacked view scrolls the active verse into view on mount. With the
+  // body held behind the gate, that scroll must still happen once the config
+  // arrives, or a shared deep link opens at the top of the chapter.
+  test("classic scripture pane: a deep link still scrolls to its verse after the config", async ({
+    browser,
+  }, testInfo) => {
+    const far = 12;
+    const { page, release } = await openWithHeldConfig(
+      browser,
+      "rtl-728-deeplink",
+      `/#/${RTL_FIXTURE.book}/${RTL_FIXTURE.chapter}/${far}`,
+      { storage: { "be:scriptureMode": "stacked" }, viewport: DESK },
+    );
+    await expect(directionSpinner(page).first()).toBeVisible({ timeout: 15_000 });
+    release();
+    const cell = page.locator(`[data-find-cell="${RTL_FIXTURE.chapter}-${far}-ULT"]`).first();
+    await expect(cell).toBeAttached({ timeout: 15_000 });
+    await expect(cell, "active verse not scrolled into view").toBeInViewport({ timeout: 5_000 });
+    await page.screenshot({ path: testInfo.outputPath("728-deeplink-resolved.png") });
+  });
+
   /** AlignmentPanel's word-bank strip (same scoping as the #532 case). */
   function wordBank(page: Page): Locator {
     return page
