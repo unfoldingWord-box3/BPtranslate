@@ -145,6 +145,7 @@ function rowFromStatus(prev: PipelineJob, status: PipelineStatusResponse): Pipel
     error_kind: status.current?.errorKind ?? null,
     error_message: status.current?.error ?? null,
     output_json: status.output ? JSON.stringify(status.output) : prev.output_json,
+    apply_skipped_json: status.applySkipped ? JSON.stringify(status.applySkipped) : prev.apply_skipped_json,
     updated_at: Number.isFinite(updatedTs) ? Math.floor(updatedTs / 1000) : prev.updated_at,
     created_at: Number.isFinite(createdTs) ? Math.floor(createdTs / 1000) : prev.created_at,
     last_polled_at: Math.floor(Date.now() / 1000),
