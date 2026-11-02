@@ -1,4 +1,4 @@
-// Per-user daily spend cap for the help assistant (migration 0076).
+// Per-user daily spend cap for the help assistant (migration 0077).
 // All money is integer micro-dollars (1 USD = 1,000,000) so the cap check never
 // meets float rounding. The cap is checked and the worst-case cost reserved in
 // ONE statement, before any provider call; settle() then swaps the reservation
@@ -17,7 +17,7 @@ export function capMicrosFromEnv(raw: string | undefined): number {
   return Math.round(usd * 1_000_000);
 }
 
-/** True for the error D1 raises when migration 0076 has not been applied. */
+/** True for the error D1 raises when migration 0077 has not been applied. */
 export function isMissingSchemaError(e: unknown): boolean {
   return /no such (table|column)/i.test(e instanceof Error ? e.message : String(e));
 }
