@@ -60,6 +60,9 @@ function publish(next: ProjectConfigResponse): ProjectConfigResponse {
 
 function load(): Promise<ProjectConfigResponse> {
   if (inflight) return inflight;
+  // A new fetch supersedes an earlier failure: while it is in flight the
+  // config is loading, not failed.
+  setLoadFailed(false);
   inflight = api
     .getProjectConfig()
     .then((res) => {
@@ -86,10 +89,9 @@ export function useProjectConfigLoadFailed(): boolean {
   return useSyncExternalStore(subscribeLoadFailed, () => loadFailed);
 }
 
-// Try the config fetch again after a failure. Clears the failed flag first so
-// the caller shows its loading state while the retry is in flight.
+// Try the config fetch again after a failure. load() clears the failed flag,
+// so the caller shows its loading state while the retry is in flight.
 export function retryProjectConfig(): void {
-  setLoadFailed(false);
   load().catch(() => {
     /* load() has set the failed flag again */
   });

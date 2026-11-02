@@ -233,6 +233,14 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
   const simRtl = simDir === "rtl";
   const directionKnown = litDir !== null && simDir !== null;
   const configLoadFailed = useProjectConfigLoadFailed();
+  // While the "could not be loaded" warning shows, retry on its own when the
+  // connection comes back.
+  const showConfigFailed = !directionKnown && configLoadFailed;
+  useEffect(() => {
+    if (!showConfigFailed) return;
+    window.addEventListener("online", retryProjectConfig);
+    return () => window.removeEventListener("online", retryProjectConfig);
+  }, [showConfigFailed]);
 
   const sourceIndex = useMemo(
     () => buildVerseIndex(data?.verses?.[sourceLane]),
@@ -615,7 +623,7 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
         </Alert>
       </Box>
     );
-  } else if (!directionKnown && configLoadFailed) {
+  } else if (showConfigFailed) {
     // Offline with no cached project config: say so rather than spin forever
     // or guess a direction (issue #451).
     body = (
@@ -640,7 +648,7 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
         role="status"
         sx={{ padding: 5, display: "flex", flexDirection: "column", alignItems: "center", gap: 1.5 }}
       >
-        <CircularProgress size={28} />
+        <CircularProgress size={28} aria-hidden />
         <Typography variant="body2" color="text.secondary">
           {t("flowVerse.verse.directionLoading")}
         </Typography>

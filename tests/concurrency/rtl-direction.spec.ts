@@ -574,6 +574,32 @@ test.describe("RTL paint on Arabic surfaces (#486)", () => {
     await context.close();
   });
 
+  test("#451: the config warning retries on its own when the connection returns", async ({ browser }) => {
+    const { context } = await newUserContext(browser, "rtl-451-online");
+    track(context);
+    const page = await context.newPage();
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await blockDoor43(page);
+    let offline = true;
+    await page.route("**/api/project-config", async (route) => {
+      if (route.request().method() !== "GET") return route.continue();
+      if (offline) return route.abort("internetdisconnected");
+      const res = await route.fetch();
+      const json = await res.json();
+      json.config = { ...json.config, ...RTL_PROJECT };
+      return route.fulfill({ response: res, json });
+    });
+    await page.goto(`/#/verse/${V}`);
+    const alert = page.getByRole("alert").filter({ hasText: enUi("flowVerse.verse.directionLoadFailed") });
+    await expect(alert).toBeVisible({ timeout: 15_000 });
+    offline = false;
+    // Going offline and back fires the window "online" event; no click.
+    await context.setOffline(true);
+    await context.setOffline(false);
+    await expectRtlSentence(sentence(page.locator("main"), RTL_FIXTURE.arabicUlt), "#451 lane, after online");
+    await context.close();
+  });
+
   // #533: ReviewContextPanel's ULT/UST lanes and the card's draft field
   // follow their content (dir="auto", as #256/#292), so the Arabic verse and
   // note paint RTL under the LTR UI.
