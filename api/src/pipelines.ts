@@ -20,7 +20,7 @@ import { z } from "zod";
 import type { Env } from "./index";
 import { currentUserId, requireEditor } from "./auth.ts";
 import { importJobOutput, applySkippedOf, type ApplySkipped } from "./pipelineImport.ts";
-import { getProjectConfig } from "./projectConfig.ts";
+import { exportOwnerFor, getProjectConfig } from "./projectConfig.ts";
 import { buildTranslateOptions, normalizeRowIds, normalizeTranslateRowIdsJson } from "./translateOptions.ts";
 import {
   PIPELINE_COVERAGE_WHERE,
@@ -44,12 +44,17 @@ import {
 import { applyContextRef } from "./assistedContextRef.ts";
 import { getLatestSuccessfulContextExport } from "./contextExportResults.ts";
 import { broadcastChapter } from "./wsEvents.ts";
+import { scriptureStatus, type ScriptureResource } from "./unpublishedScripture.ts";
 import { sameDcsName } from "./repoUrl.ts";
 import { isChapterWideTnTranslate, translateNoteSelection } from "./chapterLock.ts";
 import {
+  activeLaneConfig,
   assertLaneWritable,
+  getLaneState,
   type LaneKey,
 } from "./scriptureLane.ts";
+import { BOOK_NUMBERS } from "./dcsSources.ts";
+import { resourceTargetsFor } from "./export.ts";
 
 export const pipelines = new Hono<{
   Bindings: Env;
@@ -2010,6 +2015,63 @@ pipelines.post("/start", requireEditor, async (c) => {
     queuePosition: snap.positions.get(jobId)?.position,
   };
   return c.json(resp);
+});
+
+// GET /api/pipelines/unpublished-scripture/:book (#679). Will an AI translate
+// run see this book's newest Bible text? Runs read Door43 master, and an edit
+// gets there only when the export PR carrying it merges. Per lane: "current",
+// "pending" (the nightly publish will merge it) or "unpublishable" (the lane's
+// export is off). See unpublishedScripture.ts. Asks Door43 about an unmerged
+// export PR only when newer edits exist, and records a merge so it asks once.
+pipelines.get("/unpublished-scripture/:book", requireEditor, async (c) => {
+  const book = c.req.param("book").toUpperCase();
+  if (!BOOK_NUMBERS[book]) return c.json({ error: "unknown_book" }, 400);
+  const env = c.env;
+  const lanes: Record<ScriptureResource, LaneKey> = { ult: "lit", ust: "sim" };
+  // Where each resource exports: the lane's own export repo, else the
+  // project's (the same choice exportOne makes). undefined = export off.
+  const destCache = new Map<ScriptureResource, Promise<{ owner: string; repo: string } | undefined>>();
+  const destFor = (resource: ScriptureResource) => {
+    let p = destCache.get(resource);
+    if (!p) {
+      p = (async () => {
+        const row = await getLaneState(env, lanes[resource]);
+        if (row) {
+          const exp = activeLaneConfig(row).export;
+          return exp ? { owner: exp.owner, repo: exp.repo } : undefined;
+        }
+        const cfg = await getProjectConfig(env);
+        return { owner: exportOwnerFor(env, cfg), repo: resourceTargetsFor(cfg)[resource].repo };
+      })();
+      destCache.set(resource, p);
+    }
+    return p;
+  };
+  const status = await scriptureStatus(env.DB, book, {
+    exportEnabled: async (resource) => (await destFor(resource)) !== undefined,
+    prMergedAt: async (resource, prNumber) => {
+      try {
+        const dest = await destFor(resource);
+        if (!dest) return null;
+        const res = await fetch(
+          `${env.DCS_BASE_URL.replace(/\/+$/, "")}/api/v1/repos/${encodeURIComponent(dest.owner)}/${encodeURIComponent(dest.repo)}/pulls/${prNumber}`,
+          {
+            headers: {
+              Accept: "application/json",
+              ...(env.DCS_SERVICE_TOKEN ? { Authorization: `token ${env.DCS_SERVICE_TOKEN}` } : {}),
+            },
+          },
+        );
+        if (!res.ok) return null;
+        const pr = (await res.json()) as { merged?: boolean; merged_at?: string | null };
+        const at = pr.merged && pr.merged_at ? Date.parse(pr.merged_at) : NaN;
+        return Number.isFinite(at) ? Math.floor(at / 1000) : null;
+      } catch {
+        return null;
+      }
+    },
+  });
+  return c.json({ book, ...status });
 });
 
 // What a job's apply staged and what became of it, per kind (tn | tq | verse |

@@ -19,6 +19,7 @@ import {
   Box,
   TextField,
   Typography,
+  Alert,
 } from "@mui/material";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import CloudDownloadIcon from "@mui/icons-material/CloudDownload";
@@ -37,6 +38,7 @@ import type {
 import { getSessionKey, pipelineStore, type PipelineJob } from "../sync/pipelineStore";
 import { currentPipelineUserId } from "../sync/pipelineSession";
 import { parseChapterRange } from "../lib/refParser";
+import { unpublishedWarning, type UnpublishedCheck } from "../lib/unpublishedScriptureWarning";
 import { isAiNeedsOrgKey, isAiProviderNotConfigured } from "../lib/aiProviderErrors";
 import { useTranslation } from "react-i18next";
 import { useProjectConfig, isTranslationProject } from "../hooks/useProjectConfig";
@@ -141,6 +143,24 @@ export function PipelineMenu({ book, chapter, onMessage, onImported, renderTrigg
     null,
   );
   const [resourceBusy, setResourceBusy] = useState(false);
+  // #679 option C: AI translate runs read the workspace's Bible from Door43
+  // master, so warn in the run dialog when this book has ULT/UST edits that
+  // have not reached it. Checked each time the dialog opens (confirmOpenId);
+  // only a result for this opening and book shows (unpublishedWarning), so a
+  // reopen or a failed check never shows an earlier answer. The run itself is
+  // never blocked.
+  const [confirmOpenId, setConfirmOpenId] = useState(0);
+  const [unpublishedCheck, setUnpublishedCheck] = useState<UnpublishedCheck | null>(null);
+  useEffect(() => {
+    if (confirm?.type !== "translate") return;
+    const ctrl = new AbortController();
+    api
+      .unpublishedScripture(book, ctrl.signal)
+      .then((r) => setUnpublishedCheck({ openId: confirmOpenId, book, ult: r.ult, ust: r.ust }))
+      .catch(() => {});
+    return () => ctrl.abort();
+  }, [confirm, confirmOpenId, book]);
+  const unpublished = confirm?.type === "translate" ? unpublishedWarning(unpublishedCheck, confirmOpenId, book) : null;
 
   useEffect(() => pipelineStore.subscribe(setActiveJobs), []);
 
@@ -361,6 +381,7 @@ export function PipelineMenu({ book, chapter, onMessage, onImported, renderTrigg
                 close();
                 // Each run's range field starts at the current chapter.
                 setRefInput(String(chapter));
+                setConfirmOpenId((n) => n + 1);
                 setConfirm(opt);
               }}
             >
@@ -437,6 +458,15 @@ export function PipelineMenu({ book, chapter, onMessage, onImported, renderTrigg
               ? t("pipeline.confirmRun", { label: t(confirm.label), duration: t(confirm.approxDuration) })
               : ""}
           </DialogContentText>
+          {unpublished && (
+            <Alert severity="warning" sx={{ mt: 2 }}>
+              {t(
+                unpublished === "unpublishable"
+                  ? "pipeline.unpublishedScriptureNotPublished"
+                  : "pipeline.unpublishedScriptureWarning",
+              )}
+            </Alert>
+          )}
           <Box sx={{ mt: 2, display: "flex", alignItems: "flex-start", gap: 1.5 }}>
             <Typography sx={{ pt: 1, fontWeight: 500 }}>{book}</Typography>
             <TextField
