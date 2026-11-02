@@ -132,15 +132,15 @@ export function PipelineMenu({ book, chapter, onMessage, onImported }: Props) {
   // #679 option C: AI translate runs read the workspace's Bible from Door43,
   // so warn in the run dialog when this book has ULT/UST edits the nightly
   // export has not published yet. Checked each time the dialog opens; a failed
-  // check shows no warning (the run itself is never blocked).
-  const [unpublished, setUnpublished] = useState(false);
+  // check shows no warning (the run itself is never blocked). Holds the book
+  // the last check flagged, so a check for another book never shows here.
+  const [unpublishedBook, setUnpublishedBook] = useState<string | null>(null);
   useEffect(() => {
-    setUnpublished(false);
     if (confirm?.type !== "translate") return;
     const ctrl = new AbortController();
     api
       .unpublishedScripture(book, ctrl.signal)
-      .then((r) => setUnpublished(r.ult || r.ust))
+      .then((r) => setUnpublishedBook(r.ult || r.ust ? book : null))
       .catch(() => {});
     return () => ctrl.abort();
   }, [confirm, book]);
@@ -426,7 +426,7 @@ export function PipelineMenu({ book, chapter, onMessage, onImported }: Props) {
               ? t("pipeline.confirmRun", { label: t(confirm.label), duration: t(confirm.approxDuration) })
               : ""}
           </DialogContentText>
-          {unpublished && (
+          {confirm?.type === "translate" && unpublishedBook === book && (
             <Alert severity="warning" sx={{ mt: 2 }}>
               {t("pipeline.unpublishedScriptureWarning")}
             </Alert>
