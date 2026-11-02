@@ -29,23 +29,32 @@ const SINGLE_PROCLITICS = ["و", "ب", "ل", "ف", "ك"];
 
 /**
  * Strip an Arabic definite article / attached one-letter particle so "حفظ"
- * matches "الحفظ", "وحفظ", "بالحفظ", "للحفظ". Conservative: the remainder must
- * stay at least 2 letters (3 for a single-letter proclitic, which is often a
- * real root letter).
+ * matches "الحفظ", "والحفظ", "بالحفظ", "للحفظ". Conservative: the remainder must
+ * stay at least 2 letters after a multi-letter proclitic, and a one-letter
+ * proclitic (often a real root letter: كتاب is not ك + تاب) is stripped only
+ * from words of 5+ letters.
  */
 function stripProclitic(token: string): string {
   if (!ARABIC_LETTER.test(token)) return token;
   for (const p of MULTI_PROCLITICS) {
     if (token.startsWith(p) && token.length - p.length >= 2) return token.slice(p.length);
   }
-  for (const p of SINGLE_PROCLITICS) {
-    if (token.startsWith(p) && token.length - p.length >= 3) return token.slice(p.length);
+  if (token.length >= 5) {
+    for (const p of SINGLE_PROCLITICS) {
+      if (token.startsWith(p)) return token.slice(p.length);
+    }
   }
   return token;
 }
 
+// A bare definite article is not a search term; it would prefix-match every
+// word that kept its ال (too short to strip).
+const BARE_ARTICLE = "ال";
+
 export function tokenize(s: string): string[] {
-  return (normalizeText(s).match(/[\p{L}\p{N}]+/gu) ?? []).filter((t) => t.length > 1).map(stripProclitic);
+  return (normalizeText(s).match(/[\p{L}\p{N}]+/gu) ?? [])
+    .filter((t) => t.length > 1 && t !== BARE_ARTICLE)
+    .map(stripProclitic);
 }
 
 /** Article body as prose: link/image targets and #help: references removed. */

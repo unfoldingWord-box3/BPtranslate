@@ -440,7 +440,10 @@ export function App() {
   const [helpEverOpened, setHelpEverOpened] = useState(false);
   const [helpSeq, setHelpSeq] = useState(0);
   const [helpArticle, setHelpArticle] = useState<string | undefined>(undefined);
-  const openHelp = useCallback((articleId?: string) => {
+  const helpReturnFocus = useRef<HTMLElement | null>(null);
+  const openHelp = useCallback((articleId?: string, returnFocus?: HTMLElement | null) => {
+    helpReturnFocus.current =
+      returnFocus ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
     setHelpArticle(articleId);
     setHelpSeq((n) => n + 1);
     setHelpEverOpened(true);
@@ -1154,6 +1157,10 @@ export function App() {
             routeKey={helpKey}
             initialArticle={helpArticle}
             onClose={() => setHelpOpen(false)}
+            onClosed={() => {
+              const el = helpReturnFocus.current;
+              if (el?.isConnected) el.focus();
+            }}
           />
         </Suspense>
       )}

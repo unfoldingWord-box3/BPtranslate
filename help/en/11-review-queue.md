@@ -33,7 +33,7 @@ More tools on a note card:
 - **✨ Suggest** asks the AI for a draft. The draft goes into the editor. Select **Save** to keep it. It needs a quote and a support reference.
 - **Template** inserts a curated template for the note's support reference.
 - **Preserve** marks the note to survive future AI runs. **Hint** sends it to the next AI run as a hint.
-- **Trash** moves a note to the trash. **Restore** brings it back. A note you set aside with **Not needed** on the Notes screen is in the trash too.
+- **Trash** moves a note to the trash. **Restore** brings it back, but only until the nightly publish: that night the trash is emptied and its notes are deleted for good. A note you set aside with **Not needed** on the Notes screen is in the trash too.
 - **History** shows earlier versions of the item, and lets you restore one.
 - **Retarget** moves the note to another verse of the chapter.
 - **Move up**, **Move down** and **Insert note after this one** change the order. **+ Note** and **+ Question** add new ones.
