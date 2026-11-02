@@ -18,7 +18,7 @@ export function workflowRunId(prefix: string): string {
 //
 // Door43's file-change request has no base-commit check, so two context
 // exports running at once could fail for good or leave an older pack on top of
-// a newer one (#722). The context_export_lock row (migration 0076) serializes
+// a newer one (#722). The context_export_lock row (migration 0078) serializes
 // every context export of a workspace — save-triggered, manual and nightly:
 //
 // - A save sets `pending` and starts a run only when no run holds the lease.
