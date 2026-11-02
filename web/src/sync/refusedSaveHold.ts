@@ -20,13 +20,12 @@
 //     the op's own expectedVersion, round 2 B2): another user's save or an AI
 //     apply after a "locked" drop. The editor then adopts the newer server
 //     value where it still shows the held text, as on main, so no newer server
-//     text is overwritten without a 409. For tQ and tW links the drafts store
-//     keeps the user's text as a refused draft (refusedRowDraft.ts). For tN it
-//     does not: NoteCard's draft is not marked refused, so once the card adopts
-//     the server text its no-diff clear drops the draft and the refused text is
-//     lost, the same as main (known limit, #724: #601 decided the translator's
-//     edit wins over a later AI apply, and the server now skips notes touched
-//     while the job was queued, but a refused save never reaches the server).
+//     text is overwritten without a 409. The drafts store keeps the user's
+//     text as a refused draft (refusedRowDraft.ts), shown as unsaved and
+//     restored on the next mount. For tN that covers saves NoteCard made
+//     itself (#724): they carry a draftRef, so the refusal marks the card's
+//     draft refused and its no-diff clear keeps it (a refused save never
+//     reaches the server, so the server-side skip of #601 cannot see it).
 //
 // Kept free of IndexedDB / api.ts imports so it can be unit-tested from a plain
 // Node script (refusedSaveHold.test.mjs).
@@ -163,9 +162,9 @@ export function holdOnRowVersion(state: HoldState, version: number): { state: Ho
 // What a field showing `local` does when the row changes: "keep" it (it still
 // shows the text of a held refused save), "adopt" the row's new value (it shows
 // the text of a hold that just ended because the server moved on, so it is not
-// the user's newer typing: as on main, the server's value shows; for tQ and tW
-// links the drafts store keeps the text as a refused draft, for tN it does not,
-// see the header), or "reconcile" as usual. `local` is in the form the
+// the user's newer typing: as on main, the server's value shows, and the
+// drafts store keeps the text as a refused draft, see the header), or
+// "reconcile" as usual. `local` is in the form the
 // editor's Save sends; `released` is what holdOnRowVersion just returned.
 export function holdDecision(
   state: HoldState,

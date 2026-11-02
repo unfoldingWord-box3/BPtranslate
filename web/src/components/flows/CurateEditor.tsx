@@ -39,6 +39,7 @@ import { MarkdownView } from "../MarkdownView";
 import { TemplateHistoryDialog } from "../TemplateHistoryDialog";
 import { useTemplateAiDraft } from "../../hooks/useTemplateAiDraft";
 import { drafts as draftStore, templateKey } from "../../sync/drafts";
+import { useShowDraftEditors } from "../../sync/draftEditors";
 import { ApiError, api, type TemplateUnit } from "../../sync/api";
 import { formatEpochSecondsDateTime } from "../../lib/formatDate";
 import { QUICK_DRAFTS_NEED_ORG_KEY } from "../../lib/aiProviderErrors";
@@ -85,6 +86,9 @@ export function CurateEditor({
   const { t } = useTranslation();
   const theme = useTheme();
   const [unit, setUnit] = useState<TemplateUnit | null>(null);
+  // This template's editor is on screen once loaded; drafts of any other
+  // template get the unsaved-drafts reminder (#372).
+  useShowDraftEditors(unit ? [templateKey(templateId)] : []);
   // Starts true: this editor is always mounted keyed by its template (see the
   // callers), so the load effect below runs once per mount and needs no
   // synchronous loading/staleDraft reset of its own.

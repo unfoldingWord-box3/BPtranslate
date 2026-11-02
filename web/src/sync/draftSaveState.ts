@@ -53,6 +53,23 @@ export function verseDraftHasActiveSave(draft: DraftRecord, ops: OutboxOp[]): bo
   });
 }
 
+// Row-draft counterpart of verseDraftHasActiveSave (#372): true while a save of
+// exactly this draft's patch is pending or in flight, e.g. a note saved while
+// offline. Matched by row and exact patch (isPendingRowSave), so typing after
+// the save still counts as unsaved. Conflicted and failed saves return false:
+// they still need the reminder.
+export function rowDraftHasActiveSave(draft: DraftRecord, ops: OutboxOp[]): boolean {
+  if (draft.meta.kind !== "row") return false;
+  const { rowKind, id, book } = draft.meta;
+  const patch = (draft.payload as { patch?: unknown }).patch;
+  if (!patch || typeof patch !== "object") return false;
+  return ops.some(
+    (op) =>
+      (op.status === "pending" || op.status === "in_flight") &&
+      isPendingRowSave(patch as Record<string, unknown>, op, { rowKind, id, book }),
+  );
+}
+
 export function generationForSuccessfulOp(
   draft: DraftRecord | undefined,
   op: OutboxOp,

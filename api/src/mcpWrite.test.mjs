@@ -679,7 +679,7 @@ test("bpt_templates_for_row: ten long translated variants leave out their Englis
 function assertOneContextExport(queued, env) {
   assert.equal(queued.length, 1, JSON.stringify(queued));
   assert.ok(queued[0].id.startsWith(`context-save-${env.WORKSPACE_SLUG}-`), queued[0].id);
-  assert.deepEqual(queued[0].params, { contextOnly: true, workspace: env.WORKSPACE_SLUG });
+  assert.deepEqual(queued[0].params, { contextOnly: true, workspace: env.WORKSPACE_SLUG, queued: true });
 }
 
 function webTemplates(env, ctx) {

@@ -8,6 +8,9 @@ import { TopBar } from "./components/TopBar";
 import { FlowHeaderSlotContext } from "./components/flows/FlowHeader";
 import { SyncStatusBar } from "./components/SyncStatusBar";
 import { PipelineStatusBar } from "./components/PipelineStatusBar";
+import { UnsavedToasts } from "./components/UnsavedToasts";
+import { draftFlowHash } from "./lib/draftLocation";
+import type { DraftMeta } from "./sync/drafts";
 import { AccountMenu } from "./components/AccountMenu";
 import { TemplateWorkspace } from "./components/TemplateWorkspace";
 import { ReviewQueue } from "./components/ReviewQueue";
@@ -525,6 +528,17 @@ export function App() {
   // The global flow bar's inline-start slot; screens portal their title row
   // into it through <FlowHeader> (#299).
   const [headerSlot, setHeaderSlot] = useState<HTMLElement | null>(null);
+  // Bumped by the unsaved-drafts toast's "Go to it" when the draft's hash is
+  // already the current one (#372): the notes, questions and scripture screens
+  // do not write Next/Prev into the hash, so after paging away the hash still
+  // names the drafted card. Remounting the flow screen re-seeds it from the
+  // hash, which lands back on the draft.
+  const [goToNonce, setGoToNonce] = useState(0);
+  const goToDraft = (m: DraftMeta) => {
+    const hash = draftFlowHash(m);
+    if (location.hash === hash) setGoToNonce((n) => n + 1);
+    else location.assign(hash);
+  };
   const isPhone = useLayoutBand().band === "phone";
 
   // Live in-session position for the Books screen's Continue card. `auth.me`
@@ -898,14 +912,11 @@ export function App() {
           // case. justify-end keeps the controls on the inline-end corner in both
           // LTR and RTL.
           //
-          // The "N unsaved drafts" reminder (UnsavedToasts) is intentionally NOT
-          // mounted here — it requires a `book` in scope (Shell resolves it via
-          // its own useChapter instance), but most flow views (books, style,
-          // curate, ai, observe, package, admin) have no
-          // book/chapter in `loc` at all. Hoisting it needs either new data
-          // plumbing or a redesign of its in-place Save action — scoped as a
-          // separate follow-up rather than risking a silent no-op or a
-          // half-working Save button on those screens.
+          // The unsaved-drafts reminder (UnsavedToasts) mounts here in its
+          // flows form (#372): instead of classic's in-place Save, which needs
+          // a loaded chapter's verse cache most flow views lack, each toast has
+          // "Go to it", which opens the editor holding the draft. A draft whose
+          // own editor is showing stays quiet (sync/draftEditors.ts).
           //
           // One row, not two (#299): the screen's own title row portals into the
           // inline-start slot through <FlowHeader>, beside these controls.
@@ -991,6 +1002,7 @@ export function App() {
                 </Tooltip>
               )}
               <SyncStatusBar onNavigate={navigate} flowRouting compact={isPhone} />
+              <UnsavedToasts onGoTo={goToDraft} />
               <PipelineStatusBar />
               {/* Phones: Help is in the account menu; a button here truncated screen titles at 360px. */}
               {!isPhone && <HelpButton />}
@@ -1046,7 +1058,7 @@ export function App() {
               />
             </Stack>
             </Stack>
-            <Box sx={{ flex: 1, minHeight: 0 }}>
+            <Box key={goToNonce} sx={{ flex: 1, minHeight: 0 }}>
           <Suspense
             fallback={
               <Stack alignItems="center" justifyContent="center" sx={{ height: "100%" }}>
