@@ -19,7 +19,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { Env } from "./index";
 import { currentUserId, requireEditor } from "./auth.ts";
-import { importJobOutput } from "./pipelineImport.ts";
+import { importJobOutput, type ApplySkipped } from "./pipelineImport.ts";
 import { getProjectConfig } from "./projectConfig.ts";
 import { buildTranslateOptions, normalizeRowIds, normalizeTranslateRowIdsJson } from "./translateOptions.ts";
 import {
@@ -421,6 +421,27 @@ async function resolveUsername(c: {
   const fromJwt = c.get("username");
   if (fromJwt) return fromJwt;
   return resolveUsernameFromDb(c.env, userId);
+}
+
+// pipeline_jobs.edit_log_watermark (#601, migration 0076): the highest
+// edit_log.id when the job is queued. Evaluated inside the job's own INSERT, so
+// no edit can commit between reading it and queueing the job. The translate
+// apply treats a human edit_log row above it as "changed after the job was
+// queued" (pipelineImport.ts humanTouchedTnIds).
+const EDIT_LOG_WATERMARK_SQL = `(SELECT COALESCE(MAX(id), 0) FROM edit_log)`;
+// A follow-up or chain child inherits its parent's watermark, so an edit made
+// between the parent's and the child's enqueue still counts. A parent queued
+// before the column existed (NULL) gives the child the current watermark.
+function inheritedWatermarkSql(parentParam: number): string {
+  return `COALESCE((SELECT edit_log_watermark FROM pipeline_jobs WHERE job_id = ?${parentParam}), ${EDIT_LOG_WATERMARK_SQL})`;
+}
+
+function parseApplySkipped(json: string): ApplySkipped | null {
+  try {
+    return JSON.parse(json) as ApplySkipped;
+  } catch {
+    return null;
+  }
 }
 
 interface PolledJob {
@@ -957,6 +978,9 @@ async function pollPipelineJob(
   // Chapters this apply actually wrote to — used below to hint open tabs once
   // the finalize commit lands. Empty unless a successful import populated it.
   let appliedChapters: number[] = [];
+  // Notes the translate apply left alone (#601); also persisted in
+  // apply_skipped_json, echoed here so the polling tab sees it at completion.
+  let applySkipped: ApplySkipped | null = null;
   if (shouldImport && data.output) {
     try {
       const cfg = await getProjectConfig(env);
@@ -988,6 +1012,12 @@ async function pollPipelineJob(
         return { kind: "ok", text, status: httpStatus, state: data.state ?? "running" };
       }
       appliedChapters = importResult.applied?.affectedChapters ?? [];
+      if (importResult.applied && importResult.applied.tnSkippedTouched > 0) {
+        applySkipped = {
+          tnTouched: importResult.applied.tnSkippedTouched,
+          tnTouchedIds: importResult.applied.tnSkippedTouchedIds,
+        };
+      }
     } catch (err) {
       importFailed = true;
       importErrMessage = err instanceof Error ? err.message : String(err);
@@ -1144,6 +1174,8 @@ async function pollPipelineJob(
       },
     };
     responseText = JSON.stringify(adjusted);
+  } else if (applySkipped) {
+    responseText = JSON.stringify({ ...data, applySkipped });
   } else if (upstreamInterrupted) {
     // Upstream still says 'running'; we stored 'failed'. Rewrite so a tab
     // polling this job by id sees terminal and stops polling.
@@ -1857,9 +1889,9 @@ pipelines.post("/start", requireEditor, async (c) => {
        job_id, user_id, pipeline_type, book, start_chapter, end_chapter,
        session_key, state, priority, options_json, follow_up_options,
        follow_up_chain, source_generation, source_owner, source_repo, source_ref,
-       source_stamps_json, created_at, updated_at
+       source_stamps_json, created_at, updated_at, edit_log_watermark
      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', 0, ?8, ?9, ?10,
-               ?11, ?12, ?13, ?14, ?15, unixepoch(), unixepoch())`,
+               ?11, ?12, ?13, ?14, ?15, unixepoch(), unixepoch(), ${EDIT_LOG_WATERMARK_SQL})`,
   )
     .bind(
       jobId,
@@ -1936,7 +1968,7 @@ pipelines.get("/:jobId", requireEditor, async (c) => {
             end_chapter, session_key, follow_up_options, follow_up_chain,
             follow_up_job_id, error_kind, state, current_skill, current_status,
             created_at, updated_at, (output_json IS NULL) AS no_output_yet,
-            runner, wf_status_json
+            runner, wf_status_json, apply_skipped_json
        FROM pipeline_jobs WHERE job_id = ?1`,
   )
     .bind(jobId)
@@ -1946,6 +1978,7 @@ pipelines.get("/:jobId", requireEditor, async (c) => {
       current_status: string | null;
       created_at: number;
       updated_at: number;
+      apply_skipped_json: string | null;
     }>();
 
   // Capability gate — also the AiScreen "is AI configured?" probe: a bogus id
@@ -2000,6 +2033,7 @@ pipelines.get("/:jobId", requireEditor, async (c) => {
       state: owned.state,
       updatedAt: new Date(owned.updated_at * 1000).toISOString(),
       createdAt: new Date(owned.created_at * 1000).toISOString(),
+      ...(owned.apply_skipped_json ? { applySkipped: parseApplySkipped(owned.apply_skipped_json) } : {}),
     });
   }
 
@@ -2030,7 +2064,7 @@ interface FollowUpInput {
 // job_id is derived deterministically from the parent so two concurrent polls
 // collapse via ON CONFLICT DO NOTHING; the parent claim guard makes the whole
 // thing idempotent.
-async function enqueueFollowUp(env: Env, input: FollowUpInput): Promise<void> {
+export async function enqueueFollowUp(env: Env, input: FollowUpInput): Promise<void> {
   // Normalize any rowIds a translate child carries so the stored options_json
   // holds the canonical (sorted+deduped) set the dedupe key compares against (#347).
   const followUpOptions = normalizeTranslateRowIdsJson(input.pipelineType, input.followUpOptionsJson);
@@ -2066,9 +2100,9 @@ async function enqueueFollowUp(env: Env, input: FollowUpInput): Promise<void> {
            job_id, user_id, pipeline_type, book, start_chapter, end_chapter,
            session_key, state, priority, options_json,
            source_generation, source_owner, source_repo, source_ref, source_stamps_json,
-           created_at, updated_at
+           created_at, updated_at, edit_log_watermark
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', 1, ?8,
-                   ?9, ?10, ?11, ?12, ?13, unixepoch(), unixepoch())
+                   ?9, ?10, ?11, ?12, ?13, unixepoch(), unixepoch(), ${inheritedWatermarkSql(14)})
          ON CONFLICT(job_id) DO NOTHING`,
       )
       .bind(
@@ -2085,6 +2119,7 @@ async function enqueueFollowUp(env: Env, input: FollowUpInput): Promise<void> {
         parentStamp?.source_repo ?? null,
         parentStamp?.source_ref ?? null,
         parentStamp?.source_stamps_json ?? null,
+        input.parentJobId,
       ),
   ]);
 }
@@ -2104,7 +2139,7 @@ interface FollowUpChainInput {
 // child's pipelineType + options, and stores the remainder on the child row
 // so the same logic fires the next step when this child completes. Same
 // priority=1 + atomic-batch + deterministic-id idempotency as enqueueFollowUp.
-async function enqueueFollowUpFromChain(env: Env, input: FollowUpChainInput): Promise<void> {
+export async function enqueueFollowUpFromChain(env: Env, input: FollowUpChainInput): Promise<void> {
   let chain: ChainStepValue[];
   try {
     chain = JSON.parse(input.chainJson) as ChainStepValue[];
@@ -2160,9 +2195,9 @@ async function enqueueFollowUpFromChain(env: Env, input: FollowUpChainInput): Pr
            job_id, user_id, pipeline_type, book, start_chapter, end_chapter,
            session_key, state, priority, options_json, follow_up_chain,
            source_generation, source_owner, source_repo, source_ref, source_stamps_json,
-           created_at, updated_at
+           created_at, updated_at, edit_log_watermark
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', 1, ?8, ?9,
-                   ?10, ?11, ?12, ?13, ?14, unixepoch(), unixepoch())
+                   ?10, ?11, ?12, ?13, ?14, unixepoch(), unixepoch(), ${inheritedWatermarkSql(15)})
          ON CONFLICT(job_id) DO NOTHING`,
       )
       .bind(
@@ -2180,6 +2215,7 @@ async function enqueueFollowUpFromChain(env: Env, input: FollowUpChainInput): Pr
         stamp.legacy.source_repo,
         stamp.legacy.source_ref,
         stamp.stampsJson,
+        input.parentJobId,
       ),
   ]);
 }
@@ -2220,7 +2256,7 @@ pipelines.get("/", requireEditor, async (c) => {
             start_chapter, end_chapter, session_key, state, priority,
             current_skill, current_status, error_kind, error_message,
             output_json, follow_up_job_id, created_at, updated_at,
-            last_polled_at, notified_user_at, options_json`;
+            last_polled_at, notified_user_at, options_json, apply_skipped_json`;
 
   if (stateList === null) {
     // Default: the live queue is visible to everyone (active + waiting jobs,
@@ -2283,6 +2319,7 @@ pipelines.get("/", requireEditor, async (c) => {
             output_json: null,
             error_kind: null,
             error_message: null,
+            apply_skipped_json: null,
           }
         : row;
     // options_json itself stays server-side (a notes run's hints live there);
@@ -2330,6 +2367,8 @@ interface PipelineRowSelect {
   last_polled_at: number | null;
   notified_user_at: number | null;
   options_json: string | null;
+  // What the translate apply left alone (#601, migration 0076): JSON, or NULL.
+  apply_skipped_json: string | null;
   // Present only on the default (shared-queue) list where we JOIN users, so the
   // UI can attribute another user's run. Absent on the explicit-state branch.
   started_by_username?: string | null;

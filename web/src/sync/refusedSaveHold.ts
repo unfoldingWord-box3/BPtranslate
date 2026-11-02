@@ -24,8 +24,9 @@
 //     keeps the user's text as a refused draft (refusedRowDraft.ts). For tN it
 //     does not: NoteCard's draft is not marked refused, so once the card adopts
 //     the server text its no-diff clear drops the draft and the refused text is
-//     lost, the same as main (known limit; whether an edit should win over a
-//     later AI apply is a product decision, #601).
+//     lost, the same as main (known limit, #724: #601 decided the translator's
+//     edit wins over a later AI apply, and the server now skips notes touched
+//     while the job was queued, but a refused save never reaches the server).
 //
 // Kept free of IndexedDB / api.ts imports so it can be unit-tested from a plain
 // Node script (refusedSaveHold.test.mjs).
