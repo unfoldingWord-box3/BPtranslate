@@ -3,7 +3,7 @@
 // pill. The bot's three older actions (Generate ULT + UST, Write translation
 // notes, Write translation questions) were removed in #470.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   Button,
   Menu,
@@ -47,6 +47,19 @@ interface Props {
   onMessage?: (msg: string) => void;
   /** Called after a Door43 import completes so the parent can refetch the chapter. */
   onImported?: () => void;
+  /**
+   * Custom trigger (#481): an icon button in a header row, or an item in a
+   * host's overflow menu. Call `open` with the element the pipeline menu
+   * should anchor to — a stable one, not a menu item that is about to
+   * unmount. Omitted, the menu renders its default outlined "AI" button.
+   */
+  renderTrigger?: (open: (anchor: HTMLElement) => void) => ReactNode;
+  /**
+   * Open the menu below the anchor, aligned to its inline end (the flow
+   * account menu's placement), for an anchor at the end of a bar — the
+   * avatar, on phones (#481). Default: MUI's placement over the anchor.
+   */
+  menuBelowEnd?: boolean;
 }
 
 interface PipelineOption {
@@ -100,7 +113,7 @@ function relativeMinutes(seconds: number): string {
   return `${Math.floor(diff / 3600)}h ${Math.floor((diff % 3600) / 60)} min`;
 }
 
-export function PipelineMenu({ book, chapter, onMessage, onImported }: Props) {
+export function PipelineMenu({ book, chapter, onMessage, onImported, renderTrigger, menuBelowEnd }: Props) {
   const { t } = useTranslation();
   const projectConfig = useProjectConfig();
   // Only gateway-language projects get AI actions ("Translate chapter" for tN
@@ -315,15 +328,29 @@ export function PipelineMenu({ book, chapter, onMessage, onImported }: Props) {
 
   return (
     <>
-      <Button
-        size="small"
-        variant="outlined"
-        startIcon={<AutoAwesomeIcon fontSize="small" />}
-        onClick={(e) => setAnchorEl(e.currentTarget)}
+      {renderTrigger ? (
+        renderTrigger(setAnchorEl)
+      ) : (
+        <Button
+          size="small"
+          variant="outlined"
+          startIcon={<AutoAwesomeIcon fontSize="small" />}
+          onClick={(e) => setAnchorEl(e.currentTarget)}
+        >
+          {t("pipeline.aiButton")}
+        </Button>
+      )}
+      <Menu
+        anchorEl={anchorEl}
+        open={Boolean(anchorEl)}
+        onClose={close}
+        {...(menuBelowEnd
+          ? {
+              anchorOrigin: { vertical: "bottom", horizontal: "right" },
+              transformOrigin: { vertical: "top", horizontal: "right" },
+            }
+          : {})}
       >
-        {t("pipeline.aiButton")}
-      </Button>
-      <Menu anchorEl={anchorEl} open={Boolean(anchorEl)} onClose={close}>
         {visibleOptions.map((opt) => {
           const running = runningType(opt.type);
           return (

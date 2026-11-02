@@ -869,6 +869,7 @@
   },
   "pipeline": {
     "aiButton": "AI",
+    "startAiRun": "Start an AI run",
     "generateUltUst": "Generate ULT + UST",
     "writeTranslationNotes": "Write translation notes",
     "writeTranslationQuestions": "Write translation questions",

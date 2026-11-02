@@ -115,6 +115,7 @@ import {
   type ProgressPair,
 } from "../../lib/packageLifecycle";
 import { FlowStatusChip } from "./FlowStatusChip";
+import { useFlowAiRun } from "./FlowAiRunAction";
 
 export interface PackageHubScreenProps extends FlowScreenContext {
   book: string;
@@ -593,14 +594,28 @@ export default function PackageHubScreen({ book, role, lastPosition }: PackageHu
   const { skip } = theme.palette.flows;
   // md+ (>=900px): the surface cards flow into the grid-3 desk (file header).
   const wide = useMediaQuery(theme.breakpoints.up("md"));
+  const isTabletUp = useMediaQuery(theme.breakpoints.up("tablet"));
 
   const projectConfig = useProjectConfig();
   const translationMode = isTranslationProject(projectConfig);
   const targetLabel = projectConfig?.languageName || t("flowWords.target");
 
-  const { summary, summaryStatus } = useBook(book, true);
+  const { summary, summaryStatus, reloadSummary } = useBook(book, true);
 
   const [open, setOpen] = useState<ExpandableSurface | null>(null);
+  // The AI run's chapter field starts at the chapter last worked on in this
+  // book, else 1; its range input ("1-14") covers more of the book.
+  const aiChapter = lastPosition && lastPosition.book === book ? Math.max(1, lastPosition.chapter) : 1;
+  // AI run (#481): top bar on tablet+, account menu on phone; nothing for
+  // viewers. A Door43 import, Aquifer pull or re-source changes the book's
+  // rows, so the hub's counts reload after one.
+  const aiRun = useFlowAiRun({
+    book,
+    chapter: aiChapter,
+    role,
+    phone: !isTabletUp,
+    onImported: reloadSummary,
+  });
 
   // BookSummary includes a chapter-0 entry for book front matter (intro tn
   // rows, 0 verses — verified against GET /api/chapters/ZEC: ids 0–14 for a
@@ -673,6 +688,7 @@ export default function PackageHubScreen({ book, role, lastPosition }: PackageHu
   return (
     <Box sx={{ height: "100%", minHeight: 0, overflowY: "auto", textAlign: "start" }}>
       {/* topbar */}
+      {aiRun.action}
       <FlowHeader>
         <Box sx={{ maxWidth: wide ? 1440 : COLUMN_PX, mx: "auto", paddingInline: 2, paddingBlock: 1.5 }}>
           <Stack direction="row" alignItems="center" spacing={1.25}>
@@ -707,6 +723,7 @@ export default function PackageHubScreen({ book, role, lastPosition }: PackageHu
                 {t("flowVerse.hub.chapterCount", { count: totals.chapters })}
               </Typography>
             )}
+            {aiRun.headerButton}
           </Stack>
           {/* Progress lives on the lifecycle card below (A4), fed by the A2
               rollup — not duplicated in this topbar. */}

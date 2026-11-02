@@ -35,6 +35,7 @@ import {
 } from "@mui/material";
 import AddIcon from "@mui/icons-material/Add";
 import AdminPanelSettingsIcon from "@mui/icons-material/AdminPanelSettings";
+import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import ChatIcon from "@mui/icons-material/Chat";
 import HelpOutlineIcon from "@mui/icons-material/HelpOutline";
 import CheckIcon from "@mui/icons-material/Check";
@@ -63,11 +64,17 @@ type Props = {
   onLogout?: () => void;
   isAdmin?: boolean;
   onOpenClassic?: () => void;
+  /**
+   * The current screen's "Start an AI run" on phones (#481), registered by
+   * FlowAiRunAction. Called with the avatar button, so the pipeline menu opens
+   * where the account menu was.
+   */
+  onStartAiRun?: (anchor: HTMLElement) => void;
   /** Phones only: show a Help item; it gets the avatar button to return focus to. */
   onOpenHelp?: (returnFocus: HTMLElement | null) => void;
 };
 
-export function AccountMenu({ username, onLogout, isAdmin, onOpenClassic, onOpenHelp }: Props) {
+export function AccountMenu({ username, onLogout, isAdmin, onOpenClassic, onStartAiRun, onOpenHelp }: Props) {
   const { t } = useTranslation();
   const [anchor, setAnchor] = useState<null | HTMLElement>(null);
   const [langAnchor, setLangAnchor] = useState<null | HTMLElement>(null);
@@ -125,6 +132,27 @@ export function AccountMenu({ username, onLogout, isAdmin, onOpenClassic, onOpen
         )}
         {(username || orgLanguageLabel) && <Divider />}
 
+        {/* First, because on phones this is the screen's own work action, not
+            an account setting. */}
+        {onStartAiRun && (
+          <MenuItem
+            // Takes the menu's roving focus (see the note on the dark-mode
+            // row) when present, since it is the first focusable item.
+            autoFocus
+            onClick={() => {
+              const avatar = anchor;
+              setAnchor(null);
+              if (avatar) onStartAiRun(avatar);
+            }}
+          >
+            <ListItemIcon>
+              <AutoAwesomeIcon fontSize="small" sx={{ color: "text.secondary" }} />
+            </ListItemIcon>
+            <ListItemText primary={t("pipeline.startAiRun")} />
+          </MenuItem>
+        )}
+        {onStartAiRun && <Divider />}
+
         <WorkspaceSwitcher variant="submenuItem" />
 
         {/* autoFocus establishes the menu's roving focus. MUI only sets it up
@@ -133,7 +161,7 @@ export function AccountMenu({ username, onLogout, isAdmin, onOpenClassic, onOpen
             whole menu is pointer-only (the same defect classic's account menu
             still has, #224). The org row above is a MenuItem too, so ArrowUp
             reaches it; it renders nothing on a single-org install. */}
-        <MenuItem autoFocus onClick={toggleTheme}>
+        <MenuItem autoFocus={!onStartAiRun} onClick={toggleTheme}>
           <ListItemIcon>
             <DarkModeIcon fontSize="small" sx={{ color: "text.secondary" }} />
           </ListItemIcon>
