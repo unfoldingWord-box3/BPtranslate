@@ -204,6 +204,31 @@ eq(
   "twl (no admin_bulk_state column, field absent) → still reimportable",
 );
 
+// ── an approved row is NOT reimportable (issues #414, #732) ─────────────────
+// Approval leaves updated_by alone and logs 'validate', which latestSource
+// ignores, so an approved AI draft still reads AI-only and a hand-approved row
+// whose bulk stamp was cleared still reads pristine.
+eq(
+  isReimportableRow({ updated_by: 7, latestSource: AI_SOURCE, deleted_at: null, translation_state: "validated", kind: "tn" }),
+  false,
+  "approved AI-only tn → NOT reimportable",
+);
+eq(
+  isReimportableRow({ updated_by: null, latestSource: null, deleted_at: null, translation_state: "validated", kind: "tq" }),
+  false,
+  "approved tq with no author (bulk stamp cleared by a hand approval) → NOT reimportable",
+);
+eq(
+  isReimportableRow({ updated_by: 7, latestSource: AI_SOURCE, deleted_at: null, translation_state: "ai_draft", kind: "tn" }),
+  true,
+  "unapproved AI-only tn → still reimportable",
+);
+eq(
+  isReimportableRow({ updated_by: null, latestSource: null, deleted_at: null, translation_state: null, kind: "tn" }),
+  true,
+  "untouched imported tn (state null) → still reimportable",
+);
+
 // ── isReissuedTombstone (issue #427, option 2) ────────────────────────────────
 // A soft-deleted row keeps its (book, id) primary key forever, so master's row
 // bearing that id cannot land via the normal INSERT path. Which of the two
