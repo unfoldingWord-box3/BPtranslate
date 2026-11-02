@@ -1105,10 +1105,32 @@ function statePins(opts: StateWriteOpts, first: number, trash: boolean): { sql: 
   return { sql, values };
 }
 
+// A hand approval ends a bulk approval (issue #414, option A). The admin bulk
+// sweep and the Aquifer importer stamp admin_bulk_state, which keeps the row out
+// of the AI few-shot examples (contextExport.ts) and out of translation-memory
+// suggestions. A person approving the row one at a time is the review the stamp
+// says never happened, so the approval clears it and the row counts as a
+// human-approved example again.
+//
+// The stamp ALSO made the row non-pristine for the nightly reimport
+// (isReimportableRow, #394). A bulk-approved imported row has updated_by NULL,
+// and this write's edit_log action ('validate') is not a content action, so
+// clearing the stamp alone would make the row pristine again and let the
+// reimport overwrite approved work. So when a stamp is cleared, the approver
+// (?5) becomes updated_by if the row had no author yet. A row that already had
+// one (an AI draft) keeps it and ends up exactly where a hand-approved AI draft
+// that was never swept already is. In SQLite every SET expression reads the
+// row's values from before the UPDATE, so the CASE sees the stamp still present.
+// Un-approve (state 'edited') does not use this: the stamp stays.
+const HAND_APPROVAL_CLAUSE =
+  ", admin_bulk_state = NULL" +
+  ", updated_by = CASE WHEN admin_bulk_state IS NOT NULL THEN COALESCE(updated_by, ?5) ELSE updated_by END";
+
 // Set the translation_state on a target-language tN row (multilingual review
 // flow; PIPELINE-SPEC §4.1). Like setTnBit, this is a state flip, not a
 // content edit: it does NOT bump `version` (in-flight If-Match preconditions
-// stay valid) and leaves `updated_by` alone. The audit action ('validate' |
+// stay valid) and leaves `updated_by` alone, except that approving a bulk-approved
+// row with no author records the approver (HAND_APPROVAL_CLAUSE). The audit action ('validate' |
 // 'unvalidate') is written with source=NULL ('chat' when a chat reviewer
 // approved) — an explicit human approval is a human edit_log entry, which is
 // also what clears the 'ai_pipeline' chip. The
@@ -1123,8 +1145,10 @@ async function setTnTranslationState(
 ): Promise<TnRow | null> {
   const now = Math.floor(Date.now() / 1000);
   const action = state === "validated" ? "validate" : "unvalidate";
+  const approve = state === "validated";
   const auditPins = statePins(opts, 6, true);
-  const updatePins = statePins(opts, 5, true);
+  // An approval binds the approver as ?5 (handApprovalClause), so its pins start at ?6.
+  const updatePins = statePins(opts, approve ? 6 : 5, true);
   // Approval snapshots the now-published content into pre_draft_json (migration
   // 0049) — NOT NULL. A subsequent human content edit demotes 'validated' ->
   // 'edited' (see the demote CASE in the PATCH handler), and the export gate
@@ -1132,8 +1156,8 @@ async function setTnTranslationState(
   // re-approved. Clearing to NULL instead would let the unvalidated edit reach
   // DCS as a legacy row. Un-approve leaves the snapshot in place (the once-
   // approved content keeps exporting — accepted, docs/plan Design 2).
-  const snapshotClause = state === "validated"
-    ? ", pre_draft_json = json_object('note', note, 'tags', tags)"
+  const snapshotClause = approve
+    ? ", pre_draft_json = json_object('note', note, 'tags', tags)" + HAND_APPROVAL_CLAUSE
     : "";
   // Only rows that are ALREADY translation drafts (state non-NULL) can be
   // validated/un-validated. Without this guard a validate on a row the
@@ -1160,7 +1184,7 @@ async function setTnTranslationState(
            SET translation_state = ?1, updated_at = ?2${snapshotClause}
          WHERE id = ?3 AND deleted_at IS NULL AND translation_state IS NOT NULL${bookClause(4)}${updatePins.sql}`,
       )
-      .bind(state, now, id, book, ...updatePins.values),
+      .bind(state, now, id, book, ...(approve ? [userId ?? null] : []), ...updatePins.values),
   ]);
   if (!updateRes.meta.changes) return null;
   // With latest_source, like a PATCH response: the chat reads it back as its
@@ -1170,7 +1194,7 @@ async function setTnTranslationState(
 
 // Set the translation_state on a target-language tQ row — the exact analogue of
 // setTnTranslationState (kind='tq'). State flip, not a content edit: does NOT
-// bump `version` and leaves `updated_by` alone; audit source=NULL or 'chat'
+// bump `version` and leaves `updated_by` alone (but see HAND_APPROVAL_CLAUSE); audit source=NULL or 'chat'
 // (human approval, which also clears the 'ai_pipeline' chip). Guarded on
 // translation_state IS NOT NULL so a row the translate pipeline never touched
 // can't be validated.
@@ -1184,12 +1208,14 @@ async function setTqTranslationState(
 ): Promise<TqRow | null> {
   const now = Math.floor(Date.now() / 1000);
   const action = state === "validated" ? "validate" : "unvalidate";
+  const approve = state === "validated";
   // tq_rows has no trashed_at: the state pin is the whole guard.
   const auditPins = statePins(opts, 6, false);
-  const updatePins = statePins(opts, 5, false);
-  // Approval snapshots the now-published content — see setTnTranslationState.
-  const snapshotClause = state === "validated"
-    ? ", pre_draft_json = json_object('question', question, 'response', response)"
+  const updatePins = statePins(opts, approve ? 6 : 5, false);
+  // Approval snapshots the now-published content and ends a bulk stamp — see
+  // setTnTranslationState.
+  const snapshotClause = approve
+    ? ", pre_draft_json = json_object('question', question, 'response', response)" + HAND_APPROVAL_CLAUSE
     : "";
   // Audit INSERT first, so a state pin sees the row before the UPDATE changes
   // it — see setTnTranslationState.
@@ -1208,7 +1234,7 @@ async function setTqTranslationState(
            SET translation_state = ?1, updated_at = ?2${snapshotClause}
          WHERE id = ?3 AND deleted_at IS NULL AND translation_state IS NOT NULL${bookClause(4)}${updatePins.sql}`,
       )
-      .bind(state, now, id, book, ...updatePins.values),
+      .bind(state, now, id, book, ...(approve ? [userId ?? null] : []), ...updatePins.values),
   ]);
   if (!updateRes.meta.changes) return null;
   // With latest_source — see setTnTranslationState.

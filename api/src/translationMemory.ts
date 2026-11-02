@@ -9,7 +9,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import type { Env } from "./index";
-import { currentUserId, requireEditor, requireAdmin } from "./auth";
+import { currentUserId, requireEditor, requireAdmin } from "./auth.ts";
 import {
   REGISTERS,
   TERM_STATUSES,
@@ -609,6 +609,11 @@ translationMemory.get("/terms/count", requireEditor, async (c) => {
 // the design doc's "source + target" pairing is NOT yet built: tn_rows/tq_rows
 // don't store a source snapshot, and the row's own English source lives in a
 // different book's published TSV, not this row. Known gap; see PR review notes.
+//
+// Rows only ever approved in bulk (admin_bulk_state set: the admin review-state
+// sweep or the Aquifer importer) are skipped, the same rule as the AI few-shot
+// selectors in contextExport.ts: nobody may have read them (issue #414). A hand
+// approval clears the stamp (rows.ts HAND_APPROVAL_CLAUSE) and brings the row in.
 // ---------------------------------------------------------------------------
 
 translationMemory.get("/examples", requireEditor, async (c) => {
@@ -618,7 +623,7 @@ translationMemory.get("/examples", requireEditor, async (c) => {
   const limit = Math.min(Math.max(parseInt(c.req.query("limit") ?? "100", 10) || 100, 1), 500);
 
   if (resource === "tn") {
-    const conds = ["translation_state = 'validated'", "deleted_at IS NULL", "trashed_at IS NULL"];
+    const conds = ["translation_state = 'validated'", "admin_bulk_state IS NULL", "deleted_at IS NULL", "trashed_at IS NULL"];
     const binds: unknown[] = [];
     if (supportRef) {
       binds.push(supportRef);
@@ -640,7 +645,7 @@ translationMemory.get("/examples", requireEditor, async (c) => {
     return c.json({ resource: "tn", examples: rows.results ?? [] });
   }
   if (resource === "tq") {
-    const conds = ["translation_state = 'validated'", "deleted_at IS NULL"];
+    const conds = ["translation_state = 'validated'", "admin_bulk_state IS NULL", "deleted_at IS NULL"];
     const binds: unknown[] = [];
     if (q) {
       const like = `%${escapeLikeParam(q)}%`;

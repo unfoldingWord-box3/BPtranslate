@@ -50,7 +50,10 @@
 //    swept it). `updated_at` does move, so the row sorts as recently touched.
 //    The audit trail is edit_log, written per chapter with source =
 //    ADMIN_BULK_SOURCE so a sweep is distinguishable from a translator's
-//    approval.
+//    approval. (One exception on the per-row side, issue #414: hand-approving a
+//    STAMPED row clears the stamp and, if the row had no author, records the
+//    approver in updated_by so it stays non-pristine; see HAND_APPROVAL_CLAUSE in
+//    rows.ts. The sweep itself still never touches updated_by.)
 //
 // 6. SUBREQUEST BUDGET. Writes are SET-BASED — two statements per chapter (one
 //    UPDATE, one INSERT ... SELECT into edit_log), not two per row — so a
