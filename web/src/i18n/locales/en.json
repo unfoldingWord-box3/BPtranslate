@@ -2678,6 +2678,9 @@
       "unsavedOffscreen_one": "{{count}} unsaved edit off-screen",
       "unsavedOffscreen_other": "{{count}} unsaved edits off-screen",
       "saveVerseRef": "Save {{book}} {{chapter}}:{{verse}} {{version}}?",
+      "unsavedDraftRef": "Unsaved: {{ref}}",
+      "goToDraft": "Go to it",
+      "goToDraftAria": "Go to unsaved {{ref}}",
       "aiDraftReady": "AI draft ready · v{{verse}}"
     },
     "errorBoundary": {

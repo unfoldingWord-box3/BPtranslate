@@ -159,6 +159,7 @@ import { extractEditableText, extractPlainText, normalizeEditable } from "../../
 import { buildVerseIndex } from "../../lib/verseRange";
 import { versionIsRtl, versionLabel } from "../../lib/versionLabels";
 import { drafts, verseKey } from "../../sync/drafts";
+import { useShowDraftEditors } from "../../sync/draftEditors";
 import { onOutboxResult, outbox } from "../../sync/outbox";
 import type { ChapterLockedBody, VerseDto } from "../../sync/api";
 import { SCRIPTURE_FONT_STACK } from "../../theme";
@@ -374,6 +375,14 @@ export default function TranslateScriptureScreen({
       UST: verseNum != null ? (verseIndexes.UST?.[verseNum] ?? null) : null,
     }),
     [verseIndexes, verseNum],
+  );
+  // The cursor verse's lane editors are on screen; a draft of any other verse
+  // (e.g. after Next) gets the unsaved-drafts reminder (#372).
+  useShowDraftEditors(
+    TARGET_LANES.flatMap((bv) => {
+      const base = bases[bv];
+      return base ? [verseKey(book, chapter, base.verse, bv)] : [];
+    }),
   );
   const baselines = useMemo<Record<TargetLane, string>>(
     () => ({

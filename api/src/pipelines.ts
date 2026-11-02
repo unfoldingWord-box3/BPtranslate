@@ -703,14 +703,32 @@ export async function dispatchNext(env: Env): Promise<void> {
       : undefined;
   const isArticleJob =
     job.pipeline_type === "translate" && (optResourceType === "tw" || optResourceType === "ta");
+  // A translate verse range rides at the TOP level of the bot's start body:
+  // bp-assistant's options schema is strict and has no verse keys (its
+  // StartBodySchema reads verseStart/verseEnd beside book/startChapter), so
+  // left in options the whole start is a 400. options_json keeps them, because
+  // the dedup SQL, the chapter lock and the internal runner read them there.
+  let upstreamOptions = options;
+  let verseScope: { verseStart?: unknown; verseEnd?: unknown } = {};
+  if (job.pipeline_type === "translate" && options && typeof options === "object") {
+    const { verseStart, verseEnd, ...rest } = options as Record<string, unknown>;
+    if (verseStart != null || verseEnd != null) {
+      upstreamOptions = rest;
+      verseScope = {
+        ...(verseStart != null ? { verseStart } : {}),
+        ...(verseEnd != null ? { verseEnd } : {}),
+      };
+    }
+  }
   const upstreamBody: Record<string, unknown> = {
     pipelineType: job.pipeline_type,
     ...(isArticleJob
       ? {}
       : { book: job.book, startChapter: job.start_chapter, endChapter: job.end_chapter }),
+    ...verseScope,
     username,
     sessionKey: job.session_key,
-    ...(options ? { options } : {}),
+    ...(upstreamOptions ? { options: upstreamOptions } : {}),
   };
 
   // Per-org AI provider config (migration 0066): translate jobs only. Read
@@ -1940,7 +1958,8 @@ pipelines.post("/start", requireEditor, async (c) => {
   if (state === "failed") {
     // This job won the slot but the upstream POST failed during its own
     // dispatch. Surface it so the menu toasts instead of pretending success.
-    return c.json({ error: "upstream_error", message: after?.error_message ?? "dispatch failed" }, 502);
+    // jobId: the failed row, so a caller (the chat's bpt_draft) can name it.
+    return c.json({ error: "upstream_error", message: after?.error_message ?? "dispatch failed", jobId }, 502);
   }
   // Still queued — something else holds the slot or is ahead by priority.
   const snap = await queueSnapshot(c.env);
@@ -1962,6 +1981,30 @@ pipelines.get("/unpublished-scripture/:book", requireEditor, async (c) => {
   return c.json({ book, ...(await unpublishedScripture(c.env.DB, book)) });
 });
 
+// What a job's apply staged and what became of it, per kind (tn | tq | verse |
+// article): proposals staged in pending_imports, how many were applied
+// (accepted) and how many rejected. Empty until the apply has staged anything.
+// Read-only; the chat's bpt_job_status calls it only after GET /:jobId below
+// answered for the caller's own job.
+export async function jobResultCounts(
+  env: Env,
+  jobId: string,
+): Promise<Record<string, { proposed: number; applied: number; rejected: number }>> {
+  const rs = await env.DB.prepare(
+    `SELECT kind, COUNT(*) AS proposed,
+            SUM(CASE WHEN accepted_at IS NOT NULL THEN 1 ELSE 0 END) AS applied,
+            SUM(CASE WHEN rejected_at IS NOT NULL THEN 1 ELSE 0 END) AS rejected
+       FROM pending_imports WHERE job_id = ?1 GROUP BY kind ORDER BY kind`,
+  )
+    .bind(jobId)
+    .all<{ kind: string; proposed: number; applied: number; rejected: number }>();
+  const out: Record<string, { proposed: number; applied: number; rejected: number }> = {};
+  for (const r of rs.results ?? []) {
+    out[r.kind] = { proposed: Number(r.proposed), applied: Number(r.applied), rejected: Number(r.rejected) };
+  }
+  return out;
+}
+
 // GET /api/pipelines/:jobId
 pipelines.get("/:jobId", requireEditor, async (c) => {
   const userId = currentUserId(c);
@@ -1976,13 +2019,14 @@ pipelines.get("/:jobId", requireEditor, async (c) => {
   const owned = await c.env.DB.prepare(
     `SELECT job_id, upstream_job_id, user_id, pipeline_type, book, start_chapter,
             end_chapter, session_key, follow_up_options, follow_up_chain,
-            follow_up_job_id, error_kind, state, current_skill, current_status,
+            follow_up_job_id, error_kind, error_message, state, current_skill, current_status,
             created_at, updated_at, (output_json IS NULL) AS no_output_yet,
             runner, wf_status_json, apply_skipped_json
        FROM pipeline_jobs WHERE job_id = ?1`,
   )
     .bind(jobId)
     .first<PolledJob & {
+      error_message: string | null;
       state: string;
       current_skill: string | null;
       current_status: string | null;
@@ -2023,6 +2067,22 @@ pipelines.get("/:jobId", requireEditor, async (c) => {
       createdAt: new Date(owned.created_at * 1000).toISOString(),
       queuePosition: pos?.position,
       queueAhead: pos?.ahead,
+      // A job that failed before the bot gave it an id (the dispatch POST was
+      // refused, or the org key could not be used) has its reason only here,
+      // in D1. Same current shape as the import_failed rewrite in
+      // pollPipelineJob, so the web chip and the chat's bpt_job_status show it.
+      ...(owned.state === "failed"
+        ? {
+            current: {
+              chapter: owned.start_chapter,
+              skill: "",
+              status: "",
+              startedAt: "",
+              errorKind: owned.error_kind ?? "failed",
+              error: owned.error_message ?? "failed before the AI service started it",
+            },
+          }
+        : {}),
     });
   }
 

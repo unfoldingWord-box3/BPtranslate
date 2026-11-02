@@ -166,6 +166,7 @@ import { useProjectConfig, isTranslationProject } from "../../hooks/useProjectCo
 import { useUnsavedGuard } from "../../hooks/useUnsavedGuard";
 import { api, ApiError, type ArticleUnit, type ArticleUnitMeta } from "../../sync/api";
 import { drafts as draftStore, articleKey, type DraftRecord } from "../../sync/drafts";
+import { useShowDraftEditors } from "../../sync/draftEditors";
 import { pipelineStore, getSessionKey } from "../../sync/pipelineStore";
 import { MarkdownView } from "../MarkdownView";
 import { realChapterNumbers } from "../../lib/bookSummary";
@@ -1102,6 +1103,9 @@ function ArticleDetail({
   const pathsKey = useMemo(() => [...paths].sort().join("|"), [paths]);
 
   const [parts, setParts] = useState<ArticleUnit[] | null>(null);
+  // This article's part editors are on screen once loaded; drafts of any other
+  // article get the unsaved-drafts reminder (#372).
+  useShowDraftEditors(parts ? parts.map((p) => articleKey(resource, p.path)) : []);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [draftsByPath, setDraftsByPath] = useState<Record<string, string>>({});
   const [editingPath, setEditingPath] = useState<string | null>(null);
