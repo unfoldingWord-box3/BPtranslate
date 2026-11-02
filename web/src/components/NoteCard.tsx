@@ -102,7 +102,7 @@ interface Props {
   // comes from "switch to v{N}" in the history dialog, opts carries the
   // origin version so the server can mark the new edit_log entry + row
   // column for chip-label purposes.
-  onSave: (patch: Partial<TnRow>, opts?: { restoredFromVersion?: number }) => void;
+  onSave: (patch: Partial<TnRow>, opts?: { restoredFromVersion?: number; draftRef?: { chapter: number; verse: number } }) => void;
   // Resolves false when the trash request failed, so handleDelete can leave the
   // user's unsaved text alone (see the comment there).
   onDelete: () => void | Promise<boolean | void>;
@@ -851,7 +851,9 @@ function NoteCardInner({
     setSavePendingVersion(savedRef.current.version);
     sentRef.current = sentSave(patch);
     noteSave(patch, row.version);
-    onSave(patch);
+    // draftRef: this card made the save, so a refused one is marked on its
+    // draft and outlives an AI apply (#724; refusedRowDraft.ts).
+    onSave(patch, { draftRef: { chapter: row.chapter, verse: row.verse } });
     // Rebase the snapshot so the chip stops showing "*" after a manual
     // save and a follow-up Undo reverts to the just-saved state.
     if (sessionSnapshotRef.current !== null) {
@@ -977,7 +979,7 @@ function NoteCardInner({
     onChange(patch);
     sentRef.current = sentSave(patch);
     noteSave(patch, row.version);
-    onSave(patch, { restoredFromVersion: fromVersion });
+    onSave(patch, { restoredFromVersion: fromVersion, draftRef: { chapter: row.chapter, verse: row.verse } });
   };
 
   const aiPrereqsMet = !!supportRef && quote.trim().length > 0;
@@ -1217,8 +1219,15 @@ function NoteCardInner({
       // hasRowDiff is measured against an unhydrated baseline and would
       // spuriously wipe a draft we haven't had the chance to restore. Kept
       // while a live later op for the row holds it: the baseline can follow
-      // a confirmed row that carries that op's unlanded text (#620).
-      void drafts.clearRowUnlessHeld(draftKey);
+      // a confirmed row that carries that op's unlanded text (#620). A refused
+      // save of this card's stays as the draft (#724): once an AI apply moves
+      // the row on, the card shows the AI note but the refused text is still
+      // unsaved. `current` is in the form flushPending sends.
+      void drafts.clearRowUnlessHeld(draftKey, {
+        quote: toTsv(quote),
+        note: toTsv(note),
+        support_reference: supportRef,
+      });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
