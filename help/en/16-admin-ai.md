@@ -3,19 +3,19 @@ id: admin-ai
 title: AI studio and AI service (admin)
 routes: [ai]
 roles: [admin]
-keywords: [ai, artificial intelligence, pipeline, draft, generate, ult, ust, translate chapter, provider, api key, gemini, claude, openai, xai, grok, model, bring your own key, byo, run, queue, retry]
+keywords: [ai, artificial intelligence, pipeline, draft, translate chapter, translate questions, translate notes, provider, api key, gemini, claude, openai, xai, grok, model, bring your own key, byo, run, queue, retry]
 screenshots:
   - admin-ai-1 #/admin/ai
 ---
 
-**AI studio** is where you run AI drafts for a chapter and where you save the AI provider key of your organization. A run locks its chapter for editing until it finishes.
+**AI studio** is where you have AI translate a chapter's translation notes or translation questions, and where you save the AI provider key of your organization. A run locks its chapter for editing until it finishes.
 
 ![The AI studio with the run controls and the runs table](../screenshots/en/admin-ai-1.png)
 
 ## Start an AI run
 1. Open **AI studio** in the admin menu.
 2. Choose the **Book** and type the **Chapter**.
-3. Press **AI** and choose what to do. For example **Generate ULT + UST**, **Write translation notes**, **Write translation questions**, **Translate chapter** or **Translate questions**. ULT and UST are the literal and simplified scripture texts.
+3. Press **AI** and choose **Translate chapter** (the chapter's translation notes) or **Translate questions** (its translation questions). These two appear only in a translation project, one that translates from a source language.
 4. In the confirm window, choose a chapter or a range and press **Start**.
 
 Only one job runs at a time. The other jobs wait in line. When AI drafts are ready, a banner on the page tells you to review them.
