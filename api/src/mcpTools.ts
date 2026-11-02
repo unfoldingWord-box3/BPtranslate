@@ -1644,7 +1644,7 @@ const NO_SUCH_JOB = "No job with that id that you started in this project.";
 const jobStatus: ToolDef = {
   name: "bpt_job_status",
   description:
-    "Check on an AI draft run this user started (job_id from bpt_draft). Returns state (queued, dispatching, running, paused_for_outage, paused_for_usage_limit, done, failed, cancelled), queue_position while queued, progress (chapter, step, status) while running, error when it failed, and results: per kind (tn, tq), how many drafts the run proposed, how many were applied and how many rejected (empty until the run's output is staged). Only the user who started the run can see it, and only in this project. Read-only.",
+    "Check on an AI draft run this user started (job_id from bpt_draft). Returns state (queued, dispatching, running, paused_for_outage, paused_for_usage_limit, done, failed, cancelled), queue_position while queued, progress (chapter, step, status) while running, error when it failed, and results: per kind (tn, tq), how many drafts the run proposed, how many were applied and how many rejected (empty until the run's output is staged), and, once done, kept_because_changed_by_people: tn notes the run left as they were because a person changed them after the run was queued (count and ids). Only the user who started the run can see it, and only in this project. Read-only.",
   inputSchema: {
     type: "object",
     properties: {
@@ -1682,6 +1682,14 @@ const jobStatus: ToolDef = {
       ...(cur && state !== "failed" ? { progress: { chapter: cur.chapter ?? null, step: cur.skill ?? null, status: cur.status ?? null } } : {}),
       ...(cur && (cur.error || cur.errorKind) ? { error: { kind: cur.errorKind ?? null, message: cur.error ?? null } } : {}),
       results: await session.jobResults(jobId),
+      // #729: notes the apply left alone because a person changed them after
+      // the run was queued.
+      ...(b.applySkipped
+        ? (() => {
+            const k = b.applySkipped as { tnTouched?: unknown; tnTouchedIds?: unknown };
+            return { kept_because_changed_by_people: { tn: Number(k.tnTouched ?? 0), tn_ids: Array.isArray(k.tnTouchedIds) ? k.tnTouchedIds : [] } };
+          })()
+        : {}),
       updated_at: b.updatedAt ?? null,
     };
   },
