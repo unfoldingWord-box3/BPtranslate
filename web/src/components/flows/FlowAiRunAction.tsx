@@ -37,7 +37,7 @@ export type OpenAiRun = (anchor: HTMLElement) => void;
 /**
  * Set by App.tsx around the flow screens. A screen at the phone band registers
  * its OpenAiRun here (null on unmount); AccountMenu shows "Start an AI run"
- * while one is registered.
+ * ("Import from Door43" in a source project, #731) while one is registered.
  */
 export const FlowAccountAiRunContext = createContext<(open: OpenAiRun | null) => void>(() => {});
 

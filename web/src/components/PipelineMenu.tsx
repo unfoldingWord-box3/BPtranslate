@@ -126,8 +126,9 @@ export function PipelineMenu({ book, chapter, onMessage, onImported, renderTrigg
   const projectConfig = useProjectConfig();
   // Only gateway-language projects get AI actions ("Translate chapter" for tN
   // and tQ). The English root project (translationSource == null) has none
-  // since the bot's three older actions were removed (#470); its menu keeps
-  // the import items below.
+  // since the bot's three older actions were removed (#470), so its trigger
+  // opens the Door43 import dialog directly and this menu only ever opens in a
+  // translation project (#731).
   const translationProject = isTranslationProject(projectConfig);
   const visibleOptions = useMemo(
     () => (translationProject ? [TRANSLATE_OPTION, TRANSLATE_TQ_OPTION] : []),

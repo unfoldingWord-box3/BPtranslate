@@ -69,7 +69,8 @@ type Props = {
   /**
    * The current screen's "Start an AI run" on phones (#481), registered by
    * FlowAiRunAction. Called with the avatar button, so the pipeline menu opens
-   * where the account menu was.
+   * where the account menu was. In a source project it is labelled "Import
+   * from Door43" and opens that dialog instead (#731).
    */
   onStartAiRun?: (anchor: HTMLElement) => void;
   /** Phones only: show a Help item; it gets the avatar button to return focus to. */
