@@ -163,20 +163,64 @@ export function AiServiceSection() {
     }
   };
 
+  // The help switch has its own endpoint, so it renders even when the
+  // provider settings below fail to load.
+  const helpSwitch = (
+    <>
+      {helpLoadError && !help && (
+        <Alert
+          severity="error"
+          action={
+            <Button size="small" onClick={loadHelp}>
+              {t("common.retry")}
+            </Button>
+          }
+        >
+          {t("preferences.aiService.helpChat.loadFailed")}
+        </Alert>
+      )}
+
+      {help && (
+        <Box>
+          <FormControlLabel
+            control={
+              <Switch
+                checked={help.enabled}
+                disabled={helpSaving}
+                onChange={(e) => void onHelpToggle(e.target.checked)}
+              />
+            }
+            label={t("preferences.aiService.helpChat.label")}
+          />
+          <FormHelperText sx={{ mx: 0 }}>
+            {t("preferences.aiService.helpChat.helper", { cap: formatUsd(help.capUsd) })}{" "}
+            {t("preferences.aiService.helpChat.needsKey")}
+          </FormHelperText>
+        </Box>
+      )}
+    </>
+  );
+
   if (settings === null) {
-    return loadError ? (
-      <Alert
-        severity="error"
-        action={
-          <Button size="small" onClick={() => void load()}>
-            {t("common.retry")}
-          </Button>
-        }
-      >
-        {t("preferences.aiService.loadFailed")}
-      </Alert>
-    ) : (
-      <CircularProgress size={22} />
+    return (
+      <Stack spacing={2}>
+        {loadError ? (
+          <Alert
+            severity="error"
+            action={
+              <Button size="small" onClick={() => void load()}>
+                {t("common.retry")}
+              </Button>
+            }
+          >
+            {t("preferences.aiService.loadFailed")}
+          </Alert>
+        ) : (
+          <CircularProgress size={22} />
+        )}
+        {helpSwitch}
+        <Snackbar open={!!save.msg} autoHideDuration={4000} onClose={save.clear} message={save.msg ?? ""} />
+      </Stack>
     );
   }
 
@@ -397,37 +441,7 @@ export function AiServiceSection() {
           </Button>
         </Box>
 
-        {helpLoadError && !help && (
-          <Alert
-            severity="error"
-            action={
-              <Button size="small" onClick={loadHelp}>
-                {t("common.retry")}
-              </Button>
-            }
-          >
-            {t("preferences.aiService.helpChat.loadFailed")}
-          </Alert>
-        )}
-
-        {help && (
-          <Box>
-            <FormControlLabel
-              control={
-                <Switch
-                  checked={help.enabled}
-                  disabled={helpSaving}
-                  onChange={(e) => void onHelpToggle(e.target.checked)}
-                />
-              }
-              label={t("preferences.aiService.helpChat.label")}
-            />
-            <FormHelperText sx={{ mx: 0 }}>
-              {t("preferences.aiService.helpChat.helper", { cap: formatUsd(help.capUsd) })}{" "}
-              {t("preferences.aiService.helpChat.needsKey")}
-            </FormHelperText>
-          </Box>
-        )}
+        {helpSwitch}
       </Stack>
 
       <Dialog open={clearOpen} onClose={() => !clearing && setClearOpen(false)} maxWidth="xs" fullWidth>

@@ -1181,6 +1181,8 @@ export interface HelpStatus {
   model: string | null;
   capUsd: number;
   remainingUsd: number;
+  /** False when what is left is below one question's reservation (remainingUsd is then 0). */
+  canAsk: boolean;
 }
 export interface HelpAskBody {
   lang: string;
@@ -2249,13 +2251,15 @@ export const api = {
       headers: { "If-Match": String(expectedVersion) },
     }),
   // ── In-app help assistant (api/src/help/helpRoutes.ts) ──
-  getHelpStatus: () => request<HelpStatus>(`/api/help/status`),
+  getHelpStatus: (lang?: string) =>
+    request<HelpStatus>(`/api/help/status${lang ? `?lang=${encodeURIComponent(lang)}` : ""}`),
   // The model call can take up to 45 s server-side.
-  askHelp: (body: HelpAskBody) =>
+  askHelp: (body: HelpAskBody, signal?: AbortSignal) =>
     request<HelpAskResponse>(`/api/help/ask`, {
       method: "POST",
       body: JSON.stringify(body),
       timeoutMs: 60_000,
+      signal,
     }),
   setHelpChatEnabled: (enabled: boolean) =>
     request<{ enabled: boolean }>(`/api/help/settings`, {

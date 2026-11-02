@@ -34,21 +34,28 @@ export default function AskAi({ open, articles, lang, routeKey, onOpenArticle, c
   const [history, setHistory] = useState<Msg[]>([]);
   const [cited, setCited] = useState<string[]>([]);
   const [remaining, setRemaining] = useState<number | null>(null);
+  const [canAsk, setCanAsk] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inFlight = useRef(false);
+  const abortRef = useRef<AbortController | null>(null);
 
   // Refetch each time the drawer opens so an admin's switch / key change shows
   // up without a reload; a failed fetch is retried on the next open.
   useEffect(() => {
-    if (!open) return;
+    // The panel stays mounted when closed: closing it cancels a pending question.
+    if (!open) {
+      abortRef.current?.abort();
+      return;
+    }
     let alive = true;
     api
-      .getHelpStatus()
+      .getHelpStatus(lang)
       .then((s) => {
         if (alive) {
           setStatus(s);
           setRemaining(s.remainingUsd);
+          setCanAsk(s.canAsk);
         }
       })
       .catch(() => {
@@ -57,7 +64,7 @@ export default function AskAi({ open, articles, lang, routeKey, onOpenArticle, c
     return () => {
       alive = false;
     };
-  }, [open]);
+  }, [open, lang]);
 
   const trimmed = question.trim();
   const hits = useMemo(() => (trimmed ? searchHelp(articles, trimmed).slice(0, 3) : []), [articles, trimmed]);
@@ -104,8 +111,11 @@ export default function AskAi({ open, articles, lang, routeKey, onOpenArticle, c
   // A failed ask may still have been charged server-side; refresh the amount.
   const refreshRemaining = () => {
     api
-      .getHelpStatus()
-      .then((s) => setRemaining(s.remainingUsd))
+      .getHelpStatus(lang)
+      .then((s) => {
+        setRemaining(s.remainingUsd);
+        setCanAsk(s.canAsk);
+      })
       .catch(() => {
         /* keep the last known amount */
       });
@@ -117,20 +127,27 @@ export default function AskAi({ open, articles, lang, routeKey, onOpenArticle, c
     setBusy(true);
     setError(null);
     const messages: Msg[] = [...history, { role: "user", content: trimmed }];
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
     try {
-      const res = await api.askHelp({ lang, route: routeKey ?? "", messages });
+      const res = await api.askHelp({ lang, route: routeKey ?? "", messages }, ctrl.signal);
       setHistory([...messages, { role: "assistant", content: res.answer }]);
       setCited(res.articleIds);
       setRemaining(res.remainingUsd);
       setQuestion("");
+      refreshRemaining(); // also picks up canAsk
     } catch (e) {
-      setError(describe(e));
+      // Cancelled (button or panel closed): keep the question, show no error.
+      if (!ctrl.signal.aborted) setError(describe(e));
       refreshRemaining();
     } finally {
+      if (abortRef.current === ctrl) abortRef.current = null;
       inFlight.current = false;
       setBusy(false);
     }
   };
+
+  const cancel = () => abortRef.current?.abort();
 
   const reset = () => {
     setHistory([]);
@@ -169,11 +186,11 @@ export default function AskAi({ open, articles, lang, routeKey, onOpenArticle, c
       <Box aria-live="polite" aria-relevant="additions">
       {history.map((m, i) =>
         m.role === "user" ? (
-          <Typography key={i} variant="body2" sx={{ fontWeight: 600, mt: 1 }}>
+          <Typography key={i} variant="body2" dir="auto" sx={{ fontWeight: 600, mt: 1 }}>
             {m.content}
           </Typography>
         ) : (
-          <Box key={i} sx={{ ...bodySx, "& p:first-of-type": { marginBlockStart: "0.2em" } }}>
+          <Box key={i} dir="auto" sx={{ ...bodySx, "& p:first-of-type": { marginBlockStart: "0.2em" } }}>
             <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
               {m.content}
             </ReactMarkdown>
@@ -250,10 +267,15 @@ export default function AskAi({ open, articles, lang, routeKey, onOpenArticle, c
             size="small"
             variant="contained"
             onClick={() => void ask()}
-            disabled={!trimmed || busy || (remaining !== null && remaining <= 0)}
+            disabled={!trimmed || busy || !canAsk || (remaining !== null && remaining <= 0)}
             startIcon={busy ? <CircularProgress size={14} color="inherit" /> : undefined}
           >
             {busy ? t("help.ask.asking") : t("help.ask.button")}
+          </Button>
+        )}
+        {busy && (
+          <Button size="small" onClick={cancel}>
+            {t("help.ask.cancel")}
           </Button>
         )}
         {history.length > 0 && (

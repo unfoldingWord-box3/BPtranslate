@@ -3700,6 +3700,7 @@
       "button": "Ask AI",
       "asking": "Asking…",
       "newQuestion": "New question",
+      "cancel": "Cancel",
       "sources": "From the guide:",
       "remaining": "${{amount}} left today",
       "notConfigured": "Ask AI isn't set up for this organization.",
