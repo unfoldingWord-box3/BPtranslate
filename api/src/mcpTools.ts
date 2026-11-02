@@ -1280,21 +1280,43 @@ function articleRefusal(resource: "tw" | "ta", path: string, status: number, bod
   throw new Error(`BPtranslate write for ${resource} ${path} returned ${status}`);
 }
 
+// Write results stay under the chat's cap too (GET_ROW_BYTE_BUDGET, as
+// bpt_get_article): one long tA part is ~15 KB of English plus a two-byte
+// translation. They never carry the English (the reviewer read it in
+// bpt_get_article); past the cap they leave out the reviewer's own text, then
+// the part's wording, keeping its version and state.
+const ARTICLE_RESULT_BUDGET = GET_ROW_BYTE_BUDGET - 1_000;
+const TOO_LONG = " The wording is too long to include here: call bpt_get_article to show it.";
+
+function articleWritePart(u: Record<string, unknown>) {
+  const { source_md: _english, ...part } = projectArticlePart(u);
+  return part;
+}
+
+function withoutWording(part: ReturnType<typeof articleWritePart>) {
+  const { target_md: _wording, ...rest } = part;
+  return { ...rest, target_left_out: true };
+}
+
 // retryWith: what to call again with. An approval pins the state too, and a
 // state change leaves the version as it was (see conflict).
 function articleConflict(yours: string | null, current: Record<string, unknown>, what: string, retryWith = "current.version") {
-  return {
-    status: "conflict",
-    message:
-      `Someone changed this article part after the reviewer saw it, so ${what} was NOT ${yours === null ? "made" : "saved"}. ` +
-      `Show the reviewer the current wording and ask; to go ahead, call again with ${retryWith}.`,
-    ...(yours !== null ? { your_text: yours } : {}),
-    current: projectArticlePart(current),
-  };
+  const message =
+    `Someone changed this article part after the reviewer saw it, so ${what} was NOT ${yours === null ? "made" : "saved"}. ` +
+    `Show the reviewer the current wording and ask; to go ahead, call again with ${retryWith}.`;
+  const part = articleWritePart(current);
+  const full = { status: "conflict", message, ...(yours !== null ? { your_text: yours } : {}), current: part };
+  if (getRowBytes(full) <= ARTICLE_RESULT_BUDGET) return full;
+  const noYours = { status: "conflict", message, ...(yours !== null ? { your_text_left_out: true } : {}), current: part };
+  if (getRowBytes(noYours) <= ARTICLE_RESULT_BUDGET) return noYours;
+  return { ...noYours, message: message + TOO_LONG, current: withoutWording(part) };
 }
 
 function articleApplied(u: Record<string, unknown>) {
-  return { status: "applied", version: u.version, state: u.translation_state ?? null, part: projectArticlePart(u) };
+  const part = articleWritePart(u);
+  const out = { status: "applied", version: u.version, state: u.translation_state ?? null, part };
+  if (getRowBytes(out) <= ARTICLE_RESULT_BUDGET) return out;
+  return { ...out, part: withoutWording(part) };
 }
 
 const getArticle: ToolDef = {
@@ -1372,7 +1394,7 @@ const ARTICLE_PATH_SCHEMA = { type: "string", description: "The part's path from
 const editArticle: ToolDef = {
   name: "bpt_edit_article",
   description:
-    "Save the reviewer's wording for one part of a tW or tA article, replacing that part's translation (target_md) whole. Pass the version the reviewer was shown; it is saved only if the part is still at that version. Returns status applied with the new version and state (an AI draft or approved part becomes state edited, so it needs approving again: pass the NEW version and state to bpt_approve_article), or status conflict when someone changed the part since, with your_text and current (the wording and version now): nothing was saved, so show the reviewer the current wording and ask. Errors change nothing. Requires edit access.",
+    "Save the reviewer's wording for one part of a tW or tA article, replacing that part's translation (target_md) whole. Pass the version the reviewer was shown; it is saved only if the part is still at that version. Returns status applied with the new version and state (an AI draft or approved part becomes state edited, so it needs approving again: pass the NEW version and state to bpt_approve_article), or status conflict when someone changed the part since, with your_text and current (the wording and version now): nothing was saved, so show the reviewer the current wording and ask. A very long part comes back with your_text_left_out or target_left_out instead of the text: call bpt_get_article to show it. Errors change nothing. Requires edit access.",
   inputSchema: {
     type: "object",
     properties: {
@@ -1403,7 +1425,7 @@ const editArticle: ToolDef = {
 const approveArticle: ToolDef = {
   name: "bpt_approve_article",
   description:
-    "Approve one part of a tW or tA article that the reviewer was shown and accepted, marking it validated. Only for wording the reviewer has actually read in this conversation. Pass the version and state exactly as the reviewer was shown them (after bpt_edit_article, the version and state it returned; approving does not change the version); the part is approved only if it is still at that version and in that state. Returns status applied, or status conflict when the part changed since (its wording, or its state: someone approved or un-approved it), with current (the wording, version and state now): nothing was approved, so show the reviewer the current wording first. A part with no translation yet cannot be approved. Errors change nothing. Requires edit access.",
+    "Approve one part of a tW or tA article that the reviewer was shown and accepted, marking it validated. Only for wording the reviewer has actually read in this conversation. Pass the version and state exactly as the reviewer was shown them (after bpt_edit_article, the version and state it returned; approving does not change the version); the part is approved only if it is still at that version and in that state. Returns status applied, or status conflict when the part changed since (its wording, or its state: someone approved or un-approved it), with current (the wording, version and state now): nothing was approved, so show the reviewer the current wording first (target_left_out: too long to include, call bpt_get_article). A part with no translation yet cannot be approved. Errors change nothing. Requires edit access.",
   inputSchema: {
     type: "object",
     properties: {
@@ -1445,6 +1467,11 @@ const approveArticle: ToolDef = {
     const b = (body ?? {}) as Record<string, unknown>;
     if (status === 409 && b.error === "version_mismatch") {
       return articleConflict(null, b.current as Record<string, unknown>, "the approval", "current.version and current.state");
+    }
+    // The route answers 404 for a part that is gone AND for one whose
+    // translation was cleared since the check above: re-read to say which.
+    if (status === 404 && (await getArticlePart(t.session, t.resource, t.path, true))) {
+      throw new ToolInputError(`${t.path} has no translation now, so there is nothing to approve. Nothing was changed.`);
     }
     if (status !== 200) articleRefusal(t.resource, t.path, status, body);
     return articleApplied(b);

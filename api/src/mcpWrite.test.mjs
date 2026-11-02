@@ -26,7 +26,7 @@ import { attachAuth, chatConfirmMac, chatWriteEnv, requireCsrf } from "./auth.ts
 import { requireWorkspaceMatch } from "./workspaces.ts";
 import { blockViewerWrites } from "./viewerGuard.ts";
 import { dispatch } from "./mcp.ts";
-import { missingPlaceholders, templatePlaceholders } from "./mcpTools.ts";
+import { GET_ROW_BYTE_BUDGET, missingPlaceholders, templatePlaceholders } from "./mcpTools.ts";
 
 // counter.calls counts D1 round trips (a batch counts once, as on D1), so a
 // test can measure what one chat write costs.
@@ -1129,6 +1129,88 @@ test("bpt_get_article: a long translated article leaves out its English, and too
   const tooBig = await call("bpt_get_article", { resource: "ta", article: "figs-aside" });
   assert.equal(tooBig.isError, true);
   assert.match(tooBig.data.error, /too long/);
+});
+
+// #670 part (d) review: write results fit the chat's cap, and never carry raw columns.
+const resultBytes = (data) => Buffer.byteLength(JSON.stringify(data), "utf8");
+const RAW_COLUMNS = ["pre_draft_json", "draft_meta_json", "source_sha", "updated_by", "updated_at", "deleted_at", "latest_source", "resource", "article_id"];
+function assertProjected(part) {
+  for (const k of RAW_COLUMNS) assert.equal(part[k], undefined, `${k} must not reach chat`);
+  assert.equal(part.source_md, undefined, "write results leave out the English the reviewer already read");
+}
+
+test("article write results on a long tA part stay under the chat cap and carry only the projected part", async () => {
+  const { call, sqlite, env, ctx } = fresh();
+  sqlite.prepare(`UPDATE article_units SET source_md = ?, target_md = ?, pre_draft_json = '{"target_md":"old"}' WHERE path = ?`)
+    .run("An aside. ".repeat(1500), "ك".repeat(7000), ASIDE);
+
+  const edit = await call("bpt_edit_article", { resource: "ta", path: ASIDE, version: 3, text: "ل".repeat(7000) });
+  assert.equal(edit.data.status, "applied", JSON.stringify(edit.data).slice(0, 300));
+  assert.ok(resultBytes(edit.data) < GET_ROW_BYTE_BUDGET, `applied ${resultBytes(edit.data)}`);
+  assertProjected(edit.data.part);
+  assert.equal(edit.data.part.target_md, "ل".repeat(7000));
+
+  // The web saves a long part, then the chat edits at the old version with long text.
+  const web = webArticles(env, ctx);
+  const p = await web(`/api/articles/ta/unit?path=${encodeURIComponent(ASIDE)}`, "PATCH", { target_md: "و".repeat(9000) }, { "If-Match": "4" });
+  assert.equal(p.status, 200);
+  const stale = await call("bpt_edit_article", { resource: "ta", path: ASIDE, version: 4, text: "م".repeat(9000) });
+  assert.equal(stale.data.status, "conflict", JSON.stringify(stale.data).slice(0, 300));
+  assert.ok(resultBytes(stale.data) < GET_ROW_BYTE_BUDGET, `conflict ${resultBytes(stale.data)}`);
+  assertProjected(stale.data.current);
+  assert.equal(stale.data.your_text, undefined, "the reviewer's own long text is left out first");
+  assert.equal(stale.data.your_text_left_out, true);
+  assert.equal(stale.data.current.target_md, "و".repeat(9000));
+  assert.deepEqual([stale.data.current.version, stale.data.current.state], [5, "edited"]);
+
+  // Current wording alone past the cap: only version and state, and a pointer to bpt_get_article.
+  const p2 = await web(`/api/articles/ta/unit?path=${encodeURIComponent(ASIDE)}`, "PATCH", { target_md: "و".repeat(16000) }, { "If-Match": "5" });
+  assert.equal(p2.status, 200);
+  const huge = await call("bpt_edit_article", { resource: "ta", path: ASIDE, version: 5, text: "x" });
+  assert.equal(huge.data.status, "conflict");
+  assert.ok(resultBytes(huge.data) < GET_ROW_BYTE_BUDGET, `huge conflict ${resultBytes(huge.data)}`);
+  assert.equal(huge.data.current.target_md, undefined);
+  assert.equal(huge.data.current.target_left_out, true);
+  assert.deepEqual([huge.data.current.version, huge.data.current.state], [6, "edited"]);
+  assert.match(huge.data.message, /bpt_get_article/);
+
+  // Approve: a stale pre-check conflict, a route 409 and an applied result all fit.
+  const staleApprove = await call("bpt_approve_article", { resource: "ta", path: ASIDE, version: 5, state: "edited" });
+  assert.equal(staleApprove.data.status, "conflict");
+  assert.ok(resultBytes(staleApprove.data) < GET_ROW_BYTE_BUDGET);
+  const ok = await call("bpt_approve_article", { resource: "ta", path: ASIDE, version: 6, state: "edited" });
+  assert.equal(ok.data.status, "applied", JSON.stringify(ok.data).slice(0, 300));
+  assert.ok(resultBytes(ok.data) < GET_ROW_BYTE_BUDGET, `approve ${resultBytes(ok.data)}`);
+  assert.equal(ok.data.part.target_left_out, true);
+  assert.deepEqual([ok.data.version, ok.data.state, ok.data.part.state], [6, "validated", "validated"]);
+});
+
+test("article approve: a route 409 carries only the projected part (no raw columns)", async () => {
+  const { call, env, ctx, sqlite } = fresh();
+  sqlite.prepare(`UPDATE article_units SET pre_draft_json = '{"target_md":"old"}', draft_meta_json = '{}' WHERE path = ?`).run(ASIDE);
+  await webArticles(env, ctx)(`/api/articles/ta/unit/validate?path=${encodeURIComponent(ASIDE)}`, "POST", { value: 0 });
+  const r = await call("bpt_approve_article", { resource: "ta", path: ASIDE, version: 3, state: "validated" });
+  assert.equal(r.data.status, "conflict");
+  assertProjected(r.data.current);
+  assert.deepEqual(Object.keys(r.data.current).sort(), ["part", "path", "state", "target_md", "version"]);
+});
+
+test("article approve: a part whose translation is cleared between the check and the write says nothing to approve, not gone", async () => {
+  const { call, sessions, sqlite, article, artLog } = fresh();
+  const session = sessions[EDITOR];
+  const send = session.send;
+  session.send = async (method, path, body, ifMatch) => {
+    if (method === "POST" && path.includes("/unit/validate")) {
+      sqlite.prepare(`UPDATE article_units SET translation_state = NULL, target_md = NULL WHERE path = ?`).run(GOD);
+    }
+    return send(method, path, body, ifMatch);
+  };
+  const r = await call("bpt_approve_article", { resource: "tw", path: GOD, version: 1, state: "ai_draft" });
+  assert.equal(r.isError, true);
+  assert.match(r.data.error, /nothing to approve/);
+  assert.doesNotMatch(r.data.error, /There is no/);
+  assert.equal(article("tw", GOD).translation_state, null);
+  assert.equal(artLog().length, 0);
 });
 
 // ── Issue #670 part (c): bpt_bulk_set_state ─────────────────────────────────
