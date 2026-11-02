@@ -37,6 +37,7 @@ import AddIcon from "@mui/icons-material/Add";
 import AdminPanelSettingsIcon from "@mui/icons-material/AdminPanelSettings";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import ChatIcon from "@mui/icons-material/Chat";
+import CloudDownloadIcon from "@mui/icons-material/CloudDownload";
 import HelpOutlineIcon from "@mui/icons-material/HelpOutline";
 import CheckIcon from "@mui/icons-material/Check";
 import LanguageIcon from "@mui/icons-material/Language";
@@ -46,7 +47,8 @@ import FormatSizeIcon from "@mui/icons-material/FormatSize";
 import LogoutIcon from "@mui/icons-material/Logout";
 import RemoveIcon from "@mui/icons-material/Remove";
 import { useTranslation } from "react-i18next";
-import { useProjectConfig } from "../hooks/useProjectConfig";
+import { isTranslationProject, useProjectConfig } from "../hooks/useProjectConfig";
+import { pipelineTrigger } from "../lib/pipelineTrigger";
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 import { ChatLinkDialog } from "./ChatLinkDialog";
 import { UI_LANGUAGES } from "../i18n";
@@ -83,6 +85,8 @@ export function AccountMenu({ username, onLogout, isAdmin, onOpenClassic, onStar
   const { mode: themeMode, toggle: toggleTheme } = useContext(ThemeModeContext);
   const { scale, setScale } = useContext(FontScaleContext);
   const projectConfig = useProjectConfig();
+  // A source project's run trigger is an import, not an AI run (#731).
+  const aiRunTrigger = pipelineTrigger(isTranslationProject(projectConfig));
   const orgLanguageLabel = projectConfig
     ? projectConfig.languageTitle || projectConfig.languageName || projectConfig.languageCode
     : null;
@@ -146,9 +150,13 @@ export function AccountMenu({ username, onLogout, isAdmin, onOpenClassic, onStar
             }}
           >
             <ListItemIcon>
-              <AutoAwesomeIcon fontSize="small" sx={{ color: "text.secondary" }} />
+              {aiRunTrigger.kind === "import" ? (
+                <CloudDownloadIcon fontSize="small" sx={{ color: "text.secondary" }} />
+              ) : (
+                <AutoAwesomeIcon fontSize="small" sx={{ color: "text.secondary" }} />
+              )}
             </ListItemIcon>
-            <ListItemText primary={t("pipeline.startAiRun")} />
+            <ListItemText primary={t(aiRunTrigger.actionKey)} />
           </MenuItem>
         )}
         {onStartAiRun && <Divider />}

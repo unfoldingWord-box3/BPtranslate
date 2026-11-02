@@ -1,9 +1,11 @@
 // Per-chapter trigger UI for the AI translate pipeline (translation notes and
 // questions, ~1h a chapter); we kick off and surface status via the bottom
 // pill. The bot's three older actions (Generate ULT + UST, Write translation
-// notes, Write translation questions) were removed in #470.
+// notes, Write translation questions) were removed in #470, so a source project
+// (the English root) has no AI actions: its trigger is a plain "Import" that
+// opens the Door43 import dialog directly (#731, see lib/pipelineTrigger.ts).
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   Button,
   Menu,
@@ -42,6 +44,7 @@ import { unpublishedWarning, type UnpublishedCheck } from "../lib/unpublishedScr
 import { isAiNeedsOrgKey, isAiProviderNotConfigured } from "../lib/aiProviderErrors";
 import { useTranslation } from "react-i18next";
 import { useProjectConfig, isTranslationProject } from "../hooks/useProjectConfig";
+import { pipelineTrigger } from "../lib/pipelineTrigger";
 
 interface Props {
   book: string;
@@ -53,7 +56,10 @@ interface Props {
    * Custom trigger (#481): an icon button in a header row, or an item in a
    * host's overflow menu. Call `open` with the element the pipeline menu
    * should anchor to — a stable one, not a menu item that is about to
-   * unmount. Omitted, the menu renders its default outlined "AI" button.
+   * unmount. Omitted, the menu renders its default outlined button: "AI" in
+   * a translation project, "Import" in a source project. In a source project
+   * `open` goes straight to the Door43 import dialog (#731), so a host that
+   * labels its own trigger should take that label from pipelineTrigger().
    */
   renderTrigger?: (open: (anchor: HTMLElement) => void) => ReactNode;
   /**
@@ -122,10 +128,12 @@ export function PipelineMenu({ book, chapter, onMessage, onImported, renderTrigg
   // and tQ). The English root project (translationSource == null) has none
   // since the bot's three older actions were removed (#470); its menu keeps
   // the import items below.
+  const translationProject = isTranslationProject(projectConfig);
   const visibleOptions = useMemo(
-    () => (isTranslationProject(projectConfig) ? [TRANSLATE_OPTION, TRANSLATE_TQ_OPTION] : []),
-    [projectConfig],
+    () => (translationProject ? [TRANSLATE_OPTION, TRANSLATE_TQ_OPTION] : []),
+    [translationProject],
   );
+  const trigger = pipelineTrigger(translationProject);
   const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
   const [confirm, setConfirm] = useState<PipelineOption | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -133,6 +141,13 @@ export function PipelineMenu({ book, chapter, onMessage, onImported, renderTrigg
   const [conflict, setConflict] = useState<PipelineConflictExisting | null>(null);
   const [refInput, setRefInput] = useState("");
   const [importOpen, setImportOpen] = useState(false);
+  // With no AI action the menu would hold only "Import from Door43", so the
+  // trigger opens that dialog itself. Stable per kind: renderTrigger hosts
+  // register it in an effect keyed on its identity.
+  const openTrigger = useCallback(
+    (anchor: HTMLElement) => (trigger.kind === "import" ? setImportOpen(true) : setAnchorEl(anchor)),
+    [trigger.kind],
+  );
   const [aquiferBusy, setAquiferBusy] = useState(false);
   const canPullAquifer = isAdmin() && isTranslationProject(projectConfig);
   // Admin-only, translation projects only: wipe this book's notes/questions and
@@ -349,15 +364,21 @@ export function PipelineMenu({ book, chapter, onMessage, onImported, renderTrigg
   return (
     <>
       {renderTrigger ? (
-        renderTrigger(setAnchorEl)
+        renderTrigger(openTrigger)
       ) : (
         <Button
           size="small"
           variant="outlined"
-          startIcon={<AutoAwesomeIcon fontSize="small" />}
-          onClick={(e) => setAnchorEl(e.currentTarget)}
+          startIcon={
+            trigger.kind === "import" ? (
+              <CloudDownloadIcon fontSize="small" />
+            ) : (
+              <AutoAwesomeIcon fontSize="small" />
+            )
+          }
+          onClick={(e) => openTrigger(e.currentTarget)}
         >
-          {t("pipeline.aiButton")}
+          {t(trigger.buttonKey)}
         </Button>
       )}
       <Menu
