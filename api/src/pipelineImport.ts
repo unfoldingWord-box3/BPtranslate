@@ -36,6 +36,7 @@ import { getText, outKey } from "./translate/storage.ts";
 import { selectRows } from "./translate/core.ts";
 import { rawUrlOriginError } from "./rawUrlPin.ts";
 import { sameDcsName } from "./repoUrl.ts";
+import { HUMAN_TOUCH_ACTIONS, HUMAN_TOUCH_SOURCES } from "./pipelineDedupSql.ts";
 
 interface OutputEntry {
   type?: string;
@@ -1457,19 +1458,9 @@ async function recordArticleNoApplyAlert(
   }
 }
 
-// edit_log entries that count as a person changing a note (#601, option B) or
-// a question (#725; questions only have content edits and Approve, so the
-// trash/untrash actions never occur for them):
-// a content edit (PATCH, history restore included), Approve, Not needed and
-// Restore. Keep and hint toggles are left out (the translate apply never writes
-// those bits, so they survive it, #602), and so is un-approve (the apply resets
-// the note to ai_draft anyway, #602). Sources: the web app (NULL), the chat
-// (`chat`) and the admin approve sweep (`admin_bulk_state`); machine writers
-// (ai_pipeline, hint_expansion, dcs_reimport, aquifer, nightly_finalize) are
-// not a person. Same action+source reading of edit_log as deleteUnkeptTns and
-// reimportClassify.ts.
-const HUMAN_TOUCH_ACTIONS = ["update", "validate", "trash", "untrash"] as const;
-const HUMAN_TOUCH_SOURCES = ["chat", "admin_bulk_state"] as const;
+// HUMAN_TOUCH_ACTIONS / HUMAN_TOUCH_SOURCES (which edit_log entries count as a
+// person changing a note or question) live in pipelineDedupSql.ts, shared with
+// the /start route's #757 check so the two can't read edit_log differently.
 
 // Ids among `ids` (this job's proposals) that a person touched after the job
 // was queued. Exact when the job carries an edit_log watermark (migration

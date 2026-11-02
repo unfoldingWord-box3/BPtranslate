@@ -29,6 +29,9 @@ import {
   coverageVerseRange,
   isNarrowerTranslateScope,
   needsRowVerseLookup,
+  needsTouchedRowCheck,
+  rowTouchedAfterJobBindings,
+  rowTouchedAfterJobSql,
   rowVerseLookupSql,
   rowVerseSpan,
 } from "./pipelineDedupSql.ts";
@@ -1684,11 +1687,13 @@ pipelines.post("/start", requireEditor, async (c) => {
     parsed.data.pipelineType === "translate" ? (parsed.data.translate?.verseEnd ?? 0) : null;
   // The projected columns are identical for both conflict queries (exact
   // identity and coverage) — the 409 body renders the same `existing` block
-  // either way.
+  // either way. edit_log_watermark is for the #757 touched-row check below.
   const conflictColumns = `j.job_id, j.user_id, j.pipeline_type, j.book, j.start_chapter,
             j.end_chapter, j.state, j.current_skill, j.current_status,
-            j.created_at, j.updated_at, u.dcs_username AS started_by_username`;
-  let dup = await c.env.DB.prepare(
+            j.created_at, j.updated_at, u.dcs_username AS started_by_username,
+            j.edit_log_watermark`;
+  type ConflictRow = PublicJobSummary & { user_id: number; edit_log_watermark: number | null };
+  let dup: ConflictRow | null = await c.env.DB.prepare(
     `SELECT ${conflictColumns}
        FROM pipeline_jobs j
        LEFT JOIN users u ON u.id = j.user_id
@@ -1706,7 +1711,8 @@ pipelines.post("/start", requireEditor, async (c) => {
       dedupVerseStart,
       dedupVerseEnd,
     )
-    .first<PublicJobSummary & { user_id: number }>();
+    .first<ConflictRow>();
+  const exactDup = dup;
   // #347 item 1 — "broader blocks narrower" (decided 2026-08-27). Exact identity
   // above is not enough: a row-scoped or verse-ranged translate started while a
   // CHAPTER-WIDE translate of the same book/chapter/resource is in flight would
@@ -1749,7 +1755,7 @@ pipelines.post("/start", requireEditor, async (c) => {
         coverageVerses.start,
         coverageVerses.end,
       )
-      .first<PublicJobSummary & { user_id: number }>();
+      .first<ConflictRow>();
   }
   // #745 — a row-scoped request ("re-run AI on this note") inside a running
   // VERSE-RANGE translate (e.g. bpt_draft on verses 2-4). The row ids carry no
@@ -1789,9 +1795,29 @@ pipelines.post("/start", requireEditor, async (c) => {
             LIMIT 1`,
         )
           .bind(book, startChapter, endChapter, dedupResourceType, span.start, span.end)
-          .first<PublicJobSummary & { user_id: number }>();
+          .first<ConflictRow>();
       }
     }
+  }
+  // #757 — a covering job does not redraft a row a person touched after it was
+  // queued (its apply skips that row: humanTouchedIds, #601 notes / #725
+  // questions). So when coverage (not exact identity) answered a row-scoped
+  // tn/tq request, ask edit_log once whether any requested row was touched after
+  // that job's enqueue; if so, drop the coverage answer and let the explicit
+  // redraft start. Exact-identity dups and every other start path skip this
+  // query. Only the earliest covering job is checked (the one the queries
+  // above return); see pipelineDedupSql.ts.
+  if (
+    dup &&
+    !exactDup &&
+    needsTouchedRowCheck(parsed.data.pipelineType, dedupResourceType, dedupNormRowIds)
+  ) {
+    const touched = await c.env.DB.prepare(
+      rowTouchedAfterJobSql(dedupResourceType, dup.edit_log_watermark !== null, dedupNormRowIds!.length),
+    )
+      .bind(...rowTouchedAfterJobBindings(book, dup, dedupNormRowIds!))
+      .first<{ hit: number }>();
+    if (touched) dup = null;
   }
   if (dup) {
     if (dup.user_id === userId) {

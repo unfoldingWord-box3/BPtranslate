@@ -1,5 +1,6 @@
 // Unit test for the scope terms of the /api/pipelines/start conflict queries
-// (issue #316 row scope, #347 item 2 verse range, #347 item 1 coverage).
+// (issue #316 row scope, #347 item 2 verse range, #347 item 1 coverage, #745
+// row scope inside a verse range, #757 rows touched after the covering job).
 //
 // The queries live inline in the Hono route in pipelines.ts, so this test drives
 // them against an in-memory node:sqlite DB (the schema-invariant testing pattern
@@ -22,6 +23,9 @@ import {
   coverageVerseRange,
   isNarrowerTranslateScope,
   needsRowVerseLookup,
+  needsTouchedRowCheck,
+  rowTouchedAfterJobBindings,
+  rowTouchedAfterJobSql,
   rowVerseLookupSql,
   rowVerseSpan,
 } from "./pipelineDedupSql.ts";
@@ -133,7 +137,7 @@ function makeDb() {
   function findCovering(translate, verses = coverageVerseRange(translate?.verseStart, translate?.verseEnd)) {
     return db
       .prepare(
-        `SELECT j.job_id, j.user_id
+        `SELECT j.job_id, j.user_id, j.created_at, j.edit_log_watermark
            FROM pipeline_jobs j
           WHERE ${PIPELINE_COVERAGE_WHERE}
           ORDER BY j.created_at ASC
@@ -153,6 +157,21 @@ function makeDb() {
   function resolveConflict(translate, pipelineType = "translate") {
     const exact = findDup(translate, pipelineType);
     if (exact) return exact;
+    const covering = findCoveringJob(translate, pipelineType);
+    if (!covering) return undefined;
+    // #757: the route's own predicate, SQL and bindings — a requested row a
+    // person touched after the covering job was queued drops the coverage answer.
+    const rt = pipelineType === "translate" ? (translate?.resourceType ?? "tn") : null;
+    const norm = normalizeRowIds(translate?.rowIds);
+    if (!needsTouchedRowCheck(pipelineType, rt, norm)) return covering;
+    const touched = db
+      .prepare(rowTouchedAfterJobSql(rt, covering.edit_log_watermark !== null, norm.length))
+      .get(...rowTouchedAfterJobBindings("MRK", covering, norm));
+    return touched ? undefined : covering;
+  }
+
+  // Both coverage paths (#347 item 1, then #745), as the route runs them.
+  function findCoveringJob(translate, pipelineType) {
     const verses = coverageVerseRange(translate?.verseStart, translate?.verseEnd);
     const norm = normalizeRowIds(translate?.rowIds);
     const narrower = isNarrowerTranslateScope(pipelineType, norm, verses);
