@@ -19,6 +19,7 @@ import {
   Box,
   TextField,
   Typography,
+  Alert,
 } from "@mui/material";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import CloudDownloadIcon from "@mui/icons-material/CloudDownload";
@@ -128,6 +129,21 @@ export function PipelineMenu({ book, chapter, onMessage, onImported }: Props) {
     null,
   );
   const [resourceBusy, setResourceBusy] = useState(false);
+  // #679 option C: AI translate runs read the workspace's Bible from Door43,
+  // so warn in the run dialog when this book has ULT/UST edits the nightly
+  // export has not published yet. Checked each time the dialog opens; a failed
+  // check shows no warning (the run itself is never blocked).
+  const [unpublished, setUnpublished] = useState(false);
+  useEffect(() => {
+    setUnpublished(false);
+    if (confirm?.type !== "translate") return;
+    const ctrl = new AbortController();
+    api
+      .unpublishedScripture(book, ctrl.signal)
+      .then((r) => setUnpublished(r.ult || r.ust))
+      .catch(() => {});
+    return () => ctrl.abort();
+  }, [confirm, book]);
 
   useEffect(() => pipelineStore.subscribe(setActiveJobs), []);
 
@@ -410,6 +426,11 @@ export function PipelineMenu({ book, chapter, onMessage, onImported }: Props) {
               ? t("pipeline.confirmRun", { label: t(confirm.label), duration: t(confirm.approxDuration) })
               : ""}
           </DialogContentText>
+          {unpublished && (
+            <Alert severity="warning" sx={{ mt: 2 }}>
+              {t("pipeline.unpublishedScriptureWarning")}
+            </Alert>
+          )}
           <Box sx={{ mt: 2, display: "flex", alignItems: "flex-start", gap: 1.5 }}>
             <Typography sx={{ pt: 1, fontWeight: 500 }}>{book}</Typography>
             <TextField

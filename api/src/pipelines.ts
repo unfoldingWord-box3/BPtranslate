@@ -40,6 +40,7 @@ import {
 import { applyContextRef } from "./assistedContextRef.ts";
 import { getLatestSuccessfulContextExport } from "./contextExportResults.ts";
 import { broadcastChapter } from "./wsEvents.ts";
+import { unpublishedScripture } from "./unpublishedScripture.ts";
 import { sameDcsName } from "./repoUrl.ts";
 import { isChapterWideTnTranslate, translateNoteSelection } from "./chapterLock.ts";
 import {
@@ -1950,6 +1951,15 @@ pipelines.post("/start", requireEditor, async (c) => {
     queuePosition: snap.positions.get(jobId)?.position,
   };
   return c.json(resp);
+});
+
+// GET /api/pipelines/unpublished-scripture/:book (#679). Does this book have
+// ULT/UST edits that the nightly export has not published yet? AI translate
+// runs read the target Bible from Door43, so the run dialog warns when they
+// won't see the newest text. Read-only and cheap: two EXISTS queries.
+pipelines.get("/unpublished-scripture/:book", requireEditor, async (c) => {
+  const book = c.req.param("book").toUpperCase();
+  return c.json({ book, ...(await unpublishedScripture(c.env.DB, book)) });
 });
 
 // GET /api/pipelines/:jobId

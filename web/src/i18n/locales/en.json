@@ -869,6 +869,7 @@
   },
   "pipeline": {
     "aiButton": "AI",
+    "unpublishedScriptureWarning": "This book has Bible text changes that are not published to Door43 yet. The AI reads the published Bible text, so this run will not see those changes. The nightly publish fixes this, or an admin can publish now with “Publish this book” on the book page. You can still start the run.",
     "generateUltUst": "Generate ULT + UST",
     "writeTranslationNotes": "Write translation notes",
     "writeTranslationQuestions": "Write translation questions",

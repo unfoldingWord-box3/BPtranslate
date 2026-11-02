@@ -2330,6 +2330,14 @@ export const api = {
       signal,
     }),
 
+  // #679: true per lane when the book has ULT/UST edits the nightly export
+  // has not published yet. AI translate runs read the published text.
+  unpublishedScripture: (book: string, signal?: AbortSignal) =>
+    request<{ book: string; ult: boolean; ust: boolean }>(
+      `/api/pipelines/unpublished-scripture/${encodeURIComponent(book)}`,
+      { signal },
+    ),
+
   pipelineStatus: (jobId: string, signal?: AbortSignal) =>
     request<PipelineStatusResponse>(
       `/api/pipelines/${encodeURIComponent(jobId)}`,
