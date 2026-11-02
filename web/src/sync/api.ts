@@ -2051,20 +2051,23 @@ export const api = {
   // chapter_locked) while a translate run will write the note (#602). Non-version-
   // bumping, mirrors setPreserveNote. Returns the updated row so the caller can
   // refresh local state (the collapsed/green treatment keys off the new state).
-  validateNote: (id: string, book: string, value: boolean) =>
+  // `bulk`: set by Approve-all loops. A one-at-a-time approval clears a bulk
+  // approval stamp (the row becomes an AI example again); Approve-all is itself
+  // a bulk approval and keeps it (#414).
+  validateNote: (id: string, book: string, value: boolean, opts?: { bulk?: boolean }) =>
     request<TnRow>(`/api/rows/tn/${encodeURIComponent(id)}/validate?book=${encodeURIComponent(book)}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ value: value ? 1 : 0 }),
+      body: JSON.stringify({ value: value ? 1 : 0, ...(opts?.bulk ? { bulk: true } : {}) }),
     }),
 
   // Translation-mode "Approve" for translationQuestions — the tQ analogue of
   // validateNote. value=true → 'validated'; value=false → 'edited'.
-  validateQuestion: (id: string, book: string, value: boolean) =>
+  validateQuestion: (id: string, book: string, value: boolean, opts?: { bulk?: boolean }) =>
     request<TqRow>(`/api/rows/tq/${encodeURIComponent(id)}/validate?book=${encodeURIComponent(book)}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ value: value ? 1 : 0 }),
+      body: JSON.stringify({ value: value ? 1 : 0, ...(opts?.bulk ? { bulk: true } : {}) }),
     }),
 
   // ── tW / tA articles ──
