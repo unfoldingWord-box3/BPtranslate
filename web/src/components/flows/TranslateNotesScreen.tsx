@@ -168,6 +168,7 @@ import { flowLaneSegmentsAcross, type FlowSegment } from "../../lib/flowHighligh
 import { isHebrewBook } from "../../lib/sourceSearch";
 import { realChapters } from "../../lib/bookSummary";
 import { drafts, rowKey } from "../../sync/drafts";
+import { useShowDraftEditors } from "../../sync/draftEditors";
 import {
   isEditorsPendingSave,
   pendingRevertSave,
@@ -487,6 +488,9 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   const total = queueIds?.length ?? 0;
   const currentId = queueIds && cursor < queueIds.length ? queueIds[cursor] : null;
   const row = currentId ? (rowById.get(currentId) ?? null) : null;
+  // The selected note's editor is on screen; a draft on any other note (e.g.
+  // after Next) gets the unsaved-drafts reminder (#372).
+  useShowDraftEditors(row ? [rowKey("tn", book, row.id)] : []);
   const statusedCount = queueIds ? queueIds.filter((id) => statuses[id]).length : 0;
 
   // Re-seek the cursor when `verse` changes while the queue is already built

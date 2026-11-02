@@ -4,10 +4,11 @@ import { fileURLToPath } from "node:url";
 import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import { newUserContext } from "./helpers";
 
-// Flows unsaved-drafts toast (#372, option A). Typing in a flows note editor
-// without saving leaves a draft in IndexedDB; on any other flows screen a
-// corner toast names it and offers "Go to it", which opens the editor holding
-// the draft. On the screen that holds the draft the toast stays quiet.
+// Flows unsaved-drafts toast (#372, option A). Typing in a flows editor
+// without saving leaves a draft in IndexedDB. While that draft's own editor is
+// showing the toast stays quiet; once it is not (another screen, or Next to
+// another card or verse on the same screen) a corner toast names the draft and
+// offers "Go to it", which opens the editor holding it.
 // Nothing here saves, so the shared ZEC fixture on the server is untouched.
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -39,7 +40,7 @@ test.afterEach(async () => {
   for (const c of openContexts.splice(0)) await c.close().catch(() => {});
 });
 
-async function openWithDraft(browser: Browser, user: string, uiLang?: string): Promise<Page> {
+async function newPage(browser: Browser, user: string, uiLang?: string): Promise<Page> {
   const { context } = await newUserContext(browser, user);
   openContexts.push(context);
   if (uiLang) {
@@ -54,6 +55,11 @@ async function openWithDraft(browser: Browser, user: string, uiLang?: string): P
   const page = await context.newPage();
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.route("https://git.door43.org/**", (route) => route.fulfill({ status: 404, body: "not mocked" }));
+  return page;
+}
+
+async function openWithDraft(browser: Browser, user: string, uiLang?: string): Promise<Page> {
+  const page = await newPage(browser, user, uiLang);
   await page.goto(`/#/notes/${BOOK}/${CHAPTER}/${VERSE}?row=${ROW}`);
   // The selected note's draft box: click it to edit, then type without saving.
   const box = page.locator('[role="button"][dir="auto"]').filter({ hasText: "AVD" }).first();
@@ -64,10 +70,26 @@ async function openWithDraft(browser: Browser, user: string, uiLang?: string): P
   return page;
 }
 
+/** The typed draft is back on screen, as text or in a textarea. */
+async function expectDraftRestored(page: Page): Promise<void> {
+  await expect
+    .poll(
+      () =>
+        page.evaluate(
+          (draft) =>
+            document.body.innerText.includes(draft) ||
+            Array.from(document.querySelectorAll("textarea")).some((t) => t.value === draft),
+          DRAFT,
+        ),
+      { timeout: 15_000 },
+    )
+    .toBe(true);
+}
+
 test("#372: an unsaved flows note shows a toast elsewhere, and Go to it opens it", async ({ browser }, testInfo) => {
   const page = await openWithDraft(browser, "unsaved-toast-372");
   const toast = page.getByRole("status").filter({ hasText: ui(EN, "widgets.toasts.unsavedDraftRef", { ref: REF }) });
-  // On the screen that holds the draft: no toast, once the toolbar's
+  // While the note's editor is showing: no toast, once the toolbar's
   // "1 unsaved" chip shows the draft has landed in the store.
   await expect(page.getByText(`1 ${ui(EN, "sync.unsaved")}`)).toBeVisible({ timeout: 15_000 });
   await expect(toast).toHaveCount(0);
@@ -83,23 +105,9 @@ test("#372: an unsaved flows note shows a toast elsewhere, and Go to it opens it
   await expect.poll(() => page.evaluate(() => location.hash)).toBe(
     `#/notes/${BOOK}/${CHAPTER}/${VERSE}?row=${ROW}`,
   );
-  // The note's editor restores the draft from IndexedDB, shown as text or in a
-  // textarea depending on whether the card reopens in edit mode.
-  await expect
-    .poll(
-      () =>
-        page.evaluate(
-          (draft) =>
-            document.body.innerText.includes(draft) ||
-            Array.from(document.querySelectorAll("textarea")).some((t) => t.value === draft),
-          DRAFT,
-        ),
-      { timeout: 15_000 },
-    )
-    .toBe(true);
+  await expectDraftRestored(page);
   await expect(toast).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath("372-landed.png") });
-  await page.context().close();
 });
 
 test("#372: the toast under the Arabic UI", async ({ browser }, testInfo) => {
@@ -113,21 +121,58 @@ test("#372: the toast under the Arabic UI", async ({ browser }, testInfo) => {
   await expect(toast).toBeVisible({ timeout: 15_000 });
   await expect(toast.getByRole("button", { name: ui(AR, "widgets.toasts.goToDraftAria", { ref: REF }) })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("372-toast-ar.png") });
-  await page.context().close();
 });
 
-// tW/tA articles are edited on Translate Words and note templates on Curate,
-// so a draft of either stays quiet there and toasts elsewhere. The seeded
-// workspace is an authoring project, where Translate Words shows only a
-// notice and has no articles to type into, so the drafts are written through
-// the app's own drafts module (the same instance the editors use) while the
-// route is open. The on-screen rule is decided by the route alone.
-test("#372: article and template drafts stay quiet on their own flows screens", async ({ browser }, testInfo) => {
-  const { context } = await newUserContext(browser, "unsaved-toast-372-words");
-  openContexts.push(context);
-  const page = await context.newPage();
-  await page.setViewportSize({ width: 1280, height: 900 });
-  await page.route("https://git.door43.org/**", (route) => route.fulfill({ status: 404, body: "not mocked" }));
+// Codex review of #736: paging away from the drafted card on the same screen
+// and chapter takes its editor off screen, so the reminder must show. The
+// notes screen does not write Next into the hash, so "Go to it" targets the
+// hash already showing; App remounts the screen, which re-seeds from the hash.
+test("#372: Next note on the same screen shows the toast, and Go to it comes back", async ({ browser }, testInfo) => {
+  const page = await openWithDraft(browser, "unsaved-toast-372-next");
+  const toast = page.getByRole("status").filter({ hasText: ui(EN, "widgets.toasts.unsavedDraftRef", { ref: REF }) });
+  await expect(page.getByText(`1 ${ui(EN, "sync.unsaved")}`)).toBeVisible({ timeout: 15_000 });
+  await expect(toast).toHaveCount(0);
+
+  await page.getByRole("button", { name: ui(EN, "flowTranslate.nextNote"), exact: true }).click();
+  await expect(toast).toBeVisible({ timeout: 15_000 });
+  await page.screenshot({ path: testInfo.outputPath("372-next-note-toast.png") });
+
+  const hashBefore = await page.evaluate(() => location.hash);
+  await toast.getByRole("button", { name: ui(EN, "widgets.toasts.goToDraftAria", { ref: REF }) }).click();
+  expect(await page.evaluate(() => location.hash)).toBe(hashBefore);
+  await expectDraftRestored(page);
+  await expect(toast).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath("372-next-note-back.png") });
+});
+
+test("#372: Next verse on the scripture screen shows the toast for the drafted verse", async ({ browser }, testInfo) => {
+  const page = await newPage(browser, "unsaved-toast-372-verse");
+  await page.goto(`/#/scripture/${BOOK}/${CHAPTER}/3`);
+  const editor = page.locator('textarea:not([aria-hidden="true"])').first();
+  await editor.waitFor({ state: "visible", timeout: 20_000 });
+  await editor.fill(DRAFT);
+  await expect(page.getByText(`1 ${ui(EN, "sync.unsaved")}`)).toBeVisible({ timeout: 15_000 });
+  const toast = page.getByRole("status").filter({ hasText: new RegExp(`U[LS]T ${BOOK} ${CHAPTER}:3`) });
+  await expect(toast).toHaveCount(0);
+
+  await page.getByRole("button", { name: ui(EN, "flowScripture.nextVerse"), exact: true }).click();
+  await expect(toast).toBeVisible({ timeout: 15_000 });
+  await page.screenshot({ path: testInfo.outputPath("372-next-verse-toast.png") });
+
+  await toast.getByRole("button").first().click();
+  await expectDraftRestored(page);
+  await expect(toast).toHaveCount(0);
+});
+
+// tW/tA article and template drafts: with no editor showing the draft (no
+// article open on Translate Words, a template that does not load on Curate)
+// the reminder shows even on those screens. The seeded workspace is an
+// authoring project with no articles or templates, so the drafts are written
+// through the app's own drafts module (the instance the editors use). The
+// quiet case for an open article or template is covered by
+// web/src/sync/draftEditors.test.mjs.
+test("#372: article and template drafts toast when their editor is not open", async ({ browser }, testInfo) => {
+  const page = await newPage(browser, "unsaved-toast-372-words");
   const seed = (meta: Record<string, string>, key: string) =>
     page.evaluate(
       async ({ meta, key }) => {
@@ -148,24 +193,20 @@ test("#372: article and template drafts stay quiet on their own flows screens", 
     { kind: "article", resource: "tw", articleId: "kt/god", path: "bible/kt/god.md", part: "body" },
     "article:tw:bible/kt/god.md",
   );
-  await expect(page.getByText(`1 ${ui(EN, "sync.unsaved")}`)).toBeVisible({ timeout: 15_000 });
-  await expect(articleToast).toHaveCount(0);
-  await page.screenshot({ path: testInfo.outputPath("372-words-quiet.png") });
-
-  await page.evaluate(() => (location.hash = "#/admin/curate"));
   await expect(articleToast).toBeVisible({ timeout: 15_000 });
+  await page.screenshot({ path: testInfo.outputPath("372-words-toast.png") });
+
+  await page.evaluate(() => (location.hash = "#/admin/curate/zz-l4-template"));
   await seed(
     { kind: "template", templateId: "zz-l4-template", supportRef: "rc://*/ta/man/translate/figs-idiom" },
     "template:zz-l4-template",
   );
-  await expect(page.getByText(`2 ${ui(EN, "sync.unsaved")}`)).toBeVisible({ timeout: 15_000 });
-  await expect(templateToast).toHaveCount(0);
-  await page.screenshot({ path: testInfo.outputPath("372-curate-quiet.png") });
-
-  await page.evaluate(() => (location.hash = "#/books"));
   await expect(templateToast).toBeVisible({ timeout: 15_000 });
   await expect(articleToast).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("372-curate-toast.png") });
+
+  // From another screen, Go to it opens the template on Curate.
+  await page.evaluate(() => (location.hash = "#/books"));
   await templateToast.getByRole("button", { name: ui(EN, "widgets.toasts.goToDraftAria", { ref: templateRef }) }).click();
   await expect.poll(() => page.evaluate(() => location.hash)).toBe("#/admin/curate/zz-l4-template");
-  await expect(templateToast).toHaveCount(0);
 });

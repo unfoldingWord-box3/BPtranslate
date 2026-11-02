@@ -16,6 +16,7 @@ import { drafts, type DraftMeta, type DraftRecord } from "../sync/drafts";
 import { formatDraftMeta } from "../lib/draftLocation";
 import { outbox, type OutboxOp } from "../sync/outbox";
 import { rowDraftHasActiveSave, verseDraftHasActiveSave } from "../sync/draftSaveState";
+import { isDraftEditorShown, useDraftEditorsVersion } from "../sync/draftEditors";
 
 const AGGREGATE_THRESHOLD = 3;
 // Stand-in for the draft ref when splitting a translated sentence around it.
@@ -24,10 +25,12 @@ const REF_SLOT = "\u0000ref\u0000";
 // Two mounts:
 //  - Classic Shell passes `book` + `onSaveVerseDraft`: verse drafts of that
 //    book only, each with an in-place Save.
-//  - The flows chrome (#372) passes `onGoTo` + `isOnScreen` instead: drafts of
-//    every kind and book, each with a "Go to it" button that opens the editor
-//    holding it, where the user saves. In-place Save needs the verse cache of
-//    a loaded chapter, which most flows screens do not have.
+//  - The flows chrome (#372) passes `onGoTo` instead: drafts of every kind and
+//    book, each with a "Go to it" button that opens the editor holding it,
+//    where the user saves. In-place Save needs the verse cache of a loaded
+//    chapter, which most flows screens do not have. A draft whose editor is
+//    showing right now (sync/draftEditors.ts) gets no toast, so the user is
+//    not nagged while typing.
 type Props =
   | {
       // Current book. Cross-book drafts (rare) are filtered out so the toast
@@ -45,7 +48,6 @@ type Props =
       // Optional: scroll/navigate the user to a specific draft. Stub-friendly.
       onJumpTo?: (book: string, chapter: number, verse: number, bibleVersion: string) => void;
       onGoTo?: never;
-      isOnScreen?: never;
     }
   | {
       book?: never;
@@ -53,13 +55,11 @@ type Props =
       onJumpTo?: never;
       // Open the editor that holds this draft.
       onGoTo: (meta: DraftMeta) => void;
-      // Whether the current screen already shows this draft's editor; those
-      // drafts get no toast, so the user is not nagged while typing.
-      isOnScreen: (meta: DraftMeta) => boolean;
     };
 
-export function UnsavedToasts({ book, onSaveVerseDraft, onJumpTo, onGoTo, isOnScreen }: Props) {
+export function UnsavedToasts({ book, onSaveVerseDraft, onJumpTo, onGoTo }: Props) {
   const { t } = useTranslation();
+  const editorsVersion = useDraftEditorsVersion();
   const [draftList, setDraftList] = useState<DraftRecord[]>([]);
   const [ops, setOps] = useState<OutboxOp[]>([]);
   const [visibleKeys, setVisibleKeys] = useState<Set<string>>(new Set());
@@ -119,11 +119,15 @@ export function UnsavedToasts({ book, onSaveVerseDraft, onJumpTo, onGoTo, isOnSc
   }, [draftList]);
 
   const offscreenDrafts = useMemo(() => {
+    // isDraftEditorShown reads the editors registry; editorsVersion is its
+    // change counter, so the list re-filters when an editor starts or stops
+    // showing.
+    void editorsVersion;
     return draftList.filter(
       (d) =>
         !d.quarantined &&
-        (isOnScreen
-          ? !isOnScreen(d.meta)
+        (onGoTo
+          ? !isDraftEditorShown(d.key)
           : d.meta.kind === "verse" && d.meta.book === book) &&
         // A draft whose exact generation is pending/in-flight in the outbox is
         // being saved right now — nagging "Save X?" would re-enqueue the same
@@ -134,7 +138,7 @@ export function UnsavedToasts({ book, onSaveVerseDraft, onJumpTo, onGoTo, isOnSc
         !visibleKeys.has(d.key) &&
         !dismissed.has(d.key),
     );
-  }, [draftList, ops, visibleKeys, dismissed, book, isOnScreen]);
+  }, [draftList, ops, visibleKeys, dismissed, book, onGoTo, editorsVersion]);
 
   if (offscreenDrafts.length === 0) return null;
 

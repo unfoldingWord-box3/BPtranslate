@@ -2,7 +2,8 @@ import type { DraftMeta } from "../sync/drafts";
 
 // Where an unsaved draft lives on the flows screens. Shared by the flows "N
 // unsaved" jump menu (SyncStatusBar) and the flows unsaved-drafts toast
-// (UnsavedToasts, #372), so the two always land in the same place.
+// (UnsavedToasts, #372), so the two always land in the same place. Whether a
+// draft's editor is showing right now is sync/draftEditors.ts, not the route.
 
 // One-line name for a draft, e.g. "ULT ZEC 6:1" or "TN ZEC 6:11".
 export function formatDraftMeta(m: DraftMeta): string {
@@ -42,32 +43,4 @@ export function draftFlowHash(m: DraftMeta): string {
   // starts its resource column on the Words tab with this row active; the
   // row's WordsTable entry restores the draft from the drafts store.
   return `#/${m.book}/${m.chapter}/${m.verse}?twl=${row}`;
-}
-
-// The part of the current flows route that decides whether a draft's editor is
-// on screen.
-export interface FlowScreen {
-  view: string;
-  book?: string;
-  chapter?: number;
-}
-
-// Whether the current flows screen shows the editor holding this draft, judged
-// by route: the flows editors are not tagged for a DOM lookup the way the
-// classic verse cells are. Chapter granularity, because the notes, questions
-// and scripture screens edit a whole chapter. tW/tA articles are edited on
-// Translate Words (any book: articles are book-agnostic) and templates on
-// Curate.
-export function draftOnFlowScreen(m: DraftMeta, screen: FlowScreen): boolean {
-  if (m.kind === "article") return screen.view === "translateWords";
-  if (m.kind === "template") return screen.view === "curate";
-  const view =
-    m.kind === "verse"
-      ? "translateScripture"
-      : m.rowKind === "tn"
-        ? "notes"
-        : m.rowKind === "tq"
-          ? "questions"
-          : null;
-  return view !== null && screen.view === view && screen.book === m.book && screen.chapter === m.chapter;
 }

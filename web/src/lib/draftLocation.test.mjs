@@ -1,9 +1,9 @@
 import assert from "node:assert";
-import { draftFlowHash, draftOnFlowScreen, formatDraftMeta } from "./draftLocation.ts";
+import { draftFlowHash, formatDraftMeta } from "./draftLocation.ts";
 
 // Where an unsaved draft lives on the flows screens (issue #372): the hash a
-// "Go to it" button opens, and whether the current screen already shows the
-// draft's editor (then the reminder toast stays quiet).
+// "Go to it" button opens, and the draft's label. Whether its editor is
+// showing is sync/draftEditors.ts (tested there).
 
 const verse = { kind: "verse", book: "ZEC", chapter: 6, verse: 1, bibleVersion: "ULT" };
 const tn = { kind: "row", rowKind: "tn", id: "f66i", book: "ZEC", chapter: 6, verse: 11 };
@@ -23,34 +23,6 @@ assert.strictEqual(draftFlowHash(twl), "#/ZEC/6/3?twl=w9");
 assert.strictEqual(draftFlowHash(article), "#/articles/ta/figs-metaphor");
 // Templates are edited on the flows Curate screen.
 assert.strictEqual(draftFlowHash(template), "#/admin/curate/t%2F1");
-
-// ── draftOnFlowScreen ──────────────────────────────────────────────────────
-// Same screen and chapter as the draft's editor: on screen.
-assert.strictEqual(draftOnFlowScreen(verse, { view: "translateScripture", book: "ZEC", chapter: 6 }), true);
-assert.strictEqual(draftOnFlowScreen(tn, { view: "notes", book: "ZEC", chapter: 6 }), true);
-assert.strictEqual(draftOnFlowScreen(tq, { view: "questions", book: "ZEC", chapter: 6 }), true);
-// Another chapter, book, or screen: off screen.
-assert.strictEqual(draftOnFlowScreen(verse, { view: "translateScripture", book: "ZEC", chapter: 7 }), false);
-assert.strictEqual(draftOnFlowScreen(tn, { view: "notes", book: "RUT", chapter: 6 }), false);
-assert.strictEqual(draftOnFlowScreen(tn, { view: "questions", book: "ZEC", chapter: 6 }), false);
-assert.strictEqual(draftOnFlowScreen(tq, { view: "notes", book: "ZEC", chapter: 6 }), false);
-assert.strictEqual(draftOnFlowScreen(verse, { view: "verse", book: "ZEC", chapter: 6 }), false);
-assert.strictEqual(draftOnFlowScreen(tn, { view: "books" }), false);
-// No flows screen edits word links.
-assert.strictEqual(draftOnFlowScreen(twl, { view: "notes", book: "ZEC", chapter: 6 }), false);
-// tW and tA articles are edited on the Translate Words screen, whatever its
-// book (articles are book-agnostic); templates on the Curate screen.
-assert.strictEqual(draftOnFlowScreen(article, { view: "translateWords", book: "ZEC" }), true);
-assert.strictEqual(draftOnFlowScreen(article, { view: "translateWords", book: "RUT" }), true);
-assert.strictEqual(
-  draftOnFlowScreen({ ...article, resource: "tw", articleId: "kt/god" }, { view: "translateWords", book: "ZEC" }),
-  true,
-);
-assert.strictEqual(draftOnFlowScreen(article, { view: "books" }), false);
-assert.strictEqual(draftOnFlowScreen(article, { view: "curate" }), false);
-assert.strictEqual(draftOnFlowScreen(template, { view: "curate" }), true);
-assert.strictEqual(draftOnFlowScreen(template, { view: "translateWords", book: "ZEC" }), false);
-assert.strictEqual(draftOnFlowScreen(template, { view: "books" }), false);
 
 // ── formatDraftMeta ────────────────────────────────────────────────────────
 assert.strictEqual(formatDraftMeta(verse), "ULT ZEC 6:1");
