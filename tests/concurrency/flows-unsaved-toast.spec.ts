@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { expect, test, type Browser, type Page } from "@playwright/test";
+import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import { newUserContext } from "./helpers";
 
 // Flows unsaved-drafts toast (#372, option A). Typing in a flows note editor
@@ -31,8 +31,17 @@ const DRAFT = "Unsaved draft for the flows toast check";
 
 test.describe.configure({ timeout: 120_000 });
 
+// Close every context in afterEach: a failing test never reaches its own
+// close, and a page left on ZEC 6 would stay in the chapter room through the
+// save-race specs that run next (same reason as rtl-direction.spec.ts).
+const openContexts: BrowserContext[] = [];
+test.afterEach(async () => {
+  for (const c of openContexts.splice(0)) await c.close().catch(() => {});
+});
+
 async function openWithDraft(browser: Browser, user: string, uiLang?: string): Promise<Page> {
   const { context } = await newUserContext(browser, user);
+  openContexts.push(context);
   if (uiLang) {
     await context.addInitScript((lang) => {
       try {
