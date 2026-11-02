@@ -13,7 +13,11 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  CONTEXT_EXPORT_DEFERRED,
   CONTEXT_EXPORT_LEASE_SECONDS,
+  SHRINK_OVERRIDE_MAX_AGE_SECONDS,
+  contextExportNeedsRun,
+  exportContextPackUnderLease,
   queueContextExport,
   runContextExportExclusive,
 } from "./contextExportQueue.ts";
@@ -129,13 +133,15 @@ function harness() {
   }
 
   // One Workflow instance's context step. `gate` (optional) is awaited after
-  // the render and before the commit, to hold a run mid-flight.
-  async function runInstance(id, { params = created.find((c) => c.id === id)?.params ?? {}, gate, shrinkOverride = false } = {}) {
+  // the render and before the commit, to hold a run mid-flight. `outcome`
+  // (optional) is returned instead of committing, like renderAndCommitContextPack
+  // returning a failed result.
+  async function runInstance(id, { params = created.find((c) => c.id === id)?.params ?? {}, gate, shrinkOverride = false, outcome } = {}) {
     const seenOverride = [];
     const result = await runContextExportExclusive({
       db,
       key: "ws",
-      holder: id,
+      instance: id,
       markPending: !params.queued,
       shrinkOverride: shrinkOverride || !!params.shrinkOverride,
       startFollowUp: () => env.EXPORT_WORKFLOW.create({ id: `follow-${created.length}`, params: { contextOnly: true, workspace: "ws", queued: true } }),
@@ -147,6 +153,7 @@ function harness() {
           const body = sqlite.prepare(`SELECT body FROM test_pack WHERE id = 1`).get().body;
           if (gate) await gate;
           if (!(await holdsLease())) return { status: "failed", body, failureReason: "context_export_lease_lost" };
+          if (outcome) return outcome;
           const tip = await getBranchTipSha(dcsCfg, "master");
           const c = await commitContextPackToMaster(dcsCfg, [{ path: "brief.md", content: body }], `export ${id}`, tip);
           return { status: "success", body, commitSha: c.commitSha };
@@ -159,7 +166,7 @@ function harness() {
   }
 
   const lock = () => sqlite.prepare(`SELECT * FROM context_export_lock WHERE workspace = 'ws'`).get();
-  return { env, sqlite, door43, created, save, runInstance, lock, stats: () => ({ maxRunning }) };
+  return { env, db, sqlite, door43, created, save, runInstance, lock, stats: () => ({ maxRunning }) };
 }
 
 async function withFetch(fn, run) {
@@ -326,4 +333,164 @@ test("an admin's shrink override that had to wait is carried to the follow-up", 
     const c = await h.runInstance("later");
     assert.deepEqual(c.seenOverride, [false], "the override is used once");
   });
+});
+
+// ── PR #737 review ──────────────────────────────────────────────────────────
+
+test("a run that RETURNS a passing failure (Door43 5xx, CAS retries used up, en fetch) keeps the save pending and its retry exports", async () => {
+  for (const failureReason of [
+    "dcs_batch_commit_failed: POST 500 internal error",
+    "cas_retries_exhausted",
+    "context_cas_conflict:ref_lock:dcs_batch_commit_failed: POST 403 cannot lock ref",
+    "en_fetch_failed:tn:TIT",
+    "dcs_batch_commit_failed: POST 422 sha does not match",
+  ]) {
+    const h = harness();
+    await withFetch(h.door43.fetch, async () => {
+      await h.save("A");
+      const id = h.created[0].id;
+      await assert.rejects(h.runInstance(id, { outcome: { status: "failed", failureReason } }), /^Error: context_export_retry:/, failureReason);
+      assert.equal(h.lock().holder, null, failureReason);
+      assert.equal(h.lock().pending, 1, `${failureReason}: the save is still waiting`);
+      assert.equal(await contextExportNeedsRun(h.db, "ws"), true, "the cron sweep would start a run");
+      const retry = await h.runInstance(id);
+      assert.equal(retry.result.status, "success", failureReason);
+      assert.equal(h.door43.state.files.get("brief.md"), "A");
+      assert.equal(h.lock().pending, 0);
+    });
+  }
+});
+
+test("a run that RETURNS a failure retrying cannot fix clears the save like a success", async () => {
+  for (const outcome of [
+    { status: "failed", failureReason: "not_a_gl_project" },
+    { status: "failed", failureReason: "context_repo_not_provisioned" },
+    { status: "failed", failureReason: "missing_en_source:tn:TIT 1:1" },
+    { status: "failed", failureReason: "dcs_batch_commit_failed: POST 403 user does not have write access" },
+    { status: "shrink_refused", failureReason: "terms_shrink" },
+    { status: "no_content", failureReason: "scaffold_only" },
+  ]) {
+    const h = harness();
+    await withFetch(h.door43.fetch, async () => {
+      await h.save("A");
+      const r = await h.runInstance(h.created[0].id, { outcome });
+      assert.deepEqual(r.result, outcome);
+      assert.equal(h.lock().holder, null);
+      assert.equal(h.lock().pending, 0, outcome.failureReason);
+      assert.equal(await contextExportNeedsRun(h.db, "ws"), false);
+    });
+  }
+});
+
+test("a step retry takes the lease over from its own instance's earlier attempt, which then cannot commit", async () => {
+  const h = harness();
+  await withFetch(h.door43.fetch, async () => {
+    await h.save("A");
+    const id = h.created[0].id;
+    const hold = deferred();
+    const timedOut = h.runInstance(id, { gate: hold.promise }); // the attempt Workflows gave up on
+    await new Promise((r) => setImmediate(r));
+    await h.save("B");
+    const retry = await h.runInstance(id); // the retry, while the old attempt still runs
+    assert.equal(retry.result.status, "success");
+    assert.equal(h.door43.state.files.get("brief.md"), "B");
+    hold.resolve();
+    const late = await timedOut;
+    assert.equal(late.result.failureReason, "context_export_lease_lost");
+    assert.equal(h.door43.state.files.get("brief.md"), "B");
+    assert.equal(h.door43.state.posts, 1);
+  });
+});
+
+test("a waiting shrink override expires: a follow-up that starts more than an hour after the click ignores it", async () => {
+  const h = harness();
+  const t0 = Date.parse("2026-11-02T12:00:00Z");
+  mock.timers.enable({ apis: ["Date"], now: t0 });
+  try {
+    await withFetch(h.door43.fetch, async () => {
+      await h.save("A");
+      const hold = deferred();
+      const first = h.runInstance(h.created[0].id, { gate: hold.promise });
+      await new Promise((r) => setImmediate(r));
+      assert.equal((await h.runInstance("context-manual", { shrinkOverride: true })).result, null);
+      mock.timers.setTime(t0 + (SHRINK_OVERRIDE_MAX_AGE_SECONDS + 1) * 1000);
+      hold.resolve();
+      await first;
+      const b = await h.runInstance(h.created[1].id);
+      assert.deepEqual(b.seenOverride, [false], "the stale override is dropped");
+      assert.equal(h.lock().shrink_override_at, null);
+    });
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("the cron sweep finds saves with no live run, and leaves a live run alone", async () => {
+  const h = harness();
+  const t0 = Date.parse("2026-11-02T12:00:00Z");
+  mock.timers.enable({ apis: ["Date"], now: t0 });
+  try {
+    await withFetch(h.door43.fetch, async () => {
+      assert.equal(await contextExportNeedsRun(h.db, "ws"), false, "no row yet");
+      await h.save("A");
+      assert.equal(await contextExportNeedsRun(h.db, "ws"), true, "pending, not started");
+      const hold = deferred();
+      const run = h.runInstance(h.created[0].id, { gate: hold.promise });
+      await new Promise((r) => setImmediate(r));
+      await h.save("B");
+      assert.equal(await contextExportNeedsRun(h.db, "ws"), false, "a live run will follow up");
+      mock.timers.setTime(t0 + (CONTEXT_EXPORT_LEASE_SECONDS + 1) * 1000);
+      assert.equal(await contextExportNeedsRun(h.db, "ws"), true, "the run's lease ran out");
+      hold.resolve();
+      await run;
+    });
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("exportContextPackUnderLease: dry runs bypass the lease; queued runs need a pending save; manual runs record their own; a held lease defers", async () => {
+  const h = harness();
+  const calls = [];
+  const render = (label) => async (so, holdsLease) => {
+    calls.push({ label, so, holds: await holdsLease() });
+    return { status: "success", failureReason: null };
+  };
+  const call = (instanceId, extra, label) =>
+    exportContextPackUnderLease({ env: h.env, instanceId, queued: false, dcsAllowed: true, shrinkOverride: false, render: render(label), ...extra });
+
+  assert.deepEqual(await call("dry-1", { dcsAllowed: false }, "dry"), { status: "success", failureReason: null });
+  assert.equal(h.lock(), undefined, "a dry run never touches the lock");
+
+  assert.deepEqual(await call("queued-1", { queued: true }, "queued-nothing-pending"), CONTEXT_EXPORT_DEFERRED);
+  assert.equal(h.created.length, 0);
+
+  assert.equal((await call("manual-1", {}, "manual")).status, "success");
+  assert.equal(h.lock().holder, null);
+  assert.equal(h.lock().pending, 0);
+
+  // Another instance holds the lease; a nightly run defers and its request
+  // becomes that holder's follow-up.
+  const hold = deferred();
+  const holderRun = exportContextPackUnderLease({
+    env: h.env,
+    instanceId: "context-save-ws-x",
+    queued: false,
+    dcsAllowed: true,
+    shrinkOverride: false,
+    render: async () => {
+      assert.match(h.lock().holder, /^context-save-ws-x#[0-9a-f]{8}$/, "holder = instance id + attempt nonce");
+      await hold.promise;
+      return { status: "success", failureReason: null };
+    },
+  });
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(await call("nightly-ws-2026-11-02", {}, "nightly"), CONTEXT_EXPORT_DEFERRED);
+  hold.resolve();
+  await holderRun;
+  assert.equal(h.created.length, 1, "one follow-up for the deferred nightly request");
+  assert.equal(h.created[0].params.queued, true);
+  assert.equal(h.created[0].params.contextOnly, true);
+  assert.deepEqual(calls.map((c) => c.label), ["dry", "manual"]);
+  assert.ok(calls.every((c) => c.holds));
 });

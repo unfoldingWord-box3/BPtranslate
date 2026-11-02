@@ -34,6 +34,7 @@ import { chatRoleFor, claimCode, lookupLink, revokeLink, type ChatLink } from ".
 import { readPackageRefs } from "./packageRefs";
 import { readSourceNotes } from "./sourceNotes";
 import { blockViewerWrites } from "./viewerGuard";
+import { contextExportNeedsRun, startQueuedContextExport } from "./contextExportQueue";
 import { listWorkspaces, resolveWorkspaceFresh, workspaceEnv, parseWorkspaceCookie, requireWorkspaceMatch, primeWorkspaces } from "./workspaces";
 
 export interface Env {
@@ -474,6 +475,17 @@ async function runScheduledTick(controller: ScheduledController, env: Env, _ctx:
         }
       } catch (e) {
         console.error("cron syncTemplates failed", e instanceof Error ? e.message : String(e));
+      }
+      // Context export queue sweep (#716, #722): saves left pending with no
+      // live run (the run's retries ran out, its follow-up could not be
+      // created, or it died and its lease ran out) get a run here instead of
+      // waiting for the next save. Isolated like the blocks above.
+      try {
+        if (await contextExportNeedsRun(env.DB, env.WORKSPACE_SLUG ?? "default")) {
+          await startQueuedContextExport(env);
+        }
+      } catch (e) {
+        console.error("cron context export sweep failed", e instanceof Error ? e.message : String(e));
       }
       // Stale-lock sweep for book_import_locks. Imports take 5-60s in
       // practice; anything past 10 minutes is a Worker that died mid-import

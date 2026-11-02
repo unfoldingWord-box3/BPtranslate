@@ -99,7 +99,7 @@ import {
 import { contextShrinkRefused, shrinkDetailCode, hasSemanticContent } from "./contextExportLib.ts";
 import { fetchEnSourceMaps } from "./contextSourceFetch.ts";
 import { commitContextPackToMaster, getBranchTipSha, repoExists } from "./contextExportDcs.ts";
-import { runContextExportExclusive, startQueuedContextExport } from "./contextExportQueue.ts";
+import { exportContextPackUnderLease } from "./contextExportQueue.ts";
 import {
   insertContextExportQueued,
   finalizeContextExport,
@@ -139,7 +139,7 @@ export interface ExportParams {
   // Admin override for the context-pack semantic shrink guard.
   shrinkOverride?: boolean;
   // Set by startQueuedContextExport (contextExportQueue.ts) on a contextOnly
-  // run a save or a follow-up started: its request is already recorded in
+  // run a save, a follow-up or the cron sweep started: its request is already recorded in
   // context_export_lock, so the run does not record one of its own.
   queued?: boolean;
   // Chapter-scoped export ("MRK 13-14 tn"): restrict the render to this
@@ -553,10 +553,11 @@ export class ExportWorkflow extends WorkflowEntrypoint<Env, ExportParams> {
 
   // One context export at a time per workspace (#716, #722): every context
   // export that writes Door43 runs under the context_export_lock lease (see
-  // contextExportQueue.ts). `holder` is the Workflow instance id, stable across
-  // this step's retries. When another run holds the lease this returns
+  // exportContextPackUnderLease in contextExportQueue.ts). `holder` is the
+  // Workflow instance id. When another run holds the lease this returns
   // `deferred` without exporting, and that run's follow-up carries this
-  // request. Dry runs write nothing to Door43 and skip the lease.
+  // request. A passing failure throws so this step's retries fire. Dry runs
+  // write nothing to Door43 and skip the lease.
   private async exportContextPack(
     instanceId: string,
     dcsAllowed: boolean,
@@ -564,28 +565,14 @@ export class ExportWorkflow extends WorkflowEntrypoint<Env, ExportParams> {
     holder: string,
     queued: boolean,
   ): Promise<ContextPackStepResult> {
-    if (!dcsAllowed) return this.renderAndCommitContextPack(instanceId, dcsAllowed, shrinkOverride, async () => true);
-    const result = await runContextExportExclusive({
-      db: this.env.DB,
-      key: this.env.WORKSPACE_SLUG ?? "default",
-      holder,
-      markPending: !queued,
+    return exportContextPackUnderLease({
+      env: this.env,
+      instanceId: holder,
+      queued,
+      dcsAllowed,
       shrinkOverride,
-      run: ({ shrinkOverride: override, holdsLease }) =>
-        this.renderAndCommitContextPack(instanceId, dcsAllowed, override, holdsLease),
-      startFollowUp: () => startQueuedContextExport(this.env),
+      render: (override, holdsLease) => this.renderAndCommitContextPack(instanceId, dcsAllowed, override, holdsLease),
     });
-    if (result) return result;
-    console.log("context export deferred: another run holds the lease and will follow up", { holder });
-    return {
-      status: "deferred",
-      commitSha: null,
-      contentFiles: 0,
-      terms: 0,
-      examplesTn: 0,
-      examplesTq: 0,
-      failureReason: "export_in_progress",
-    };
   }
 
   // Render D1 translation memory → {owner}/translation-context@master with
