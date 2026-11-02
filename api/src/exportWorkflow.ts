@@ -99,6 +99,7 @@ import {
 import { contextShrinkRefused, shrinkDetailCode, hasSemanticContent } from "./contextExportLib.ts";
 import { fetchEnSourceMaps } from "./contextSourceFetch.ts";
 import { commitContextPackToMaster, getBranchTipSha, repoExists } from "./contextExportDcs.ts";
+import { runContextExportExclusive, startQueuedContextExport } from "./contextExportQueue.ts";
 import {
   insertContextExportQueued,
   finalizeContextExport,
@@ -137,6 +138,10 @@ export interface ExportParams {
   contextOnly?: boolean;
   // Admin override for the context-pack semantic shrink guard.
   shrinkOverride?: boolean;
+  // Set by startQueuedContextExport (contextExportQueue.ts) on a contextOnly
+  // run a save or a follow-up started: its request is already recorded in
+  // context_export_lock, so the run does not record one of its own.
+  queued?: boolean;
   // Chapter-scoped export ("MRK 13-14 tn"): restrict the render to this
   // inclusive chapter range and MERGE it into master's whole-book file
   // instead of replacing the whole file (exportChapterMerge.ts). Set only
@@ -243,7 +248,7 @@ export class ExportWorkflow extends WorkflowEntrypoint<Env, ExportParams> {
       const contextResult = await step.do(
         "export-context-pack",
         { retries: { limit: 3, delay: "5 seconds", backoff: "exponential" } },
-        async () => this.exportContextPack(instanceId, dcsAllowed, !!params.shrinkOverride),
+        async () => this.exportContextPack(instanceId, dcsAllowed, !!params.shrinkOverride, event.instanceId, !!params.queued),
       );
       return {
         instanceId,
@@ -508,7 +513,7 @@ export class ExportWorkflow extends WorkflowEntrypoint<Env, ExportParams> {
         contextResult = await step.do(
           "export-context-pack",
           { retries: { limit: 3, delay: "5 seconds", backoff: "exponential" } },
-          async () => this.exportContextPack(instanceId, dcsAllowed, !!params.shrinkOverride),
+          async () => this.exportContextPack(instanceId, dcsAllowed, !!params.shrinkOverride, event.instanceId, false),
         );
       } catch (e) {
         const reason = e instanceof Error ? e.message : String(e);
@@ -546,13 +551,53 @@ export class ExportWorkflow extends WorkflowEntrypoint<Env, ExportParams> {
     };
   }
 
-  // Render D1 translation memory → {owner}/translation-context@master with
-  // expected-parent CAS, semantic shrink guard, and full result persistence.
-  // A SHA is only recorded as success after CAS lands (or dry_run with stats).
+  // One context export at a time per workspace (#716, #722): every context
+  // export that writes Door43 runs under the context_export_lock lease (see
+  // contextExportQueue.ts). `holder` is the Workflow instance id, stable across
+  // this step's retries. When another run holds the lease this returns
+  // `deferred` without exporting, and that run's follow-up carries this
+  // request. Dry runs write nothing to Door43 and skip the lease.
   private async exportContextPack(
     instanceId: string,
     dcsAllowed: boolean,
     shrinkOverride: boolean,
+    holder: string,
+    queued: boolean,
+  ): Promise<ContextPackStepResult> {
+    if (!dcsAllowed) return this.renderAndCommitContextPack(instanceId, dcsAllowed, shrinkOverride, async () => true);
+    const result = await runContextExportExclusive({
+      db: this.env.DB,
+      key: this.env.WORKSPACE_SLUG ?? "default",
+      holder,
+      markPending: !queued,
+      shrinkOverride,
+      run: ({ shrinkOverride: override, holdsLease }) =>
+        this.renderAndCommitContextPack(instanceId, dcsAllowed, override, holdsLease),
+      startFollowUp: () => startQueuedContextExport(this.env),
+    });
+    if (result) return result;
+    console.log("context export deferred: another run holds the lease and will follow up", { holder });
+    return {
+      status: "deferred",
+      commitSha: null,
+      contentFiles: 0,
+      terms: 0,
+      examplesTn: 0,
+      examplesTq: 0,
+      failureReason: "export_in_progress",
+    };
+  }
+
+  // Render D1 translation memory → {owner}/translation-context@master with
+  // expected-parent CAS, semantic shrink guard, and full result persistence.
+  // A SHA is only recorded as success after CAS lands (or dry_run with stats).
+  // `holdsLease` is checked right before the commit: false means this run was
+  // taken over (it ran past its lease) and must not commit.
+  private async renderAndCommitContextPack(
+    instanceId: string,
+    dcsAllowed: boolean,
+    shrinkOverride: boolean,
+    holdsLease: () => Promise<boolean>,
   ): Promise<ContextPackStepResult> {
     const cfg = await getProjectConfig(this.env);
     const owner = contextRepoOwner(this.env, cfg);
@@ -777,6 +822,21 @@ export class ExportWorkflow extends WorkflowEntrypoint<Env, ExportParams> {
           lastReason = "d1_changed_during_export";
           console.warn("context pack inputs changed during export; re-rendering", { attempt });
           continue;
+        }
+
+        if (!(await holdsLease())) {
+          const reason = "context_export_lease_lost";
+          await finalizeContextExport(this.env, resultId, { status: "failed", stats, failureReason: reason, r2Key });
+          await this.recordSnapshot("CONTEXT", "ctx", null, null, stats.contentFiles, reason);
+          return {
+            status: "failed",
+            commitSha: null,
+            contentFiles: stats.contentFiles,
+            terms: stats.terms,
+            examplesTn: stats.examplesTn,
+            examplesTq: stats.examplesTq,
+            failureReason: reason,
+          };
         }
 
         const commit = await commitContextPackToMaster(
