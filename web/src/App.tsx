@@ -8,6 +8,8 @@ import { TopBar } from "./components/TopBar";
 import { FlowHeaderSlotContext } from "./components/flows/FlowHeader";
 import { SyncStatusBar } from "./components/SyncStatusBar";
 import { PipelineStatusBar } from "./components/PipelineStatusBar";
+import { UnsavedToasts } from "./components/UnsavedToasts";
+import { draftFlowHash, draftOnFlowScreen } from "./lib/draftLocation";
 import { AccountMenu } from "./components/AccountMenu";
 import { TemplateWorkspace } from "./components/TemplateWorkspace";
 import { ReviewQueue } from "./components/ReviewQueue";
@@ -861,14 +863,11 @@ export function App() {
           // case. justify-end keeps the controls on the inline-end corner in both
           // LTR and RTL.
           //
-          // The "N unsaved drafts" reminder (UnsavedToasts) is intentionally NOT
-          // mounted here — it requires a `book` in scope (Shell resolves it via
-          // its own useChapter instance), but most flow views (books, style,
-          // curate, ai, observe, package, admin) have no
-          // book/chapter in `loc` at all. Hoisting it needs either new data
-          // plumbing or a redesign of its in-place Save action — scoped as a
-          // separate follow-up rather than risking a silent no-op or a
-          // half-working Save button on those screens.
+          // The unsaved-drafts reminder (UnsavedToasts) mounts here in its
+          // flows form (#372): instead of classic's in-place Save, which needs
+          // a loaded chapter's verse cache most flow views lack, each toast has
+          // "Go to it", which opens the editor holding the draft. Drafts whose
+          // editor is on the current screen stay quiet.
           //
           // One row, not two (#299): the screen's own title row portals into the
           // inline-start slot through <FlowHeader>, beside these controls.
@@ -954,6 +953,16 @@ export function App() {
                 </Tooltip>
               )}
               <SyncStatusBar onNavigate={navigate} flowRouting compact={isPhone} />
+              <UnsavedToasts
+                onGoTo={(m) => location.assign(draftFlowHash(m))}
+                isOnScreen={(m) =>
+                  draftOnFlowScreen(m, {
+                    view: loc.view,
+                    book: ("book" in loc && loc.book) || undefined,
+                    chapter: "chapter" in loc ? loc.chapter : undefined,
+                  })
+                }
+              />
               <PipelineStatusBar />
               <AccountMenu
                 username={auth.kind === "ready" ? auth.me?.username ?? null : null}

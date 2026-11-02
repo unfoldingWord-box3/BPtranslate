@@ -2924,6 +2924,8 @@
       "unsavedOffscreen_many": "{{count}} تعديلًا غير محفوظ خارج الشاشة",
       "unsavedOffscreen_other": "{{count}} تعديل غير محفوظ خارج الشاشة",
       "saveVerseRef": "حفظ {{book}} {{chapter}}:{{verse}} {{version}}؟",
+      "unsavedDraftRef": "غير محفوظ: {{ref}}",
+      "goToDraft": "انتقل إليه",
       "aiDraftReady": "مسودة الذكاء الاصطناعي جاهزة · الآية {{verse}}"
     },
     "errorBoundary": {

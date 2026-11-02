@@ -1,0 +1,68 @@
+import type { DraftMeta } from "../sync/drafts";
+
+// Where an unsaved draft lives on the flows screens. Shared by the flows "N
+// unsaved" jump menu (SyncStatusBar) and the flows unsaved-drafts toast
+// (UnsavedToasts, #372), so the two always land in the same place.
+
+// One-line name for a draft, e.g. "ULT ZEC 6:1" or "TN ZEC 6:11".
+export function formatDraftMeta(m: DraftMeta): string {
+  if (m.kind === "verse") return `${m.bibleVersion} ${m.book} ${m.chapter}:${m.verse}`;
+  if (m.kind === "article") {
+    // tA parts split into title / sub-title / body; name the part so two drafts
+    // on the same article are tellable apart.
+    return `${m.resource.toUpperCase()} ${m.articleId}${m.part === "body" ? "" : ` · ${m.part}`}`;
+  }
+  // Note templates have no reference either; the support_ref is what a
+  // translator recognises them by, so lead with it and keep the id for
+  // disambiguation (several templates can share a support_ref).
+  if (m.kind === "template") return `${m.supportRef} · ${m.templateId}`;
+  return `${m.rowKind.toUpperCase()} ${m.book} ${m.chapter}:${m.verse}`;
+}
+
+// The hash of the screen whose editor holds this draft. tW/tA articles and
+// note templates carry no book/chapter/verse, so they route to their own
+// editors by id.
+export function draftFlowHash(m: DraftMeta): string {
+  if (m.kind === "article") return `#/articles/${m.resource}/${encodeURIComponent(m.articleId)}`;
+  if (m.kind === "template") return `#/templates/${encodeURIComponent(m.templateId)}`;
+  // 3-segment #/scripture/B/C/V: App.tsx's `ts` route accepts the optional
+  // verse segment and TranslateScriptureScreen seeds its cursor from it on
+  // mount, so this lands the translator on the exact drafted verse, not just
+  // the top of the chapter (#229, #389).
+  if (m.kind === "verse") return `#/scripture/${m.book}/${m.chapter}/${m.verse}`;
+  // Row drafts carry the exact row id so the notes / questions screen lands on
+  // the card that holds the draft: several can share a verse (#335).
+  const row = encodeURIComponent(m.id);
+  if (m.rowKind === "tn") return `#/notes/${m.book}/${m.chapter}/${m.verse}?row=${row}`;
+  if (m.rowKind === "tq") return `#/questions/${m.book}/${m.chapter}/${m.verse}?row=${row}`;
+  // twl row: the new UI has no word-links editor since the old flows words
+  // screen retired (#173), so open the classic editor at that verse. ?twl=
+  // starts its resource column on the Words tab with this row active; the
+  // row's WordsTable entry restores the draft from the drafts store.
+  return `#/${m.book}/${m.chapter}/${m.verse}?twl=${row}`;
+}
+
+// The part of the current flows route that decides whether a draft's editor is
+// on screen.
+export interface FlowScreen {
+  view: string;
+  book?: string;
+  chapter?: number;
+}
+
+// Whether the current flows screen shows the editor holding this draft, judged
+// by route: the flows editors are not tagged for a DOM lookup the way the
+// classic verse cells are. Chapter granularity, because the notes, questions
+// and scripture screens edit a whole chapter.
+export function draftOnFlowScreen(m: DraftMeta, screen: FlowScreen): boolean {
+  if (m.kind === "article" || m.kind === "template") return false;
+  const view =
+    m.kind === "verse"
+      ? "translateScripture"
+      : m.rowKind === "tn"
+        ? "notes"
+        : m.rowKind === "tq"
+          ? "questions"
+          : null;
+  return view !== null && screen.view === view && screen.book === m.book && screen.chapter === m.chapter;
+}
