@@ -26,3 +26,11 @@ test("AI studio subtitle: translation keeps the AI copy, source project gets its
   assert.equal(aiStudioSubtitleKey(true), "aiStudio.subtitle");
   assert.equal(aiStudioSubtitleKey(false), "aiStudio.subtitleSourceProject");
 });
+
+// Config still loading (or failed with nothing cached): keep the pre-#731
+// behaviour, so a translation project never shows "Import" or opens the import
+// dialog in place of its AI menu during the load.
+test("unknown project type (config null) keeps the AI trigger and subtitle", () => {
+  assert.deepEqual(pipelineTrigger(null), pipelineTrigger(true));
+  assert.equal(aiStudioSubtitleKey(null), "aiStudio.subtitle");
+});

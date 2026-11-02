@@ -46,7 +46,7 @@ import type { FlowScreenContext } from "./types";
 import { PipelineMenu } from "../PipelineMenu";
 import { AiServiceSection } from "../AiServiceSection";
 import { pipelineStore, type PipelineJob } from "../../sync/pipelineStore";
-import { useProjectConfig, isTranslationProject } from "../../hooks/useProjectConfig";
+import { useProjectConfig, isTranslationProject, projectType } from "../../hooks/useProjectConfig";
 import { aiStudioSubtitleKey, pipelineTrigger } from "../../lib/pipelineTrigger";
 import {
   isAiNeedsOrgKey,
@@ -153,8 +153,9 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
 
   const cfg = useProjectConfig();
   // A source project (the English root) has no AI translation runs (#731).
-  const translationProject = isTranslationProject(cfg);
-  const pickTrigger = pipelineTrigger(translationProject);
+  // Unknown (config still loading) keeps the AI copy.
+  const type = projectType(cfg);
+  const pickTrigger = pipelineTrigger(type);
   const eyebrow = cfg
     ? `${cfg.languageTitle || cfg.languageName || cfg.languageCode} · ${cfg.org}`
     : t("aiStudio.workspace");
@@ -377,7 +378,7 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
         <AdminPageHeader
           eyebrow={eyebrow}
           title={t("aiStudio.title")}
-          subtitle={t(aiStudioSubtitleKey(translationProject))}
+          subtitle={t(aiStudioSubtitleKey(type))}
         />
 
       <Stack spacing={1} sx={{ mb: 2 }}>

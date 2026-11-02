@@ -43,7 +43,7 @@ import { parseChapterRange } from "../lib/refParser";
 import { unpublishedWarning, type UnpublishedCheck } from "../lib/unpublishedScriptureWarning";
 import { isAiNeedsOrgKey, isAiProviderNotConfigured } from "../lib/aiProviderErrors";
 import { useTranslation } from "react-i18next";
-import { useProjectConfig, isTranslationProject } from "../hooks/useProjectConfig";
+import { useProjectConfig, isTranslationProject, projectType } from "../hooks/useProjectConfig";
 import { pipelineTrigger } from "../lib/pipelineTrigger";
 
 interface Props {
@@ -134,7 +134,8 @@ export function PipelineMenu({ book, chapter, onMessage, onImported, renderTrigg
     () => (translationProject ? [TRANSLATE_OPTION, TRANSLATE_TQ_OPTION] : []),
     [translationProject],
   );
-  const trigger = pipelineTrigger(translationProject);
+  // Unknown config (still loading) keeps the AI trigger and opens the menu.
+  const trigger = pipelineTrigger(projectType(projectConfig));
   const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
   const [confirm, setConfirm] = useState<PipelineOption | null>(null);
   const [submitting, setSubmitting] = useState(false);

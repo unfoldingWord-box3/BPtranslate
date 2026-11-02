@@ -28,7 +28,7 @@ import { useTranslation } from "react-i18next";
 import { PipelineMenu } from "../PipelineMenu";
 import { aiRunPlacement } from "../../lib/aiRunPlacement";
 import { pipelineTrigger } from "../../lib/pipelineTrigger";
-import { isTranslationProject, useProjectConfig } from "../../hooks/useProjectConfig";
+import { projectType, useProjectConfig } from "../../hooks/useProjectConfig";
 import type { Role } from "../../sync/api";
 
 /** Opens the screen's pipeline menu anchored to the given element. */
@@ -66,7 +66,7 @@ export function useFlowAiRun({ book, chapter, role, phone, onImported }: Options
   const { t } = useTranslation();
   const placement = aiRunPlacement(role, phone ? "phone" : "tablet");
   const registerInAccountMenu = useContext(FlowAccountAiRunContext);
-  const trigger = pipelineTrigger(isTranslationProject(useProjectConfig()));
+  const trigger = pipelineTrigger(projectType(useProjectConfig()));
   const [open, setOpenState] = useState<OpenAiRun | null>(null);
   const setOpen = useCallback((fn: OpenAiRun | null) => setOpenState(() => fn), []);
   // Own toast, not the host's: the hosts' save toasts close after 1.4s, too

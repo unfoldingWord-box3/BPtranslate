@@ -47,7 +47,7 @@ import FormatSizeIcon from "@mui/icons-material/FormatSize";
 import LogoutIcon from "@mui/icons-material/Logout";
 import RemoveIcon from "@mui/icons-material/Remove";
 import { useTranslation } from "react-i18next";
-import { isTranslationProject, useProjectConfig } from "../hooks/useProjectConfig";
+import { projectType, useProjectConfig } from "../hooks/useProjectConfig";
 import { pipelineTrigger } from "../lib/pipelineTrigger";
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 import { ChatLinkDialog } from "./ChatLinkDialog";
@@ -87,7 +87,7 @@ export function AccountMenu({ username, onLogout, isAdmin, onOpenClassic, onStar
   const { scale, setScale } = useContext(FontScaleContext);
   const projectConfig = useProjectConfig();
   // A source project's run trigger is an import, not an AI run (#731).
-  const aiRunTrigger = pipelineTrigger(isTranslationProject(projectConfig));
+  const aiRunTrigger = pipelineTrigger(projectType(projectConfig));
   const orgLanguageLabel = projectConfig
     ? projectConfig.languageTitle || projectConfig.languageName || projectConfig.languageCode
     : null;
