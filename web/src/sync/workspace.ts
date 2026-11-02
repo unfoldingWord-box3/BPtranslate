@@ -23,6 +23,21 @@ export function setWorkspaceSlug(slug: string): void {
   }
 }
 
+// Boot-time workspace reconcile (App.tsx): true when the server's workspace
+// (`serverWs`, from /api/auth/me) disagrees with this tab's slug and the tab
+// has not already reloaded once for it this session. App reloads onto the
+// server's slug in that case, and holds the tree while it does, because child
+// effects run before App's and would otherwise send requests claiming the
+// stale slug (#749). `alreadyTried` is what keeps a persistent disagreement
+// from reload-looping: after one attempt the app renders normally.
+export function shouldReconcileWorkspace(
+  serverWs: string | undefined,
+  localSlug: string,
+  alreadyTried: boolean,
+): boolean {
+  return serverWs !== undefined && serverWs !== localSlug && !alreadyTried;
+}
+
 // Per-workspace IndexedDB names (issues #228, #502).
 //
 // INVARIANT: at any moment, current code writes each store (the outbox, the
