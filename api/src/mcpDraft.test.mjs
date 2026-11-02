@@ -78,6 +78,14 @@ async function fresh({ orgKey = true } = {}) {
   role.run("ed", "editor");
   role.run("boss2", "admin");
   sqlite.prepare(`INSERT INTO project_config (id, preset, overrides_json, updated_at) VALUES (1, 'ar-bsoj', NULL, 0)`).run();
+  // TIT 1: tn rows on verses 1 to 6 (and an intro row); TIT 2: three tq rows.
+  const tn = sqlite.prepare(`INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, note, sort_order, version, translation_state) VALUES (?, ?, 1, ?, ?, 'n', 10, 1, 'validated')`);
+  tn.run("in01", BOOK, 0, "1:intro");
+  for (let v = 1; v <= 6; v++) tn.run(`t00${v}`, BOOK, v, `1:${v}`);
+  const tq = sqlite.prepare(`INSERT INTO tq_rows (id, book, chapter, verse, ref_raw, question, response, version, translation_state) VALUES (?, ?, 2, ?, ?, 'q?', 'a.', 1, 'validated')`);
+  tq.run("q001", BOOK, 1, "2:1");
+  tq.run("q002", BOOK, 2, "2:2");
+  tq.run("q003", BOOK, 3, "2:3");
   if (orgKey) {
     const { ciphertextB64, ivB64 } = await encryptApiKey(WRAPPING_KEY, API_KEY);
     sqlite
@@ -152,14 +160,40 @@ async function fresh({ orgKey = true } = {}) {
   return { sqlite, env, call, jobs, toolCtx };
 }
 
-// The fake bot: POST /api/pipeline/start answers a job id; GET answers a
-// running status at chapter 1.
+// bp-assistant's start contract (unfoldingWord/bp-assistant src/api/pipeline.js,
+// StartBodySchema + OptionsSchema, read 2026-11-02): options is .strict() with
+// no verse keys, verse scoping is top-level verseStart/verseEnd (1 to 200), and
+// rowIds match /^[a-z][a-z0-9]{3}$/. The fake bot answers 400 like the real
+// one when a start breaks it.
+const BOT_OPTION_KEYS = new Set([
+  "model", "fresh", "contentTypes", "noAlign", "alignOnly", "textOnly", "noIntro", "pauseBeforeATs",
+  "resourceType", "articleId", "articleUrl", "sourceLang", "targetLang", "targetOrg", "repoName",
+  "sourceRef", "contextRef", "literalRef", "simplifiedRef", "writeContextBack", "branchOnly",
+  "delivery", "direction", "rowIds", "hints", "kept",
+]);
+function botStartProblem(b) {
+  const o = b.options ?? {};
+  const unknown = Object.keys(o).filter((k) => !BOT_OPTION_KEYS.has(k));
+  if (unknown.length) return `options: unrecognized keys ${unknown.join(", ")}`;
+  if (o.rowIds && !o.rowIds.every((id) => /^[a-z][a-z0-9]{3}$/.test(id))) return "options.rowIds: invalid id";
+  for (const k of ["verseStart", "verseEnd"]) {
+    if (b[k] != null && !(Number.isInteger(b[k]) && b[k] >= 1 && b[k] <= 200)) return `${k}: out of range`;
+  }
+  if (b.verseEnd != null && b.verseStart == null) return "verseEnd without verseStart";
+  return null;
+}
+
+// The fake bot: POST /api/pipeline/start answers a job id (or 400, as above);
+// GET answers a running status at chapter 1.
 const realFetch = globalThis.fetch;
-async function withBot(fn, { status = { state: "running", current: { chapter: 1, skill: "translate-tn", status: "verse 3 of 12", startedAt: "2026-11-02T10:00:00Z" } } } = {}) {
+async function withBot(fn, { status = { state: "running", current: { chapter: 1, skill: "translate-tn", status: "verse 3 of 12", startedAt: "2026-11-02T10:00:00Z" } }, startStatus = 200 } = {}) {
   const calls = [];
   globalThis.fetch = async (url, init) => {
     calls.push({ url: String(url), method: init?.method ?? "GET", body: init?.body ? JSON.parse(init.body) : undefined });
     if (String(url).endsWith("/api/pipeline/start")) {
+      const problem = botStartProblem(calls.at(-1).body);
+      if (problem) return new Response(JSON.stringify({ error: "invalid_body", message: problem }), { status: 400 });
+      if (startStatus !== 200) return new Response(JSON.stringify({ error: "bot_down" }), { status: startStatus });
       return new Response(JSON.stringify({ jobId: "bot-1", provider: "openai" }), { status: 200 });
     }
     // The bot's StatusResponse (pipelines.ts) carries the scope too.
@@ -196,6 +230,9 @@ test("bpt_draft: an admin starts a verse-range translate through the real start 
     const start = calls.filter((c) => c.url.endsWith("/api/pipeline/start"));
     assert.equal(start.length, 1, "dispatched to the bot once");
     assert.equal(start[0].body.apiKey, API_KEY, "on the org's own key");
+    assert.equal(start[0].body.verseStart, 2, "verse scope rides at the top level, as the bot reads it");
+    assert.equal(start[0].body.verseEnd, 4);
+    assert.equal(start[0].body.options.verseStart, undefined, "and not in the bot's strict options");
   });
 });
 
@@ -204,6 +241,7 @@ test("bpt_draft: row ids scope the job to those notes", async () => {
   await withBot(async () => {
     const r = await call("bpt_draft", { book: BOOK, kind: "tq", chapter: 2, ids: ["q002", "q001"] });
     assert.equal(r.isError, false, JSON.stringify(r.data));
+    assert.equal(r.data.status, "running");
     const opts = JSON.parse(jobs()[0].options_json);
     assert.equal(opts.resourceType, "tq");
     assert.deepEqual(opts.rowIds, ["q001", "q002"]);
@@ -235,17 +273,27 @@ test("bpt_draft: with no org AI key the refusal says so and nothing is enqueued"
   });
 });
 
-test("bpt_draft: a bare chapter, ids with a verse range, and verse 0 are refused as input", async () => {
+test("bpt_draft: a bare chapter, a range or ids covering the whole chapter, ids with a verse range, verse 0 or past 200, and nothing to draft are refused", async () => {
   const { call, jobs } = await fresh();
   await withBot(async (calls) => {
-    for (const args of [
-      { book: BOOK, kind: "tn", chapter: 1 },
-      { ...DRAFT, ids: ["ab12"] },
-      { book: BOOK, kind: "tn", chapter: 1, verse_start: 0 },
-      { book: BOOK, kind: "tw", chapter: 1, verse_start: 1 },
+    for (const [args, why] of [
+      [{ book: BOOK, kind: "tn", chapter: 1 }, /whole chapter/],
+      [{ book: BOOK, kind: "tn", chapter: 1, verse_start: 1, verse_end: 6 }, /whole chapter/],
+      [{ book: BOOK, kind: "tn", chapter: 1, verse_start: 1, verse_end: 150 }, /whole chapter/],
+      [{ book: BOOK, kind: "tq", chapter: 2, ids: ["q001", "q002", "q003"] }, /whole chapter/],
+      [{ ...DRAFT, ids: ["t002"] }, /not both/],
+      [{ book: BOOK, kind: "tn", chapter: 1, verse_start: 0 }, /verse_start/],
+      [{ book: BOOK, kind: "tn", chapter: 1, verse_start: 2, verse_end: 100000 }, /verse_end/],
+      [{ book: BOOK, kind: "tw", chapter: 1, verse_start: 1 }, /kind/],
+      [{ book: BOOK, kind: "tn", chapter: 9, verse_start: 1 }, /no tn notes/],
+      [{ book: "JUD", kind: "tn", chapter: 1, verse_start: 1 }, /no tn notes/],
+      [{ book: BOOK, kind: "tq", chapter: 1, verse_start: 1 }, /no tq notes/],
+      [{ book: BOOK, kind: "tn", chapter: 1, verse_start: 7, verse_end: 9 }, /no tn notes in TIT 1:7-9/],
+      [{ book: BOOK, kind: "tn", chapter: 1, ids: ["t002", "zz99"] }, /zz99/],
     ]) {
       const r = await call("bpt_draft", args);
       assert.equal(r.isError, true, JSON.stringify(args));
+      assert.match(r.data.error, why, JSON.stringify([args, r.data]));
     }
     assert.equal(calls.length, 0);
     assert.equal(jobs().length, 0);
@@ -263,8 +311,10 @@ test("bpt_draft: the same draft twice points at the running job; another admin's
     const other = await call("bpt_draft", DRAFT, OTHER_ADMIN);
     assert.equal(other.isError, false, JSON.stringify(other.data));
     assert.equal(other.data.status, "busy");
-    assert.equal(other.data.job_id, first.data.job_id);
+    assert.equal(other.data.job_id, undefined, "another user's job id is not handed out: bpt_job_status would not show it");
     assert.equal(other.data.started_by, "boss");
+    assert.match(other.data.message, /boss/);
+    assert.match(other.data.message, /only they|web app/);
     assert.equal(jobs().length, 1);
   });
 });
@@ -313,4 +363,20 @@ test("bpt_job_status: another user's job, a job in another workspace and an unkn
     const viewer = await a.call("bpt_job_status", { job_id: mine.data.job_id }, VIEWER);
     assert.equal(viewer.isError, true);
   });
+});
+
+test("bpt_draft: a run the bot refuses comes back as a plain refusal with the failed job's id, not an internal error", async () => {
+  const { call, jobs } = await fresh();
+  await withBot(
+    async () => {
+      const r = await call("bpt_draft", DRAFT);
+      assert.equal(r.isError, true, JSON.stringify(r.data));
+      assert.doesNotMatch(r.data.error, /Internal error/);
+      const j = jobs()[0];
+      assert.equal(j.state, "failed");
+      assert.match(r.data.error, new RegExp(j.job_id));
+      assert.match(r.data.error, /Nothing is running/);
+    },
+    { startStatus: 503 },
+  );
 });
