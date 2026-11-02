@@ -1505,6 +1505,8 @@ export interface PipelineStatusResponse {
    */
   queuePosition?: number;
   queueAhead?: number;
+  /** Notes a translate apply left alone because a person changed them after the job was queued (#601). */
+  applySkipped?: { tnTouched: number; tnTouchedIds: string[] };
 }
 
 // AI pipeline proposal staged in pending_imports. The server parses payload
@@ -1552,6 +1554,8 @@ export interface PipelineJobRow {
   error_kind: string | null;
   error_message: string | null;
   output_json: string | null;
+  /** JSON skip report of a translate apply (#601, migration 0076); see lib/applySkipped.ts. */
+  apply_skipped_json?: string | null;
   /**
    * Set on a parent row once its asymmetric-alignment follow-up has been
    * spawned. Lets the UI render a "follow-up: jobX" line on the parent and

@@ -27,6 +27,7 @@ import { Hono } from "hono";
 import { rows } from "./rows.ts";
 import { bulkReviewState } from "./reviewState.ts";
 import { importJobOutput } from "./pipelineImport.ts";
+import { pipelines } from "./pipelines.ts";
 
 function makeDb(sqlite) {
   const mk = (sql, args) => ({
@@ -56,7 +57,7 @@ function makeDb(sqlite) {
 const BOOK = "ZEC";
 const JOB = "job-601";
 
-function fresh() {
+function fresh({ options = null } = {}) {
   const sqlite = new DatabaseSync(":memory:");
   const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations");
   for (const f of readdirSync(dir).filter((f) => f.endsWith(".sql")).sort()) {
@@ -71,6 +72,7 @@ function fresh() {
   ins.run("c1v2", BOOK, 2, "1:2", null);
   ins.run("c1v3", BOOK, 3, "1:3", null);
   ins.run("c1tr", BOOK, 7, "1:7", 500); // already trashed, for /restore
+  ins.run("c1in", BOOK, 0, "1:intro", null); // chapter intro (verse 0)
 
   // The chapter-wide translate job, queued 100s ago. created_at is the enqueue
   // time (pipelines.ts INSERTs the 'queued' row with created_at = unixepoch()).
@@ -78,15 +80,15 @@ function fresh() {
   const queuedAt = now - 100;
   sqlite
     .prepare(
-      `INSERT INTO pipeline_jobs (job_id, user_id, pipeline_type, book, start_chapter, end_chapter, session_key, state, created_at, staged_at)
-       VALUES (?, 9, 'translate', ?, 1, 1, 's', 'queued', ?, ?)`,
+      `INSERT INTO pipeline_jobs (job_id, user_id, pipeline_type, book, start_chapter, end_chapter, session_key, state, created_at, staged_at, options_json)
+       VALUES (?, 9, 'translate', ?, 1, 1, 's', 'queued', ?, ?, ?)`,
     )
-    .run(JOB, BOOK, queuedAt, now);
+    .run(JOB, BOOK, queuedAt, now, options ? JSON.stringify(options) : null);
   // One AI proposal per note, as staging would have written them.
   const prop = sqlite.prepare(
     `INSERT INTO pending_imports (job_id, kind, book, chapter, verse, payload_json) VALUES (?, 'tn', ?, 1, ?, ?)`,
   );
-  for (const [id, verse] of [["c1v1", 1], ["c1v2", 2], ["c1v3", 3], ["c1tr", 7]]) {
+  for (const [id, verse] of [["c1v1", 1], ["c1v2", 2], ["c1v3", 3], ["c1tr", 7], ["c1in", 0]]) {
     prop.run(JOB, BOOK, verse, JSON.stringify({ id, note: `AI note ${id}` }));
   }
 
@@ -98,6 +100,7 @@ function fresh() {
   });
   app.route("/api/rows", rows);
   app.post("/api/books/:book/review-state", bulkReviewState);
+  app.route("/api/pipelines", pipelines);
   const env = { DB: makeDb(sqlite) };
   const ctx = {
     waitUntil(p) {
@@ -146,7 +149,21 @@ function fresh() {
       .prepare(`SELECT accepted_at, rejected_at FROM pending_imports WHERE job_id = ? AND json_extract(payload_json, '$.id') = ?`)
       .get(JOB, id);
   const alerts = () => sqlite.prepare(`SELECT username, message, link_url FROM system_alerts`).all();
-  return { sqlite, post, patch, sweep, apply, row, proposal, alerts, queuedAt };
+  const stored = () => {
+    const r = sqlite.prepare(`SELECT apply_skipped_json FROM pipeline_jobs WHERE job_id = ?`).get(JOB);
+    return r.apply_skipped_json === null ? null : JSON.parse(r.apply_skipped_json);
+  };
+  // A hand-written edit_log row: for sources and timestamps the routes can't
+  // produce here (chat, machine writers, a chosen second).
+  const logTouch = (rowKey, { book = BOOK, action = "update", source = null, at = Math.floor(Date.now() / 1000) } = {}) =>
+    sqlite
+      .prepare(
+        `INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action, source, created_at)
+         VALUES ('tn', ?, ?, 9, 3, 3, ?, ?, ?)`,
+      )
+      .run(rowKey, book, action, source, at);
+  const get = (path) => app.request(path, { method: "GET" }, env, ctx);
+  return { sqlite, post, patch, sweep, apply, row, proposal, alerts, stored, logTouch, get, queuedAt };
 }
 
 function assertDrafted(t, id) {
@@ -218,11 +235,11 @@ test("an admin approve sweep while the job was queued is kept too", async () => 
 
   const out = await t.apply();
 
-  for (const id of ["c1v1", "c1v2", "c1v3"]) {
+  for (const id of ["c1v1", "c1v2", "c1v3", "c1in"]) {
     assert.equal(t.row(id).translation_state, "validated", `${id} stays approved`);
     assert.equal(t.row(id).note, "old note");
   }
-  assert.equal(out.applied.tnSkippedTouched, 3);
+  assert.equal(out.applied.tnSkippedTouched, 4);
 });
 
 test("the skipped notes are reported to the person who started the job", async () => {
@@ -297,4 +314,105 @@ test("machine writes after queueing (AI, reimport) do not stop the draft", async
   assertDrafted(t, "c1v2");
   assertDrafted(t, "c1v3");
   assert.equal(out.applied.tnSkippedTouched, 0);
+});
+
+test("the skip report is stored on the job for the status and list APIs", async () => {
+  const t = fresh();
+  await t.patch("c1v1", 3, { note: "translator text" });
+  await t.apply();
+  assert.deepEqual(t.stored(), { tnTouched: 1, tnTouchedIds: ["c1v1"] });
+});
+
+test("nothing skipped: the stored skip report is empty", async () => {
+  const t = fresh();
+  await t.apply();
+  assert.equal(t.stored(), null);
+});
+
+test("a touch from the chat counts as a person", async () => {
+  const t = fresh();
+  t.logTouch("c1v1", { source: "chat" });
+  const out = await t.apply();
+  assert.equal(t.row("c1v1").note, "old note");
+  assert.equal(out.applied.tnSkippedTouched, 1);
+});
+
+test("a history restore (PATCH with restored_from_version) while queued is kept", async () => {
+  const t = fresh();
+  const res = await t.patch("c1v1", 3, { note: "older text", restored_from_version: 1 });
+  assert.equal(res.status, 200);
+  const out = await t.apply();
+  assert.equal(t.row("c1v1").note, "older text");
+  assert.equal(out.applied.tnSkippedTouched, 1);
+});
+
+test("a retried import gives the same counts and replaces the alert", async () => {
+  const t = fresh();
+  await t.patch("c1v1", 3, { note: "translator text" });
+  const first = await t.apply();
+  // The one-retry path: the failed import released its claim.
+  t.sqlite.prepare(`UPDATE pipeline_jobs SET import_claimed_at = NULL WHERE job_id = ?`).run(JOB);
+  const second = await t.apply();
+  assert.equal(first.applied.tnSkippedTouched, 1);
+  assert.equal(second.applied.tnSkippedTouched, 1, "the skipped proposal is skipped again, not applied");
+  assert.equal(t.row("c1v1").note, "translator text");
+  assert.equal(t.alerts().length, 1, "the alert is replaced, not duplicated");
+  assert.deepEqual(t.stored(), { tnTouched: 1, tnTouchedIds: ["c1v1"] });
+});
+
+test("same-second touch: a chapter-wide job keeps the note", async () => {
+  const t = fresh();
+  t.logTouch("c1v1", { at: t.queuedAt });
+  const out = await t.apply();
+  assert.equal(t.row("c1v1").note, "old note");
+  assert.equal(out.applied.tnSkippedTouched, 1);
+});
+
+test("same-second touch: a Redo of that very note still drafts it (the save just before asking)", async () => {
+  const t = fresh({ options: { resourceType: "tn", rowIds: ["c1v1"] } });
+  t.logTouch("c1v1", { at: t.queuedAt });
+  const out = await t.apply();
+  assertDrafted(t, "c1v1");
+  assert.equal(out.applied.tnSkippedTouched, 0);
+});
+
+test("a Redo of a note edited in a later second keeps the edit", async () => {
+  const t = fresh({ options: { resourceType: "tn", rowIds: ["c1v1"] } });
+  t.logTouch("c1v1", { at: t.queuedAt });
+  t.logTouch("c1v1", { at: t.queuedAt + 1 });
+  const out = await t.apply();
+  assert.equal(t.row("c1v1").note, "old note");
+  assert.equal(out.applied.tnSkippedTouched, 1);
+});
+
+test("a touch on the same row id in another book does not count", async () => {
+  const t = fresh();
+  t.logTouch("c1v1", { book: "MAL" });
+  const out = await t.apply();
+  assertDrafted(t, "c1v1");
+  assert.equal(out.applied.tnSkippedTouched, 0);
+});
+
+test("a skipped chapter intro (verse 0) is listed as the intro", async () => {
+  const t = fresh();
+  t.logTouch("c1in");
+  await t.apply();
+  assert.match(t.alerts()[0].message, /1:intro/);
+  assert.doesNotMatch(t.alerts()[0].message, /1:0\b/);
+});
+
+test("the job status and list APIs return the skip report", async () => {
+  const t = fresh();
+  await t.patch("c1v1", 3, { note: "translator text" });
+  await t.apply();
+  t.sqlite.prepare(`UPDATE pipeline_jobs SET state = 'done', runner = 'internal', upstream_job_id = 'wf' WHERE job_id = ?`).run(JOB);
+
+  const status = await t.get(`/api/pipelines/${JOB}`);
+  assert.equal(status.status, 200);
+  assert.deepEqual((await status.json()).applySkipped, { tnTouched: 1, tnTouchedIds: ["c1v1"] });
+
+  const list = await t.get(`/api/pipelines?state=done`);
+  assert.equal(list.status, 200);
+  const job = (await list.json()).jobs.find((j) => j.job_id === JOB);
+  assert.deepEqual(JSON.parse(job.apply_skipped_json), { tnTouched: 1, tnTouchedIds: ["c1v1"] });
 });

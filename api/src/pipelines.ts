@@ -19,7 +19,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { Env } from "./index";
 import { currentUserId, requireEditor } from "./auth.ts";
-import { importJobOutput } from "./pipelineImport.ts";
+import { importJobOutput, type ApplySkipped } from "./pipelineImport.ts";
 import { getProjectConfig } from "./projectConfig.ts";
 import { buildTranslateOptions, normalizeRowIds, normalizeTranslateRowIdsJson } from "./translateOptions.ts";
 import {
@@ -421,6 +421,14 @@ async function resolveUsername(c: {
   const fromJwt = c.get("username");
   if (fromJwt) return fromJwt;
   return resolveUsernameFromDb(c.env, userId);
+}
+
+function parseApplySkipped(json: string): ApplySkipped | null {
+  try {
+    return JSON.parse(json) as ApplySkipped;
+  } catch {
+    return null;
+  }
 }
 
 interface PolledJob {
@@ -957,6 +965,9 @@ async function pollPipelineJob(
   // Chapters this apply actually wrote to — used below to hint open tabs once
   // the finalize commit lands. Empty unless a successful import populated it.
   let appliedChapters: number[] = [];
+  // Notes the translate apply left alone (#601); also persisted in
+  // apply_skipped_json, echoed here so the polling tab sees it at completion.
+  let applySkipped: ApplySkipped | null = null;
   if (shouldImport && data.output) {
     try {
       const cfg = await getProjectConfig(env);
@@ -988,6 +999,12 @@ async function pollPipelineJob(
         return { kind: "ok", text, status: httpStatus, state: data.state ?? "running" };
       }
       appliedChapters = importResult.applied?.affectedChapters ?? [];
+      if (importResult.applied && importResult.applied.tnSkippedTouched > 0) {
+        applySkipped = {
+          tnTouched: importResult.applied.tnSkippedTouched,
+          tnTouchedIds: importResult.applied.tnSkippedTouchedIds,
+        };
+      }
     } catch (err) {
       importFailed = true;
       importErrMessage = err instanceof Error ? err.message : String(err);
@@ -1144,6 +1161,8 @@ async function pollPipelineJob(
       },
     };
     responseText = JSON.stringify(adjusted);
+  } else if (applySkipped) {
+    responseText = JSON.stringify({ ...data, applySkipped });
   } else if (upstreamInterrupted) {
     // Upstream still says 'running'; we stored 'failed'. Rewrite so a tab
     // polling this job by id sees terminal and stops polling.
@@ -1936,7 +1955,7 @@ pipelines.get("/:jobId", requireEditor, async (c) => {
             end_chapter, session_key, follow_up_options, follow_up_chain,
             follow_up_job_id, error_kind, state, current_skill, current_status,
             created_at, updated_at, (output_json IS NULL) AS no_output_yet,
-            runner, wf_status_json
+            runner, wf_status_json, apply_skipped_json
        FROM pipeline_jobs WHERE job_id = ?1`,
   )
     .bind(jobId)
@@ -1946,6 +1965,7 @@ pipelines.get("/:jobId", requireEditor, async (c) => {
       current_status: string | null;
       created_at: number;
       updated_at: number;
+      apply_skipped_json: string | null;
     }>();
 
   // Capability gate — also the AiScreen "is AI configured?" probe: a bogus id
@@ -2000,6 +2020,7 @@ pipelines.get("/:jobId", requireEditor, async (c) => {
       state: owned.state,
       updatedAt: new Date(owned.updated_at * 1000).toISOString(),
       createdAt: new Date(owned.created_at * 1000).toISOString(),
+      ...(owned.apply_skipped_json ? { applySkipped: parseApplySkipped(owned.apply_skipped_json) } : {}),
     });
   }
 
@@ -2220,7 +2241,7 @@ pipelines.get("/", requireEditor, async (c) => {
             start_chapter, end_chapter, session_key, state, priority,
             current_skill, current_status, error_kind, error_message,
             output_json, follow_up_job_id, created_at, updated_at,
-            last_polled_at, notified_user_at, options_json`;
+            last_polled_at, notified_user_at, options_json, apply_skipped_json`;
 
   if (stateList === null) {
     // Default: the live queue is visible to everyone (active + waiting jobs,
@@ -2283,6 +2304,7 @@ pipelines.get("/", requireEditor, async (c) => {
             output_json: null,
             error_kind: null,
             error_message: null,
+            apply_skipped_json: null,
           }
         : row;
     // options_json itself stays server-side (a notes run's hints live there);
@@ -2330,6 +2352,8 @@ interface PipelineRowSelect {
   last_polled_at: number | null;
   notified_user_at: number | null;
   options_json: string | null;
+  // What the translate apply left alone (#601, migration 0076): JSON, or NULL.
+  apply_skipped_json: string | null;
   // Present only on the default (shared-queue) list where we JOIN users, so the
   // UI can attribute another user's run. Absent on the explicit-state branch.
   started_by_username?: string | null;

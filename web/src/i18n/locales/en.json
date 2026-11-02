@@ -1624,6 +1624,7 @@
     "redoFailed": "Couldn't get a new draft ({{status}}).",
     "redoStarted": "The AI is redrafting this note in the background — the new draft appears here when it lands.",
     "redoTimedOut": "The AI redraft is taking too long — try Redo again, or check the AI status panel.",
+    "redoKeptYourEdit": "Your note was kept: it was changed after the AI job was queued, so the AI left it alone. Press Redo again if you still want a new draft.",
     "approveNeedsDraft": "Approve needs a draft first — this note hasn't been through the AI pipeline yet.",
     "approveFailed": "Approve failed ({{status}}).",
     "notNeededFailed": "Could not set this aside ({{status}}).",
