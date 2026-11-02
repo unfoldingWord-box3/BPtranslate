@@ -869,7 +869,6 @@
   },
   "pipeline": {
     "aiButton": "AI",
-    "unpublishedScriptureWarning": "This book has Bible text changes that are not published to Door43 yet. The AI reads the published Bible text, so this run will not see those changes. The nightly publish fixes this, or an admin can publish now with “Publish this book” on the book page. You can still start the run.",
     "generateUltUst": "Generate ULT + UST",
     "writeTranslationNotes": "Write translation notes",
     "writeTranslationQuestions": "Write translation questions",
@@ -947,7 +946,9 @@
     "aiOutputApplied": "AI output applied to {{book}} {{chapter}}.",
     "refreshing": "Refreshing…",
     "refresh": "Refresh",
-    "dismissAll": "Dismiss all"
+    "dismissAll": "Dismiss all",
+    "unpublishedScriptureWarning": "This book has Bible text changes that the AI can’t see yet. AI runs read the Bible text published on Door43, and these changes get there when the nightly publish merges them. You can still start the run now.",
+    "unpublishedScriptureNotPublished": "This book has Bible text changes that the AI can’t see. AI runs read the Bible text published on Door43, and this workspace’s Bible text is not set to publish there. You can still start the run."
   },
   "noteCard": {
     "clickToEdit": "click to edit",

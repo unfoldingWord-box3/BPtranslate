@@ -1,0 +1,11 @@
+-- When an export snapshot's commit reached the base branch (master) on Door43
+-- (issue #679).
+--
+-- An export commits to a per-book `-be-` branch and opens a PR; Door43's own
+-- validate-and-merge workflow merges it into master later, outside this app.
+-- AI translate runs read master, so "exported" is not "visible to the AI".
+-- The unpublished-Bible-text check (api/src/unpublishedScripture.ts) asks
+-- Door43 whether a snapshot's PR has merged and records the PR's merge time
+-- here (unix seconds), so it asks once per PR. NULL = not known to be merged.
+-- Additive; nothing else reads it.
+ALTER TABLE export_snapshots ADD COLUMN merged_at INTEGER;

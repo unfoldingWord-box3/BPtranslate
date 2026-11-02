@@ -2,6 +2,7 @@
 // dev proxy points /api/* at the local Worker; production serves the SPA
 // from the same origin as the Worker).
 
+import type { ScriptureStatus } from "../lib/unpublishedScriptureWarning";
 import type { LayoutSpec } from "../lib/layoutSpec";
 import type { ReviewSweepBody, ReviewSweepResource, ReviewSweepTarget } from "../lib/reviewStateSweep";
 import type { NoteSourcePlan } from "../lib/sourceNotePlan";
@@ -2330,10 +2331,10 @@ export const api = {
       signal,
     }),
 
-  // #679: true per lane when the book has ULT/UST edits the nightly export
-  // has not published yet. AI translate runs read the published text.
+  // #679: per lane, whether the book's newest ULT/UST text has reached Door43
+  // master, where AI translate runs read it (api/src/unpublishedScripture.ts).
   unpublishedScripture: (book: string, signal?: AbortSignal) =>
-    request<{ book: string; ult: boolean; ust: boolean }>(
+    request<{ book: string; ult: ScriptureStatus; ust: ScriptureStatus }>(
       `/api/pipelines/unpublished-scripture/${encodeURIComponent(book)}`,
       { signal },
     ),
