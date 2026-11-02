@@ -16,6 +16,9 @@
 // classic Preferences, which would drop a new-UI user back into the old
 // interface) and it is a real MenuItem, so arrow keys can reach it. Either
 // variant renders nothing on a single-org install.
+//
+// On phones the Help panel's entry lives here too (onOpenHelp), because a
+// separate Help button in the strip truncated the screen titles at 360px.
 import { useContext, useState } from "react";
 import {
   Box,
@@ -33,6 +36,7 @@ import {
 import AddIcon from "@mui/icons-material/Add";
 import AdminPanelSettingsIcon from "@mui/icons-material/AdminPanelSettings";
 import ChatIcon from "@mui/icons-material/Chat";
+import HelpOutlineIcon from "@mui/icons-material/HelpOutline";
 import CheckIcon from "@mui/icons-material/Check";
 import LanguageIcon from "@mui/icons-material/Language";
 import MenuBookIcon from "@mui/icons-material/MenuBook";
@@ -59,9 +63,11 @@ type Props = {
   onLogout?: () => void;
   isAdmin?: boolean;
   onOpenClassic?: () => void;
+  /** Phones only: show a Help item; it gets the avatar button to return focus to. */
+  onOpenHelp?: (returnFocus: HTMLElement | null) => void;
 };
 
-export function AccountMenu({ username, onLogout, isAdmin, onOpenClassic }: Props) {
+export function AccountMenu({ username, onLogout, isAdmin, onOpenClassic, onOpenHelp }: Props) {
   const { t } = useTranslation();
   const [anchor, setAnchor] = useState<null | HTMLElement>(null);
   const [langAnchor, setLangAnchor] = useState<null | HTMLElement>(null);
@@ -238,6 +244,20 @@ export function AccountMenu({ username, onLogout, isAdmin, onOpenClassic }: Prop
           </MenuItem>
         )}
         {(onOpenClassic || isAdmin) && <Divider />}
+        {onOpenHelp && (
+          <MenuItem
+            onClick={() => {
+              const avatar = anchor;
+              setAnchor(null);
+              onOpenHelp(avatar);
+            }}
+          >
+            <ListItemIcon>
+              <HelpOutlineIcon fontSize="small" sx={{ color: "text.secondary" }} />
+            </ListItemIcon>
+            <ListItemText primary={t("help.open")} />
+          </MenuItem>
+        )}
         {/* Any signed-in user: the link is how the chat knows which project to
             read, and the server lets only editors save over it. */}
         {username && (

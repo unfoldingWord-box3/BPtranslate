@@ -992,8 +992,10 @@ export function App() {
               )}
               <SyncStatusBar onNavigate={navigate} flowRouting compact={isPhone} />
               <PipelineStatusBar />
-              <HelpButton />
+              {/* Phones: Help is in the account menu; a button here truncated screen titles at 360px. */}
+              {!isPhone && <HelpButton />}
               <AccountMenu
+                onOpenHelp={isPhone ? (el) => openHelp(undefined, el) : undefined}
                 username={auth.kind === "ready" ? auth.me?.username ?? null : null}
                 onLogout={handleSignOut}
                 isAdmin={auth.kind === "ready" && auth.role === "admin"}
