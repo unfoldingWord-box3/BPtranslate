@@ -548,6 +548,10 @@ export interface ApplyResult {
   // The same for questions (#725): edited or approved after the job was queued.
   tqSkippedTouched: number;
   tqSkippedTouchedIds: string[];
+  // Translate apply only (#735): notes already marked Not needed (trashed) when
+  // the apply ran, so they get no AI draft. Kept apart from the touched count
+  // above, which covers only changes made after the job was queued.
+  tnSkippedTrashed: number;
   // tw/ta article files updated in place by the translate apply (by path).
   articleUpdated: number;
   verseUpdated: number;
@@ -636,6 +640,7 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
     tnSkippedTouchedIds: [],
     tqSkippedTouched: 0,
     tqSkippedTouchedIds: [],
+    tnSkippedTrashed: 0,
     articleUpdated: 0,
     verseUpdated: 0,
     affectedChapters: [],
@@ -704,6 +709,10 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
       if (outcome === "drafted") {
         affected.add(p.chapter);
         result.tnHintExpanded += 1; // reuses the "updated in place" counter
+      } else if (outcome === "trashed") {
+        // Marked Not needed before the apply: the proposal is left unresolved,
+        // like a no_match, and the note keeps its text and state (#735).
+        result.tnSkippedTrashed += 1;
       }
       // no_match: the id isn't a live target row (or a concurrent human edit
       // won the CAS) — the proposal is left unresolved rather than inserted,
@@ -1091,15 +1100,17 @@ async function applyTranslateTnRow(
   p: PendingImportRow,
   job: ImportContext,
   userId: number,
-): Promise<"drafted" | "no_match"> {
+): Promise<"drafted" | "no_match" | "trashed"> {
   const payload = JSON.parse(p.payload_json) as Record<string, unknown>;
   const proposedId = typeof payload.id === "string" ? payload.id : null;
   if (!proposedId) return "no_match";
 
   // `chapter = 0 AND ?3 = 1`: the book introduction (front:intro) rides along
   // with a job that starts at chapter 1, as in parseOutputEntry's staging scope.
+  // trashed_at is read, not filtered, so a note marked Not needed reports
+  // "trashed" rather than "no_match" (#735).
   const target = await env.DB.prepare(
-    `SELECT id, version, note, tags, translation_state, pre_draft_json FROM tn_rows
+    `SELECT id, version, note, tags, translation_state, pre_draft_json, trashed_at FROM tn_rows
       WHERE id = ?1 AND deleted_at IS NULL
         AND book = ?2 AND (chapter BETWEEN ?3 AND ?4 OR (chapter = 0 AND ?3 = 1))`,
   )
@@ -1111,8 +1122,12 @@ async function applyTranslateTnRow(
       tags: string | null;
       translation_state: string | null;
       pre_draft_json: string | null;
+      trashed_at: number | null;
     }>();
   if (!target) return "no_match";
+  // A note marked Not needed gets no AI draft, as on the English apply path:
+  // restoring it later must not bring back AI text nobody reviewed (#735).
+  if (target.trashed_at != null) return "trashed";
 
   const now = Math.floor(Date.now() / 1000);
   const newVersion = target.version + 1;
@@ -1147,7 +1162,7 @@ async function applyTranslateTnRow(
                 version = version + 1,
                 updated_at = ?5,
                 updated_by = ?6
-          WHERE id = ?7 AND book = ?8 AND deleted_at IS NULL AND version = ?9`,
+          WHERE id = ?7 AND book = ?8 AND deleted_at IS NULL AND trashed_at IS NULL AND version = ?9`,
       )
       .bind(note, tags, srcHash, draftMeta, now, userId, target.id, job.book, target.version, preDraftJson),
     env.DB

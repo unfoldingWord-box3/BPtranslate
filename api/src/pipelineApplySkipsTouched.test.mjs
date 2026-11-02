@@ -256,6 +256,26 @@ test("a note RESTORED while the job was queued keeps its restored text", async (
   assert.deepEqual(out.applied.tnSkippedTouchedIds, ["c1tr"]);
 });
 
+// #735: a note already marked Not needed BEFORE the job was queued is not a
+// touch after the enqueue, so the check above never sees it. The apply itself
+// must leave a trashed note alone, as the English apply path already does.
+test("a note marked NOT NEEDED before the job was queued gets no AI draft (#735)", async () => {
+  const t = fresh(); // c1tr is seeded trashed, with an AI proposal
+
+  const out = await t.apply();
+
+  const r = t.row("c1tr");
+  assert.notEqual(r.trashed_at, null, "still trashed");
+  assert.equal(r.note, "old note", "no AI text was written into the trashed note");
+  assert.equal(r.translation_state, "ai_draft", "state unchanged");
+  assert.equal(r.version, 3, "the apply did not write the row");
+  assert.equal(t.proposal("c1tr").accepted_at, null, "the proposal is left unapplied");
+  assert.equal(out.applied.tnSkippedTrashed, 1, "counted as its own skip reason");
+  assert.equal(out.applied.tnSkippedTouched, 0, "not reported as a touch");
+  assert.equal(t.alerts().length, 0, "no alert: nobody changed it during the wait");
+  assertDrafted(t, "c1v1");
+});
+
 test("an admin approve sweep while the job was queued is kept too", async () => {
   const t = fresh();
   const res = await t.sweep({ resource: "tn", target: "approved", chapter: 1 });
