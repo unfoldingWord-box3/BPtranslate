@@ -162,7 +162,8 @@ async function withBot(fn, { status = { state: "running", current: { chapter: 1,
     if (String(url).endsWith("/api/pipeline/start")) {
       return new Response(JSON.stringify({ jobId: "bot-1", provider: "openai" }), { status: 200 });
     }
-    return new Response(JSON.stringify({ jobId: "bot-1", pipelineType: "translate", ...status, updatedAt: "2026-11-02T10:01:00Z", createdAt: "2026-11-02T10:00:00Z" }), { status: 200 });
+    // The bot's StatusResponse (pipelines.ts) carries the scope too.
+    return new Response(JSON.stringify({ jobId: "bot-1", pipelineType: "translate", scope: { book: BOOK, startChapter: 1, endChapter: 1 }, ...status, updatedAt: "2026-11-02T10:01:00Z", createdAt: "2026-11-02T10:00:00Z" }), { status: 200 });
   };
   try {
     return await fn(calls);

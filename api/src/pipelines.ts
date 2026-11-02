@@ -1920,6 +1920,30 @@ pipelines.post("/start", requireEditor, async (c) => {
   return c.json(resp);
 });
 
+// What a job's apply staged and what became of it, per kind (tn | tq | verse |
+// article): proposals staged in pending_imports, how many were applied
+// (accepted) and how many rejected. Empty until the apply has staged anything.
+// Read-only; the chat's bpt_job_status calls it only after GET /:jobId below
+// answered for the caller's own job.
+export async function jobResultCounts(
+  env: Env,
+  jobId: string,
+): Promise<Record<string, { proposed: number; applied: number; rejected: number }>> {
+  const rs = await env.DB.prepare(
+    `SELECT kind, COUNT(*) AS proposed,
+            SUM(CASE WHEN accepted_at IS NOT NULL THEN 1 ELSE 0 END) AS applied,
+            SUM(CASE WHEN rejected_at IS NOT NULL THEN 1 ELSE 0 END) AS rejected
+       FROM pending_imports WHERE job_id = ?1 GROUP BY kind ORDER BY kind`,
+  )
+    .bind(jobId)
+    .all<{ kind: string; proposed: number; applied: number; rejected: number }>();
+  const out: Record<string, { proposed: number; applied: number; rejected: number }> = {};
+  for (const r of rs.results ?? []) {
+    out[r.kind] = { proposed: Number(r.proposed), applied: Number(r.applied), rejected: Number(r.rejected) };
+  }
+  return out;
+}
+
 // GET /api/pipelines/:jobId
 pipelines.get("/:jobId", requireEditor, async (c) => {
   const userId = currentUserId(c);
