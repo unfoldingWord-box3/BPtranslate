@@ -423,6 +423,19 @@ async function resolveUsername(c: {
   return resolveUsernameFromDb(c.env, userId);
 }
 
+// pipeline_jobs.edit_log_watermark (#601, migration 0076): the highest
+// edit_log.id when the job is queued. Evaluated inside the job's own INSERT, so
+// no edit can commit between reading it and queueing the job. The translate
+// apply treats a human edit_log row above it as "changed after the job was
+// queued" (pipelineImport.ts humanTouchedTnIds).
+const EDIT_LOG_WATERMARK_SQL = `(SELECT COALESCE(MAX(id), 0) FROM edit_log)`;
+// A follow-up or chain child inherits its parent's watermark, so an edit made
+// between the parent's and the child's enqueue still counts. A parent queued
+// before the column existed (NULL) gives the child the current watermark.
+function inheritedWatermarkSql(parentParam: number): string {
+  return `COALESCE((SELECT edit_log_watermark FROM pipeline_jobs WHERE job_id = ?${parentParam}), ${EDIT_LOG_WATERMARK_SQL})`;
+}
+
 function parseApplySkipped(json: string): ApplySkipped | null {
   try {
     return JSON.parse(json) as ApplySkipped;
@@ -1876,9 +1889,9 @@ pipelines.post("/start", requireEditor, async (c) => {
        job_id, user_id, pipeline_type, book, start_chapter, end_chapter,
        session_key, state, priority, options_json, follow_up_options,
        follow_up_chain, source_generation, source_owner, source_repo, source_ref,
-       source_stamps_json, created_at, updated_at
+       source_stamps_json, created_at, updated_at, edit_log_watermark
      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', 0, ?8, ?9, ?10,
-               ?11, ?12, ?13, ?14, ?15, unixepoch(), unixepoch())`,
+               ?11, ?12, ?13, ?14, ?15, unixepoch(), unixepoch(), ${EDIT_LOG_WATERMARK_SQL})`,
   )
     .bind(
       jobId,
@@ -2051,7 +2064,7 @@ interface FollowUpInput {
 // job_id is derived deterministically from the parent so two concurrent polls
 // collapse via ON CONFLICT DO NOTHING; the parent claim guard makes the whole
 // thing idempotent.
-async function enqueueFollowUp(env: Env, input: FollowUpInput): Promise<void> {
+export async function enqueueFollowUp(env: Env, input: FollowUpInput): Promise<void> {
   // Normalize any rowIds a translate child carries so the stored options_json
   // holds the canonical (sorted+deduped) set the dedupe key compares against (#347).
   const followUpOptions = normalizeTranslateRowIdsJson(input.pipelineType, input.followUpOptionsJson);
@@ -2087,9 +2100,9 @@ async function enqueueFollowUp(env: Env, input: FollowUpInput): Promise<void> {
            job_id, user_id, pipeline_type, book, start_chapter, end_chapter,
            session_key, state, priority, options_json,
            source_generation, source_owner, source_repo, source_ref, source_stamps_json,
-           created_at, updated_at
+           created_at, updated_at, edit_log_watermark
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', 1, ?8,
-                   ?9, ?10, ?11, ?12, ?13, unixepoch(), unixepoch())
+                   ?9, ?10, ?11, ?12, ?13, unixepoch(), unixepoch(), ${inheritedWatermarkSql(14)})
          ON CONFLICT(job_id) DO NOTHING`,
       )
       .bind(
@@ -2106,6 +2119,7 @@ async function enqueueFollowUp(env: Env, input: FollowUpInput): Promise<void> {
         parentStamp?.source_repo ?? null,
         parentStamp?.source_ref ?? null,
         parentStamp?.source_stamps_json ?? null,
+        input.parentJobId,
       ),
   ]);
 }
@@ -2125,7 +2139,7 @@ interface FollowUpChainInput {
 // child's pipelineType + options, and stores the remainder on the child row
 // so the same logic fires the next step when this child completes. Same
 // priority=1 + atomic-batch + deterministic-id idempotency as enqueueFollowUp.
-async function enqueueFollowUpFromChain(env: Env, input: FollowUpChainInput): Promise<void> {
+export async function enqueueFollowUpFromChain(env: Env, input: FollowUpChainInput): Promise<void> {
   let chain: ChainStepValue[];
   try {
     chain = JSON.parse(input.chainJson) as ChainStepValue[];
@@ -2181,9 +2195,9 @@ async function enqueueFollowUpFromChain(env: Env, input: FollowUpChainInput): Pr
            job_id, user_id, pipeline_type, book, start_chapter, end_chapter,
            session_key, state, priority, options_json, follow_up_chain,
            source_generation, source_owner, source_repo, source_ref, source_stamps_json,
-           created_at, updated_at
+           created_at, updated_at, edit_log_watermark
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', 1, ?8, ?9,
-                   ?10, ?11, ?12, ?13, ?14, unixepoch(), unixepoch())
+                   ?10, ?11, ?12, ?13, ?14, unixepoch(), unixepoch(), ${inheritedWatermarkSql(15)})
          ON CONFLICT(job_id) DO NOTHING`,
       )
       .bind(
@@ -2201,6 +2215,7 @@ async function enqueueFollowUpFromChain(env: Env, input: FollowUpChainInput): Pr
         stamp.legacy.source_repo,
         stamp.legacy.source_ref,
         stamp.stampsJson,
+        input.parentJobId,
       ),
   ]);
 }

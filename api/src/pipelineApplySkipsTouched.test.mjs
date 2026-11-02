@@ -57,7 +57,10 @@ function makeDb(sqlite) {
 const BOOK = "ZEC";
 const JOB = "job-601";
 
-function fresh({ options = null } = {}) {
+// watermark: true stamps edit_log_watermark the way pipelines.ts does (inside
+// the INSERT); false leaves it NULL, as on a job queued before migration 0076.
+// beforeEnqueue: edit_log touches written before the job is queued.
+function fresh({ options = null, watermark = true, beforeEnqueue = [] } = {}) {
   const sqlite = new DatabaseSync(":memory:");
   const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations");
   for (const f of readdirSync(dir).filter((f) => f.endsWith(".sql")).sort()) {
@@ -78,10 +81,18 @@ function fresh({ options = null } = {}) {
   // time (pipelines.ts INSERTs the 'queued' row with created_at = unixepoch()).
   const now = Math.floor(Date.now() / 1000);
   const queuedAt = now - 100;
+  for (const { rowKey, at } of beforeEnqueue) {
+    sqlite
+      .prepare(
+        `INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action, created_at)
+         VALUES ('tn', ?, ?, 9, 2, 3, 'update', ?)`,
+      )
+      .run(rowKey, BOOK, at ?? queuedAt);
+  }
   sqlite
     .prepare(
-      `INSERT INTO pipeline_jobs (job_id, user_id, pipeline_type, book, start_chapter, end_chapter, session_key, state, created_at, staged_at, options_json)
-       VALUES (?, 9, 'translate', ?, 1, 1, 's', 'queued', ?, ?, ?)`,
+      `INSERT INTO pipeline_jobs (job_id, user_id, pipeline_type, book, start_chapter, end_chapter, session_key, state, created_at, staged_at, options_json, edit_log_watermark)
+       VALUES (?, 9, 'translate', ?, 1, 1, 's', 'queued', ?, ?, ?, ${watermark ? "(SELECT COALESCE(MAX(id), 0) FROM edit_log)" : "NULL"})`,
     )
     .run(JOB, BOOK, queuedAt, now, options ? JSON.stringify(options) : null);
   // One AI proposal per note, as staging would have written them.
@@ -269,13 +280,7 @@ test("nothing touched: every note is drafted and no alert is written", async () 
 });
 
 test("an edit made BEFORE the job was queued does not stop the draft", async () => {
-  const t = fresh();
-  t.sqlite
-    .prepare(
-      `INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action, created_at)
-       VALUES ('tn', 'c1v1', ?, 9, 2, 3, 'update', ?)`,
-    )
-    .run(BOOK, t.queuedAt - 50);
+  const t = fresh({ beforeEnqueue: [{ rowKey: "c1v1", at: Math.floor(Date.now() / 1000) - 150 }] });
   const out = await t.apply();
   assertDrafted(t, "c1v1");
   assert.equal(out.applied.tnSkippedTouched, 0);
@@ -360,7 +365,9 @@ test("a retried import gives the same counts and replaces the alert", async () =
   assert.deepEqual(t.stored(), { tnTouched: 1, tnTouchedIds: ["c1v1"] });
 });
 
-test("same-second touch: a chapter-wide job keeps the note", async () => {
+// Same second, both orders. The enqueue and the edit can share a unixepoch()
+// second; the edit_log watermark orders them exactly (edit_log.id).
+test("same second, edit after the enqueue: a chapter-wide job keeps the note", async () => {
   const t = fresh();
   t.logTouch("c1v1", { at: t.queuedAt });
   const out = await t.apply();
@@ -368,21 +375,47 @@ test("same-second touch: a chapter-wide job keeps the note", async () => {
   assert.equal(out.applied.tnSkippedTouched, 1);
 });
 
-test("same-second touch: a Redo of that very note still drafts it (the save just before asking)", async () => {
+test("same second, edit after the enqueue: a Redo of that note keeps the edit", async () => {
   const t = fresh({ options: { resourceType: "tn", rowIds: ["c1v1"] } });
   t.logTouch("c1v1", { at: t.queuedAt });
+  const out = await t.apply();
+  assert.equal(t.row("c1v1").note, "old note", "an edit committed after the Redo was queued is not overwritten");
+  assert.equal(out.applied.tnSkippedTouched, 1);
+});
+
+test("same second, edit before the enqueue: a Redo of that note still drafts it", async () => {
+  const t = fresh({
+    options: { resourceType: "tn", rowIds: ["c1v1"] },
+    beforeEnqueue: [{ rowKey: "c1v1" }], // at the enqueue second
+  });
   const out = await t.apply();
   assertDrafted(t, "c1v1");
   assert.equal(out.applied.tnSkippedTouched, 0);
 });
 
-test("a Redo of a note edited in a later second keeps the edit", async () => {
-  const t = fresh({ options: { resourceType: "tn", rowIds: ["c1v1"] } });
-  t.logTouch("c1v1", { at: t.queuedAt });
-  t.logTouch("c1v1", { at: t.queuedAt + 1 });
+test("same second, edit before the enqueue: a chapter-wide job drafts it too", async () => {
+  const t = fresh({ beforeEnqueue: [{ rowKey: "c1v1" }] });
   const out = await t.apply();
-  assert.equal(t.row("c1v1").note, "old note");
-  assert.equal(out.applied.tnSkippedTouched, 1);
+  assertDrafted(t, "c1v1");
+  assert.equal(out.applied.tnSkippedTouched, 0);
+});
+
+test("a job queued before the watermark existed falls back to seconds", async () => {
+  // NULL watermark: a touch in a later second counts, an earlier one does not,
+  // and an enqueue-second touch counts unless the job is a Redo of that note.
+  const t = fresh({ watermark: false, beforeEnqueue: [{ rowKey: "c1v2", at: Math.floor(Date.now() / 1000) - 150 }] });
+  t.logTouch("c1v1", { at: t.queuedAt + 1 });
+  t.logTouch("c1v3", { at: t.queuedAt });
+  const out = await t.apply();
+  assert.equal(t.row("c1v1").note, "old note", "later second: kept");
+  assertDrafted(t, "c1v2");
+  assert.equal(t.row("c1v3").note, "old note", "enqueue second, chapter-wide: kept");
+  assert.deepEqual(out.applied.tnSkippedTouchedIds.sort(), ["c1v1", "c1v3"]);
+
+  const r = fresh({ watermark: false, options: { resourceType: "tn", rowIds: ["c1v1"] } });
+  r.logTouch("c1v1", { at: r.queuedAt });
+  await r.apply();
+  assertDrafted(r, "c1v1");
 });
 
 test("a touch on the same row id in another book does not count", async () => {

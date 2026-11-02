@@ -577,13 +577,14 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
   // was triggered on their behalf.
   const starter = await env.DB.prepare(
     `SELECT user_id, source_generation, source_owner, source_repo, source_ref,
-            source_stamps_json, pipeline_type, created_at
+            source_stamps_json, pipeline_type, created_at, edit_log_watermark
        FROM pipeline_jobs WHERE job_id = ?1`,
   )
     .bind(job.jobId)
     .first<{
       user_id: number;
       created_at: number;
+      edit_log_watermark: number | null;
       source_generation: number | null;
       source_owner: string | null;
       source_repo: string | null;
@@ -659,7 +660,7 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
     const touched = await humanTouchedTnIds(
       env,
       job.book,
-      starter.created_at,
+      { watermark: starter.edit_log_watermark, queuedAt: starter.created_at },
       [...new Set(proposalIds.values())],
       new Set(requested ?? []),
     );
@@ -1376,27 +1377,30 @@ const HUMAN_TOUCH_ACTIONS = ["update", "validate", "trash", "untrash"] as const;
 const HUMAN_TOUCH_SOURCES = ["chat", "admin_bulk_state"] as const;
 
 // Ids among `ids` (this job's proposals) that a person touched after the job
-// was queued (`since`, pipeline_jobs.created_at). Both clocks are D1
-// unixepoch() seconds, so a touch in the enqueue second itself is ambiguous:
-//   * for a row the job was asked to (re)draft by id (`requested`, a Redo), it
-//     is most likely the save the person made just before asking, so only a
-//     touch strictly AFTER the enqueue second counts;
-//   * for any other row it counts (`>=`), the side that loses no work.
-// A touch in a later second always counts, so a later human edit is never
-// overwritten. Bounded by `row_key IN (...)` (chunked under D1's bind limit)
-// so a chapter job reads only its own rows' history, not the book's. The
-// window between this read and the apply's write is covered by the #561/#602
-// route locks (the job is 'running' while it applies), and a content edit is
-// also caught by the version CAS in applyTranslateTnRow.
+// was queued. Exact when the job carries an edit_log watermark (migration
+// 0076): a human edit_log row with id above it was written after the enqueue,
+// whatever second either landed in, for every row the job writes.
+// Jobs queued before that column (watermark NULL) fall back to seconds,
+// comparing edit_log.created_at with pipeline_jobs.created_at, where a touch in
+// the enqueue second itself is ambiguous: for a row the job was asked to
+// (re)draft by id (`requested`, a Redo) it is most likely the save made just
+// before asking, so only a later second counts; for any other row it counts,
+// the side that loses no work.
+// Bounded by `row_key IN (...)` (chunked under D1's bind limit) so a chapter
+// job reads only its own rows' history, not the book's. The window between
+// this read and the apply's write is covered by the #561/#602 route locks (the
+// job is 'running' while it applies), and a content edit is also caught by the
+// version CAS in applyTranslateTnRow.
 const TOUCH_ID_CHUNK = 80;
 async function humanTouchedTnIds(
   env: Env,
   book: string,
-  since: number,
+  queued: { watermark: number | null; queuedAt: number },
   ids: string[],
   requested: Set<string>,
 ): Promise<Set<string>> {
   const out = new Set<string>();
+  const exact = queued.watermark !== null;
   const fixed = 2 + HUMAN_TOUCH_ACTIONS.length + HUMAN_TOUCH_SOURCES.length;
   const actions = HUMAN_TOUCH_ACTIONS.map((_, i) => `?${i + 3}`).join(", ");
   const sources = HUMAN_TOUCH_SOURCES.map((_, i) => `?${i + 3 + HUMAN_TOUCH_ACTIONS.length}`).join(", ");
@@ -1405,16 +1409,16 @@ async function humanTouchedTnIds(
     const idPlaces = chunk.map((_, j) => `?${j + fixed + 1}`).join(", ");
     const rs = await env.DB.prepare(
       `SELECT row_key, MAX(created_at) AS last_touch FROM edit_log
-        WHERE kind = 'tn' AND book = ?1 AND created_at >= ?2
+        WHERE kind = 'tn' AND book = ?1 AND ${exact ? "id > ?2" : "created_at >= ?2"}
           AND action IN (${actions})
           AND (source IS NULL OR source IN (${sources}))
           AND row_key IN (${idPlaces})
         GROUP BY row_key`,
     )
-      .bind(book, since, ...HUMAN_TOUCH_ACTIONS, ...HUMAN_TOUCH_SOURCES, ...chunk)
+      .bind(book, exact ? queued.watermark : queued.queuedAt, ...HUMAN_TOUCH_ACTIONS, ...HUMAN_TOUCH_SOURCES, ...chunk)
       .all<{ row_key: string; last_touch: number }>();
     for (const r of rs.results ?? []) {
-      if (r.last_touch > since || !requested.has(r.row_key)) out.add(r.row_key);
+      if (exact || r.last_touch > queued.queuedAt || !requested.has(r.row_key)) out.add(r.row_key);
     }
   }
   return out;
