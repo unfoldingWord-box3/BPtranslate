@@ -204,3 +204,57 @@ for (const [i, variant] of variants.entries()) {
     await context.close();
   });
 }
+
+test("tN card: text typed while the card's own save is pending saves cleanly after it lands", async ({ browser }) => {
+  // The other side of #754: the copy a draft was typed against moves with the
+  // translator's own save. Type, Save (held in flight), type more, let the
+  // first save land, Save again: the second Save goes out at the landed
+  // version and lands, with no conflict against the translator's own save.
+  test.setTimeout(90_000);
+  const probe = await apiRequest.newContext({ baseURL: BASE });
+  const auth = await mintToken(probe, "probe-754-own");
+  const chapter = await fetchChapter(probe, auth.token, "ZEC", CHAPTER);
+  const byVerse = new Map<number, typeof chapter.tn>();
+  for (const r of chapter.tn) byVerse.set(r.verse, [...(byVerse.get(r.verse) ?? []), r]);
+  // A verse after the ones the conflict cases use.
+  const pairs = [...byVerse.entries()].filter(([v, rows]) => v > 1 && rows.length >= 2);
+  expect(pairs.length).toBeGreaterThan(variants.length);
+  const tn = pairs[variants.length][1][0];
+  const { context } = await newUserContext(browser, "restored-draft-754-own");
+  const page = await context.newPage();
+
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  const sent: Array<{ ifMatch: string | undefined; status: number }> = [];
+  await context.route(`**/api/rows/tn/${tn.id}**`, async (route, request) => {
+    if (request.method() !== "PATCH") return route.continue();
+    if (sent.length === 0) await held;
+    const response = await route.fetch();
+    sent.push({ ifMatch: request.headers()["if-match"], status: response.status() });
+    return route.fulfill({ response });
+  });
+
+  await gotoVerse(page, "ZEC", CHAPTER, tn.verse);
+  const first = `OWN FIRST 754 ${Date.now()}`;
+  await noteTextarea(page, tn.id).fill(first);
+  await saveNote(page, tn.id);
+  const second = `${first} AND MORE`;
+  await noteTextarea(page, tn.id).fill(second);
+  await page.waitForTimeout(500);
+  release();
+  await expect.poll(() => sent.length, { message: "the first save should land" }).toBe(1);
+  expect(sent[0]).toEqual({ ifMatch: String(tn.version), status: 200 });
+
+  await saveNote(page, tn.id);
+  await expect.poll(() => sent.length, { message: "the second save should reach the server" }).toBe(2);
+  expect(sent[1], "the second Save goes out at the landed version").toEqual({
+    ifMatch: String(tn.version + 1),
+    status: 200,
+  });
+  const after = (await fetchChapter(probe, auth.token, "ZEC", CHAPTER)).tn.find((r) => r.id === tn.id)!;
+  expect(after.note).toBe(second);
+  await expect(page.getByText(/^1 conflict$/)).toHaveCount(0);
+
+  await probe.dispose();
+  await context.close();
+});

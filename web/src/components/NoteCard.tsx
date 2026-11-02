@@ -102,7 +102,7 @@ interface Props {
   // comes from "switch to v{N}" in the history dialog, opts carries the
   // origin version so the server can mark the new edit_log entry + row
   // column for chip-label purposes.
-  onSave: (patch: Partial<TnRow>, opts?: { restoredFromVersion?: number; draftRef?: { chapter: number; verse: number } }) => void;
+  onSave: (patch: Partial<TnRow>, opts?: { restoredFromVersion?: number; draftRef?: { chapter: number; verse: number }; origin?: { version: number; values: Record<string, unknown> } }) => void;
   // Resolves false when the trash request failed, so handleDelete can leave the
   // user's unsaved text alone (see the comment there).
   onDelete: () => void | Promise<boolean | void>;
@@ -577,6 +577,21 @@ function NoteCardInner({
     version: row.version,
   }));
   const savedRef = useRef(saved);
+  // The server copy the card's unsaved text was typed against (#754): the
+  // baseline and version its draft records and its Save sends as If-Match.
+  // `saved` rebases whenever the row moves, so after another person's save it
+  // holds their text; a Save diffed and sent against that would replace their
+  // note with a 200. Kept apart from `saved`, it survives that rebase (and a
+  // remount, through the draft), so the Save goes out at the old version and
+  // the server's 409 brings up the conflict prompt. Set when a draft is first
+  // written or restored; moved to the landed row by this tab's own save of the
+  // row; cleared by Undo and when the draft is cleared.
+  const originRef = useRef<{
+    quote: string | null;
+    note: string | null;
+    support_reference: string | null;
+    version: number;
+  } | null>(null);
   const [savePendingVersion, setSavePendingVersion] = useState<number | null>(null);
   if (row.version !== saved.version) {
     setSaved({
@@ -789,6 +804,7 @@ function NoteCardInner({
         };
         savedRef.current = next;
         setSaved(next);
+        if (typeof rec?.expectedVersion === "number") originRef.current = next;
       }
       if (typeof patch.quote === "string") setQuote(tsvToDisplay(patch.quote));
       if (typeof patch.note === "string") setNote(tsvToDisplay(patch.note));
@@ -851,9 +867,24 @@ function NoteCardInner({
     setSavePendingVersion(savedRef.current.version);
     sentRef.current = sentSave(patch);
     noteSave(patch, row.version);
+    // Typed against an older copy than the row's (#754): send it at that
+    // version, with that copy as the conflict baseline, so a field someone
+    // else changed meanwhile comes back as a conflict instead of a 200.
+    const origin = originRef.current;
+    const stale = origin !== null && origin.version !== row.version ? origin : null;
     // draftRef: this card made the save, so a refused one is marked on its
     // draft and outlives an AI apply (#724; refusedRowDraft.ts).
-    onSave(patch, { draftRef: { chapter: row.chapter, verse: row.verse } });
+    onSave(patch, {
+      draftRef: { chapter: row.chapter, verse: row.verse },
+      ...(stale
+        ? {
+            origin: {
+              version: stale.version,
+              values: { quote: stale.quote, note: stale.note, support_reference: stale.support_reference },
+            },
+          }
+        : {}),
+    });
     // Rebase the snapshot so the chip stops showing "*" after a manual
     // save and a follow-up Undo reverts to the just-saved state.
     if (sessionSnapshotRef.current !== null) {
@@ -886,6 +917,7 @@ function NoteCardInner({
     setNote(rowNote);
     setSupportRef(savedSupportRef);
     pendingRef.current = {};
+    originRef.current = null;
     // Re-baseline the session snapshot to the saved state so a follow-up
     // edit produces a fresh hasNetChanges signal rather than thinking
     // the user is undoing the previous undo.
@@ -1171,6 +1203,30 @@ function NoteCardInner({
       }
     };
     const offResult = onOutboxResult((op, result) => {
+      // This tab's own save of the row landed (#754): unsaved text still in
+      // the card was typed on top of it, so it is now typed against the
+      // landed row, not the copy before it (else the next Save would go out
+      // at the old version and conflict with the translator's own save).
+      if (
+        result.kind === "ok" &&
+        originRef.current !== null &&
+        op.action === "patch" &&
+        op.target.kind === "row" &&
+        op.target.rowKind === "tn" &&
+        op.target.id === row.id &&
+        op.target.book === row.book
+      ) {
+        const landed = result.updated as Partial<TnRow> | null | undefined;
+        originRef.current =
+          landed && typeof landed.version === "number"
+            ? {
+                quote: landed.quote ?? null,
+                note: landed.note ?? null,
+                support_reference: landed.support_reference ?? null,
+                version: landed.version,
+              }
+            : null;
+      }
       if (rowSaveEnded(result)) end(op, result.kind !== "ok");
     });
     const offDrop = onOutboxDrop((op) => end(op, true));
@@ -1189,22 +1245,27 @@ function NoteCardInner({
     // Record the kept type-backs so a remount can restore the protection (#658).
     const reverted = revertMarks(rowDiff, draftPatch, sentRef.current ?? undefined);
     if (Object.keys(draftPatch).length > 0) {
+      // The copy this text was typed against (#754): fixed at the first write,
+      // so a later row move (another person's save, an AI apply) does not
+      // re-stamp the draft with the newer copy and version.
+      if (originRef.current === null) originRef.current = { ...savedRef.current };
+      const origin = originRef.current;
       void drafts.set(
         draftKey,
         {
           patch: draftPatch,
-          // Persist the server baseline (savedRef stays version-pinned, immune
-          // to the optimistic same-version row mutations) so a remount restores
-          // an honest baseline instead of inheriting a polluted row. See the
+          // Persist the server baseline (version-pinned, immune to the
+          // optimistic same-version row mutations) so a remount restores an
+          // honest baseline instead of inheriting a polluted row. See the
           // hydration effect above.
           baseline: {
-            quote: savedRef.current.quote,
-            note: savedRef.current.note,
-            support_reference: savedRef.current.support_reference,
+            quote: origin.quote,
+            note: origin.note,
+            support_reference: origin.support_reference,
           },
           ...(reverted ? { reverted } : {}),
         },
-        row.version,
+        origin.version,
         {
           kind: "row",
           rowKind: "tn",
@@ -1223,11 +1284,16 @@ function NoteCardInner({
       // save of this card's stays as the draft (#724): once an AI apply moves
       // the row on, the card shows the AI note but the refused text is still
       // unsaved. `current` is in the form flushPending sends.
-      void drafts.clearRowUnlessHeld(draftKey, {
-        quote: toTsv(quote),
-        note: toTsv(note),
-        support_reference: supportRef,
-      });
+      void drafts
+        .clearRowUnlessHeld(draftKey, {
+          quote: toTsv(quote),
+          note: toTsv(note),
+          support_reference: supportRef,
+        })
+        .then((cleared) => {
+          // No draft left: later typing starts from the row as it is then (#754).
+          if (cleared) originRef.current = null;
+        });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
