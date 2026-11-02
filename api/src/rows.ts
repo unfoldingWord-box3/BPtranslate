@@ -1076,6 +1076,11 @@ function coerceBitValue(raw: 0 | 1 | boolean): 0 | 1 {
 // tn, not trashed. State flips never bump `version`, so a version pin alone
 // misses an un-approve or a trash that landed after the reviewer saw the row
 // (#701). null = no check, which is what the web app sends.
+// expectedUpdatedAt: the updated_at the caller saw (validate body
+// expected_updated_at); the state changes only if the row still has it. Every
+// state flip sets updated_at, so this catches an un-approve plus re-approve
+// that put version and state back where they were (bpt_bulk_set_state, #670
+// part c). null = no check.
 // source: edit_log.source for the audit entry (editSource).
 // clearBulkStamp: an approval also ends a bulk approval (HAND_APPROVAL_CLAUSE).
 // The validate routes set it for a person approving one row; Approve-all loops
@@ -1083,6 +1088,7 @@ function coerceBitValue(raw: 0 | 1 | boolean): 0 | 1 {
 interface StateWriteOpts {
   expected: number | null;
   expectedState: TranslationStatePin | null;
+  expectedUpdatedAt: number | null;
   source: "chat" | null;
   clearBulkStamp?: boolean;
 }
@@ -1105,6 +1111,10 @@ function statePins(opts: StateWriteOpts, first: number, trash: boolean): { sql: 
   if (opts.expectedState !== null) {
     sql += ` AND translation_state = ?${n++}${trash ? " AND trashed_at IS NULL" : ""}`;
     values.push(opts.expectedState);
+  }
+  if (opts.expectedUpdatedAt !== null) {
+    sql += ` AND updated_at = ?${n++}`;
+    values.push(opts.expectedUpdatedAt);
   }
   return { sql, values };
 }
@@ -1138,7 +1148,7 @@ async function setTnTranslationState(
   book: string,
   userId: number | null,
   state: "validated" | "edited" | null,
-  opts: StateWriteOpts = { expected: null, expectedState: null, source: null },
+  opts: StateWriteOpts = { expected: null, expectedState: null, expectedUpdatedAt: null, source: null },
 ): Promise<TnRow | null> {
   const now = Math.floor(Date.now() / 1000);
   const action = state === "validated" ? "validate" : "unvalidate";
@@ -1200,7 +1210,7 @@ async function setTqTranslationState(
   book: string,
   userId: number | null,
   state: "validated" | "edited" | null,
-  opts: StateWriteOpts = { expected: null, expectedState: null, source: null },
+  opts: StateWriteOpts = { expected: null, expectedState: null, expectedUpdatedAt: null, source: null },
 ): Promise<TqRow | null> {
   const now = Math.floor(Date.now() / 1000);
   const action = state === "validated" ? "validate" : "unvalidate";
@@ -1366,18 +1376,20 @@ rows.post("/tn/:id/hint", requireEditor, async (c) => {
 // PATCH) when the caller pinned a version and the live draft has moved on,
 // else 404 (gone, or not a translation draft) as before. A pinned state that
 // no longer matches (un-approved, or a tn row trashed, at the same version) is
-// the same 409: the row still exists, it just isn't what the reviewer saw.
+// the same 409: the row still exists, it just isn't what the reviewer saw. So
+// is a pinned updated_at that moved.
 // Pinned misses are recorded in row_conflict_log (action 'validate').
 async function stateWriteMiss(c: Context<{ Bindings: Env; Variables: { userId?: number } }>, kind: "tn" | "tq", id: string, book: string, opts: StateWriteOpts) {
-  const { expected, expectedState } = opts;
-  if (expected !== null || expectedState !== null) {
+  const { expected, expectedState, expectedUpdatedAt } = opts;
+  if (expected !== null || expectedState !== null || expectedUpdatedAt !== null) {
     const fresh = await c.env.DB.prepare(`SELECT * FROM ${KIND_TO_TABLE[kind]} WHERE id = ?1${bookClause(2)}`)
       .bind(id, book)
-      .first<{ version: number; deleted_at: number | null; translation_state: string | null; trashed_at?: number | null }>();
+      .first<{ version: number; deleted_at: number | null; translation_state: string | null; trashed_at?: number | null; updated_at: number }>();
     if (fresh && !fresh.deleted_at && fresh.translation_state !== null) {
       const moved =
         (expected !== null && fresh.version !== expected) ||
-        (expectedState !== null && (fresh.translation_state !== expectedState || (kind === "tn" && !!fresh.trashed_at)));
+        (expectedState !== null && (fresh.translation_state !== expectedState || (kind === "tn" && !!fresh.trashed_at))) ||
+        (expectedUpdatedAt !== null && fresh.updated_at !== expectedUpdatedAt);
       if (moved) {
         logRowConflict(c, {
           kind,
@@ -1396,12 +1408,13 @@ async function stateWriteMiss(c: Context<{ Bindings: Env; Variables: { userId?: 
   return c.json({ error: "not_found" }, 404);
 }
 
-// The validate body: TnBitBody plus the state the reviewer saw. Validate-only,
-// so /preserve and /hint keep their exact shape.
+// The validate body: TnBitBody plus the state (and updated_at) the reviewer
+// saw. Validate-only, so /preserve and /hint keep their exact shape.
 // bulk: sent by the web's Approve-all loops. Approve-all is itself a bulk
 // approver, so it keeps admin_bulk_state (#414); see HAND_APPROVAL_CLAUSE.
 const ValidateBody = TnBitBody.extend({
   expected_state: z.enum(TRANSLATION_STATES).optional(),
+  expected_updated_at: z.number().int().nonnegative().optional(),
   bulk: z.boolean().optional(),
 });
 
@@ -1410,8 +1423,10 @@ const ValidateBody = TnBitBody.extend({
 // to edited). Optional If-Match: the version the reviewer saw; optional
 // expected_state: the translation_state they saw. The state changes only if the
 // row is still at both (and not trashed, when expected_state is sent); 409
-// version_mismatch otherwise. The web app sends neither; the chat's bpt_approve
-// always sends both (#701).
+// version_mismatch otherwise. Optional expected_updated_at pins the row's
+// updated_at the same way. The web app sends none; the chat's bpt_approve
+// always sends If-Match and expected_state (#701), and bpt_bulk_set_state all
+// three (#670 part c).
 // Non-version-bumping, idempotent. Approving (value=1) is refused (409
 // chapter_locked) while a translate run will write this note (#602). Marks a
 // reviewed AI draft as human-approved so the nightly context export can turn
@@ -1440,6 +1455,7 @@ rows.post("/tn/:id/validate", requireEditor, async (c) => {
   const pins: StateWriteOpts = {
     expected,
     expectedState: parsed.data.expected_state ?? null,
+    expectedUpdatedAt: parsed.data.expected_updated_at ?? null,
     source: editSource(c),
     clearBulkStamp: parsed.data.bulk !== true && userId != null,
   };
@@ -1460,8 +1476,8 @@ rows.post("/tn/:id/validate", requireEditor, async (c) => {
 
 // POST /api/rows/tq/:id/validate — the translationQuestions "Approve" action,
 // the exact analogue of /tn/:id/validate. Body: { value: 0 | 1 | boolean,
-// expected_state? } (1 → validated, 0 → back to edited); If-Match and
-// expected_state pin as there. Lock-exempt, non-version-bumping.
+// expected_state?, expected_updated_at? } (1 → validated, 0 → back to edited);
+// If-Match, expected_state and expected_updated_at pin as there. Lock-exempt, non-version-bumping.
 rows.post("/tq/:id/validate", requireEditor, async (c) => {
   const id = c.req.param("id");
   const book = c.req.query("book");
@@ -1484,6 +1500,7 @@ rows.post("/tq/:id/validate", requireEditor, async (c) => {
   const pins: StateWriteOpts = {
     expected,
     expectedState: parsed.data.expected_state ?? null,
+    expectedUpdatedAt: parsed.data.expected_updated_at ?? null,
     source: editSource(c),
     clearBulkStamp: parsed.data.bulk !== true && userId != null,
   };
