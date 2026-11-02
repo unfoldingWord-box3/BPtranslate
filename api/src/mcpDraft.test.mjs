@@ -354,6 +354,33 @@ test("bpt_job_status: the starter sees state and progress, and result counts onc
   });
 });
 
+test("bpt_job_status: questions and tW/tA articles kept because a person changed them are reported, not just notes (#760)", async () => {
+  const { call, sqlite } = await fresh();
+  await withBot(async () => {
+    const started = await call("bpt_draft", DRAFT);
+    const setReport = (report) =>
+      sqlite
+        .prepare(`UPDATE pipeline_jobs SET state = 'done', apply_skipped_json = ? WHERE job_id = ?`)
+        .run(JSON.stringify(report), started.data.job_id);
+
+    setReport({ tqTouched: 1, tqTouchedIds: ["q1"] });
+    const q = await call("bpt_job_status", { job_id: started.data.job_id });
+    assert.equal(q.isError, false, JSON.stringify(q.data));
+    assert.deepEqual(q.data.kept_because_changed_by_people, { tq: 1, tq_ids: ["q1"] });
+
+    setReport({ articleTouched: 2, articleTouchedPaths: ["bible/kt/god.md", "bible/kt/love.md"] });
+    const a = await call("bpt_job_status", { job_id: started.data.job_id });
+    assert.deepEqual(a.data.kept_because_changed_by_people, {
+      articles: 2,
+      article_paths: ["bible/kt/god.md", "bible/kt/love.md"],
+    });
+
+    setReport({ tnTouched: 1, tnTouchedIds: ["t003"], tqTouched: 2, tqTouchedIds: ["q1", "q2"] });
+    const both = await call("bpt_job_status", { job_id: started.data.job_id });
+    assert.deepEqual(both.data.kept_because_changed_by_people, { tn: 1, tn_ids: ["t003"], tq: 2, tq_ids: ["q1", "q2"] });
+  });
+});
+
 test("bpt_job_status: another user's job, a job in another workspace and an unknown id all get the same not-found answer", async () => {
   const a = await fresh();
   const b = await fresh();
