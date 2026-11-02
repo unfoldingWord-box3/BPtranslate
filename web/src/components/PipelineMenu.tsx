@@ -1,6 +1,7 @@
-// Per-chapter trigger UI for bp-assistant pipelines (see
-// docs/ai-pipeline-integration.md). Three pipeline types, ~1h each, run on
-// the bot; we kick off and surface status via the bottom pill.
+// Per-chapter trigger UI for the AI translate pipeline (translation notes and
+// questions, ~1h a chapter); we kick off and surface status via the bottom
+// pill. The bot's three older actions (Generate ULT + UST, Write translation
+// notes, Write translation questions) were removed in #470.
 
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -15,9 +16,6 @@ import {
   DialogContentText,
   DialogActions,
   CircularProgress,
-  FormGroup,
-  FormControlLabel,
-  Checkbox,
   Box,
   TextField,
   Typography,
@@ -30,10 +28,8 @@ import { ApiError, api, importedSourceRepos, isAdmin, isReadOnly } from "../sync
 import { ImportFromDoor43Dialog } from "./ImportFromDoor43Dialog";
 import type {
   ImportHasLocalEditsBody,
-  PipelineChainStep,
   PipelineConflictBody,
   PipelineConflictExisting,
-  PipelineRequestOptions,
   PipelineStartResponse,
   PipelineType,
   TranslateRequestOptions,
@@ -41,11 +37,7 @@ import type {
 import { getSessionKey, pipelineStore, type PipelineJob } from "../sync/pipelineStore";
 import { currentPipelineUserId } from "../sync/pipelineSession";
 import { parseChapterRange } from "../lib/refParser";
-import {
-  isAiNeedsOrgKey,
-  isAiProviderNotConfigured,
-  PIPELINE_TYPES_NEEDING_ORG_KEY,
-} from "../lib/aiProviderErrors";
+import { isAiNeedsOrgKey, isAiProviderNotConfigured } from "../lib/aiProviderErrors";
 import { useTranslation } from "react-i18next";
 import { useProjectConfig, isTranslationProject } from "../hooks/useProjectConfig";
 
@@ -64,42 +56,12 @@ interface PipelineOption {
   description: string;
   approxDuration: string;
   /**
-   * When set, fires this pipeline plus a chain of cross-type follow-ups
-   * after each step completes. The chapter lock holds across the full run.
-   * Currently only used by the "Generate everything" macro.
-   */
-  followUpChain?: PipelineChainStep[];
-  /**
    * Translate-pipeline overrides passed through to the start request. Used to
    * pick the resource (tn default | tq) for a chapter translate. The server
    * folds these into the config-derived options (buildTranslateOptions).
    */
   translate?: TranslateRequestOptions;
 }
-
-const OPTIONS: PipelineOption[] = [
-  {
-    key: "generate",
-    type: "generate",
-    label: "pipeline.generateUltUst",
-    description: "pipeline.descGenerate",
-    approxDuration: "pipeline.durationGenerate",
-  },
-  {
-    key: "notes",
-    type: "notes",
-    label: "pipeline.writeTranslationNotes",
-    description: "pipeline.descNotes",
-    approxDuration: "pipeline.durationNotesTqs",
-  },
-  {
-    key: "tqs",
-    type: "tqs",
-    label: "pipeline.writeTranslationQuestions",
-    description: "pipeline.descTqs",
-    approxDuration: "pipeline.durationNotesTqs",
-  },
-];
 
 // Only offered in gateway-language projects (translationSource != null). Drafts
 // the whole chapter's tN from the published source repo (server derives all
@@ -124,87 +86,6 @@ const TRANSLATE_TQ_OPTION: PipelineOption = {
   translate: { resourceType: "tq" },
 };
 
-// Internal 4-checkbox state for the generate dialog. Maps to the wire shape
-// (contract §3) at submit time via buildGenerateOptions. The contract's align
-// flags are mutually exclusive within one call, so asymmetric combos
-// (e.g. ULT-aligned + UST-not-aligned) are split into a parent call plus
-// a server-side follow-up — see PipelineStartRequest.followUpOptions.
-interface GenUiState {
-  ult: boolean;
-  ust: boolean;
-  ultAlignment: boolean;
-  ustAlignment: boolean;
-}
-
-const GEN_OPTS_LS = "bible-editor.pipeline.generate.options";
-const DEFAULT_GEN_OPTS: GenUiState = {
-  ult: true,
-  ust: true,
-  ultAlignment: true,
-  ustAlignment: true,
-};
-
-function loadGenOpts(): GenUiState {
-  try {
-    const raw = localStorage.getItem(GEN_OPTS_LS);
-    if (!raw) return DEFAULT_GEN_OPTS;
-    const parsed = JSON.parse(raw) as Partial<GenUiState>;
-    return {
-      ult: parsed.ult ?? true,
-      ust: parsed.ust ?? true,
-      ultAlignment: parsed.ultAlignment ?? true,
-      ustAlignment: parsed.ustAlignment ?? true,
-    };
-  } catch {
-    return DEFAULT_GEN_OPTS;
-  }
-}
-
-function saveGenOpts(opts: GenUiState) {
-  try {
-    localStorage.setItem(GEN_OPTS_LS, JSON.stringify(opts));
-  } catch {
-    /* private mode etc. */
-  }
-}
-
-// Translate the UI state to the on-the-wire shape per the contract table.
-// Returns a primary `options` plus an optional `followUpOptions` — the
-// latter is only set when the user requested asymmetric alignment across
-// ULT and UST (which the upstream can't express in a single call).
-//
-// Order for asymmetric: ULT first, then UST. Translators read ULT-first in
-// the editor and the chapter is locked during the entire two-call sequence,
-// so the visible order matches the reading order.
-interface GenerateWireShape {
-  options?: PipelineRequestOptions;
-  followUpOptions?: PipelineRequestOptions;
-}
-
-function singleContentOptions(
-  side: "ult" | "ust",
-  aligned: boolean,
-): PipelineRequestOptions {
-  return aligned ? { contentTypes: [side] } : { contentTypes: [side], textOnly: true };
-}
-
-function buildGenerateWire(g: GenUiState): GenerateWireShape {
-  if (g.ult && g.ust) {
-    if (g.ultAlignment === g.ustAlignment) {
-      // Symmetric — fits one call.
-      return g.ultAlignment ? {} : { options: { textOnly: true } };
-    }
-    // Asymmetric — split into parent + follow-up. ULT first.
-    return {
-      options: singleContentOptions("ult", g.ultAlignment),
-      followUpOptions: singleContentOptions("ust", g.ustAlignment),
-    };
-  }
-  if (g.ult) return { options: singleContentOptions("ult", g.ultAlignment) };
-  if (g.ust) return { options: singleContentOptions("ust", g.ustAlignment) };
-  return {};
-}
-
 const TYPE_LABEL: Record<PipelineType, string> = {
   generate: "pipeline.generateUltUst",
   notes: "pipeline.translationNotes",
@@ -222,21 +103,18 @@ function relativeMinutes(seconds: number): string {
 export function PipelineMenu({ book, chapter, onMessage, onImported }: Props) {
   const { t } = useTranslation();
   const projectConfig = useProjectConfig();
-  // Gateway-language projects also offer "Translate chapter" (drafts the whole
-  // chapter's tN). The English root project (translationSource == null) sees
-  // exactly the original three options.
+  // Only gateway-language projects get AI actions ("Translate chapter" for tN
+  // and tQ). The English root project (translationSource == null) has none
+  // since the bot's three older actions were removed (#470); its menu keeps
+  // the import items below.
   const visibleOptions = useMemo(
-    () =>
-      isTranslationProject(projectConfig)
-        ? [...OPTIONS, TRANSLATE_OPTION, TRANSLATE_TQ_OPTION]
-        : OPTIONS,
+    () => (isTranslationProject(projectConfig) ? [TRANSLATE_OPTION, TRANSLATE_TQ_OPTION] : []),
     [projectConfig],
   );
   const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
   const [confirm, setConfirm] = useState<PipelineOption | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [activeJobs, setActiveJobs] = useState<PipelineJob[]>([]);
-  const [genOpts, setGenOpts] = useState<GenUiState>(() => loadGenOpts());
   const [conflict, setConflict] = useState<PipelineConflictExisting | null>(null);
   const [refInput, setRefInput] = useState("");
   const [importOpen, setImportOpen] = useState(false);
@@ -253,15 +131,6 @@ export function PipelineMenu({ book, chapter, onMessage, onImported }: Props) {
 
   useEffect(() => pipelineStore.subscribe(setActiveJobs), []);
 
-  // Re-load from localStorage whenever the dialog opens for a generate run, so
-  // a change made in a different tab is reflected.
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- loadGenOpts() reads localStorage (an external store another tab can change) each time the dialog opens; that read belongs after commit, not in render.
-    if (confirm?.type === "generate") setGenOpts(loadGenOpts());
-    if (confirm) setRefInput(String(chapter));
-  }, [confirm, book, chapter]);
-
-  const genNothingSelected = !genOpts.ult && !genOpts.ust;
   // `t` is a dep because parseChapterRange returns a translated error message;
   // without it the message stays in the previous language after a switch. Safe
   // here — pure derivation, no fetch.
@@ -293,18 +162,11 @@ export function PipelineMenu({ book, chapter, onMessage, onImported }: Props) {
   const start = async () => {
     if (!confirm) return;
     if (!refParsed.ok) return;
-    const isMacro = Boolean(confirm.followUpChain);
-    if (confirm.type === "generate" && !isMacro && genNothingSelected) return;
     const { book: rangeBook, startChapter, endChapter } = refParsed.range;
     const chapters: number[] = [];
     for (let c = startChapter; c <= endChapter; c++) chapters.push(c);
     setSubmitting(true);
     try {
-      let wire: GenerateWireShape = {};
-      if (confirm.type === "generate" && !isMacro) {
-        wire = buildGenerateWire(genOpts);
-        saveGenOpts(genOpts);
-      }
       let startedCount = 0;
       let lastRes: PipelineStartResponse | undefined;
       for (const ch of chapters) {
@@ -314,9 +176,6 @@ export function PipelineMenu({ book, chapter, onMessage, onImported }: Props) {
           startChapter: ch,
           endChapter: ch,
           sessionKey: getSessionKey(),
-          ...(wire.options ? { options: wire.options } : {}),
-          ...(wire.followUpOptions ? { followUpOptions: wire.followUpOptions } : {}),
-          ...(confirm.followUpChain ? { followUpChain: confirm.followUpChain } : {}),
           ...(confirm.translate ? { translate: confirm.translate } : {}),
         });
         lastRes = res;
@@ -335,14 +194,7 @@ export function PipelineMenu({ book, chapter, onMessage, onImported }: Props) {
             : t("pipeline.posWaiting");
           onMessage?.(t("pipeline.queuedToast", { label: t(confirm.label), range: rangeLabel, pos: posText }));
         } else {
-          const suffix =
-            chapters.length > 1
-              ? t("pipeline.runsSuffix", { n: startedCount })
-              : isMacro
-                ? t("pipeline.runsSuffix", { n: 1 + (confirm.followUpChain?.length ?? 0) })
-                : wire.followUpOptions
-                  ? t("pipeline.runsSuffix", { n: 2 })
-                  : "";
+          const suffix = chapters.length > 1 ? t("pipeline.runsSuffix", { n: startedCount }) : "";
           onMessage?.(t("pipeline.startedToast", { label: t(confirm.label), range: rangeLabel, suffix }));
         }
       }
@@ -474,32 +326,29 @@ export function PipelineMenu({ book, chapter, onMessage, onImported }: Props) {
       <Menu anchorEl={anchorEl} open={Boolean(anchorEl)} onClose={close}>
         {visibleOptions.map((opt) => {
           const running = runningType(opt.type);
-          // #551: generate/notes/tqs would bill unfoldingWord's shared account,
-          // so they stay listed but switched off, with the reason as the second line.
-          const needsOrgKey = PIPELINE_TYPES_NEEDING_ORG_KEY.has(opt.type);
           return (
             <MenuItem
               key={opt.key}
-              disabled={Boolean(running) || needsOrgKey}
+              disabled={Boolean(running)}
               onClick={() => {
                 close();
+                // Each run's range field starts at the current chapter.
+                setRefInput(String(chapter));
                 setConfirm(opt);
               }}
             >
               <ListItemText
                 primary={t(opt.label)}
                 secondary={
-                  needsOrgKey
-                    ? t("ai.needsOrgKey")
-                    : running
-                      ? t("pipeline.alreadyRunningState", { state: running.state })
-                      : `${t(opt.description)} ${t(opt.approxDuration)}`
+                  running
+                    ? t("pipeline.alreadyRunningState", { state: running.state })
+                    : `${t(opt.description)} ${t(opt.approxDuration)}`
                 }
               />
             </MenuItem>
           );
         })}
-        <Divider />
+        {visibleOptions.length > 0 && <Divider />}
         <MenuItem
           onClick={() => {
             close();
@@ -587,67 +436,6 @@ export function PipelineMenu({ book, chapter, onMessage, onImported }: Props) {
               }
             />
           </Box>
-          {confirm?.type === "generate" && !confirm.followUpChain ? (
-            <Box sx={{ mt: 2 }}>
-              <DialogContentText sx={{ mb: 1, fontSize: "0.875rem" }}>
-                {t("pipeline.whatToGenerate")}
-              </DialogContentText>
-              <FormGroup>
-                <FormControlLabel
-                  control={
-                    <Checkbox
-                      checked={genOpts.ult}
-                      onChange={(_, v) => setGenOpts((o) => ({ ...o, ult: v }))}
-                      disabled={submitting}
-                    />
-                  }
-                  label={t("pipeline.ultLiteralText")}
-                />
-                <FormControlLabel
-                  control={
-                    <Checkbox
-                      checked={genOpts.ultAlignment}
-                      onChange={(_, v) => setGenOpts((o) => ({ ...o, ultAlignment: v }))}
-                      disabled={submitting || !genOpts.ult}
-                    />
-                  }
-                  label={t("pipeline.ultAlignment")}
-                  sx={{ ml: 3 }}
-                />
-                <FormControlLabel
-                  control={
-                    <Checkbox
-                      checked={genOpts.ust}
-                      onChange={(_, v) => setGenOpts((o) => ({ ...o, ust: v }))}
-                      disabled={submitting}
-                    />
-                  }
-                  label={t("pipeline.ustSimplifiedText")}
-                />
-                <FormControlLabel
-                  control={
-                    <Checkbox
-                      checked={genOpts.ustAlignment}
-                      onChange={(_, v) => setGenOpts((o) => ({ ...o, ustAlignment: v }))}
-                      disabled={submitting || !genOpts.ust}
-                    />
-                  }
-                  label={t("pipeline.ustAlignment")}
-                  sx={{ ml: 3 }}
-                />
-              </FormGroup>
-              {genOpts.ult && genOpts.ust && genOpts.ultAlignment !== genOpts.ustAlignment ? (
-                <DialogContentText sx={{ mt: 1, fontSize: "0.75rem", fontStyle: "italic" }}>
-                  {t("pipeline.asymmetricAlignment")}
-                </DialogContentText>
-              ) : null}
-              {genNothingSelected ? (
-                <DialogContentText sx={{ mt: 1, fontSize: "0.8125rem", color: "warning.main" }}>
-                  {t("pipeline.selectAtLeastOne")}
-                </DialogContentText>
-              ) : null}
-            </Box>
-          ) : null}
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setConfirm(null)} disabled={submitting}>
@@ -656,13 +444,7 @@ export function PipelineMenu({ book, chapter, onMessage, onImported }: Props) {
           <Button
             onClick={start}
             variant="contained"
-            disabled={
-              submitting ||
-              !refParsed.ok ||
-              (confirm?.type === "generate" &&
-                !confirm.followUpChain &&
-                genNothingSelected)
-            }
+            disabled={submitting || !refParsed.ok}
             startIcon={submitting ? <CircularProgress size={14} /> : undefined}
           >
             {t("pipeline.start")}

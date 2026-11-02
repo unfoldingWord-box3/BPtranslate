@@ -8,6 +8,13 @@ D1-backed queueing, status polling, and auto-apply of completed pipeline output.
 Use this doc for background and partner-contract context, not as a current
 "no code exists" statement.
 
+**Update (2026-11, #470):** the editor no longer offers the bot's three original
+pipelines ("Generate ULT + UST", "Write translation notes", "Write translation
+questions"). The only AI pipeline the editor starts is `translate` (tN and tQ for
+a chapter, plus tW/tA articles), which runs on the organization's own AI key. The
+server still knows the old `generate` / `notes` / `tqs` types so job history can
+show past runs, and `/api/pipelines/start` refuses them (#551).
+
 ---
 
 ## 1. Who's who

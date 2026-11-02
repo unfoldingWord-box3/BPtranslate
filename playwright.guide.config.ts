@@ -38,6 +38,10 @@ export default defineConfig({
     command: "node scripts/dev-guide.mjs",
     url: `${BASE_URL}/api/health`,
     reuseExistingServer: false,
+    // dev-guide.mjs runs wrangler and vite in their own process groups, so
+    // Playwright's default group SIGKILL would orphan them: send SIGTERM and let
+    // its handler stop them (it escalates to SIGKILL after 2 s).
+    gracefulShutdown: { signal: "SIGTERM", timeout: 10_000 },
     timeout: 300_000,
     stdout: "pipe",
     stderr: "pipe",
