@@ -258,3 +258,79 @@ test("tN card: text typed while the card's own save is pending saves cleanly aft
   await probe.dispose();
   await context.close();
 });
+
+test("tN card: after resolving a restored draft's conflict (keep mine), more typing saves cleanly", async ({ browser }) => {
+  // The classic status bar resolves a conflict by re-sending the edit at the
+  // server's version (keep mine). Once it lands, the card's copy moves to the
+  // landed row, so text typed after it saves at that version with no conflict.
+  test.setTimeout(90_000);
+  const probe = await apiRequest.newContext({ baseURL: BASE });
+  const other = await mintToken(probe, "other-754-resolve");
+  const chapter = await fetchChapter(probe, other.token, "ZEC", CHAPTER);
+  const byVerse = new Map<number, typeof chapter.tn>();
+  for (const r of chapter.tn) byVerse.set(r.verse, [...(byVerse.get(r.verse) ?? []), r]);
+  const used = new Set(
+    [...byVerse.entries()]
+      .filter(([v, rows]) => v > 1 && rows.length >= 2)
+      .slice(0, variants.length + 1)
+      .map(([v]) => v),
+  );
+  const tn = chapter.tn.find((r) => r.verse > 1 && !used.has(r.verse));
+  expect(tn, `expected a tN row on ZEC ${CHAPTER} on a verse the other cases do not use`).toBeTruthy();
+  const { context } = await newUserContext(browser, "restored-draft-754-resolve");
+  const page = await context.newPage();
+
+  const sent: Array<{ ifMatch: string | undefined; status: number }> = [];
+  await context.route(`**/api/rows/tn/${tn!.id}**`, async (route, request) => {
+    if (request.method() !== "PATCH") return route.continue();
+    const response = await route.fetch();
+    sent.push({ ifMatch: request.headers()["if-match"], status: response.status() });
+    return route.fulfill({ response });
+  });
+
+  await gotoVerse(page, "ZEC", CHAPTER, tn!.verse);
+  const typed = `RESOLVE MINE 754 ${Date.now()}`;
+  await noteTextarea(page, tn!.id).fill(typed);
+  await expect
+    .poll(async () => (await readDraft(page, `row:tn:ZEC:${tn!.id}`))?.payload?.patch ?? null)
+    .toEqual(expect.objectContaining({ note: typed }));
+  await gotoVerse(page, "ZEC", AWAY_CHAPTER, 1);
+
+  const res = await authedRequest(probe, other.token, other.csrf).patch(
+    `/api/rows/tn/${tn!.id}?book=ZEC`,
+    { note: `OTHER 754 RESOLVE ${Date.now()}` },
+    tn!.version,
+  );
+  expect(res.status()).toBe(200);
+
+  await page.goto(`/#/ZEC/${CHAPTER}/${tn!.verse}`);
+  await page.reload();
+  await page.locator("[data-note-id]").first().waitFor({ timeout: 10_000 });
+  await expect(noteTextarea(page, tn!.id)).toHaveValue(typed);
+  await page.waitForTimeout(500);
+  await saveNote(page, tn!.id);
+  await expect.poll(() => sent.length).toBe(1);
+  expect(sent[0]).toEqual({ ifMatch: String(tn!.version), status: 409 });
+
+  // Keep mine: re-sent at the server's version, and it lands.
+  await page.getByText(/^1 conflict$/).first().click();
+  await page.getByText(/^resolve 1 conflict$/).click();
+  await expect.poll(() => sent.length, { message: "the re-sent save should reach the server" }).toBe(2);
+  expect(sent[1]).toEqual({ ifMatch: String(tn!.version + 1), status: 200 });
+  await page.keyboard.press("Escape");
+
+  // More typing, Save: goes out at the landed version and lands.
+  const more = `${typed} MORE`;
+  await noteTextarea(page, tn!.id).fill(more);
+  await saveNote(page, tn!.id);
+  await expect.poll(() => sent.length, { message: "the next save should reach the server" }).toBe(3);
+  expect(sent[2], "the next Save goes out at the landed version").toEqual({
+    ifMatch: String(tn!.version + 2),
+    status: 200,
+  });
+  const after = (await fetchChapter(probe, other.token, "ZEC", CHAPTER)).tn.find((r) => r.id === tn!.id)!;
+  expect(after.note).toBe(more);
+
+  await probe.dispose();
+  await context.close();
+});
