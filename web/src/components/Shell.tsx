@@ -52,7 +52,7 @@ import { smartEditVerse } from "../lib/replace";
 import { errorCopy } from "../lib/aiErrorCopy";
 import { extractEditableText, extractPlainText, normalizeEditable, SECTION_HEADER_TAGS } from "../lib/usfm";
 import { verseHasUnalignedWork, countUnalignedTargetWords } from "../lib/alignment";
-import { jobLocksChapter, jobLocksChapterNotes, jobLocksNote } from "../lib/chapterLock";
+import { jobLocksChapter, jobLocksChapterNoteCards, jobLocksChapterNotes, jobLocksNote } from "../lib/chapterLock";
 import {
   analyzeAlignmentDelta,
   guardBlocksSave,
@@ -119,6 +119,7 @@ import { ExportUsfmButton, type ExportUsfmButtonHandle } from "./ExportUsfmButto
 import { PipelineMenu } from "./PipelineMenu";
 import { pipelineStore, getSessionKey, type PipelineJob } from "../sync/pipelineStore";
 import { onOutboxResult } from "../sync/outbox";
+import { liveUpdateFollowUp } from "../sync/outboxTargeting";
 import { AiCompletionToasts } from "./AiCompletionToasts";
 import { UnsavedToasts } from "./UnsavedToasts";
 import { QuoteBuilderPopper } from "./QuoteBuilderPopper";
@@ -271,6 +272,13 @@ function isNoteTranslateLocked(e: unknown): boolean {
   return e instanceof ApiError && isChapterLockedBody(e.body);
 }
 
+// Id source for pipeline toasts; ids are only compared for equality (the
+// auto-dismiss timer clears its own toast, not a newer one). Module-level
+// rather than a useRef: a ref read inside pushPipelineToast made the React
+// Compiler treat every callback that calls it, and every memo holding such a
+// callback (the aligner props), as a ref, flagging each render read (#594).
+let pipelineToastSeq = 0;
+
 export function Shell({
   book,
   chapter,
@@ -312,10 +320,13 @@ export function Shell({
   const bookReplaceRow = bookHook?.applyLocalRowReplacement;
   const bookInsertRow = bookHook?.applyLocalRowInsert;
   const bookDeleteRow = bookHook?.applyLocalRowDelete;
+  // The book cache's chapter Map on its own, so memos can depend on it rather
+  // than on `bookHook`, which is a fresh object on every App render.
+  const bookChapters = bookHook?.chapters;
   const applyLocalRowPatch = useCallback<typeof applyChapterRowPatch>(
-    (kind, id, patch) => {
-      applyChapterRowPatch(kind, id, patch);
-      if (kind === "tn") bookPatchRow?.("tn", 0, id, patch);
+    (kind, id, patch, onlyAtVersion) => {
+      applyChapterRowPatch(kind, id, patch, onlyAtVersion);
+      if (kind === "tn") bookPatchRow?.("tn", 0, id, patch, onlyAtVersion);
     },
     [applyChapterRowPatch, bookPatchRow],
   );
@@ -338,9 +349,9 @@ export function Shell({
     [applyChapterRowInsert, bookInsertRow, chapter],
   );
   const applyLocalRowDelete = useCallback<typeof applyChapterRowDelete>(
-    (kind, id) => {
-      applyChapterRowDelete(kind, id);
-      if (kind === "tn") bookDeleteRow?.("tn", 0, id);
+    (kind, id, onlyAtVersion) => {
+      applyChapterRowDelete(kind, id, onlyAtVersion);
+      if (kind === "tn") bookDeleteRow?.("tn", 0, id, onlyAtVersion);
     },
     [applyChapterRowDelete, bookDeleteRow],
   );
@@ -355,6 +366,42 @@ export function Shell({
   useEffect(() => {
     dataRef.current = data;
   }, [data]);
+  // The open book, for the live-update follow-up below: its outbox read is
+  // async, and row ids are only unique within a book, so a follow-up that
+  // resolves after the user switched books must not touch the new book's
+  // rows. Set in a layout effect so it matches the committed screen.
+  const bookRef = useRef(book);
+  useLayoutEffect(() => {
+    bookRef.current = book;
+  }, [book]);
+  // After a live insert or replace put the server's row in a cache, that row
+  // has dropped this user's saves still waiting in the outbox (this tab's own
+  // save is broadcast back to it too, often before its 200). Put them back on
+  // top, and take back out a row a waiting delete had removed (#637 items 4
+  // and 5). The outbox read is async, so the server row shows for a few
+  // milliseconds; it includes saves whose outbox write is still in progress
+  // (#652). The follow-up passes the broadcast row's version, so it is
+  // skipped, inside the state updater, if the cached row changed meanwhile
+  // (rowAtVersion). Used by the open chapter's room and the book-intro room.
+  const followUpLiveUpdate = (
+    kind: "tn" | "tq" | "twl",
+    row: TnRow | TqRow | TwlRow,
+    patchRow: (patch: Record<string, unknown>, onlyAtVersion: number) => void,
+    deleteRow: (onlyAtVersion: number) => void,
+  ) => {
+    const target = { kind: "row", rowKind: kind, id: row.id, book: row.book } as const;
+    void outbox.listWithUncommitted().then(
+      (queued) => {
+        if (row.book !== bookRef.current) return;
+        const next = liveUpdateFollowUp(row, target, queued);
+        if (next?.t === "delete") deleteRow(row.version);
+        else if (next?.t === "patch") patchRow(next.patch, row.version);
+      },
+      () => {
+        /* outbox unreadable: the server row stays, as before */
+      },
+    );
+  };
   // The "save & refresh" prompt helper is defined further down (it depends on
   // toast state declared after this hook), so the WS handler reaches it through
   // a ref, mirroring dataRef above.
@@ -373,6 +420,14 @@ export function Shell({
       const action = broadcastUpsertAction(kind, list?.find((r) => r.id === row.id), row);
       if (action === "insert") applyLocalRowInsert(kind, row);
       else if (action === "replace") applyLocalRowReplacement(kind, row);
+      if (action === "insert" || action === "replace") {
+        followUpLiveUpdate(
+          kind,
+          row,
+          (patch, v) => applyLocalRowPatch(kind, row.id, patch, v),
+          (v) => applyLocalRowDelete(kind, row.id, v),
+        );
+      }
       // This room is scoped to the open {book, chapter}, so any row.upserted
       // here is for this book. The server may have flipped lint-relevant state
       // without moving row content or version — e.g. a no-op review-flag clear
@@ -513,6 +568,7 @@ export function Shell({
   // that commit so a later remount (e.g. a layout switch) opens as usual.
   const [openOnWords, setOpenOnWords] = useState(initialWordId !== null);
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot cleared after the commit in which ResourceColumn first mounts and reads initialTab; clearing it during render would mount the column with the flag already off.
     if (data && openOnWords) setOpenOnWords(false);
   }, [data, openOnWords]);
   // The same request for a column that is already mounted (#535): bumped by the
@@ -587,6 +643,12 @@ export function Shell({
       // rule (newer version, or a same-version preserve/hint/trash flip) —
       // also when replayed onto a chapter-0 fetch still in flight.
       bookInsertRow?.("tn", row);
+      followUpLiveUpdate(
+        "tn",
+        row,
+        (patch, v) => bookPatchRow?.("tn", 0, row.id, patch, v),
+        (v) => bookDeleteRow?.("tn", 0, row.id, v),
+      );
       // Book lint covers chapter-0 tN too.
       scheduleLintRefetch();
     },
@@ -787,6 +849,7 @@ export function Shell({
   // and the loaded render disagree on hook count and crashed the Shell.
   const layoutOverride = useMemo(
     () => loadLayoutStore().overrides[activeLayout.id],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `layoutRev` is the deliberate re-read signal (see above); the body reads localStorage, which the linter cannot track.
     [activeLayout.id, layoutRev],
   );
 
@@ -843,11 +906,10 @@ export function Shell({
   const [pipelineToast, setPipelineToast] = useState<
     { id: number; text: string; kind: "success" | "error" | "info"; action?: { label: string; onClick: () => void } } | null
   >(null);
-  const pipelineToastIdRef = useRef(0);
   const pushPipelineToast = useCallback(
     (text: string, kind: "success" | "error" | "info" = "info", action?: { label: string; onClick: () => void }) => {
-      pipelineToastIdRef.current += 1;
-      setPipelineToast({ id: pipelineToastIdRef.current, text, kind, action });
+      pipelineToastSeq += 1;
+      setPipelineToast({ id: pipelineToastSeq, text, kind, action });
     },
     [],
   );
@@ -1037,7 +1099,7 @@ export function Shell({
             reloadBookChapter?.(0);
           }
         } else if (job.state === "failed" && prev !== "failed") {
-          pushPipelineToast(t("shell.aiFailed", { pipelineType: job.pipeline_type, where, error: job.error_kind ? errorCopy(job.error_kind, t) : t("shell.error") }), "error");
+          pushPipelineToast(t("shell.aiFailed", { pipelineType: job.pipeline_type, where, error: job.error_kind ? errorCopy(job.error_kind, t, job.error_message) : t("shell.error") }), "error");
         }
       }),
     [pushPipelineToast, promptChapterRefresh, reloadBookChapter, book, chapter, mode, hasBookFront, t],
@@ -1063,21 +1125,26 @@ export function Shell({
   // whose scope covers this (book, chapter) locks the editor; the banner
   // surfaces the started-at time. Under a chapter-wide translate run every TN
   // card is read-only; under other runs the cards switch to keep-mode
-  // (issue #561).
+  // (issue #561). A single-note or verse-range translate redraft leaves the
+  // TN cards out of the chapter lock: only the notes it will write go
+  // read-only, via translateLockedNoteIds (issue #607).
   const [activeJobs, setActiveJobs] = useState<PipelineJob[]>([]);
   useEffect(() => pipelineStore.subscribe(setActiveJobs), []);
   const chapterLock = useMemo(() => {
     // jobLocksChapter mirrors the server rule, including the book intro
     // (chapter 0) being covered by a translate job that starts at chapter 1.
-    // A run that locks every note wins, so the banner names it.
+    // A run that locks every note wins, then one that reaches the note cards,
+    // so the banner names the job that explains what the user sees.
     const notesJob = activeJobs.find((j) => jobLocksChapterNotes(j, book, chapter));
-    const found = notesJob ?? activeJobs.find((j) => jobLocksChapter(j, book, chapter));
+    const noteCardsJob = notesJob ?? activeJobs.find((j) => jobLocksChapterNoteCards(j, book, chapter));
+    const found = noteCardsJob ?? activeJobs.find((j) => jobLocksChapter(j, book, chapter));
     if (!found) return null;
     return {
       jobId: found.job_id,
       pipelineType: found.pipeline_type,
       startedAt: found.created_at,
       locksAllNotes: Boolean(notesJob),
+      locksNoteCards: Boolean(noteCardsJob),
     };
   }, [activeJobs, book, chapter]);
 
@@ -1110,7 +1177,7 @@ export function Shell({
         pushPipelineToast(t("shell.couldntUpdatePreserve", { message: msg }), "error");
       }
     },
-    [applyLocalRowPatch, pushPipelineToast, t],
+    [applyLocalRowPatch, pushPipelineToast, t, book],
   );
 
   const handleSetNoteHint = useCallback(
@@ -1129,7 +1196,7 @@ export function Shell({
         pushPipelineToast(t("shell.couldntUpdateHint", { message: msg }), "error");
       }
     },
-    [applyLocalRowPatch, pushPipelineToast, t],
+    [applyLocalRowPatch, pushPipelineToast, t, book],
   );
 
   // ── Translation mode: Approve (validate) + single-note Translate ──
@@ -1580,14 +1647,14 @@ export function Shell({
     // note sorts first). Without the union, availableVersions is [] →
     // displayedVersions is [] → BookView renders no columns and every chapter's
     // verseNums is empty: a blank book view that looks like the app crashed.
-    if (mode === "book" && bookHook) {
-      for (const cs of bookHook.chapters.values()) {
+    if (mode === "book" && bookChapters) {
+      for (const cs of bookChapters.values()) {
         if (cs.kind !== "ready") continue;
         for (const v of Object.keys(cs.data.verses)) set.add(v);
       }
     }
     return [...set];
-  }, [versesForTiles, mode, bookHook?.chapters]);
+  }, [versesForTiles, mode, bookChapters]);
 
   // Range-aware lookup: ChapterPayload.verses is keyed by verse_start, so a
   // row anchored mid-bridge (e.g. verse 9 of a `\v 8-9` row) misses a direct
@@ -1664,7 +1731,7 @@ export function Shell({
         // front matter block.
         ? (bookHook.summary?.chapters ?? []).map((c) => c.chapter)
         : undefined,
-    [bookHook, mode, bookHook?.summary],
+    [bookHook, mode],
   );
 
   // Pre-load lexicon entries for every UHB Strong's in the loaded chapter
@@ -1681,14 +1748,14 @@ export function Shell({
       }
     };
     collect(data?.verses?.UHB);
-    if (bookHook) {
-      for (const cs of bookHook.chapters.values()) {
+    if (bookChapters) {
+      for (const cs of bookChapters.values()) {
         if (cs.kind !== "ready") continue;
         collect(cs.data.verses?.UHB);
       }
     }
     return [...set];
-  }, [data?.verses, bookHook?.chapters]);
+  }, [data?.verses, bookChapters]);
   const lexiconMapRaw = useLexicon(uhbStrongs);
   // useLexicon hands back a fresh Map every render; stabilize its identity so
   // ScriptureColumn's memo can compare it. The map's CONTENT only changes when
@@ -1726,9 +1793,13 @@ export function Shell({
 
   // Drop a lingering hover preview if the row could unmount without a
   // mouse-leave (keyboard nav / verse change), so the highlight never sticks.
-  useEffect(() => {
+  // Adjusted during render when the verse location changes.
+  const hoverLocKey = `${book}|${chapter}|${activeVerse}`;
+  const [prevHoverLocKey, setPrevHoverLocKey] = useState(hoverLocKey);
+  if (hoverLocKey !== prevHoverLocKey) {
+    setPrevHoverLocKey(hoverLocKey);
     setHoveredWordId(null);
-  }, [activeVerse, chapter, book]);
+  }
 
   // Reorder "stoplight": while a note is dragged (or for ~3s after an arrow
   // move) ResourceColumn reports the moved note's candidate neighbours; we
@@ -1803,17 +1874,16 @@ export function Shell({
   const [quoteBuildAppliedTo, setQuoteBuildAppliedTo] = useState<
     { noteId: string; nonce: number } | null
   >(null);
-  useEffect(() => {
-    if (!quoteBuildTarget) return;
-    const stillActive =
-      quoteBuildTarget.kind === "tn"
-        ? activeNoteId === quoteBuildTarget.id
-        : activeWordId === quoteBuildTarget.id;
-    if (!stillActive) {
-      setQuoteBuildTarget(null);
-      setQuoteBuildSelectedKeys(new Set());
-    }
-  }, [activeNoteId, activeWordId, quoteBuildTarget]);
+  // Switching selection away from the target row cancels the session, adjusted
+  // during render (React's "adjust state when a prop changes" pattern); once the
+  // target is cleared the condition no longer holds, so this settles in one pass.
+  if (
+    quoteBuildTarget &&
+    (quoteBuildTarget.kind === "tn" ? activeNoteId : activeWordId) !== quoteBuildTarget.id
+  ) {
+    setQuoteBuildTarget(null);
+    setQuoteBuildSelectedKeys(new Set());
+  }
   const toggleQuoteBuildWord = useCallback(
     (key: HighlightKey) => {
       setQuoteBuildSelectedKeys((prev) => {
@@ -1870,6 +1940,7 @@ export function Shell({
   const [quoteBuildAnchor, setQuoteBuildAnchor] = useState<HTMLElement | null>(null);
   useEffect(() => {
     if (!quoteBuildTarget) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- the anchor is a DOM element looked up after commit (document.querySelector below), so it syncs with the DOM, not with props.
       setQuoteBuildAnchor(null);
       return;
     }
@@ -1932,7 +2003,17 @@ export function Shell({
       const baseline: Record<string, unknown> = {};
       for (const field of Object.keys(patch)) baseline[field] = rowRecord[field];
       applyLocalRowPatch(kind, row.id, localPatch);
-      void outbox.enqueueRow(kind, row.id, row.version, patch as Record<string, unknown>, { ...opts, book: row.book, baseline });
+      // draftRef: lets a refused save file its text as the row's draft (#647).
+      // Not for tN: NoteCard keeps its own draft until the save confirms, and
+      // its no-diff clear (clearRowUnlessHeld) would drop a written-back draft
+      // from a save it never held (find/replace, quote builder), leaving a
+      // brief phantom "unsaved" (#647 review A8).
+      void outbox.enqueueRow(kind, row.id, row.version, patch as Record<string, unknown>, {
+        ...opts,
+        book: row.book,
+        baseline,
+        ...(kind !== "tn" ? { draftRef: { chapter: row.chapter, verse: row.verse } } : {}),
+      });
     },
     [applyLocalRowPatch],
   );
@@ -2076,7 +2157,7 @@ export function Shell({
         );
       }
     },
-    [data, activeVerse, verseIndexByVersion, book, chapter],
+    [data, activeVerse, verseIndexByVersion, book, chapter, applyLocalRowInsert],
   );
 
   // Whether a per-verse suggestion is already covered on the active verse. Done
@@ -2375,6 +2456,7 @@ export function Shell({
     setActiveVerse(initialVerse);
     setActiveNoteId(null);
     setActiveWordId(initialWordId);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- the per-chapter reset fans out to the dirty flags, pending nav and aligner state, and the effects below (alignment follow, note-jump) rely on running in the same flush after it; moving it into render changes that ordering.
     if (initialWordId !== null) setWordsTabRequest((r) => ({ tab: "words", nonce: (r?.nonce ?? 0) + 1 }));
     setAlignerTarget(null);
     setDualTarget(null);
@@ -2393,15 +2475,19 @@ export function Shell({
   // exist there, so the intro note stayed hidden until the user clicked "i" on
   // the rail. Once this chapter's tiles are known, snap to verse 0 so the intro
   // note — the only thing in the chapter — shows on arrival.
-  useEffect(() => {
-    // Gate on data.chapter === chapter: useChapter keeps the *prior* chapter's
-    // payload visible while the new one loads, so acting on stale tiles would
-    // wrongly snap to 0 when navigating from an intro chapter into a real one.
-    if (!data || data.chapter !== chapter || activeVerse === 0) return;
-    if (verseNumbers.length > 0 && verseNumbers.every((v) => v === 0)) {
-      setActiveVerse(0);
-    }
-  }, [data, chapter, verseNumbers, activeVerse]);
+  // Adjusted during render; setting activeVerse to 0 ends the condition.
+  // Gate on data.chapter === chapter: useChapter keeps the *prior* chapter's
+  // payload visible while the new one loads, so acting on stale tiles would
+  // wrongly snap to 0 when navigating from an intro chapter into a real one.
+  if (
+    data &&
+    data.chapter === chapter &&
+    activeVerse !== 0 &&
+    verseNumbers.length > 0 &&
+    verseNumbers.every((v) => v === 0)
+  ) {
+    setActiveVerse(0);
+  }
 
   // Consume a cross-chapter TN-find jump stashed before navigation. Waits for
   // this chapter's payload (and the target note row) to load, then activates +
@@ -2414,6 +2500,7 @@ export function Shell({
     if (!data) return;
     if (!data.tn.some((r) => r.id === jump.noteId)) return;
     pendingNoteJump = null;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- consumes the module-level pendingNoteJump stash; doing that during render is a side effect a StrictMode double render would lose.
     setActiveWordId(null);
     setActiveNoteId(jump.noteId);
     setScrollNonce((n) => n + 1);
@@ -2427,6 +2514,7 @@ export function Shell({
     if (panelMode !== "alignment") return;
     if (!alignerTarget) return;
     if (alignerTarget.verse === activeVerse && alignerTarget.chapter === chapter) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- runs in the same flush as the chapter-reset effect above, after it, so on a chapter change in alignment mode its write is the one that lands; a render-time version would run before the reset and change the result.
     setAlignerTarget({ ...alignerTarget, chapter, verse: activeVerse });
   }, [activeVerse, chapter, panelMode, alignerTarget]);
 
@@ -2763,8 +2851,6 @@ export function Shell({
         setPanelMode("resources");
       },
       onDirtyChange: setAlignmentDirty,
-      panelRef: alignmentPanelRef,
-      onOpenDual: () => openDualAligner(alignerTarget.chapter, alignerTarget.verse),
       onRestoreVersion: targetVerse
         ? (content, plainText) =>
             restoreVerse(
@@ -2777,7 +2863,16 @@ export function Shell({
             )
         : undefined,
     };
-  }, [alignerTarget, data, chapter, bookHook, book, openDualAligner, applyLocalVerse, enqueueVerseSafely]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `restoreVerse` is a plain function declared below the early return, so it is new every render; it reads only book, chapter, bookHook, applyLocalVerse and enqueueVerseSafely, which are all listed.
+  }, [alignerTarget, data, chapter, bookHook, book, applyLocalVerse, enqueueVerseSafely]);
+
+  // The panel's "Side-by-side" action, kept out of alignmentTabProps:
+  // openDualAligner reaches the dirty-gate refs, so a closure over it inside
+  // that memo made the React Compiler flag every render read of the memo (#594).
+  // Defined whenever alignerTarget is, which alignmentTabProps requires.
+  const openDualFromAlignmentPanel = useCallback(() => {
+    if (alignerTarget) openDualAligner(alignerTarget.chapter, alignerTarget.verse);
+  }, [alignerTarget, openDualAligner]);
 
   // Props for the side-by-side popup: ULT + UST slices against one shared
   // source. Undefined (popup closed) unless a dualTarget is set and at least
@@ -2858,9 +2953,7 @@ export function Shell({
       onSave: enqueue("ULT", ult.targetVerse),
       onConfirmUnalign: confirmUnalign("ULT", ult.targetVerse),
       onDirtyChange: setDualLeftDirty,
-      panelRef: dualLeftRef,
       onReadingDirtyChange: setDualLeftReadingDirty,
-      readingRef: dualLeftReadingRef,
     };
     const right: PanelSlot = {
       bibleVersion: "UST",
@@ -2871,9 +2964,7 @@ export function Shell({
       onSave: enqueue("UST", ust.targetVerse),
       onConfirmUnalign: confirmUnalign("UST", ust.targetVerse),
       onDirtyChange: setDualRightDirty,
-      panelRef: dualRightRef,
       onReadingDirtyChange: setDualRightReadingDirty,
-      readingRef: dualRightReadingRef,
     };
     return {
       book,
@@ -3631,6 +3722,7 @@ export function Shell({
       void outbox.enqueueDeleteRow("tq", id, row.version, row.book);
     },
     locked: Boolean(chapterLock),
+    noteCardsLocked: Boolean(chapterLock?.locksNoteCards),
     lockPipelineType: chapterLock?.locksAllNotes ? "translate" : null,
     onSetNotePreserve: handleSetNotePreserve,
     onSetNoteHint: handleSetNoteHint,
@@ -3658,6 +3750,8 @@ export function Shell({
     panelMode,
     onSetPanelMode: handleSetPanelMode,
     alignmentProps: alignmentTabProps,
+    alignmentPanelRef,
+    onOpenDualAligner: openDualFromAlignmentPanel,
     alignmentBadge,
   };
 
@@ -4258,12 +4352,19 @@ export function Shell({
             "& .MuiAlert-message": { width: "100%" },
           }}
         >
-          {t(chapterLock.locksAllNotes ? "shell.chapterLockBannerTranslate" : "shell.chapterLockBanner", {
-            pipelineType: chapterLock.pipelineType,
-            book,
-            chapter,
-            started: formatRelative(chapterLock.startedAt, t),
-          })}
+          {t(
+            chapterLock.locksAllNotes
+              ? "shell.chapterLockBannerTranslate"
+              : chapterLock.locksNoteCards
+                ? "shell.chapterLockBanner"
+                : "shell.chapterLockBannerRedraft",
+            {
+              pipelineType: chapterLock.pipelineType,
+              book,
+              chapter,
+              started: formatRelative(chapterLock.startedAt, t),
+            },
+          )}
         </Alert>
       )}
       <LayoutDragProvider value={layoutDrag}>
@@ -4388,6 +4489,10 @@ export function Shell({
           lexiconMap={lexiconMap}
           left={dualAlignerProps.left}
           right={dualAlignerProps.right}
+          leftPanelRef={dualLeftRef}
+          rightPanelRef={dualRightRef}
+          leftReadingRef={dualLeftReadingRef}
+          rightReadingRef={dualRightReadingRef}
           onPrevVerse={dualNav.prev != null ? () => dualNavTo(dualNav.prev!) : undefined}
           onNextVerse={dualNav.next != null ? () => dualNavTo(dualNav.next!) : undefined}
           onSaveReading={(bv, plain, base) =>

@@ -16,7 +16,7 @@
 // Cross-chapter persistence is intentionally a v3 — for now the
 // expectation is "click sparkles, stay in this chapter until it lands."
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import i18n from "../i18n";
 import { ApiError, api, type TnRow, type TnQuickRequest, type TnQuickResponse } from "../sync/api";
 import { AI_NEEDS_ORG_KEY } from "../lib/aiProviderErrors";
@@ -125,8 +125,12 @@ export function useAiDrafts(): UseAiDraftsAPI {
 
   // Refs so async callbacks read current values without re-binding the
   // setters every keystroke.
+  // Synced after every commit (no deps), before paint and before any
+  // passive effect or user event can call start/abortAll.
   const pendingRef = useRef(pending);
-  pendingRef.current = pending;
+  useLayoutEffect(() => {
+    pendingRef.current = pending;
+  });
 
   const isPending = useCallback((rowId: string) => pending.has(rowId), [pending]);
   const recentlyCompletedAt = useCallback(

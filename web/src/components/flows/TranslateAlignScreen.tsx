@@ -286,9 +286,13 @@ export default function TranslateAlignScreen({
 
   // ── interaction mode (form-factor policy; AlignScreen.tsx:193-199) ───────
   const [interactionChoice, setInteractionChoice] = useState<"drag" | "tap" | null>(null);
-  useEffect(() => {
-    setInteractionChoice(null); // band change resets to the band's default
-  }, [isDesktop, isTabletUp]);
+  // A band change resets to the band's default (adjusted during render).
+  const band = `${isDesktop}|${isTabletUp}`;
+  const [prevBand, setPrevBand] = useState(band);
+  if (band !== prevBand) {
+    setPrevBand(band);
+    setInteractionChoice(null);
+  }
   const interaction: "drag" | "tap" = !isTabletUp
     ? "tap"
     : (interactionChoice ?? (isDesktop ? "drag" : "tap"));
@@ -319,6 +323,7 @@ export default function TranslateAlignScreen({
   // the same three guards the drag canvas uses (AlignScreen.tsx:220-248).
   useEffect(() => {
     tapEditKeyRef.current = null;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- the reset is paired with tapEditKeyRef and the async crash-draft restore, and the persist effect below relies on it committing after the verse-nav cleanup flush (see the tapEditKeyRef comment); a render-time reset would change that ordering.
     setTapState(computedInitial);
     if (!computedInitial || !targetVerse) return;
     const baseVersion = targetVerse.version;
@@ -403,9 +408,11 @@ export default function TranslateAlignScreen({
   );
   const streamWords = useMemo(() => streamWordsOf(tapState), [tapState]);
   const [dismissedGhosts, setDismissedGhosts] = useState<Set<string>>(new Set());
-  useEffect(() => {
+  const [prevGhostVerse, setPrevGhostVerse] = useState(verse);
+  if (verse !== prevGhostVerse) {
+    setPrevGhostVerse(verse);
     setDismissedGhosts(new Set());
-  }, [verse]);
+  }
   const ghosts = useMemo(
     () => computeGhosts(displayCards, streamWords, suggestions, dismissedGhosts),
     [displayCards, streamWords, suggestions, dismissedGhosts],
@@ -607,9 +614,7 @@ export default function TranslateAlignScreen({
       onSave: saveFor(LANE_LEFT, litSlice.targetVerse),
       onConfirmUnalign: confirmUnalignFor(litSlice.targetVerse, LANE_LEFT),
       onDirtyChange: setDualLeftDirty,
-      panelRef: dualLeftRef,
       onReadingDirtyChange: setDualLeftReadingDirty,
-      readingRef: dualLeftReadingRef,
     };
     const right: PanelSlot = {
       bibleVersion: LANE_RIGHT,
@@ -620,9 +625,7 @@ export default function TranslateAlignScreen({
       onSave: saveFor(LANE_RIGHT, simSlice.targetVerse),
       onConfirmUnalign: confirmUnalignFor(simSlice.targetVerse, LANE_RIGHT),
       onDirtyChange: setDualRightDirty,
-      panelRef: dualRightRef,
       onReadingDirtyChange: setDualRightReadingDirty,
-      readingRef: dualRightReadingRef,
     };
     const labelVerse = litSlice.targetVerse ?? simSlice.targetVerse;
     return {
@@ -1417,6 +1420,10 @@ export default function TranslateAlignScreen({
           lexiconMap={lexiconMap}
           left={dualProps.left}
           right={dualProps.right}
+          leftPanelRef={dualLeftRef}
+          rightPanelRef={dualRightRef}
+          leftReadingRef={dualLeftReadingRef}
+          rightReadingRef={dualRightReadingRef}
           onSaveReading={handleSaveReading}
           onPrevVerse={prevVerse != null ? () => dualNavTo(prevVerse) : undefined}
           onNextVerse={nextVerse != null ? () => dualNavTo(nextVerse) : undefined}

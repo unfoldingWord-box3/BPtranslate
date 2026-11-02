@@ -36,3 +36,17 @@ export function versionIsRtl(cfg: ProjectConfig | null, roleCode: string): boole
   if (roleCode === "UGNT") return false;
   return cfg?.direction === "rtl";
 }
+
+// Tri-state direction (issue #451): null means "not known yet". versionIsRtl
+// above answers false for a target lane while the config is still null (first
+// load, or offline with nothing cached), which paints Arabic lanes LTR. A
+// screen that must not guess waits on null instead.
+export function versionDirection(
+  cfg: Pick<ProjectConfig, "direction"> | null,
+  roleCode: string,
+): "rtl" | "ltr" | null {
+  if (roleCode === "UHB") return "rtl";
+  if (roleCode === "UGNT") return "ltr";
+  if (!cfg) return null;
+  return cfg.direction === "rtl" ? "rtl" : "ltr";
+}

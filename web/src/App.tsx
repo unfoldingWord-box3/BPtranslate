@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Alert, Box, Button, Chip, CircularProgress, IconButton, Link, Snackbar, Stack, Tooltip, Typography } from "@mui/material";
 import RefreshIcon from "@mui/icons-material/Refresh";
@@ -477,9 +477,10 @@ export function App() {
     verse: 1,
   });
   const lastScripturePos = positionFromLoc(loc);
-  if (lastScripturePos) {
-    lastScriptureRef.current = lastScripturePos;
-  }
+  // Written after commit (no deps) on scripture routes only.
+  useLayoutEffect(() => {
+    if (lastScripturePos) lastScriptureRef.current = lastScripturePos;
+  });
   const backToScripture = () => {
     const { book, chapter, verse } = lastScriptureRef.current;
     navigate(book, chapter, verse);
@@ -497,19 +498,24 @@ export function App() {
   // lastScriptureRef above (a ref, so it can't trigger a re-render), this is
   // state — BooksScreen needs to actually re-render when it changes.
   const [livePosition, setLivePosition] = useState<{ book: string; chapter: number; verse: number } | null>(null);
-  useEffect(() => {
-    // Track the same routes the server-side push does (classic chapter + the
-    // redesign scripture routes), so the card updates in-session no matter which
-    // UI the translator works in (#200). The prev-comparison keeps this a no-op
-    // when the position is unchanged.
+  // Track the same routes the server-side push does (classic chapter + the
+  // redesign scripture routes), so the card updates in-session no matter which
+  // UI the translator works in (#200). Adjusted during render on a loc change
+  // (React's "adjust state when a prop changes" pattern); non-scripture routes
+  // keep the previous value. The prev-comparison keeps this a no-op when the
+  // position is unchanged.
+  const [livePositionLoc, setLivePositionLoc] = useState<Location | null>(null);
+  if (livePositionLoc !== loc) {
+    setLivePositionLoc(loc);
     const pos = positionFromLoc(loc);
-    if (!pos) return;
-    setLivePosition((prev) =>
-      prev && prev.book === pos.book && prev.chapter === pos.chapter && prev.verse === pos.verse
-        ? prev
-        : pos,
-    );
-  }, [loc]);
+    if (pos) {
+      setLivePosition((prev) =>
+        prev && prev.book === pos.book && prev.chapter === pos.chapter && prev.verse === pos.verse
+          ? prev
+          : pos,
+      );
+    }
+  }
 
   // Workspace reconciliation. The server's be_ws cookie is the source of
   // truth for which org's D1 database we're talking to; localStorage is just
@@ -791,6 +797,7 @@ export function App() {
           // switcher, export, verse-list toggle, lint counts) are simply not
           // passed, so each hides itself.
           <Stack sx={{ height: "100%", minHeight: 0 }}>
+            {/* eslint-disable react-hooks/refs -- deliberate render-time read: article routes never write lastScriptureRef, so this is the position the last committed scripture route left. It stays a ref so remembering a position never re-renders App. */}
             <TopBar
               showNavigation={false}
               book={lastScriptureRef.current.book}
@@ -800,6 +807,7 @@ export function App() {
               username={auth.kind === "ready" ? auth.me?.username ?? null : null}
               onLogout={handleSignOut}
             />
+            {/* eslint-enable react-hooks/refs */}
             <Box sx={{ flex: 1, minHeight: 0 }}>
               <ArticleWorkspace
                 resource={loc.resource}

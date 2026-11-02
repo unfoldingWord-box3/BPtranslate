@@ -159,6 +159,7 @@ export function BookView({
   // mounted yet; a bare scrollIntoView would no-op against a null ref. Mark
   // the request pending and let the effect below load + center it.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- also arms the initial scroll on mount; a render-time prev-key compare would drop that mount run and change the scroll path.
     setScrollPending(true);
   }, [activeChapter, activeVerse, scrollNonce]);
 
@@ -183,6 +184,7 @@ export function BookView({
     // lazy-loaded scroll container (the original "go to active" no-op). Since
     // we only scroll once heights have settled, the jump lands true.
     activeRowRef.current?.scrollIntoView({ behavior: "auto", block: "center" });
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- clears the pending flag only after the DOM scroll above has run against the committed, fully loaded rows; it can't move into render.
     setScrollPending(false);
   }, [scrollPending, chapters, activeChapter, activeVerse, chapterList, onLoadChapter]);
 
@@ -773,6 +775,7 @@ const VerseCell = memo(function VerseCell({
   const hydratedFromDraftRef = useRef(false);
   useEffect(() => {
     if (readOnly) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- clears hasDraft when the cell turns read-only and skips the drafts-store subscription; drafts.subscribe has no getSnapshot, and its callback also hydrates the DOM once, so useSyncExternalStore would not be equivalent.
       setHasDraft(false);
       return;
     }

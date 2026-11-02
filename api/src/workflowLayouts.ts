@@ -90,7 +90,7 @@ export const CLASSIC_LAYOUT_ID = "builtin:classic";
 // Translate-Notes layout, and flipping to Editor on one that had a source
 // language failed to hide it. translationSource remains the fallback only for
 // legacy configs materialized before `mode` existed.
-function isTranslationConfig(config: ProjectConfig): boolean {
+export function isTranslationConfig(config: ProjectConfig): boolean {
   if (config.mode === "authoring" || config.mode === "translation") {
     return config.mode === "translation";
   }

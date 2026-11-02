@@ -26,6 +26,8 @@ import {
 } from "../sync/api";
 import { fetchWithRetry } from "../sync/fetchWithRetry";
 import { onOutboxResult } from "../sync/outbox";
+import { rebuiltRow, rowWithLivePatches } from "../sync/outboxTargeting";
+import { onRowRebuild } from "../sync/rowRebuild";
 import { applyCacheOp, ChapterFetchTracker, type CacheOp } from "../lib/bookCache";
 
 export type ChapterState =
@@ -48,12 +50,13 @@ export interface UseBookReturn {
     chapter: number,
     id: string,
     patch: Partial<TnRow & TqRow & TwlRow>,
+    onlyAtVersion?: number,
   ) => void;
   /** Swap in a full server row; skipped when the cached copy is newer. */
   applyLocalRowReplacement: (kind: "tn" | "tq" | "twl", row: TnRow | TqRow | TwlRow) => void;
   /** Add a row to its chapter's cache (after `afterId` when given). No-op if present. */
   applyLocalRowInsert: (kind: "tn" | "tq" | "twl", row: TnRow | TqRow | TwlRow, position?: { afterId?: string }) => void;
-  applyLocalRowDelete: (kind: "tn" | "tq" | "twl", chapter: number, id: string) => void;
+  applyLocalRowDelete: (kind: "tn" | "tq" | "twl", chapter: number, id: string, onlyAtVersion?: number) => void;
 }
 
 export function useBook(book: string, enabled: boolean): UseBookReturn {
@@ -71,6 +74,7 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
   // cache is per-book, not global.
   useEffect(() => {
     if (!enabled) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- the per-book cache is reset here when the book changes or the hook is disabled, in the same effect that starts the summary fetch. Deriving it in render would show the previous book's chapters for a render after a book change.
       setSummary(null);
       setSummaryStatus("idle");
       setChapters(new Map());
@@ -105,9 +109,12 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
   // When the book toggles or `enabled` drops, abort every in-flight chapter
   // load (the effect above already clears the cache).
   useEffect(() => {
+    // The ref holds one Map for the hook's lifetime (never reassigned), so
+    // capturing it here is the same object the cleanup would have read.
+    const ctrls = chapterCtrls.current;
     return () => {
-      for (const ctrl of chapterCtrls.current.values()) ctrl.abort();
-      chapterCtrls.current.clear();
+      for (const ctrl of ctrls.values()) ctrl.abort();
+      ctrls.clear();
       trackerRef.current = null;
     };
   }, [book, enabled]);
@@ -200,7 +207,7 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
   // Shell patches the chapter-0 cache on every tn edit; applyCacheOp returns
   // the same payload when the row isn't one of that chapter's, so no churn.
   const applyLocalRowPatch = useCallback<UseBookReturn["applyLocalRowPatch"]>(
-    (kind, chapter, id, patch) => mutate(chapter, { t: "patch", kind, id, patch }),
+    (kind, chapter, id, patch, onlyAtVersion) => mutate(chapter, { t: "patch", kind, id, patch, onlyAtVersion }),
     [mutate],
   );
 
@@ -215,7 +222,7 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
   );
 
   const applyLocalRowDelete = useCallback<UseBookReturn["applyLocalRowDelete"]>(
-    (kind, chapter, id) => mutate(chapter, { t: "delete", kind, id }),
+    (kind, chapter, id, onlyAtVersion) => mutate(chapter, { t: "delete", kind, id, onlyAtVersion }),
     [mutate],
   );
 
@@ -224,7 +231,7 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
   // duplicate updates are idempotent.
   useEffect(() => {
     if (!enabled) return;
-    return onOutboxResult((op, result) => {
+    return onOutboxResult((op, result, queued) => {
       if (result.kind !== "ok") return;
       if (op.target.kind === "verse") {
         const v = result.updated as VerseDto;
@@ -234,10 +241,28 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
       if (op.target.kind === "row") {
         const u = result.updated as TnRow | TqRow | TwlRow;
         if (!u || u.book !== book) return;
-        mutate(u.chapter, { t: "replace", kind: op.target.rowKind, row: u });
+        // Later saves still queued for the row stay on top (#620).
+        mutate(u.chapter, { t: "replace", kind: op.target.rowKind, row: rowWithLivePatches(u, op, queued) });
       }
     });
   }, [book, enabled, applyLocalVerse, mutate]);
+
+  // A row op that never landed: put the server's row back, with the row's
+  // saves still waiting on top (#637 item 1). One "rebuild" cache op, the same
+  // one useChapter applies (rowRebuildAction's guards: a newer cached row is
+  // kept; a missing row goes back, in server order, only after its own
+  // refused or discarded delete). It is recorded, so a fetch in flight
+  // replays it, and it carries the server row just read, so no copy kept here
+  // can be older than the cache.
+  useEffect(() => {
+    if (!enabled) return;
+    return onRowRebuild(({ target, server, queued, cause, mayInsert }) => {
+      if (server.book !== book) return;
+      const rebuilt = rebuiltRow(server, target, queued, cause);
+      if (!rebuilt) return;
+      mutate(rebuilt.chapter, { t: "rebuild", kind: target.rowKind, row: rebuilt, mayInsert });
+    });
+  }, [book, enabled, mutate]);
 
   return {
     summary,

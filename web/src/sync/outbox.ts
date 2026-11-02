@@ -19,7 +19,7 @@ import {
   type CheckLane,
 } from "./api";
 import { backoffMs } from "./backoff";
-import { classifyRowPatchConflict } from "./rowConflict";
+import { isSortOrderOnlyPatch, wouldAutoHeal } from "./rowConflict";
 import { isLaneFrozen, laneFreezeReason } from "./laneFreeze";
 import {
   MAX_ATTEMPTS_SENTINEL,
@@ -27,6 +27,7 @@ import {
   isMaxAttemptsBlocked,
   shouldAnnounceResult,
   targetKey,
+  withUncommittedOps,
 } from "./outboxTargeting.ts";
 import { legacyDbNames, workspaceDbName } from "./workspace";
 import { adoptFromLegacyDbs, type LegacySource } from "./legacyAdoption";
@@ -74,14 +75,6 @@ const STORE = "ops";
 // connection or session comes back (see reviveMaxAttemptsFailed).
 const MAX_ATTEMPTS = 20;
 
-// Cap on silent re-arm-and-retry after a 409 that we judged spurious — either a
-// reorder-only patch (sort_order is transient last-write-wins, see api/src/rows.ts
-// "transient fields like sort_order") or a content patch that doesn't genuinely
-// conflict with the server's current row (see classifyRowPatchConflict). Neither
-// should surface a conflict prompt. This cap stops a pathological loop if another
-// writer is bumping the same row faster than we can land — beyond it, fall through
-// to the normal conflict flow.
-const MAX_CONFLICT_AUTOHEAL = 5;
 
 // recoverInFlight only re-arms in_flight ops at least this stale. A live
 // request can't outlast its api.ts timeout, so 2× that means "the tab that
@@ -170,6 +163,10 @@ export interface OutboxOp {
   // IDB as failed recovery copies — a late 200 from an in-flight dispatch must
   // not delete them (see drainPass).
   quarantined?: string;
+  // Row patches from the classic editors only (#647): the row's verse, so a
+  // refused save can file its text as a row draft (drafts.ts,
+  // refusedRowDraft.ts) even when the editor had already cleared its draft.
+  draftRef?: { chapter: number; verse: number };
 }
 
 // Ops still awaiting a settled outcome — either queued or on the wire. Shared
@@ -275,6 +272,21 @@ function noopOp(target: OpTarget, action: OpAction, patch: Record<string, unknow
   };
 }
 
+// Row ops this tab has started writing to IndexedDB but whose write has not
+// committed yet (#637 item 2). A Save patches the cached row and calls
+// enqueueRow in the same tick; registering the op before the first await
+// makes it visible to drainPass's post-200 snapshot (withUncommittedOps) from
+// that same tick, so a listener rebuilding the row never drops it.
+const uncommittedRowOps = new Map<string, OutboxOp>();
+async function putRowOp(op: OutboxOp): Promise<void> {
+  uncommittedRowOps.set(op.id, op);
+  try {
+    await (await db()).put(STORE, op);
+  } finally {
+    uncommittedRowOps.delete(op.id);
+  }
+}
+
 // targetKey / isMaxAttemptsBlocked / eligibleForVersionThread live in
 // outboxTargeting.ts, not here — that module has no dependency on api.ts (its
 // ApiError class uses a TS parameter-property constructor Node's strip-types
@@ -293,7 +305,12 @@ export const outbox = {
     id: string,
     expectedVersion: number,
     patch: Record<string, unknown>,
-    opts: { restoredFromVersion?: number; book: string; baseline?: Record<string, unknown> },
+    opts: {
+      restoredFromVersion?: number;
+      book: string;
+      baseline?: Record<string, unknown>;
+      draftRef?: { chapter: number; verse: number };
+    },
   ): Promise<OutboxOp> {
     if (isReadOnly()) {
       return noopOp({ kind: "row", rowKind, id, book: opts.book }, "patch", patch);
@@ -312,8 +329,9 @@ export const outbox = {
         ? { restoredFromVersion: opts.restoredFromVersion }
         : {}),
       ...(opts.baseline !== undefined ? { baseline: opts.baseline } : {}),
+      ...(opts.draftRef !== undefined ? { draftRef: opts.draftRef } : {}),
     };
-    await (await db()).put(STORE, op);
+    await putRowOp(op);
     void notify();
     void drain();
     return op;
@@ -339,7 +357,7 @@ export const outbox = {
       attempts: 0,
       status: "pending",
     };
-    await (await db()).put(STORE, op);
+    await putRowOp(op);
     void notify();
     void drain();
     return op;
@@ -576,6 +594,16 @@ export const outbox = {
     }
     await tx.store.delete(opId);
     await tx.done;
+    // A throwing listener must not stop this drop's notify/drain.
+    if (op) {
+      for (const l of dropListeners) {
+        try {
+          l(op);
+        } catch (e) {
+          console.warn("outbox drop listener failed", e);
+        }
+      }
+    }
     void notify();
     void drain();
   },
@@ -626,6 +654,15 @@ export const outbox = {
 
   async list(): Promise<OutboxOp[]> {
     return listAll();
+  },
+
+  // list() plus this tab's row ops whose write has not committed yet, merged
+  // in the same microtask the read resolves in (no await between), as
+  // drainPass's post-200 read does. For readers that rebuild a row from the
+  // queue, so a Save made during the read is not dropped (#652). list() and
+  // subscribe stay plain: they feed the status counters.
+  async listWithUncommitted(): Promise<OutboxOp[]> {
+    return withUncommittedOps(await listAll(), uncommittedRowOps.values()) ?? [];
   },
 
   // Quarantine every queued verse op for a bible_version whose lane just froze
@@ -696,11 +733,25 @@ type Result =
 
 export type { Result as OutboxResult };
 
-type ResultListener = (op: OutboxOp, result: Result) => void;
+// `queued` is the outbox as read after a confirmed ("ok") row op was settled,
+// before the drain dispatches anything else, so cache listeners can keep the
+// row's later live saves on screen (rowWithLivePatches, #620). It includes
+// this tab's row ops whose write has not committed yet (#637 item 2).
+// Undefined for every other result, and null when that read failed.
+type ResultListener = (op: OutboxOp, result: Result, queued?: OutboxOp[] | null) => void;
 const resultListeners = new Set<ResultListener>();
 export function onOutboxResult(fn: ResultListener): () => void {
   resultListeners.add(fn);
   return () => resultListeners.delete(fn);
+}
+
+// Called with each op outbox.drop() deleted (a user discarding a conflicted or
+// failed op). drafts.ts re-settles the row draft such an op held (#632 item 1).
+type DropListener = (op: OutboxOp) => void;
+const dropListeners = new Set<DropListener>();
+export function onOutboxDrop(fn: DropListener): () => void {
+  dropListeners.add(fn);
+  return () => dropListeners.delete(fn);
 }
 
 function unexpectedAlignmentLossReason(body: unknown): string | null {
@@ -728,6 +779,7 @@ async function dispatch(op: OutboxOp): Promise<Result> {
           op.target.id,
           op.expectedVersion,
           op.target.book,
+          op.queuedAt,
         );
       } else {
         updated = await api.patchRow(
@@ -738,6 +790,7 @@ async function dispatch(op: OutboxOp): Promise<Result> {
           {
             ...(op.restoredFromVersion !== undefined ? { restoredFromVersion: op.restoredFromVersion } : {}),
             book: op.target.book,
+            queuedAt: op.queuedAt,
           },
         );
       }
@@ -921,14 +974,6 @@ async function threadVersionToSiblings(done: OutboxOp, updated: unknown) {
   await tx.done;
 }
 
-// A reorder enqueues a patch whose only field is sort_order. Such patches are
-// last-write-wins and must never raise a user-facing conflict — they auto-heal
-// against the server's current version instead.
-function isSortOrderOnlyPatch(patch: Record<string, unknown>): boolean {
-  const keys = Object.keys(patch);
-  return keys.length === 1 && keys[0] === "sort_order";
-}
-
 async function drainPass() {
   const youngInFlightEligibleAt = await recoverInFlight();
   // Targets this pass has itself just parked as conflict/retry-backoff
@@ -1091,20 +1136,8 @@ async function drainPass() {
             stored.target.kind === "row" &&
             stored.action === "patch" &&
             isSortOrderOnlyPatch(stored.patch);
-          const nonConflictingContent =
-            stored.target.kind === "row" &&
-            stored.action === "patch" &&
-            !sortOrderOnly &&
-            classifyRowPatchConflict(
-              stored.patch,
-              stored.baseline,
-              result.current as Record<string, unknown>,
-            ) === "auto_heal";
-          if (
-            (sortOrderOnly || nonConflictingContent) &&
-            typeof serverVersion === "number" &&
-            (stored.conflictRetries ?? 0) < MAX_CONFLICT_AUTOHEAL
-          ) {
+          // wouldAutoHeal also checks that serverVersion is a number.
+          if (wouldAutoHeal(stored, result.current) && typeof serverVersion === "number") {
             stored.status = "pending";
             stored.expectedVersion = serverVersion;
             stored.conflictRetries = (stored.conflictRetries ?? 0) + 1;
@@ -1177,7 +1210,21 @@ async function drainPass() {
     }
 
     if (shouldAnnounceResult(result.kind, persisted)) {
-      for (const l of resultListeners) l(next, result);
+      let queued: OutboxOp[] | null | undefined;
+      if (result.kind === "ok" && next.target.kind === "row") {
+        try {
+          // Merged in the same microtask the read resolves in, with no await
+          // between here and the listeners. An op whose write was created
+          // after this read's transaction cannot commit before that
+          // transaction completes (IndexedDB queues the overlapping
+          // readwrite behind it), so it is still in uncommittedRowOps here
+          // (#637 item 2).
+          queued = withUncommittedOps(await listAll(), uncommittedRowOps.values());
+        } catch {
+          queued = null;
+        }
+      }
+      for (const l of resultListeners) l(next, result, queued);
     }
     void notify();
   }

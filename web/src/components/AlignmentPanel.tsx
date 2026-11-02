@@ -327,6 +327,7 @@ export const AlignmentPanel = forwardRef<AlignmentPanelHandle, Props>(
     // `initial` stays computedInitial so the restored state reads as dirty
     // (state !== initial) and can be saved or reset.
     useEffect(() => {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- the synchronous reset must land before the async crash-draft restore below so the restore wins (see the comment above); a render-time reset would change that ordering.
       setInitial(computedInitial);
       setState(computedInitial);
       setSelectedUnaligned(new Set());
@@ -376,9 +377,12 @@ export const AlignmentPanel = forwardRef<AlignmentPanelHandle, Props>(
     // the user navigates to a different verse / edits a different bible, but NOT
     // on same-verse re-sync after a save (computedInitial churns then; the
     // coordinate doesn't), so rejected ghosts stay rejected across a save.
-    useEffect(() => {
+    const ghostScope = `${verseNum}|${bibleVersion}`;
+    const [prevGhostScope, setPrevGhostScope] = useState(ghostScope);
+    if (ghostScope !== prevGhostScope) {
+      setPrevGhostScope(ghostScope);
       setDismissedGhosts(new Set());
-    }, [verseNum, bibleVersion]);
+    }
 
     const dirty = state !== initial && state !== null;
     useEffect(() => {

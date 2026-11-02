@@ -161,7 +161,9 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
   const pickedChapter = Math.max(1, parseInt(chapterInput, 10) || 1);
 
   const [jobs, setJobs] = useState<PipelineJob[]>([]);
-  const [jobsUnavailable, setJobsUnavailable] = useState(false);
+  // Pipelines are gated `requireEditor` server-side, so a viewer's jobs list
+  // is "not visible for your role", not an error.
+  const jobsUnavailable = role === "viewer";
   const [aiDisabled, setAiDisabled] = useState(false);
   // i18n key for "this org's AI key is missing or unusable" (#551 part E), or
   // null. Separate from aiDisabled, which is the deployment-level "no AI
@@ -202,11 +204,7 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
   // Treat that as "not visible for your role", not an error, and skip the
   // rest of the AI machinery for that role.
   useEffect(() => {
-    if (role === "viewer") {
-      setJobsUnavailable(true);
-      return;
-    }
-    setJobsUnavailable(false);
+    if (role === "viewer") return;
     return pipelineStore.subscribe(setJobs);
   }, [role]);
 
@@ -255,6 +253,7 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
   // Drafts-ready banner for the currently-picked scope.
   useEffect(() => {
     if (!pickedBook || role === "viewer") {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- zero the drafts-ready count when no book is picked or the role is viewer; without it the banner keeps the previous scope's count after the scope is cleared.
       setPendingCount(0);
       return;
     }
@@ -638,6 +637,35 @@ function requestedByLabel(job: PipelineJob, me: FlowScreenContext["me"], t: TFun
   return t("aiStudio.requestedBy", { name: job.started_by_username || t("aiStudio.someoneElse") });
 }
 
+// The stored error_message under the friendly copy (#678). The friendly copy
+// is per-kind and generic; this is the specific reason (e.g. the provider's
+// "model_not_found" body), which otherwise only showed in a vanishing toast.
+// Clamped to two lines so a long JSON body can't stretch the Runs table; the
+// tooltip has the full text.
+function ErrorMessageDetail({ message }: { message: string | null }) {
+  if (!message) return null;
+  return (
+    <Tooltip title={message}>
+      <Typography
+        variant="caption"
+        color="text.secondary"
+        sx={{
+          display: "-webkit-box",
+          WebkitLineClamp: 2,
+          WebkitBoxOrient: "vertical",
+          overflow: "hidden",
+          overflowWrap: "anywhere",
+          maxWidth: 360,
+          fontSize: "0.7rem",
+          mt: 0.25,
+        }}
+      >
+        {message}
+      </Typography>
+    </Tooltip>
+  );
+}
+
 function JobRow({ job, me, aiDisabled, retrying, cancelling, onRetry, onCancel, onDismiss }: JobRowProps) {
   const { t } = useTranslation();
   const mine = isMine(job, me);
@@ -662,8 +690,9 @@ function JobRow({ job, me, aiDisabled, retrying, cancelling, onRetry, onCancel, 
               {job.error_kind ?? "unknown_error"}
             </Typography>
             <Typography variant="caption" color="warning.main" sx={{ display: "block" }}>
-              {errorCopy(job.error_kind, t)}
+              {errorCopy(job.error_kind, t, job.error_message)}
             </Typography>
+            <ErrorMessageDetail message={job.error_message} />
           </Box>
         ) : (
           <Typography variant="caption" color="text.secondary">
@@ -790,9 +819,12 @@ function JobCard({ job, me, aiDisabled, retrying, cancelling, onRetry, onCancel,
       </Stack>
       <Box sx={{ mt: 1 }}>
         {job.state === "failed" ? (
-          <Typography variant="caption" color="warning.main">
-            {errorCopy(job.error_kind, t)}
-          </Typography>
+          <>
+            <Typography variant="caption" color="warning.main" sx={{ display: "block" }}>
+              {errorCopy(job.error_kind, t, job.error_message)}
+            </Typography>
+            <ErrorMessageDetail message={job.error_message} />
+          </>
         ) : (
           <Typography variant="caption" color="text.secondary">
             {progressText(job, t)}

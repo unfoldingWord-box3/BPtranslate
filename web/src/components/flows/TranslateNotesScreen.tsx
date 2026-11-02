@@ -6,8 +6,20 @@
 // and everything else on the screen is read-only context for it. There are
 // exactly three verbs — Approve / Not needed / Redo — and no authoring chrome:
 // no preserve, no hint, no TCM/SH chips, no reorder / insert / retarget, no
-// debug row ids, no quote builder, no history dialog. Those belong to the
-// authoring surfaces (ReviewQueue, NoteCard), not to a translator's screen.
+// debug row ids, no history dialog. Those belong to the authoring surfaces
+// (ReviewQueue, NoteCard), not to a translator's screen.
+//
+// ── 2026-10-05 quote picker (Benjamin) ──────────────────────────────────────
+//
+// One exception to "no quote builder": a note can point at the wrong instance
+// of a word (LUK 7:32 — the upstream note picked the wrong καί), and the only
+// fix used to be leaving for the classic editor. A small edit button on the
+// original-language strip opens the classic QuoteBuilderPopper (a dialog below
+// md) seeded from the row's quote/occurrence, with the source en_ult as an
+// extra lane when the project offers it. The commit is its own outbox patch of
+// {quote, occurrence} with its own baseline — never folded into the note-text
+// draft — and, like any tN content edit, the server demotes an approved row to
+// 'edited', which this screen mirrors.
 //
 // ── 2026-08-10 responsive layouts (Benjamin) ────────────────────────────────
 //
@@ -94,6 +106,7 @@ import {
   Snackbar,
   Stack,
   TextField,
+  Tooltip,
   Typography,
 } from "@mui/material";
 import { alpha, useTheme } from "@mui/material/styles";
@@ -105,11 +118,14 @@ import CheckIcon from "@mui/icons-material/Check";
 import SaveIcon from "@mui/icons-material/Save";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import ViewColumnIcon from "@mui/icons-material/ViewColumn";
+import EditOutlinedIcon from "@mui/icons-material/EditOutlined";
 
 import { LockBanner } from "./FlowBanners";
 import { FlowStatusChip, type FlowStatusKind } from "./FlowStatusChip";
-import { isAquiferDraftRow, unescapeNewlines, waitForOp } from "./translateShared";
+import { escapeNewlines, isAquiferDraftRow, unescapeNewlines, waitForOp } from "./translateShared";
 import { useSwipeNav } from "./useSwipeNav";
+import { QuoteBuilderPopper, type QuoteBuilderExtraLane } from "../QuoteBuilderPopper";
+import { collectStrongs } from "../HebrewLine";
 import { UltAlignmentStrip } from "./UltAlignmentStrip";
 import { buildAlignmentStrip } from "./alignmentStripModel";
 import type { FlowScreenContext } from "./types";
@@ -118,7 +134,12 @@ import { useBook } from "../../hooks/useBook";
 import { useChapter } from "../../hooks/useChapter";
 import { useProjectConfig, isTranslationProject } from "../../hooks/useProjectConfig";
 import { useSourceNotes } from "../../hooks/useSourceNotes";
+import { useSourcePlan } from "../../hooks/sourcePlans";
+import { chapterHasSource } from "../../lib/sourceNotePlan";
 import { useSourceScripture } from "../../hooks/useSourceScripture";
+import { useLexicon } from "../../hooks/useLexicon";
+import { buildQuoteFromSelection, quotePickUnchanged, selectionFromQuote } from "../../lib/quoteBuilder";
+import type { HighlightKey } from "../../lib/highlight";
 import { useUnsavedGuard } from "../../hooks/useUnsavedGuard";
 import { useShowSourceUlt, useShowSourceUltAlignment } from "../../lib/editorPrefs";
 import { resolveSourceRef } from "../../lib/sourceRef";
@@ -128,6 +149,7 @@ import {
   coveredLaneSlices,
   noteCoveredVerses,
   noteRefLabel,
+  verseObjectsOf,
 } from "../../lib/verseRange";
 import { buildTnQuickRequest } from "../../lib/tnQuickRequest";
 import {
@@ -146,7 +168,15 @@ import { flowLaneSegmentsAcross, type FlowSegment } from "../../lib/flowHighligh
 import { isHebrewBook } from "../../lib/sourceSearch";
 import { realChapters } from "../../lib/bookSummary";
 import { drafts, rowKey } from "../../sync/drafts";
-import { onOutboxResult, outbox } from "../../sync/outbox";
+import {
+  isEditorsPendingSave,
+  pendingRevertSave,
+  revertMarks,
+  rowSaveEnded,
+  withPendingReverts,
+  type PendingRowSave,
+} from "../../sync/draftSaveState";
+import { onOutboxDrop, onOutboxResult, outbox, type OutboxOp } from "../../sync/outbox";
 import { pipelineStore, getSessionKey, type PipelineJob } from "../../sync/pipelineStore";
 import { jobLocksChapterNotes, jobLocksNote, lockJobReleased } from "../../lib/chapterLock";
 import {
@@ -298,14 +328,17 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   // The English source note lives in the PUBLISHED source repo, not in D1: in a
   // translation-mode workspace the row's own `note` IS the target being drafted
   // (useSourceNotes.ts:4-7 says this for the tQ twin, and ResourceColumn.tsx:326-338
-  // wires the tN case exactly this way). Null projection = no tN source
-  // configured → the English card degrades to a plain statement rather than
-  // showing the target text twice.
+  // wires the tN case exactly this way). Null projection = no project-wide tN
+  // source; with no English note the card degrades to a plain statement rather
+  // than showing the target text twice, worded per chapter (sourcePlan below).
   const sourceProjection = useMemo(
     () => resolveSourceRef(projectConfig?.translationSource, "tn"),
     [projectConfig],
   );
   const sourceNotes = useSourceNotes(translationMode ? book : null, sourceProjection);
+  // Which chapters have a source at all: a Door43 override can give a chapter
+  // one when the project has no project-wide tN repo (#697).
+  const sourcePlan = useSourcePlan(translationMode ? book : null, "tn", sourceProjection);
 
   // The published source-language literal bible (translationSource `lit`, e.g.
   // unfoldingWord/en_ult) as an optional third read-only lane (issue #430). A
@@ -329,7 +362,21 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   }, [sourceLitRef]);
   const [showSourceUlt, setShowSourceUlt] = useShowSourceUlt();
   const sourceUltOn = sourceUltAvailable && showSourceUlt;
-  const sourceUlt = useSourceScripture(sourceUltOn ? book : null, chapter, sourceLitRef, "SOURCE_LIT");
+  // Quote picker (2026-10-05 header): open state lives up here because the
+  // picker also wants the source en_ult lane, fetched while it is open even
+  // when the lane toggle is off.
+  // Keyed by the row it was opened for, so a different card never inherits
+  // an open picker (derived here, not reset in an effect).
+  const [quoteOpenRowId, setQuoteOpenRowId] = useState<string | null>(null);
+  const [quoteKeys, setQuoteKeys] = useState<Set<HighlightKey>>(() => new Set());
+  // State, not a ref: the popper reads its anchor during render.
+  const [quoteAnchor, setQuoteAnchor] = useState<HTMLButtonElement | null>(null);
+  const sourceUlt = useSourceScripture(
+    sourceUltOn || (sourceUltAvailable && quoteOpenRowId != null) ? book : null,
+    chapter,
+    sourceLitRef,
+    "SOURCE_LIT",
+  );
   // Second toggle (#431): draw that lane as a read-only alignment strip. Only
   // offered, and only effective, while the lane itself is on.
   const [showUltAlignment, setShowUltAlignment] = useShowSourceUltAlignment();
@@ -368,6 +415,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
     const seed: Record<string, CardStatus> = {};
     for (const r of ordered) if (r.translation_state === "validated") seed[r.id] = "approved";
     const firstOpen = ordered.findIndex((r) => !seed[r.id]);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- builds and seeds the frozen per-chapter queue (cursor, statuses, view, type filter) once the chapter payload lands; queue progression is kept on its proven post-commit timing, as in TranslateScriptureScreen.
     setQueue({ key: chapterKey, ids: ordered.map((r) => r.id) });
     setStatuses(seed);
     setEditedIds(new Set());
@@ -445,52 +493,53 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   // for the current chapter — e.g. editing the URL from #/notes/RUT/1 to
   // #/notes/RUT/1/9, or Back/Forward between two verses of the same chapter
   // (issue #201). Cross-chapter deep links are handled above, by the queue
-  // rebuild itself. Guarded on an actual change of `verse` (via the ref, not
-  // just its presence in the dep array) so this never fires on plain cursor
+  // rebuild itself. Guarded on an actual change of `verse` (compared with the
+  // previous value, not just any re-render) so this never fires on plain cursor
   // navigation (Prev/Next), a status change, or unrelated re-renders — only a
   // real prop change moves the cursor here. Uses the same setCursor/setView
   // pair the list pane's row click uses, so drafts stash/hydrate exactly as
   // they do for a manual row click — no queue rebuild, no reset of statuses/
-  // editedIds.
-  const prevVerseRef = useRef(verse);
-  const prevRowIdRef = useRef(rowId);
-  useEffect(() => {
-    if (prevVerseRef.current === verse && prevRowIdRef.current === rowId) return;
-    prevVerseRef.current = verse;
-    prevRowIdRef.current = rowId;
-    if (!queueIds || queueIds.length === 0) return;
-    // Honoring a same-chapter verse change always overrides an active type
-    // filter (issue #226, gap 2). The requested verse's note may be a different
-    // type — hidden by the filter — and the filter effect below would otherwise
-    // immediately yank the cursor to the first visible row, so the URL never
-    // lands on the requested verse. Clearing the filter first (batched with the
-    // setCursor) lets that effect early-return instead of fighting this one, and
-    // mirrors what the queue-build path does on a cross-chapter deep link.
-    setTypeFilter(null);
-    // Same precedence as the queue-build seek: an exact note id (from the
-    // "N unsaved" jump menu) beats the verse's first-card heuristic.
-    if (rowId != null) {
-      const rowIdx = queueIds.indexOf(rowId);
+  // editedIds. Adjusted during render (React's "adjust state when a prop
+  // changes" pattern, as in TranslateScriptureScreen) with the previous
+  // verse/rowId held in state; the commit this skips only re-showed the card
+  // that was already open, so no row is hydrated or stashed differently.
+  const [prevVerse, setPrevVerse] = useState(verse);
+  const [prevRowId, setPrevRowId] = useState(rowId);
+  if (prevVerse !== verse || prevRowId !== rowId) {
+    setPrevVerse(verse);
+    setPrevRowId(rowId);
+    if (queueIds && queueIds.length > 0) {
+      // Honoring a same-chapter verse change always overrides an active type
+      // filter (issue #226, gap 2). The requested verse's note may be a
+      // different type — hidden by the filter — and the filter effect below
+      // would otherwise immediately yank the cursor to the first visible row,
+      // so the URL never lands on the requested verse. Clearing the filter
+      // first (batched with the setCursor) lets that effect early-return
+      // instead of fighting this one, and mirrors what the queue-build path
+      // does on a cross-chapter deep link.
+      setTypeFilter(null);
+      // Same precedence as the queue-build seek: an exact note id (from the
+      // "N unsaved" jump menu) beats the verse's first-card heuristic.
+      const rowIdx = rowId != null ? queueIds.indexOf(rowId) : -1;
       if (rowIdx >= 0) {
         setCursor(rowIdx);
         setView("cards");
-        return;
+      } else if (verse == null) {
+        // The verse segment was dropped (e.g. #/notes/RUT/1/9 → #/notes/RUT/1
+        // via Back/Forward or a manual URL edit). Restore the same no-verse
+        // init the mount/queue-build path uses: first still-open card, or the
+        // done view when every card in the chapter is already statused (issue
+        // #226, gap 1).
+        const firstOpen = queueIds.findIndex((id) => !statuses[id]);
+        setCursor(firstOpen < 0 ? 0 : firstOpen);
+        setView(firstOpen < 0 ? "done" : "cards");
+      } else {
+        const seekIdx = queueIds.findIndex((id) => (rowById.get(id)?.verse ?? -Infinity) >= verse);
+        setCursor(seekIdx < 0 ? queueIds.length - 1 : seekIdx);
+        setView("cards");
       }
     }
-    if (verse == null) {
-      // The verse segment was dropped (e.g. #/notes/RUT/1/9 → #/notes/RUT/1 via
-      // Back/Forward or a manual URL edit). Restore the same no-verse init the
-      // mount/queue-build path uses: first still-open card, or the done view
-      // when every card in the chapter is already statused (issue #226, gap 1).
-      const firstOpen = queueIds.findIndex((id) => !statuses[id]);
-      setCursor(firstOpen < 0 ? 0 : firstOpen);
-      setView(firstOpen < 0 ? "done" : "cards");
-      return;
-    }
-    const seekIdx = queueIds.findIndex((id) => (rowById.get(id)?.verse ?? -Infinity) >= verse);
-    setCursor(seekIdx < 0 ? queueIds.length - 1 : seekIdx);
-    setView("cards");
-  }, [verse, rowId, queueIds, rowById, statuses]);
+  }
 
   // ── article-type filter (2026-08-10) ─────────────────────────────────────
   // Distinct types present in THIS chapter's queue, with counts — the filter
@@ -529,6 +578,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   useEffect(() => {
     if (!typeFilter || !queueIds) return;
     if (!typeOptions.some((o) => o.slug === typeFilter)) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- kept after commit on purpose: "Review again" and the row-gone Next button can move the cursor to a card the filter hides, and that card is committed (and its draft hydrated) before this snap; moving the snap into render would skip that row's hydration and change the drafts sequence.
       setTypeFilter(null);
       return;
     }
@@ -538,7 +588,27 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
 
   // ── editor state ─────────────────────────────────────────────────────────
   const [draftValue, setDraftValue] = useState("");
+  // The saved text the editor diffs against. `baseline` (state) is what render
+  // reads for hasDiff; `baselineRef` is the same value for handlers and
+  // effects, several of which read it after an await. Always write both
+  // through setBaseline so they never disagree (the ReviewQueue pattern, #636).
+  const [baseline, setBaselineState] = useState("");
   const baselineRef = useRef("");
+  const setBaseline = useCallback((next: string) => {
+    baselineRef.current = next;
+    setBaselineState(next);
+  }, []);
+  // The note of this screen's save for row `id` while it can still land. Until
+  // then a note typed back to the baseline but differing from what was sent
+  // stays a draft (withPendingReverts, #632 item 2). Cleared by that save's
+  // outcome (the listener below the persist effect), never by a version check:
+  // the row can reach a new version before the save lands (review A2).
+  const sentRef = useRef<(PendingRowSave & { id: string }) | null>(null);
+  // Ops this screen heard end since it mounted, so a draft lookup's outbox
+  // read cannot restore a save that ended while the read was in flight (#658).
+  const endedOpsRef = useRef(new Set<string>());
+  // Re-runs the persist effect when the protection ends.
+  const [sentTick, setSentTick] = useState(0);
   // "Hydration for this key has started" — set synchronously, guards against
   // re-entering the hydrate branch and against a stale async lookup landing
   // after a newer row change.
@@ -569,12 +639,19 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   // done job clears that draft — so anything typed in the meantime would be
   // silently discarded (codex P1 on #300). A ref can't gate a render.
   const [introRedoRowId, setIntroRedoRowId] = useState<string | null>(null);
+  // Every setRedoing call writes this ref on the line before, so handlers that
+  // read it after an await see the latest value without a render-time copy.
   const redoingRef = useRef(false);
-  redoingRef.current = redoing;
   const introRedoTimerRef = useRef<number | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ text: string; severity: "info" | "warning" } | null>(null);
-  const [conflictNotice, setConflictNotice] = useState<string | null>(null);
+  // The row a settled 409 belongs to — not a bare flag. The outbox listener
+  // hears every conflict in this book, including leftover ops from earlier
+  // sessions or another tab; a flag painted "another editor changed THIS
+  // note" on whatever card happened to be open (2026-10-03 report). Keyed by
+  // id, the banner shows only on its own card; conflicts on other rows stay
+  // in SyncStatusBar's conflict panel, which lists every conflicted op.
+  const [conflictRowId, setConflictRowId] = useState<string | null>(null);
   // A save/approve/set-aside the server refused with 409 chapter_locked, and
   // the note it was for. The refusal is about that note — a single-note
   // redraft locks only its own notes — so the banner shows on that note only
@@ -644,20 +721,36 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
     if (hydratedKeyRef.current !== nonceKey) {
       hydratedKeyRef.current = nonceKey;
       const fallback = unescapeNewlines(row.note);
-      baselineRef.current = fallback;
+      setBaseline(fallback);
       setDraftValue(fallback);
       setEditing(false);
     }
     let cancelled = false;
-    void drafts.get(key).then((rec) => {
+    // The outbox is read alongside the draft (#658): returning to this screen
+    // while its save is pending starts with no sentRef, so a note typed back
+    // to its baseline would be cleared from the drafts store.
+    void Promise.all([drafts.get(key), outbox.listWithUncommitted().catch(() => [] as OutboxOp[])]).then(([rec, ops]) => {
       if (cancelled || hydratedKeyRef.current !== nonceKey) return;
+      if (sentRef.current?.id !== row.id) {
+        const pending = pendingRevertSave(rec, ops, { rowKind: "tn", id: row.id, book }, endedOpsRef.current);
+        // Only the field this screen edits; a mark NoteCard left for the quote
+        // is not this screen's to keep.
+        if (pending && typeof pending.patch.note === "string") {
+          sentRef.current = {
+            id: row.id,
+            patch: { note: pending.patch.note },
+            shown: { note: pending.shown.note },
+            opId: pending.opId,
+          };
+        }
+      }
       const payload = rec?.payload as
         | { patch?: Record<string, unknown>; baseline?: Record<string, unknown> }
         | undefined;
       const patchVal = payload?.patch?.note;
       if (typeof patchVal === "string") setDraftValue(unescapeNewlines(patchVal));
       const baselineVal = payload?.baseline?.note;
-      if (typeof baselineVal === "string") baselineRef.current = unescapeNewlines(baselineVal);
+      if (typeof baselineVal === "string") setBaseline(unescapeNewlines(baselineVal));
       // Mark this key fully settled — sync setup AND the async lookup have
       // both landed — whether or not a persisted draft was found. This is
       // STATE, not a ref: setting it is guaranteed to produce a render/effect
@@ -673,7 +766,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [row?.id, book, reloadNonce, settledKey]);
 
-  const hasDiff = draftValue !== baselineRef.current;
+  const hasDiff = draftValue !== baseline;
 
   // While THIS row has a background redraft in flight the inline editor is
   // read-only: settling a done job clears the row's draft and refetches, so
@@ -717,10 +810,15 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
     const key = rowKey("tn", book, row.id);
     const nonceKey = `${key}#${reloadNonce}`;
     if (settledKey !== nonceKey) return;
-    if (draftValue !== baselineRef.current) {
+    const sent = sentRef.current && sentRef.current.id === row.id ? sentRef.current : undefined;
+    const diff = draftValue !== baselineRef.current ? { note: draftValue } : {};
+    const patch = withPendingReverts(diff, { note: draftValue }, sent?.patch);
+    // Record a kept type-back so a remount can restore the protection (#658).
+    const reverted = revertMarks(diff, patch, sent);
+    if ("note" in patch) {
       void drafts.set(
         key,
-        { patch: { note: draftValue }, baseline: { note: baselineRef.current } },
+        { patch: { note: draftValue }, baseline: { note: baselineRef.current }, ...(reverted ? { reverted } : {}) },
         row.version,
         { kind: "row", rowKind: "tn", id: row.id, book, chapter: row.chapter, verse: row.verse },
       );
@@ -728,7 +826,41 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
       void drafts.clear(key);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [draftValue, row?.id, row?.version, book, reloadNonce, settledKey]);
+  }, [draftValue, row?.id, row?.version, book, reloadNonce, settledKey, sentTick]);
+
+  // End the type-back protection when this screen's pending save can no
+  // longer land: confirmed, refused, dropped as "locked", or discarded. A 409
+  // that waits for keep-mine, or a save still queued after waitForOp gave up,
+  // keeps it. On a 200 the baseline takes the sent values in the same tick
+  // (also after a keep-mine, where saveDraft no longer moves it), and the
+  // persist effect re-runs against it, so a kept revert stays a draft.
+  useEffect(() => {
+    const end = (op: OutboxOp, ok: boolean) => {
+      endedOpsRef.current.add(op.id);
+      const sent = sentRef.current;
+      if (!sent || !isEditorsPendingSave(sent, op, { rowKind: "tn", id: sent.id, book })) return;
+      sentRef.current = null;
+      if (ok && hydratedKeyRef.current?.startsWith(`${rowKey("tn", book, sent.id)}#`)) {
+        // The display form of what was sent: this screen's own text as typed,
+        // or, for a save recovered from the outbox (#658), the form its mark
+        // recorded (NoteCard sends TSV newlines).
+        const shown = sent.shown.note;
+        if (typeof shown === "string") setBaseline(shown);
+      }
+      setSentTick((n) => n + 1);
+    };
+    const offResult = onOutboxResult((op, result) => {
+      if (rowSaveEnded(result)) end(op, result.kind === "ok");
+    });
+    const offDrop = onOutboxDrop((op) => end(op, false));
+    return () => {
+      offResult();
+      offDrop();
+      // A save from the previous book can no longer be heard here, so its
+      // protection must not outlive the listener.
+      sentRef.current = null;
+    };
+  }, [book, setBaseline]);
 
   useUnsavedGuard(hasDiff);
 
@@ -788,7 +920,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
         // Only a settled conflict is a question for the user: the outbox
         // auto-heals the healable ones and still notifies listeners.
         if (result.kind === "conflict" && op.status === "conflict") {
-          setConflictNotice(t("flowTranslate.conflictNotice"));
+          setConflictRowId(op.target.id);
         }
       }),
     [book, t],
@@ -1029,9 +1161,10 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   // to 'edited' server-side. The outbox stays the only thing that talks to
   // /api/rows — we just wait for its result before approving.
   async function saveDraft(target: TnRow): Promise<boolean> {
-    const patch = { note: draftValue };
-    const baseline = { note: baselineRef.current };
+    const patch = { note: escapeNewlines(draftValue) };
+    const baseline = { note: escapeNewlines(baselineRef.current) };
     applyLocalRowPatch("tn", target.id, patch as Partial<TnRow & TqRow>);
+    sentRef.current = { id: target.id, patch, shown: { note: draftValue } };
     const op = await outbox.enqueueRow("tn", target.id, target.version, patch, { book, baseline });
     const result = await waitForOp(op.id);
     if (result === null) {
@@ -1040,7 +1173,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
     }
     if (result.kind !== "ok") {
       if (result.kind === "conflict") {
-        setConflictNotice(t("flowTranslate.conflictNotice"));
+        setConflictRowId(target.id);
       } else if (result.kind === "locked") {
         // The outbox dropped the op, so the server row never changed: undo the
         // optimistic patch or the cached row would show unsaved text as saved
@@ -1054,7 +1187,15 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
       }
       return false;
     }
-    baselineRef.current = draftValue;
+    // The sent text (this render's draftValue), not whatever is typed now.
+    setBaseline(draftValue);
+    // The outbox's 200 handler clears a draft holding only the saved text, but
+    // only one written before it ran. If the row reached a new version between
+    // that clear and the baseline move above (a refetch, or the confirmed row
+    // landing first), the persist effect re-wrote the saved text as a draft,
+    // and it won't re-run for the moved baseline. Drop that draft; newer typing
+    // stays (#616 review, #618).
+    void drafts.clearRowIfSaved(rowKey("tn", book, target.id), { note: draftValue });
     setEditedIds((prev) => new Set(prev).add(target.id));
     // Mirror the server's demotion locally so the row object stays consistent
     // with what a refetch will report: a content edit demotes an AI draft or a
@@ -1078,11 +1219,172 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
     return true;
   }
 
+  // ── quote picker (2026-10-05 header) ─────────────────────────────────────
+  // The builder works on one verse: a bridged note's quote lives in its
+  // leading verse (row.verse), the same verse the classic NoteCard builds from.
+  // Intro/general rows (verse 0) have no quote to pick.
+  const quoteVerse = row && row.verse > 0 ? row.verse : null;
+  // Leaving the card closes the picker for good (coming back, e.g. by browser
+  // back, must not reopen it): adjust during render, no effect.
+  const [quoteRowSeen, setQuoteRowSeen] = useState(row?.id);
+  if (row?.id !== quoteRowSeen) {
+    setQuoteRowSeen(row?.id);
+    if (quoteOpenRowId != null) setQuoteOpenRowId(null);
+  }
+  const quoteOpen = quoteOpenRowId != null && quoteOpenRowId === row?.id;
+  const quoteSourceVo = quoteVerse != null ? verseObjectsOf(sourceIndex[quoteVerse]) : null;
+  const quoteUltVo = quoteVerse != null ? verseObjectsOf(ultIndex[quoteVerse]) : null;
+  const quoteUstVo = quoteVerse != null ? verseObjectsOf(ustIndex[quoteVerse]) : null;
+  const quoteSourceUltVo = quoteVerse != null ? verseObjectsOf(sourceUltIndex[quoteVerse]) : null;
+  const canPickQuote = Boolean(quoteSourceVo && quoteSourceVo.length > 0);
+  const quoteExtraLanes = useMemo<QuoteBuilderExtraLane[] | undefined>(
+    () =>
+      sourceUltAvailable && quoteSourceUltVo
+        ? [{ id: "source-ult", label: sourceUltLabel, verseObjects: quoteSourceUltVo }]
+        : undefined,
+    [sourceUltAvailable, sourceUltLabel, quoteSourceUltVo],
+  );
+  // Lexicon hover cards for the source chips — only this verse's words, and
+  // only while the picker is open.
+  const quoteStrongs = useMemo(
+    () => (quoteOpen && quoteSourceVo ? [...new Set(collectStrongs(quoteSourceVo))] : []),
+    [quoteOpen, quoteSourceVo],
+  );
+  const quoteLexicon = useLexicon(quoteStrongs);
+
+  function openQuotePicker() {
+    if (!row || !canPickQuote || editLocked) return;
+    setQuoteKeys(selectionFromQuote(quoteSourceVo, row.quote, row.occurrence));
+    setQuoteOpenRowId(row.id);
+  }
+
+  // Its own outbox op on {quote, occurrence}: the note field is not in the
+  // patch, so an in-flight or unsaved note edit on the same row is untouched
+  // (the outbox threads a confirmed version into the later op, and the
+  // baseline lets a 409 caused only by the other field auto-heal). `busy`
+  // holds Approve off until it settles: /validate carries no version, so a
+  // quote PATCH landing after it would demote the row straight back.
+  async function commitQuote() {
+    if (!row || busy) return;
+    const target = row;
+    const built = buildQuoteFromSelection(quoteSourceVo, quoteKeys);
+    setQuoteOpenRowId(null);
+    if (!built) {
+      say(t("flowReview.queue.noSourceWords"));
+      return;
+    }
+    // Unchanged pick → no PATCH: a no-op write would still bump the version
+    // and demote an approved row (Shell's commitQuoteBuild guard).
+    if (quotePickUnchanged(built, target.quote, target.occurrence)) return;
+    const patch = { quote: built.quote, occurrence: built.occurrence };
+    const baseline = { quote: target.quote, occurrence: target.occurrence };
+    setBusy(true);
+    try {
+      applyLocalRowPatch("tn", target.id, patch as Partial<TnRow & TqRow>);
+      const op = await outbox.enqueueRow("tn", target.id, target.version, patch, { book, baseline });
+      const result = await waitForOp(op.id);
+      if (result === null) {
+        // Still queued: Approve checks this op first (/validate carries no
+        // version, so a quote PATCH landing after it would demote the row).
+        holdQuoteOp(target, op.id, baseline);
+        say(t("flowTranslate.quoteNotConfirmed"));
+        return;
+      }
+      if (result.kind !== "ok") {
+        if (result.kind === "conflict") {
+          // Held for the user; a keep-mine re-send can still land it later.
+          holdQuoteOp(target, op.id, baseline);
+          setConflictRowId(target.id);
+        } else if (result.kind === "locked") {
+          // The outbox dropped the op, so the server row never changed: undo
+          // the optimistic patch (same as saveDraft, issue #561 review R2).
+          applyLocalRowPatch("tn", target.id, baseline as Partial<TnRow & TqRow>);
+          setChapterLock({ body: result.lockBody, rowId: target.id });
+          say(t("flowTranslate.lockedEditDropped"));
+        } else {
+          // Refused for good: the strip must not keep a quote the server rejected.
+          applyLocalRowPatch("tn", target.id, baseline as Partial<TnRow & TqRow>);
+          say(t("flowTranslate.saveFailed", { reason: result.reason }));
+        }
+        return;
+      }
+    } finally {
+      setBusy(false);
+    }
+    finishQuoteSave(target);
+    setToast(t("flowReview.queue.quoteRebuilt"));
+  }
+
+  // Finish a quote op that had not settled (timed out, or held as a
+  // conflict) when it does, for local display only — Approve's guard reads
+  // the outbox itself (quoteOpPending). A late 200 gets the local demotion
+  // the server applied; a late refusal restores the commit-time quote.
+  function holdQuoteOp(target: TnRow, opId: string, baseline: Record<string, unknown>) {
+    let offDrop: () => void = () => {};
+    const offResult = onOutboxResult((op, result) => {
+      if (op.id !== opId || result.kind === "retry" || result.kind === "conflict") return;
+      offResult();
+      offDrop();
+      if (result.kind === "ok") {
+        finishQuoteSave(target);
+      } else {
+        applyLocalRowPatch("tn", target.id, baseline as Partial<TnRow & TqRow>);
+      }
+    });
+    offDrop = onOutboxDrop((op) => {
+      if (op.id !== opId) return;
+      offResult();
+      offDrop();
+    });
+  }
+
+  // Local mirror of a confirmed quote save.
+  function finishQuoteSave(target: TnRow) {
+    // Same server-side demotion as a note-text save (see saveDraft).
+    if (target.translation_state === "ai_draft" || target.translation_state === "validated") {
+      applyLocalRowPatch("tn", target.id, { translation_state: "edited" } as Partial<
+        TnRow & TqRow
+      >);
+    }
+    setEditedIds((prev) => new Set(prev).add(target.id));
+    setStatuses((prev) => {
+      if (prev[target.id] === undefined) return prev;
+      const next = { ...prev };
+      delete next[target.id];
+      return next;
+    });
+  }
+
+  // Any quote/occurrence op for this row still in the outbox, in any status
+  // (queued, timed out, held as a conflict, failed). Approving now would let
+  // it land after the version-less /validate and demote the row again. Read
+  // from the outbox itself so a second commit or a remount can't lose it;
+  // an unreadable outbox refuses (fail closed).
+  async function quoteOpPending(rowId: string): Promise<boolean> {
+    const ops = await outbox.listWithUncommitted().catch(() => null);
+    if (!ops) return true;
+    return ops.some(
+      (o) =>
+        o.target.kind === "row" &&
+        o.target.rowKind === "tn" &&
+        o.target.book === book &&
+        o.target.id === rowId &&
+        o.action === "patch" &&
+        !!o.patch &&
+        typeof o.patch === "object" &&
+        ("quote" in o.patch || "occurrence" in o.patch),
+    );
+  }
+
   async function handleApprove() {
     if (!row || busy) return;
     setBusy(true);
     setNotice(null);
     try {
+      if (await quoteOpPending(row.id)) {
+        say(t("flowTranslate.quotePendingApprove"));
+        return;
+      }
       if (hasDiff && !(await saveDraft(row))) return;
       const updated = await api.validateNote(row.id, book, true);
       applyLocalRowReplacement("tn", updated);
@@ -1156,7 +1458,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
       // re-keys to the next row (the drafts.clear immediately below).
       const next = unescapeNewlines(updated.note);
       setDraftValue(next);
-      baselineRef.current = next;
+      setBaseline(next);
       void drafts.clear(rowKey("tn", book, row.id));
       setToast(t("flowTranslate.toastNotNeeded"));
       advanceAfter(row.id, "skipped");
@@ -1379,7 +1681,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   }
 
   function reloadRow() {
-    setConflictNotice(null);
+    setConflictRowId(null);
     void refetch().then(() => setReloadNonce((n) => n + 1));
   }
 
@@ -1599,7 +1901,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
           <Alert severity="info">{t("flowTranslate.noteLockedByTranslate")}</Alert>
         )}
 
-        {conflictNotice && (
+        {row && conflictRowId === row.id && (
           <Alert
             severity="warning"
             action={
@@ -1608,7 +1910,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
               </Button>
             }
           >
-            {conflictNotice}
+            {t("flowTranslate.conflictNotice")}
           </Alert>
         )}
 
@@ -1708,7 +2010,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
         ) : (
           <>
             {/* original-language quote strip */}
-            {row.quote && (
+            {(row.quote || canPickQuote) && (
               <Stack direction="row" alignItems="baseline" spacing={1.25} sx={{ paddingInline: 0.25 }}>
                 <Typography
                   component="p"
@@ -1733,10 +2035,30 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
                     m: 0,
                     minWidth: 0,
                     textAlign: "start",
+                    flex: 1,
                   }}
                 >
-                  {row.quote}
+                  {row.quote || "—"}
                 </Typography>
+                {canPickQuote && (
+                  // The span: a disabled button fires no events, so the
+                  // Tooltip needs a wrapper to hang its listeners on.
+                  <Tooltip title={t("flowTranslate.changeQuote")}>
+                    <span style={{ flex: "none", alignSelf: "center", display: "inline-flex" }}>
+                      <IconButton
+                        ref={setQuoteAnchor}
+                        size="small"
+                        disabled={editLocked || busy}
+                        onClick={openQuotePicker}
+                        aria-label={t("flowTranslate.changeQuote")}
+                        aria-haspopup="dialog"
+                        sx={{ color: "text.secondary" }}
+                      >
+                        <EditOutlinedIcon fontSize="small" />
+                      </IconButton>
+                    </span>
+                  </Tooltip>
+                )}
               </Stack>
             )}
 
@@ -1892,7 +2214,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
               ) : (
                 <Typography variant="body2" color="text.secondary">
                   {translationMode
-                    ? sourceProjection
+                    ? chapterHasSource(sourcePlan, row.chapter)
                       ? t("flowTranslate.noSourceForNote")
                       : t("flowTranslate.noSourceRepo")
                     : t("flowTranslate.authoringWorkspace")}
@@ -2490,6 +2812,38 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
       )}
       {!wide && !focusMode && actionBar}
 
+      {row && quoteVerse != null && (
+        <QuoteBuilderPopper
+          open={quoteOpen}
+          anchorEl={quoteAnchor}
+          book={book}
+          chapter={row.chapter}
+          verse={quoteVerse}
+          uhbVerseObjects={quoteSourceVo}
+          ultVerseObjects={quoteUltVo}
+          ustVerseObjects={quoteUstVo}
+          extraLanes={quoteExtraLanes}
+          lexiconMap={quoteLexicon}
+          selectedKeys={quoteKeys}
+          onToggleKey={(key) =>
+            setQuoteKeys((prev) => {
+              const next = new Set(prev);
+              if (next.has(key)) next.delete(key);
+              else next.add(key);
+              return next;
+            })
+          }
+          onSelectKeys={(keys) =>
+            setQuoteKeys((prev) => {
+              const next = new Set(prev);
+              for (const k of keys) next.add(k);
+              return next;
+            })
+          }
+          onCancel={() => setQuoteOpenRowId(null)}
+          onCommit={() => void commitQuote()}
+        />
+      )}
       <Snackbar
         open={toast !== null}
         message={toast ?? ""}

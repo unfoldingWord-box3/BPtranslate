@@ -33,6 +33,7 @@ import { useTranslation } from "react-i18next";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
+import CircularProgress from "@mui/material/CircularProgress";
 import Link from "@mui/material/Link";
 import IconButton from "@mui/material/IconButton";
 import MenuItem from "@mui/material/MenuItem";
@@ -71,11 +72,16 @@ import type { FlowScreenContext } from "./types";
 
 import { useChapter } from "../../hooks/useChapter";
 import { useLexicon } from "../../hooks/useLexicon";
-import { isTranslationProject, useProjectConfig } from "../../hooks/useProjectConfig";
+import {
+  isTranslationProject,
+  retryProjectConfig,
+  useProjectConfig,
+  useProjectConfigLoadFailed,
+} from "../../hooks/useProjectConfig";
 import { SCRIPTURE_FONT_STACK } from "../../theme";
 import type { VerseDto } from "../../sync/api";
 import { isHebrewBook } from "../../lib/sourceSearch";
-import { versionIsRtl, versionLabel } from "../../lib/versionLabels";
+import { versionDirection, versionLabel } from "../../lib/versionLabels";
 import { buildVerseIndex, noteOverlapsRange, verseObjectsOf } from "../../lib/verseRange";
 
 export interface VerseScreenProps extends FlowScreenContext {
@@ -155,11 +161,16 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
   const [article, setArticle] = useState<VerseArticle | null>(null);
 
   // A selection names words of THIS verse; stepping verses invalidates it, and
-  // the article opened from it.
-  useEffect(() => {
+  // the article opened from it. Reset during render (the React "adjust state
+  // when a prop changes" pattern) so the new verse never paints with the old
+  // verse's selection.
+  const verseKey = `${book}|${chapter}|${verse}`;
+  const [prevVerseKey, setPrevVerseKey] = useState(verseKey);
+  if (verseKey !== prevVerseKey) {
+    setPrevVerseKey(verseKey);
     setSelection(null);
     setArticle(null);
-  }, [book, chapter, verse]);
+  }
 
   // The article belongs to the selection it was opened from: picking any other
   // word or resource closes it, so a stale article never sits beside a new
@@ -169,9 +180,11 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
     : selection.kind === "word"
       ? `w:${selection.positions.join(",")}`
       : `r:${selection.key}`;
-  useEffect(() => {
+  const [prevSelectionKey, setPrevSelectionKey] = useState(selectionKey);
+  if (selectionKey !== prevSelectionKey) {
+    setPrevSelectionKey(selectionKey);
     setArticle(null);
-  }, [selectionKey]);
+  }
 
   // Closing the article (Back or Escape) hands focus back to the control that
   // opened it, or to the selected resource row if that control is gone, instead
@@ -210,8 +223,24 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
   // dir the ULT/UST word rows inherit the page direction and lay out backwards
   // (issue #449). ULT and UST share the project direction, but keep them
   // separate for parity with ScriptureColumn.
-  const litRtl = versionIsRtl(projectConfig, "ULT");
-  const simRtl = versionIsRtl(projectConfig, "UST");
+  //
+  // Until the config arrives the target direction is unknown (null), and the
+  // body waits on it rather than guessing LTR, which painted Arabic lanes
+  // backwards on first load and stuck that way offline (issue #451).
+  const litDir = versionDirection(projectConfig, "ULT");
+  const simDir = versionDirection(projectConfig, "UST");
+  const litRtl = litDir === "rtl";
+  const simRtl = simDir === "rtl";
+  const directionKnown = litDir !== null && simDir !== null;
+  const configLoadFailed = useProjectConfigLoadFailed();
+  // While the "could not be loaded" warning shows, retry on its own when the
+  // connection comes back.
+  const showConfigFailed = !directionKnown && configLoadFailed;
+  useEffect(() => {
+    if (!showConfigFailed) return;
+    window.addEventListener("online", retryProjectConfig);
+    return () => window.removeEventListener("online", retryProjectConfig);
+  }, [showConfigFailed]);
 
   const sourceIndex = useMemo(
     () => buildVerseIndex(data?.verses?.[sourceLane]),
@@ -259,6 +288,7 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
   // the previous language until the verse data changes. Safe here — this memo
   // is pure derivation, no fetch (contrast the loader effects, which must NOT
   // depend on `t` or they refire on every language change).
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- `t` is a deliberate recompute signal (see above); the linter cannot see that collectOriginalWords reads the active language.
   const words = useMemo(() => collectOriginalWords(sourceVO), [sourceVO, t]);
 
   const lit = useMemo(
@@ -591,6 +621,37 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
             details: error ? ` (${error})` : "",
           })}
         </Alert>
+      </Box>
+    );
+  } else if (showConfigFailed) {
+    // Offline with no cached project config: say so rather than spin forever
+    // or guess a direction (issue #451).
+    body = (
+      <Box sx={{ padding: 2.5 }}>
+        <Alert
+          severity="warning"
+          action={
+            <Button color="inherit" size="small" onClick={retryProjectConfig}>
+              {t("common.retry")}
+            </Button>
+          }
+        >
+          {t("flowVerse.verse.directionLoadFailed")}
+        </Alert>
+      </Box>
+    );
+  } else if (!directionKnown) {
+    // The target lanes' direction comes from the project config. Wait for it
+    // so Arabic lanes never paint LTR first (issue #451).
+    body = (
+      <Box
+        role="status"
+        sx={{ padding: 5, display: "flex", flexDirection: "column", alignItems: "center", gap: 1.5 }}
+      >
+        <CircularProgress size={28} aria-hidden />
+        <Typography variant="body2" color="text.secondary">
+          {t("flowVerse.verse.directionLoading")}
+        </Typography>
       </Box>
     );
   } else {

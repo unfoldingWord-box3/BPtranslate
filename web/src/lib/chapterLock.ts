@@ -47,6 +47,16 @@ export function jobLocksChapterNotes(job: LockJobLike, book: string, chapter: nu
   return isChapterWideNotesTranslate(job) && jobLocksChapter(job, book, chapter);
 }
 
+// True when `job`'s chapter lock reaches the chapter's note cards (keep-mode,
+// or read-only under a chapter-wide translate). Every locking job does, except
+// a single-note or verse-range tn translate redraft: the server still locks
+// scripture, tq, twl and note create/delete for it, but refuses edits only on
+// the notes it will write (translateLockForTnRow), and jobLocksNote marks those
+// (issue #607).
+export function jobLocksChapterNoteCards(job: LockJobLike, book: string, chapter: number): boolean {
+  return jobLocksChapter(job, book, chapter) && !isRowScopedNotesTranslate(job);
+}
+
 // True when `job` will write over this note, so the note is read-only until it
 // finishes. Client twin of the server's translateLockForTnRow: a chapter-wide
 // tn translate covers every note in its chapters (the book intro too when it
@@ -86,6 +96,13 @@ export function lockJobReleased(jobId: string, jobs: ReadonlyArray<{ job_id: str
 
 function isChapterWideNotesTranslate(job: LockJobLike): boolean {
   return job.pipeline_type === "translate" && job.locks_chapter_notes === true;
+}
+
+// A tn translate that writes only selected notes. GET /api/pipelines sends
+// note_selection only for these; an older server that sends neither field
+// gets today's chapter-wide treatment.
+function isRowScopedNotesTranslate(job: LockJobLike): boolean {
+  return job.pipeline_type === "translate" && job.locks_chapter_notes !== true && job.note_selection != null;
 }
 
 // Whether a note card is read-only because of a chapter lock. A translate run

@@ -4,6 +4,7 @@
 
 import type { LayoutSpec } from "../lib/layoutSpec";
 import type { ReviewSweepBody, ReviewSweepResource, ReviewSweepTarget } from "../lib/reviewStateSweep";
+import type { NoteSourcePlan } from "../lib/sourceNotePlan";
 import { getWorkspaceSlug, setWorkspaceSlug } from "./workspace";
 
 export type RowKind = "tn" | "tq" | "twl";
@@ -434,6 +435,29 @@ function composeSignals(signals: AbortSignal[]): AbortSignal {
   return controller.signal;
 }
 
+// Diagnostics for row writes, recorded server-side only when the write 409s
+// (api/migrations/0074_row_conflict_log.sql). A rejected save leaves no
+// edit_log trace, so without these a "someone else changed this note" report
+// can't tell a leftover op from an earlier session (old queuedAt) from a second
+// open tab (two tab ids) from a live race.
+const TAB_ID =
+  typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID().slice(0, 8)
+    : Math.random().toString(36).slice(2, 10);
+
+function rowWriteDiagnosticHeaders(queuedAt: number | undefined): Record<string, string> {
+  const headers: Record<string, string> = { "X-Tab-Id": TAB_ID };
+  if (typeof queuedAt === "number" && Number.isFinite(queuedAt)) {
+    headers["X-Op-Queued-At"] = String(Math.floor(queuedAt));
+  }
+  if (typeof location !== "undefined" && location.hash) {
+    // Header values must be ISO-8859-1; the hash route is ASCII in practice
+    // (#/notes/LUK/7), but strip anything else rather than throw.
+    headers["X-Client-Route"] = location.hash.split("?")[0].replace(/[^\x20-\x7e]/g, "").slice(0, 120);
+  }
+  return headers;
+}
+
 async function request<T>(
   path: string,
   init?: RequestInitWithTimeout,
@@ -656,6 +680,7 @@ export interface AquiferDraftsResponse {
   report: {
     enRows: number;
     aqItems: number;
+    matchedLink: number;
     matchedQuote: number;
     matchedOrdinal: number;
     matchedIntro: number;
@@ -1399,11 +1424,6 @@ export interface PipelineRequestOptions {
   pauseBeforeATs?: boolean;
 }
 
-export interface PipelineChainStep {
-  pipelineType: PipelineType;
-  options?: PipelineRequestOptions;
-}
-
 export interface PipelineStartRequest {
   pipelineType: PipelineType;
   // Optional for article translate jobs (tw/ta), which are scoped by
@@ -1420,21 +1440,6 @@ export interface PipelineStartRequest {
    * from the active project config and folds these in.
    */
   translate?: TranslateRequestOptions;
-  /**
-   * Optional second pipeline to fire on the parent's done-transition. Used
-   * to express asymmetric ULT/UST alignment (e.g. ULT aligned + UST text-
-   * only) since the upstream contract can't carry asymmetric align flags
-   * in one call. Same scope and pipelineType — only the options differ.
-   * Mutually exclusive with followUpChain.
-   */
-  followUpOptions?: PipelineRequestOptions;
-  /**
-   * Cross-type follow-up chain. First entry fires on the parent's done-
-   * transition; the rest is stored on the child and fires in turn. Used by
-   * the chapter macro to chain generate -> notes -> tqs without leaving the
-   * chapter unlocked between steps. Mutually exclusive with followUpOptions.
-   */
-  followUpChain?: PipelineChainStep[];
 }
 
 export interface PipelineStartResponse {
@@ -1744,6 +1749,14 @@ export interface InferredOrgConfigResponse {
   warnings: string[];
 }
 
+export interface ChatLink {
+  id: number;
+  workspace: string;
+  createdAt: number;
+  expiresAt: number;
+  lastUsedAt: number | null;
+}
+
 export const api = {
   getBookSummary: (book: string, signal?: AbortSignal) =>
     request<BookSummary>(`/api/chapters/${encodeURIComponent(book)}`, { signal }),
@@ -1821,8 +1834,18 @@ export const api = {
   // Per-book resource source overrides (issue #103). Whole-book override rows
   // come back as (chapter_start=0, chapter_end=999); range rows carry their real
   // bounds. Readable by any authenticated user; the PUT below is admin-only.
+  // tnNoteSources: which source each chapter's English tN source note is read
+  // from (#691; lib/sourceNotePlan.ts). null for an authoring project (no
+  // English source); left out when the server could not resolve it (#697,
+  // read through planFromBookSources). tqQuestionSources: the same
+  // for the English tQ source question (#695).
   getBookSources: (book: string) =>
-    request<{ book: string; overrides: BookSourceOverride[] }>(
+    request<{
+      book: string;
+      overrides: BookSourceOverride[];
+      tnNoteSources?: NoteSourcePlan | null;
+      tqQuestionSources?: NoteSourcePlan | null;
+    }>(
       `/api/books/${encodeURIComponent(book)}/sources`,
     ),
 
@@ -1960,6 +1983,11 @@ export const api = {
   // book is required after the composite-(book, id) PK migration (0015);
   // the server returns 400 if it's missing because the same 4-char id can
   // exist in two books with different content.
+  // The server's current copy of one row (404 once deleted). Read after a row
+  // save that never landed, to rebuild the cached row (rowRebuild.ts, #637).
+  getRow: <T = TnRow | TqRow | TwlRow>(kind: RowKind, id: string, book: string) =>
+    request<T>(`/api/rows/${kind}/${encodeURIComponent(id)}?book=${encodeURIComponent(book)}`),
+
   getRowHistory: (kind: RowKind, id: string, book: string) =>
     request<RowHistory>(
       `/api/rows/${kind}/${encodeURIComponent(id)}/history?book=${encodeURIComponent(book)}`,
@@ -1970,11 +1998,11 @@ export const api = {
     id: string,
     expectedVersion: number,
     patch: Record<string, unknown>,
-    opts: { restoredFromVersion?: number | null; book: string },
+    opts: { restoredFromVersion?: number | null; book: string; queuedAt?: number },
   ) =>
     request<T>(`/api/rows/${kind}/${encodeURIComponent(id)}?book=${encodeURIComponent(opts.book)}`, {
       method: "PATCH",
-      headers: { "If-Match": String(expectedVersion) },
+      headers: { "If-Match": String(expectedVersion), ...rowWriteDiagnosticHeaders(opts.queuedAt) },
       body: JSON.stringify(
         typeof opts.restoredFromVersion === "number"
           ? { ...patch, restored_from_version: opts.restoredFromVersion }
@@ -1982,10 +2010,10 @@ export const api = {
       ),
     }),
 
-  deleteRow: (kind: RowKind, id: string, expectedVersion: number, book: string) =>
+  deleteRow: (kind: RowKind, id: string, expectedVersion: number, book: string, queuedAt?: number) =>
     request<{ ok: true }>(`/api/rows/${kind}/${encodeURIComponent(id)}?book=${encodeURIComponent(book)}`, {
       method: "DELETE",
-      headers: { "If-Match": String(expectedVersion) },
+      headers: { "If-Match": String(expectedVersion), ...rowWriteDiagnosticHeaders(queuedAt) },
     }),
 
   // Legacy: alias for setPreserveNote(id, true). Server still accepts it for
@@ -2328,6 +2356,16 @@ export const api = {
       `/api/pipelines/${encodeURIComponent(jobId)}/notified`,
       { method: "POST", signal },
     ),
+
+  // ── Chat assistant links (api/src/chatLinkRoutes.ts) ──
+  chatLinkCode: () =>
+    request<{ code: string; expiresAt: number; ttlSeconds: number; workspace: string }>(
+      "/api/chat-links/code",
+      { method: "POST" },
+    ),
+  chatLinksList: () => request<{ links: ChatLink[] }>("/api/chat-links"),
+  chatLinkRevoke: (id: number) =>
+    request<{ ok: boolean }>(`/api/chat-links/${encodeURIComponent(String(id))}`, { method: "DELETE" }),
 
   // ── Nightly export admin surface (api/src/exports.ts) ──
   // Previously hand-rolled per admin screen (ObserveScreen.tsx's observeFetch,

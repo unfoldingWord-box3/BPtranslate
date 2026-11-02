@@ -539,7 +539,7 @@ test("POST /start (#551): translate with no org key is refused with 409 ai_provi
         JWT_ISSUER: ROUTE_ISSUER,
       });
       const app = routeApp();
-      const tok = await editorToken("1");
+      const tok = await editorToken("1", env.WORKSPACE_SLUG);
       const tag = `${label}, BT_API_TOKEN=${token ? "set" : "unset"}`;
 
       const { res, fetchCount } = await withNoFetch(async (count) => {
@@ -565,7 +565,7 @@ test("POST /start (#551): a keyless org with a same-scope translate job already 
   sqlite.prepare(`UPDATE pipeline_jobs SET book = 'OBA', start_chapter = 1, end_chapter = 1 WHERE job_id = 'pre-deploy'`).run();
   const env = freshEnv(sqlite, { JWT_SIGNING_KEY: ROUTE_SIGNING, JWT_ISSUER: ROUTE_ISSUER });
   const app = routeApp();
-  const tok = await editorToken("1");
+  const tok = await editorToken("1", env.WORKSPACE_SLUG);
 
   const { res, fetchCount } = await withNoFetch(async (count) => {
     const res = await app.request("/api/pipelines/start", postReq(tok, START_TRANSLATE), env);
@@ -584,7 +584,7 @@ test("POST /start (#551): translate with an org key gets past the key check and 
   await seedByoKey(sqlite, { provider: "openai", model: "gpt-5.5" });
   const env = freshEnv(sqlite, { JWT_SIGNING_KEY: ROUTE_SIGNING, JWT_ISSUER: ROUTE_ISSUER });
   const app = routeApp();
-  const tok = await editorToken("1");
+  const tok = await editorToken("1", env.WORKSPACE_SLUG);
 
   await withFetch(
     async () => new Response(JSON.stringify({ jobId: "bot-start", provider: "openai" }), { status: 200 }),
@@ -608,7 +608,7 @@ test("POST /start (#551 switch-off): generate/notes/tqs are refused with 409 ai_
       if (withKey) await seedByoKey(sqlite);
       const env = freshEnv(sqlite, { JWT_SIGNING_KEY: ROUTE_SIGNING, JWT_ISSUER: ROUTE_ISSUER });
       const app = routeApp();
-      const tok = await editorToken("1");
+      const tok = await editorToken("1", env.WORKSPACE_SLUG);
       const tag = `${pipelineType}, org key ${withKey ? "set" : "unset"}`;
 
       const { res, fetchCount } = await withNoFetch(async (count) => {
@@ -633,7 +633,7 @@ test("POST /start (#551 switch-off): a translate job whose followUpChain holds a
   const sqlite = freshSqlite();
   await seedByoKey(sqlite);
   const env = freshEnv(sqlite, { JWT_SIGNING_KEY: ROUTE_SIGNING, JWT_ISSUER: ROUTE_ISSUER });
-  const tok = await editorToken("1");
+  const tok = await editorToken("1", env.WORKSPACE_SLUG);
   const { res, fetchCount } = await withNoFetch(async (count) => {
     const res = await routeApp().request(
       "/api/pipelines/start",
@@ -660,7 +660,7 @@ test("POST /api/tn-quick (#551 switch-off): refused with 409 ai_needs_org_key, e
   const sqlite = freshSqlite();
   await seedByoKey(sqlite);
   const env = freshEnv(sqlite, { JWT_SIGNING_KEY: ROUTE_SIGNING, JWT_ISSUER: ROUTE_ISSUER });
-  const tok = await editorToken("1");
+  const tok = await editorToken("1", env.WORKSPACE_SLUG);
   const { res, fetchCount } = await withNoFetch(async (count) => {
     const res = await sideRouteApp().request("/api/tn-quick", postReq(tok, { book: "OBA" }), env);
     return { res, fetchCount: count() };
@@ -674,7 +674,7 @@ test("POST /api/templates/unit/draft (#551 switch-off): refused with 409 ai_need
   const sqlite = freshSqlite();
   await seedByoKey(sqlite);
   const env = freshEnv(sqlite, { JWT_SIGNING_KEY: ROUTE_SIGNING, JWT_ISSUER: ROUTE_ISSUER });
-  const tok = await editorToken("1");
+  const tok = await editorToken("1", env.WORKSPACE_SLUG);
   const req = postReq(tok, {});
   req.headers["If-Match"] = "1";
   const { res, fetchCount } = await withNoFetch(async (count) => {
@@ -736,9 +736,9 @@ function routeApp() {
   app.route("/api/pipelines", pipelines);
   return app;
 }
-async function editorToken(sub = "1") {
+async function editorToken(sub = "1", ws) {
   const now = Math.floor(Date.now() / 1000);
-  return new SignJWT({ username: "translator", role: "editor" })
+  return new SignJWT({ username: "translator", role: "editor", ws })
     .setProtectedHeader({ alg: "HS256" })
     .setSubject(sub)
     .setIssuer(ROUTE_ISSUER)
@@ -925,7 +925,7 @@ test("GET /:jobId (internal): a running internal job still returns its status af
     JWT_ISSUER: ROUTE_ISSUER,
   });
   const app = routeApp();
-  const tok = await editorToken("1");
+  const tok = await editorToken("1", env.WORKSPACE_SLUG);
 
   const res = await withNoFetch(async () => app.request("/api/pipelines/job-1", getReq(tok), env));
   assert.equal(res.status, 200, "the internal job's status is served, not a 503 from the capability gate");
@@ -942,7 +942,7 @@ test("GET /:jobId (proxy / bogus): the capability probe still 503s for non-inter
     JWT_ISSUER: ROUTE_ISSUER,
   });
   const app = routeApp();
-  const tok = await editorToken("1");
+  const tok = await editorToken("1", env.WORKSPACE_SLUG);
 
   await withNoFetch(async () => {
     // A proxy row is not stamped 'internal', so the gate still fires.

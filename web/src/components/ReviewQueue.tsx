@@ -196,10 +196,19 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
   const [activeKind, setActiveKind] = useState<RowKindTQ>("tn");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [draftValue, setDraftValue] = useState("");
+  // The saved text the editor diffs against. `baseline` (state) is what render
+  // reads for hasDiff; `baselineRef` is the same value for handlers and
+  // effects, several of which read it after an await. Always write both
+  // through setBaseline so they never disagree.
+  const [baseline, setBaselineState] = useState("");
   const baselineRef = useRef<string>("");
+  const setBaseline = useCallback((next: string) => {
+    baselineRef.current = next;
+    setBaselineState(next);
+  }, []);
   const hydratedKeyRef = useRef<string | null>(null);
   const saveButtonRef = useRef<HTMLButtonElement | null>(null);
-  const quoteButtonRef = useRef<HTMLButtonElement | null>(null);
+  const [quoteButtonEl, setQuoteButtonEl] = useState<HTMLButtonElement | null>(null);
   const templateButtonRef = useRef<HTMLButtonElement | null>(null);
 
   const [saving, setSaving] = useState(false);
@@ -265,6 +274,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
   // row disappeared (e.g. a peer deleted it).
   useEffect(() => {
     if (rows.length === 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- the selection fix feeds selectedRow, which the draft-hydration effect below keys on; moving it into render would change when hydration first runs.
       setSelectedId(null);
       return;
     }
@@ -288,7 +298,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
     if (hydratedKeyRef.current === key) return;
     hydratedKeyRef.current = key;
     const fallback = contentOf(selectedRow);
-    baselineRef.current = fallback;
+    setBaseline(fallback);
     setDraftValue(fallback);
     let cancelled = false;
     void drafts.get(key).then((rec) => {
@@ -299,7 +309,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
       const patchVal = payload?.patch?.[fieldName];
       if (typeof patchVal === "string") setDraftValue(unescapeNewlines(patchVal));
       const baselineVal = payload?.baseline?.[fieldName];
-      if (typeof baselineVal === "string") baselineRef.current = unescapeNewlines(baselineVal);
+      if (typeof baselineVal === "string") setBaseline(unescapeNewlines(baselineVal));
     });
     return () => {
       cancelled = true;
@@ -307,7 +317,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedRow?.id, activeKind, book]);
 
-  const hasDiff = draftValue !== baselineRef.current;
+  const hasDiff = draftValue !== baseline;
 
   // The grid can hold an unsaved `question` for the selected row under the very
   // same drafts key. Read it here so a card keystroke rewrites the record WITH
@@ -458,6 +468,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
       });
     }
     if (settled.length > 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- prunes settled grid entries in the same pass that writes and clears their drafts-store records (IndexedDB), which has to stay after commit.
       setGridEdits((prev) => {
         const next = { ...prev };
         for (const id of settled) delete next[id];
@@ -488,6 +499,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
     if (activeKind !== "tq" || !selectedRow) return;
     const id = selectedRow.id;
     const rowQuestion = (selectedRow as TqRow).question ?? "";
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- the mirror half of a handshake with the draft-writing effect above (that one skips the selected row, this one owns its entry); moving either into render would reorder them.
     setGridEdits((prev) => {
       const cur = prev[id];
       const entry: { question?: string; response?: string } = {};
@@ -711,7 +723,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
       const baseline = { [fieldName]: baselineRef.current };
       applyLocalRowPatch(activeKind, selectedRow.id, patch as Partial<TnRow & TqRow>);
       await outbox.enqueueRow(activeKind, selectedRow.id, selectedRow.version, patch, { book, baseline });
-      baselineRef.current = draftValue;
+      setBaseline(draftValue);
     } finally {
       setSaving(false);
     }
@@ -878,7 +890,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
         // flight. Then drop the drafts record.
         const next = unescapeNewlines(updated.note);
         setDraftValue(next);
-        baselineRef.current = next;
+        setBaseline(next);
         void drafts.clear(rowKey("tn", book, row.id));
       }
       say(
@@ -1098,7 +1110,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
       baseline: { [fieldName]: baselineRef.current },
       restoredFromVersion: fromVersion,
     });
-    baselineRef.current = text;
+    setBaseline(text);
     setDraftValue(text);
   }
 
@@ -1178,7 +1190,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
       if (textual) {
         void drafts.clear(rowKey(op.target.rowKind, book, op.target.id));
         if (selectedRow?.id === op.target.id && activeKind === kind) {
-          baselineRef.current = theirsText;
+          setBaseline(theirsText);
           setDraftValue(theirsText);
         }
       }
@@ -1453,7 +1465,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
                   // card's Draft box holds (they are one value) — move its
                   // baseline too, or the card stays "dirty" and re-writes the
                   // draft the store is about to clear.
-                  if (selectedRow?.id === row.id) baselineRef.current = patch.response;
+                  if (selectedRow?.id === row.id) setBaseline(patch.response);
                 }}
                 onDeleteRow={(row) => void handleDeleteQuestion(row)}
               />
@@ -1569,7 +1581,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
                         ? t("flowReview.queue.pickSourceWords")
                         : t("flowReview.queue.noSourceVerse", { label: sourceLabel })
                     }
-                    buildButtonRef={quoteButtonRef}
+                    buildButtonRef={setQuoteButtonEl}
                   />
                 )}
 
@@ -1847,7 +1859,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
       {selectedRow && activeKind === "tn" && (
         <QuoteBuilderPopper
           open={quoteOpen}
-          anchorEl={quoteButtonRef.current}
+          anchorEl={quoteButtonEl}
           book={book}
           chapter={chapter}
           verse={selectedRow.verse}

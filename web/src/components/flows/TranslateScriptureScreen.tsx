@@ -38,18 +38,14 @@
 //                     version — but dirty lanes are saved AND awaited
 //                     (waitForOp) first, so "Approved" is never claimed over
 //                     text the server refused.
-//   * Redraft both / Redraft this lane → HIDDEN. Scripture drafting is the
-//                     async `generate` pipeline (api/src/pipelines.ts:71-88,
-//                     PipelineOptions.contentTypes ["ult","ust"]) — a
-//                     chapter-scoped job that takes ~an hour and LOCKS the
-//                     chapter while it runs. The `translate` pipeline covers
-//                     tn|tq|tw|ta only (pipelines.ts:116), and the only
-//                     synchronous quick endpoints are tn-quick/template-quick
-//                     (api/src/index.ts:73-79,272) — there is no per-verse
-//                     scripture redraft the screen could drive. If one ships,
-//                     bring the artifact's buttons back wired to it; the
-//                     chapter-scoped fallback is the pipelines menu
-//                     (POST /api/pipelines/start, pipelineType "generate").
+//   * Redraft both / Redraft this lane → HIDDEN. There is no AI scripture
+//                     drafting the screen could drive. The bot's chapter-scoped
+//                     `generate` pipeline (ULT/UST) is refused by the server
+//                     (#551) and its menu action was removed (#470). The
+//                     `translate` pipeline covers tn|tq|tw|ta only, and the
+//                     only synchronous quick endpoints are
+//                     tn-quick/template-quick. If a scripture redraft ships,
+//                     bring the artifact's buttons back wired to it.
 //
 // Honesty notes, decided here and visible on screen:
 //
@@ -311,6 +307,7 @@ export default function TranslateScriptureScreen({
       if (s.done === 1 && verseNums.includes(s.verse)) seed[s.verse] = "approved";
     }
     const firstOpen = verseNums.findIndex((v) => !seed[v]);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- builds and seeds the frozen per-chapter queue (cursor, statuses, view) once the chapter payload lands; queue progression is kept on its proven post-commit timing.
     setQueue({ key: chapterKey, verses: verseNums });
     setStatuses(seed);
     if (verse != null) {
@@ -344,31 +341,32 @@ export default function TranslateScriptureScreen({
   // for the current chapter — e.g. editing the URL from #/scripture/JON/2 to
   // #/scripture/JON/2/7, or Back/Forward between two verses of the same
   // chapter. Cross-chapter deep links are handled above, by the queue rebuild
-  // itself. Guarded on an actual change of `verse` (via the ref, not just its
-  // presence in the dep array) so this never fires on plain cursor navigation
-  // (Prev/Next), a status change, or unrelated re-renders — only a real prop
-  // change moves the cursor here. Mirrors TranslateNotesScreen's verse re-seek
-  // effect (#389).
-  const prevVerseRef = useRef(verse);
-  useEffect(() => {
-    if (prevVerseRef.current === verse) return;
-    prevVerseRef.current = verse;
-    if (!queueVerses || queueVerses.length === 0) return;
-    if (verse == null) {
-      // The verse segment was dropped (e.g. #/scripture/JON/2/7 → #/scripture/
-      // JON/2 via Back/Forward or a manual URL edit). Restore the same
-      // no-verse init the mount/queue-build path uses: first still-open
-      // verse, or the done view when every verse in the chapter is already
-      // statused.
-      const firstOpen = queueVerses.findIndex((v) => !statuses[v]);
-      setCursor(firstOpen < 0 ? 0 : firstOpen);
-      setView(firstOpen < 0 ? "done" : "verses");
-      return;
+  // itself. Guarded on an actual change of `verse` (via prevVerse, not just a
+  // re-render) so this never fires on plain cursor navigation (Prev/Next), a
+  // status change, or unrelated re-renders — only a real prop change moves the
+  // cursor here. Mirrors TranslateNotesScreen's verse re-seek effect (#389),
+  // but adjusted during render (React's "adjust state when a prop changes"
+  // pattern) with the previous verse held in state.
+  const [prevVerse, setPrevVerse] = useState(verse);
+  if (prevVerse !== verse) {
+    setPrevVerse(verse);
+    if (queueVerses && queueVerses.length > 0) {
+      if (verse == null) {
+        // The verse segment was dropped (e.g. #/scripture/JON/2/7 → #/scripture/
+        // JON/2 via Back/Forward or a manual URL edit). Restore the same
+        // no-verse init the mount/queue-build path uses: first still-open
+        // verse, or the done view when every verse in the chapter is already
+        // statused.
+        const firstOpen = queueVerses.findIndex((v) => !statuses[v]);
+        setCursor(firstOpen < 0 ? 0 : firstOpen);
+        setView(firstOpen < 0 ? "done" : "verses");
+      } else {
+        const seekIdx = queueVerses.findIndex((v) => v >= verse);
+        setCursor(seekIdx < 0 ? queueVerses.length - 1 : seekIdx);
+        setView("verses");
+      }
     }
-    const seekIdx = queueVerses.findIndex((v) => v >= verse);
-    setCursor(seekIdx < 0 ? queueVerses.length - 1 : seekIdx);
-    setView("verses");
-  }, [verse, queueVerses, statuses]);
+  }
 
   // ── per-lane rows + baselines ────────────────────────────────────────────
   const bases = useMemo<Record<TargetLane, VerseDto | null>>(
@@ -443,6 +441,7 @@ export default function TranslateScriptureScreen({
   useEffect(() => {
     if (view === "done") {
       clearLaneBlurTimeout();
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- paired with clearing the pending blur timer (an external side effect) in the same step; deriving focus mode from view instead would re-arm it when view flips back without a focus event.
       setLaneFocused(false);
     }
   }, [view, clearLaneBlurTimeout]);
