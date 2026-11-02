@@ -3342,6 +3342,8 @@
       "readHint": "Read the verse three ways. Click any word to see what the other texts do with it.",
       "auditHint": "One row per original word: what the literal text made of it, and what the simplified text made of it.",
       "loadError": "{{book}} {{chapter}} could not be loaded{{details}}.",
+      "directionLoading": "Loading project settings…",
+      "directionLoadFailed": "The project settings could not be loaded, so this screen can't tell which way the translation text reads. Retry to try again.",
       "bridgedNotice": "One of these texts bridges verses {{start}}–{{end}} in a single row, so this screen covers the whole span at once. The original words below are verses {{start}}–{{end}} joined — the stretch the bridged row is actually aligned to — and the observations compare like with like.",
       "noOriginalText": "No {{label}} text is loaded for {{ref}} in this workspace, so nothing can be anchored to original words. The resources below still list what exists.",
       "detailAria": "Detail",

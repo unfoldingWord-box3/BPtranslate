@@ -33,6 +33,7 @@ import { useTranslation } from "react-i18next";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
+import CircularProgress from "@mui/material/CircularProgress";
 import Link from "@mui/material/Link";
 import IconButton from "@mui/material/IconButton";
 import MenuItem from "@mui/material/MenuItem";
@@ -71,11 +72,16 @@ import type { FlowScreenContext } from "./types";
 
 import { useChapter } from "../../hooks/useChapter";
 import { useLexicon } from "../../hooks/useLexicon";
-import { isTranslationProject, useProjectConfig } from "../../hooks/useProjectConfig";
+import {
+  isTranslationProject,
+  retryProjectConfig,
+  useProjectConfig,
+  useProjectConfigLoadFailed,
+} from "../../hooks/useProjectConfig";
 import { SCRIPTURE_FONT_STACK } from "../../theme";
 import type { VerseDto } from "../../sync/api";
 import { isHebrewBook } from "../../lib/sourceSearch";
-import { versionIsRtl, versionLabel } from "../../lib/versionLabels";
+import { versionDirection, versionLabel } from "../../lib/versionLabels";
 import { buildVerseIndex, noteOverlapsRange, verseObjectsOf } from "../../lib/verseRange";
 
 export interface VerseScreenProps extends FlowScreenContext {
@@ -217,8 +223,24 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
   // dir the ULT/UST word rows inherit the page direction and lay out backwards
   // (issue #449). ULT and UST share the project direction, but keep them
   // separate for parity with ScriptureColumn.
-  const litRtl = versionIsRtl(projectConfig, "ULT");
-  const simRtl = versionIsRtl(projectConfig, "UST");
+  //
+  // Until the config arrives the target direction is unknown (null), and the
+  // body waits on it rather than guessing LTR, which painted Arabic lanes
+  // backwards on first load and stuck that way offline (issue #451).
+  const litDir = versionDirection(projectConfig, "ULT");
+  const simDir = versionDirection(projectConfig, "UST");
+  const litRtl = litDir === "rtl";
+  const simRtl = simDir === "rtl";
+  const directionKnown = litDir !== null && simDir !== null;
+  const configLoadFailed = useProjectConfigLoadFailed();
+  // While the "could not be loaded" warning shows, retry on its own when the
+  // connection comes back.
+  const showConfigFailed = !directionKnown && configLoadFailed;
+  useEffect(() => {
+    if (!showConfigFailed) return;
+    window.addEventListener("online", retryProjectConfig);
+    return () => window.removeEventListener("online", retryProjectConfig);
+  }, [showConfigFailed]);
 
   const sourceIndex = useMemo(
     () => buildVerseIndex(data?.verses?.[sourceLane]),
@@ -599,6 +621,37 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
             details: error ? ` (${error})` : "",
           })}
         </Alert>
+      </Box>
+    );
+  } else if (showConfigFailed) {
+    // Offline with no cached project config: say so rather than spin forever
+    // or guess a direction (issue #451).
+    body = (
+      <Box sx={{ padding: 2.5 }}>
+        <Alert
+          severity="warning"
+          action={
+            <Button color="inherit" size="small" onClick={retryProjectConfig}>
+              {t("common.retry")}
+            </Button>
+          }
+        >
+          {t("flowVerse.verse.directionLoadFailed")}
+        </Alert>
+      </Box>
+    );
+  } else if (!directionKnown) {
+    // The target lanes' direction comes from the project config. Wait for it
+    // so Arabic lanes never paint LTR first (issue #451).
+    body = (
+      <Box
+        role="status"
+        sx={{ padding: 5, display: "flex", flexDirection: "column", alignItems: "center", gap: 1.5 }}
+      >
+        <CircularProgress size={28} aria-hidden />
+        <Typography variant="body2" color="text.secondary">
+          {t("flowVerse.verse.directionLoading")}
+        </Typography>
       </Box>
     );
   } else {
