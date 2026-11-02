@@ -1059,6 +1059,19 @@ test("validate with expected_updated_at: a moved updated_at is a 409 with curren
   assert.deepEqual(log().map((e) => [e.row_key, e.action, e.source]), [["b001", "unvalidate", "chat"]]);
 });
 
+test("with no signing key the preview is a clear refusal and reads nothing", async () => {
+  const { env, call, sqlite, d1 } = fresh();
+  seedBulk(sqlite);
+  delete env.JWT_SIGNING_KEY;
+  const before = d1.calls;
+  const r = await call("bpt_bulk_set_state", RANGE);
+  assert.equal(r.isError, true, JSON.stringify(r.data));
+  assert.match(r.data.error, /not set up on this server/);
+  assert.match(r.data.error, /Nothing was changed/);
+  assert.equal(d1.calls, before, "no chapter read before the refusal");
+  assert.deepEqual(states(sqlite), BEFORE);
+});
+
 test("a plain replay of a confirm applies nothing and says why", async () => {
   const { call, sqlite, log } = fresh();
   seedBulk(sqlite);
