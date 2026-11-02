@@ -38,18 +38,14 @@
 //                     version — but dirty lanes are saved AND awaited
 //                     (waitForOp) first, so "Approved" is never claimed over
 //                     text the server refused.
-//   * Redraft both / Redraft this lane → HIDDEN. Scripture drafting is the
-//                     async `generate` pipeline (api/src/pipelines.ts:71-88,
-//                     PipelineOptions.contentTypes ["ult","ust"]) — a
-//                     chapter-scoped job that takes ~an hour and LOCKS the
-//                     chapter while it runs. The `translate` pipeline covers
-//                     tn|tq|tw|ta only (pipelines.ts:116), and the only
-//                     synchronous quick endpoints are tn-quick/template-quick
-//                     (api/src/index.ts:73-79,272) — there is no per-verse
-//                     scripture redraft the screen could drive. If one ships,
-//                     bring the artifact's buttons back wired to it; the
-//                     chapter-scoped fallback is the pipelines menu
-//                     (POST /api/pipelines/start, pipelineType "generate").
+//   * Redraft both / Redraft this lane → HIDDEN. There is no AI scripture
+//                     drafting the screen could drive. The bot's chapter-scoped
+//                     `generate` pipeline (ULT/UST) is refused by the server
+//                     (#551) and its menu action was removed (#470). The
+//                     `translate` pipeline covers tn|tq|tw|ta only, and the
+//                     only synchronous quick endpoints are
+//                     tn-quick/template-quick. If a scripture redraft ships,
+//                     bring the artifact's buttons back wired to it.
 //
 // Honesty notes, decided here and visible on screen:
 //

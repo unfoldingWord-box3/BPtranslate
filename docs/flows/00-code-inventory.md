@@ -195,6 +195,8 @@ Reused by A.2, A.3, B.4, and the Scripture-Lanes "change source" flow (§A.7).
 **Entry point:** the "AI" button (`AutoAwesomeIcon`, `PipelineMenu.tsx:440-447`), chapter-scoped, opens a `Menu`.
 
 ### D.1 Menu contents (`PipelineMenu.tsx:75-120,223-239`)
+> **Removed in #470:** the three base pipeline types below (and D.2's "What to generate" checkboxes and the asymmetric follow-up) are gone from the menu. Translation-mode projects now show only the two translate items; the English root project shows no AI items, only the import entries. The rest of this section is the snapshot as it was.
+
 Always shown (3 base pipeline types):
 | key | label | description | duration |
 |---|---|---|---|
