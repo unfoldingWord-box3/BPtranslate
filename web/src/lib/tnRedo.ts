@@ -37,14 +37,17 @@ export const CHAPTER_REDO_TIMEOUT_MS = 90 * 60 * 1000;
  * `pipelineStore.start` answered. An `already_running` answer means we're
  * waiting on a broader job already in flight (chapter-wide, documented ~1h), so
  * a fresh-run 15-minute timeout would misreport a healthy run as `timeout`
- * (#376). Every other status keeps the short single-row budget.
+ * (#376). A `queued` answer gets the same budget: the server queues a job only
+ * when other work holds the slot or is ahead by priority, so the Redo waits
+ * behind that work first. Since #757 that is the usual case for a Redo on a row
+ * a person touched after a covering chapter or verse-range job was queued: the
+ * Redo starts its own job behind the ~1h covering one. Only `running` (a fresh
+ * single-row run that got the slot) keeps the short budget.
  */
 export function introRedoTimeoutMs(
   startStatus: "running" | "queued" | "already_running",
 ): number {
-  return startStatus === "already_running"
-    ? CHAPTER_REDO_TIMEOUT_MS
-    : INTRO_REDO_TIMEOUT_MS;
+  return startStatus === "running" ? INTRO_REDO_TIMEOUT_MS : CHAPTER_REDO_TIMEOUT_MS;
 }
 
 // Error codes returned by the tn-quick proxy / translate pipeline when AI

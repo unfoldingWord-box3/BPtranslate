@@ -1598,7 +1598,9 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
         // `already_running` answer means we latched onto a broader in-flight
         // job (chapter-wide, ~1h) instead of a fresh single-row run; the old
         // fixed 15-minute timer misreported that healthy job as a `timeout`
-        // failure (#376). A cancel/dismiss still settles early via the store
+        // failure (#376). A `queued` answer gets the same long budget: the
+        // job waits behind other work first (since #757, often the covering
+        // ~1h job). A cancel/dismiss still settles early via the store
         // subscriptions; this timer is only the last-resort backstop.
         introRedoTimerRef.current = window.setTimeout(() => {
           settleIntroRedo(
