@@ -989,6 +989,76 @@ test("a row un-approved and re-approved on the web between preview and confirm s
   assert.equal(tnRow2(sqlite, "b001").translation_state, "validated");
 });
 
+test("a web un-approve and re-approve after the confirm read the rows, before that row's write, stays approved", async () => {
+  // The confirm reads the chapter once, then writes row by row. The web flip
+  // lands in that gap, so only the validate route's own updated_at pin can
+  // see it: version and state are back to what the preview saw.
+  for (const kind of ["tn", "tq"]) {
+    const { env, ctx, call, sqlite, sessions, log } = fresh();
+    seedBulk(sqlite);
+    const table = kind === "tn" ? "tn_rows" : "tq_rows";
+    const id = kind === "tn" ? "b001" : "qb01";
+    const range = { ...RANGE, kind };
+    const dry = await call("bpt_bulk_set_state", range);
+    assert.ok(dry.data.confirm_token, JSON.stringify(dry.data));
+
+    const session = sessions[EDITOR];
+    const send = session.send;
+    session.send = async (method, path, body, ifMatch) => {
+      if (path.startsWith(`/api/rows/${kind}/${id}/validate`)) {
+        assert.equal((await webPost(env, ctx, `/api/rows/${kind}/${id}/validate?book=${BOOK}`, { value: 0 })).status, 200);
+        assert.equal((await webPost(env, ctx, `/api/rows/${kind}/${id}/validate?book=${BOOK}`, { value: 1 })).status, 200);
+      }
+      return send(method, path, body, ifMatch);
+    };
+    const logBefore = log().length;
+    const r = await call("bpt_bulk_set_state", { ...range, confirm_token: dry.data.confirm_token });
+    session.send = send;
+
+    assert.equal(r.isError, false, JSON.stringify(r.data));
+    assert.ok(!r.data.applied_ids.includes(id), JSON.stringify(r.data));
+    const miss = r.data.not_changed.find((x) => x.id === id);
+    assert.equal(miss?.reason, "changed_since_preview", JSON.stringify(r.data));
+    assert.equal(miss.current_state, "validated");
+    const row = sqlite.prepare(`SELECT translation_state FROM ${table} WHERE id = ?`).get(id);
+    assert.equal(row.translation_state, "validated", `${kind}: the web re-approval is kept`);
+    // Only the web's two flips for this row; no chat unvalidate entry for it.
+    assert.deepEqual(
+      log().slice(logBefore).filter((e) => e.row_key === id).map((e) => [e.action, e.source]),
+      [["unvalidate", null], ["validate", null]],
+    );
+  }
+});
+
+test("validate with expected_updated_at: a moved updated_at is a 409 with current and changes nothing; a match applies", async () => {
+  const { app, env, ctx, sqlite, log } = fresh();
+  seedBulk(sqlite);
+  const principal = { userId: 9, username: "reviewer", role: "editor", linkId: 1 };
+  const post = (body) =>
+    app.request(
+      `/api/rows/tn/b001/validate?book=${BOOK}`,
+      { method: "POST", headers: { "content-type": "application/json", "If-Match": "5" }, body: JSON.stringify(body) },
+      chatWriteEnv(env, principal),
+      ctx,
+    );
+  const stale = await post({ value: 0, expected_state: "validated", expected_updated_at: 999 });
+  assert.equal(stale.status, 409);
+  const sb = await stale.json();
+  assert.equal(sb.error, "version_mismatch");
+  assert.equal(sb.current.updated_at, 1000);
+  assert.equal(tnRow2(sqlite, "b001").translation_state, "validated");
+  assert.equal(log().length, 0);
+  assert.equal(conflictLog(sqlite).length, 1);
+
+  const bad = await post({ value: 0, expected_state: "validated", expected_updated_at: "soon" });
+  assert.equal(bad.status, 400);
+
+  const ok = await post({ value: 0, expected_state: "validated", expected_updated_at: 1000 });
+  assert.equal(ok.status, 200, await ok.clone().text());
+  assert.equal(tnRow2(sqlite, "b001").translation_state, "edited");
+  assert.deepEqual(log().map((e) => [e.row_key, e.action, e.source]), [["b001", "unvalidate", "chat"]]);
+});
+
 test("a plain replay of a confirm applies nothing and says why", async () => {
   const { call, sqlite, log } = fresh();
   seedBulk(sqlite);
