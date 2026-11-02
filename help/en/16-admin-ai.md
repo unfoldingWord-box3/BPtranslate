@@ -3,7 +3,7 @@ id: admin-ai
 title: AI studio and AI service (admin)
 routes: [ai]
 roles: [admin]
-keywords: [ai, artificial intelligence, pipeline, draft, translate chapter, translate questions, translate notes, provider, api key, gemini, claude, openai, xai, grok, model, bring your own key, byo, run, queue, retry]
+keywords: [ai, artificial intelligence, pipeline, draft, translate chapter, translate questions, translate notes, provider, api key, gemini, claude, openai, xai, grok, model, bring your own key, byo, run, queue, retry, import, door43, source project]
 screenshots:
   - admin-ai-1 #/admin/ai
 ---
@@ -21,6 +21,8 @@ screenshots:
 Only one job runs at a time. The other jobs wait in line. When AI drafts are ready, a banner on the page tells you to review them.
 
 The same **AI** menu also has **Import from Door43**. Admins on a translation project also see **Pull Aquifer drafts** and **Re-source notes from English**. Re-sourcing replaces the book from Door43 and discards local edits, so the app asks you to confirm.
+
+AI runs are only for translation projects. In a source project, one that does not translate from another language (such as unfoldingWord's English), the page says so under its title, and the button reads **Import** instead of **AI**. Choose a **Book**, then press **Import**: it opens **Import from Door43** straight away, with no menu. On a book's package and on the Scripture, Notes and Questions screens the same action is the download icon in the top bar, and on a phone it is the **Import from Door43** item in your account menu.
 
 ## Follow the runs
 The table **Runs — this workspace** shows **Type**, **Scope**, **State**, **Progress**, **Started** and **Requested by**. Runs started by other people are read-only. For your own runs you can press **Cancel** while a run is still queued, and **Retry** after a failure. A failed **Translate** run cannot be retried here. Press **Dismiss** to hide a failed, cancelled or finished run, or **Dismiss all** to hide them all. **Refresh** updates the list.
