@@ -135,7 +135,7 @@ import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import CheckIcon from "@mui/icons-material/Check";
 
-import { FlowAiRunAction } from "./FlowAiRunAction";
+import { useFlowAiRun } from "./FlowAiRunAction";
 import { LockBanner } from "./FlowBanners";
 import { FlowStatusChip, type FlowStatusKind } from "./FlowStatusChip";
 import {
@@ -817,6 +817,21 @@ export default function TranslateScriptureScreen({
     }
   }
 
+  // AI run for this chapter (#481): top bar on tablet+, account menu on
+  // phone; nothing for viewers. After a Door43 import, forget which drafts
+  // each lane was seeded from, so the hydration effect re-seeds both lanes
+  // from the imported text (drafts still restore on top).
+  const aiRun = useFlowAiRun({
+    book,
+    chapter,
+    role,
+    phone: !isTabletUp,
+    onImported: () => {
+      hydratedKeyRef.current = { ULT: null, UST: null };
+      void refetch();
+    },
+  });
+
   // ── render gates (every hook above this line, unconditionally) ───────────
   if (status === "error") {
     return (
@@ -1187,6 +1202,9 @@ export default function TranslateScriptureScreen({
       {/* topbar — rendered into the global flow bar via FlowHeader (#299).
           Hidden in phone focus mode (issue #164) to free space for the
           keyboard — same convention as TranslateNotesScreen.tsx. */}
+      {/* Outside the focus-mode conditional: entering focus mode must not
+          drop an open AI-run dialog, toast or account-menu item. */}
+      {aiRun.action}
       {!focusMode && (
         <FlowHeader>
           <Box
@@ -1225,15 +1243,7 @@ export default function TranslateScriptureScreen({
                   ? t("flowScripture.ofTotal", { n: total, total })
                   : t("flowScripture.verseOfTotal", { n: Math.min(cursor + 1, total), total })}
               </Typography>
-              {/* AI run for this chapter (#481): top bar on tablet+, account
-                  menu on phone; nothing for viewers. */}
-              <FlowAiRunAction
-                book={book}
-                chapter={chapter}
-                role={role}
-                phone={!isTabletUp}
-                onImported={refetch}
-              />
+              {aiRun.headerButton}
               {/* compact prev/next — the same cursor and disabled logic as the
                   bottom buttons (goPrev/goNext), also disabled on the done view
                   where the bottom pair doesn't render. */}

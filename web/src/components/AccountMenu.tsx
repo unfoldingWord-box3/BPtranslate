@@ -130,6 +130,9 @@ export function AccountMenu({ username, onLogout, isAdmin, onOpenClassic, onStar
             an account setting. */}
         {onStartAiRun && (
           <MenuItem
+            // Takes the menu's roving focus (see the note on the dark-mode
+            // row) when present, since it is the first focusable item.
+            autoFocus
             onClick={() => {
               const avatar = anchor;
               setAnchor(null);
@@ -152,7 +155,7 @@ export function AccountMenu({ username, onLogout, isAdmin, onOpenClassic, onStar
             whole menu is pointer-only (the same defect classic's account menu
             still has, #224). The org row above is a MenuItem too, so ArrowUp
             reaches it; it renders nothing on a single-org install. */}
-        <MenuItem autoFocus onClick={toggleTheme}>
+        <MenuItem autoFocus={!onStartAiRun} onClick={toggleTheme}>
           <ListItemIcon>
             <DarkModeIcon fontSize="small" sx={{ color: "text.secondary" }} />
           </ListItemIcon>

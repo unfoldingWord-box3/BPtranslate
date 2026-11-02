@@ -44,6 +44,8 @@ export interface UseBookReturn {
   loadChapter: (ch: number) => void;
   /** Re-fetch an already-cached chapter in place (keeps showing the old data until the new lands). */
   reloadChapter: (ch: number) => void;
+  /** Re-fetch the book summary in place (after an import changes the book's rows). */
+  reloadSummary: () => void;
   applyLocalVerse: (verse: VerseDto) => void;
   applyLocalRowPatch: (
     kind: "tn" | "tq" | "twl",
@@ -69,10 +71,14 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
   // reset effect runs.
   const trackerRef = useRef<ChapterFetchTracker | null>(null);
   const getTracker = useCallback(() => (trackerRef.current ??= new ChapterFetchTracker()), []);
+  // Bumped whenever the summary is reset, so a reloadSummary for an earlier
+  // book (or before a disable) never lands on the current one.
+  const summaryGen = useRef(0);
 
   // Reset everything when the book changes or the hook is disabled — the
   // cache is per-book, not global.
   useEffect(() => {
+    summaryGen.current++;
     if (!enabled) {
       // eslint-disable-next-line react-hooks/set-state-in-effect -- the per-book cache is reset here when the book changes or the hook is disabled, in the same effect that starts the summary fetch. Deriving it in render would show the previous book's chapters for a render after a book change.
       setSummary(null);
@@ -176,6 +182,19 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
     [enabled, getTracker, fetchChapter],
   );
 
+  const reloadSummary = useCallback(() => {
+    if (!enabled) return;
+    const gen = summaryGen.current;
+    api
+      .getBookSummary(book)
+      .then((s) => {
+        if (gen === summaryGen.current) setSummary(s);
+      })
+      .catch(() => {
+        // Best effort: keep the summary already shown.
+      });
+  }, [book, enabled]);
+
   const reloadChapter = useCallback(
     (ch: number) => {
       if (!enabled) return;
@@ -270,6 +289,7 @@ export function useBook(book: string, enabled: boolean): UseBookReturn {
     chapters,
     loadChapter,
     reloadChapter,
+    reloadSummary,
     applyLocalVerse,
     applyLocalRowPatch,
     applyLocalRowReplacement,

@@ -89,7 +89,7 @@ import CheckIcon from "@mui/icons-material/Check";
 import SaveIcon from "@mui/icons-material/Save";
 import ViewColumnIcon from "@mui/icons-material/ViewColumn";
 
-import { FlowAiRunAction } from "./FlowAiRunAction";
+import { useFlowAiRun } from "./FlowAiRunAction";
 import { LockBanner } from "./FlowBanners";
 import { FlowStatusChip, type FlowStatusKind } from "./FlowStatusChip";
 import { escapeNewlines, isAquiferDraftRow, unescapeNewlines, waitForOp } from "./translateShared";
@@ -1085,6 +1085,17 @@ export default function TranslateQuestionsScreen({
     void refetch().then(() => setReloadNonce((n) => n + 1));
   }
 
+  // AI run for this chapter (#481): top bar on tablet+, account menu on
+  // phone; nothing for viewers. After a Door43 import, reload like the
+  // conflict path does so the open card re-seeds from the imported text.
+  const aiRun = useFlowAiRun({
+    book,
+    chapter,
+    role,
+    phone: !isTabletUp,
+    onImported: () => void refetch().then(() => setReloadNonce((n) => n + 1)),
+  });
+
   // ── render gates (every hook above this line, unconditionally) ───────────
   if (status === "error") {
     return (
@@ -1644,6 +1655,9 @@ export default function TranslateQuestionsScreen({
       {/* topbar — rendered into the global flow bar via FlowHeader (#299).
           Hidden in phone focus mode — an active edit on a narrow viewport
           gets the keyboard-constrained screen to itself. */}
+      {/* Outside the focus-mode conditional: entering focus mode must not
+          drop an open AI-run dialog, toast or account-menu item. */}
+      {aiRun.action}
       {!focusMode && (
       <FlowHeader>
         <Box sx={{ maxWidth: wide ? 1440 : COLUMN_PX, mx: "auto", paddingInline: isTabletUp ? 2 : 1, paddingBlock: 1.5 }}>
@@ -1698,15 +1712,7 @@ export default function TranslateQuestionsScreen({
                 <ViewColumnIcon fontSize="small" />
               </IconButton>
             )}
-            {/* AI run for this chapter (#481): top bar on tablet+, account
-                menu on phone; nothing for viewers. */}
-            <FlowAiRunAction
-              book={book}
-              chapter={chapter}
-              role={role}
-              phone={!isTabletUp}
-              onImported={refetch}
-            />
+            {aiRun.headerButton}
             {/* compact prev/next — the same cursor and disabled logic as the
                 bottom Previous/Next buttons */}
             <Stack direction="row" spacing={0.25} sx={{ flex: "none" }}>
