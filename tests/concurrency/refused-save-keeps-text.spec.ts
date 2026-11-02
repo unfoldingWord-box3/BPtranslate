@@ -1,5 +1,5 @@
 import { expect, test, request as apiRequest, type Page } from "@playwright/test";
-import { fetchChapter, gotoVerse, mintToken, newUserContext, noteTextarea, saveNote } from "./helpers";
+import { authedRequest, fetchChapter, gotoVerse, mintToken, newUserContext, noteTextarea, saveNote } from "./helpers";
 
 // Honor BE_BASE_URL so the suite runs on a relocated port (mirrors s8).
 const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
@@ -243,6 +243,75 @@ test("tN card: text refused with a fatal 422 survives a reload", async ({ browse
 
   await page.reload();
   await expect(noteTextarea(page, tn.id)).toHaveValue(typed);
+
+  await context.close();
+});
+
+test('tN card: text refused with a "locked" 409 survives a later AI apply to the note (#724)', async ({ browser }) => {
+  // A Save refused while a translate job holds the chapter lock never reaches
+  // the server. When the AI result then lands on that note (a newer version
+  // with new text), the card shows the AI note; the translator's text must
+  // stay in the drafts store and come back as unsaved after a reload. Before
+  // the fix the card adopted the AI note and its no-diff clear dropped the
+  // draft. The card has to be inactive (but mounted) when the AI text lands:
+  // an open session keeps its fields, so the sibling note on the verse is
+  // focused first.
+  test.setTimeout(60_000);
+  const probe = await apiRequest.newContext({ baseURL: BASE });
+  const auth = await mintToken(probe, "probe-724");
+  const chapter = await fetchChapter(probe, auth.token, "ZEC", CHAPTER);
+  const first = (await pickRows()).tn;
+  const byVerse = new Map<number, typeof chapter.tn>();
+  for (const r of chapter.tn) byVerse.set(r.verse, [...(byVerse.get(r.verse) ?? []), r]);
+  const pair = [...byVerse.entries()].find(([v, rows]) => v > 1 && rows.length >= 2 && !rows.some((r) => r.id === first.id));
+  expect(pair, `expected a verse after 1 on ZEC ${CHAPTER} with two tN rows`).toBeTruthy();
+  const [tn, sibling] = pair![1];
+  const key = `row:tn:ZEC:${tn.id}`;
+  const { context } = await newUserContext(browser, "refused-tn-locked-ai");
+  const page = await context.newPage();
+
+  let refused = 0;
+  await context.route(`**/api/rows/tn/${tn.id}**`, async (route, request) => {
+    if (request.method() !== "PATCH") return route.continue();
+    refused++;
+    await route.fulfill({
+      status: 409,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "chapter_locked", jobId: "job-724", pipelineType: "translate", startedAt: 1 }),
+    });
+  });
+
+  await gotoVerse(page, "ZEC", CHAPTER, tn.verse);
+  const typed = `TRANSLATOR NOTE ${Date.now()}`;
+  await noteTextarea(page, tn.id).fill(typed);
+  await saveNote(page, tn.id);
+  await expect.poll(() => refused, { message: "the PATCH should reach the route" }).toBeGreaterThan(0);
+  await expect(noteTextarea(page, tn.id)).toHaveValue(typed);
+  await expect.poll(() => readDraftPatch(page, key)).toEqual(expect.objectContaining({ note: typed }));
+
+  // Leave the card: focus the sibling note so this card's session closes.
+  await noteTextarea(page, sibling.id).click();
+  await page.waitForTimeout(500);
+
+  // The AI apply: the job writes its draft to the note on the server.
+  const api = authedRequest(probe, auth.token, auth.csrf);
+  const ai = `AI DRAFT ${Date.now()}`;
+  const res = await api.patch(`/api/rows/tn/${tn.id}?book=ZEC`, { note: ai }, tn.version);
+  expect(res.status(), `AI stand-in PATCH failed: ${await res.text()}`).toBe(200);
+  await probe.dispose();
+
+  // The card shows the AI note; the translator's text stays in the drafts store.
+  await expect(noteTextarea(page, tn.id)).toHaveValue(ai, { timeout: 10_000 });
+  await page.waitForTimeout(500);
+  expect(await readDraftPatch(page, key), "the refused text should stay in the drafts store").toEqual(
+    expect.objectContaining({ note: typed }),
+  );
+  await expectOneUnsaved(page, false);
+
+  // A reload restores it as unsaved over the AI note.
+  await page.reload();
+  await expect(noteTextarea(page, tn.id)).toHaveValue(typed);
+  await expectOneUnsaved(page, false);
 
   await context.close();
 });

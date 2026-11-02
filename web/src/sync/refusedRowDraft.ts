@@ -71,7 +71,11 @@ export function keepsRefusedText(result: OutboxResult): boolean {
 // Newer text always wins, field by field. A sent field is written back only
 // when nothing newer holds it:
 //   * the draft's baseline has it (NoteCard and the flows screens pin their
-//     baseline to the server copy, so they already track that field);
+//     baseline to the server copy, so they already track that field). For a
+//     save NoteCard made itself (it carries a draftRef, #724), a field its
+//     draft still holds with the sent value is marked refused: once an AI
+//     apply moves the row on, the card shows the AI text and its no-diff
+//     clear (drafts.clearRowUnlessHeld) keeps the refused text as the draft;
 //   * the draft's patch holds other text for it (typing after the Save);
 //   * a live save for the row queued after this one sends it (newer text; if
 //     it is refused too, its own refusal writes it back).
@@ -80,7 +84,8 @@ export function keepsRefusedText(result: OutboxResult): boolean {
 // Nothing is written while a later delete for the row is queued, or when the
 // outbox could not be read: an unreadable outbox cannot show there is no newer
 // save, and writing could put older text over it. A new draft needs a place
-// to file it: the op's draftRef (set by the classic tQ / tW-link saves).
+// to file it: the op's draftRef (set by the classic tQ / tW-link saves and by
+// NoteCard's own saves; not by tN find/replace or quote-builder saves).
 export function rowDraftAfterRefusal(
   key: string,
   existing: DraftRecord | undefined,
@@ -119,7 +124,13 @@ export function rowDraftAfterRefusal(
   const added: Fields = {};
   const marked: Fields = {};
   for (const [k, v] of Object.entries(sent)) {
-    if (!editorFields.includes(k) || k in baselineIn || heldByLater.has(k)) continue;
+    if (!editorFields.includes(k) || heldByLater.has(k)) continue;
+    if (k in baselineIn) {
+      if (op.draftRef && k in patchIn && same(patchIn[k], v) && !(k in refusedIn && same(refusedIn[k], v))) {
+        marked[k] = v;
+      }
+      continue;
+    }
     if (!(k in patchIn)) added[k] = v;
     else if (same(patchIn[k], v)) {
       if (!(k in refusedIn && same(refusedIn[k], v))) marked[k] = v;
@@ -167,7 +178,10 @@ export function rowDraftAfterRefusal(
 // A1). A refused field the new patch holds keeps the user's newer text, and
 // stays in the record so typing back to the refused text (no diff again) can
 // restore it (rowDraftOnNoDiff). A field the new draft's baseline holds is the
-// editor's own to track (NoteCard): neither carried nor recorded.
+// editor's own to track (NoteCard): never carried, and kept in the record only
+// while the new patch holds that field (#724), so the card's no-diff clear can
+// keep the refused text after an AI apply; typed back to the baseline, the
+// field leaves the record.
 export function withCarriedRefusal(prev: DraftRecord | undefined, next: DraftRecord): DraftRecord {
   if (!nonEmpty(prev?.refused) || next.quarantined) return next;
   const payload = next.payload as { patch?: unknown; baseline?: unknown };
@@ -177,7 +191,10 @@ export function withCarriedRefusal(prev: DraftRecord | undefined, next: DraftRec
   const refused: Fields = {};
   const carried: Fields = {};
   for (const [k, v] of Object.entries(prev.refused)) {
-    if (k in baseline) continue;
+    if (k in baseline) {
+      if (k in patch) refused[k] = v;
+      continue;
+    }
     refused[k] = v;
     if (!(k in patch)) carried[k] = v;
   }
@@ -185,7 +202,8 @@ export function withCarriedRefusal(prev: DraftRecord | undefined, next: DraftRec
   return { ...next, payload: { ...next.payload, patch: { ...patch, ...carried } }, refused };
 }
 
-// An editor's "no diff" clear (drafts.clearUnlessRefused). `current` is what
+// An editor's "no diff" clear (drafts.clearUnlessRefused; NoteCard's
+// drafts.clearRowUnlessHeld when given what it shows, #724). `current` is what
 // the editor shows (its field values, in the form its Save sends); `queued` is
 // the outbox (null when unreadable). No diff against the cached row means every
 // field the editor shows is on the row already, either confirmed or in a save
