@@ -1644,7 +1644,7 @@ const NO_SUCH_JOB = "No job with that id that you started in this project.";
 const jobStatus: ToolDef = {
   name: "bpt_job_status",
   description:
-    "Check on an AI draft run this user started (job_id from bpt_draft). Returns state (queued, dispatching, running, paused_for_outage, paused_for_usage_limit, done, failed, cancelled), queue_position while queued, progress (chapter, step, status) while running, error when it failed, and results: per kind (tn, tq), how many drafts the run proposed, how many were applied and how many rejected (empty until the run's output is staged), and, once done, kept_because_changed_by_people: tn notes the run left as they were because a person changed them after the run was queued (count and ids). Only the user who started the run can see it, and only in this project. Read-only.",
+    "Check on an AI draft run this user started (job_id from bpt_draft). Returns state (queued, dispatching, running, paused_for_outage, paused_for_usage_limit, done, failed, cancelled), queue_position while queued, progress (chapter, step, status) while running, error when it failed, and results: per kind (tn, tq), how many drafts the run proposed, how many were applied and how many rejected (empty until the run's output is staged), and, once done, kept_because_changed_by_people: what the run left as it was because a person changed it after the run was queued, with keys only for the kinds it kept: tn and tn_ids (notes: count and ids), tq and tq_ids (questions: count and ids), articles and article_paths (tW/tA articles: count and paths). Only the user who started the run can see it, and only in this project. Read-only.",
   inputSchema: {
     type: "object",
     properties: {
@@ -1682,12 +1682,21 @@ const jobStatus: ToolDef = {
       ...(cur && state !== "failed" ? { progress: { chapter: cur.chapter ?? null, step: cur.skill ?? null, status: cur.status ?? null } } : {}),
       ...(cur && (cur.error || cur.errorKind) ? { error: { kind: cur.errorKind ?? null, message: cur.error ?? null } } : {}),
       results: await session.jobResults(jobId),
-      // #729: notes the apply left alone because a person changed them after
-      // the run was queued.
+      // #729, #760: notes, questions and tW/tA articles the apply left alone
+      // because a person changed them after the run was queued. A kind's keys
+      // are present only when the report (applySkippedOf) carries that kind.
       ...(b.applySkipped
         ? (() => {
-            const k = b.applySkipped as { tnTouched?: unknown; tnTouchedIds?: unknown };
-            return { kept_because_changed_by_people: { tn: Number(k.tnTouched ?? 0), tn_ids: Array.isArray(k.tnTouchedIds) ? k.tnTouchedIds : [] } };
+            const k = b.applySkipped as Record<string, unknown>;
+            const list = (v: unknown) => (Array.isArray(v) ? v : []);
+            const kept = {
+              ...(k.tnTouched !== undefined ? { tn: Number(k.tnTouched), tn_ids: list(k.tnTouchedIds) } : {}),
+              ...(k.tqTouched !== undefined ? { tq: Number(k.tqTouched), tq_ids: list(k.tqTouchedIds) } : {}),
+              ...(k.articleTouched !== undefined
+                ? { articles: Number(k.articleTouched), article_paths: list(k.articleTouchedPaths) }
+                : {}),
+            };
+            return Object.keys(kept).length ? { kept_because_changed_by_people: kept } : {};
           })()
         : {}),
       updated_at: b.updatedAt ?? null,
