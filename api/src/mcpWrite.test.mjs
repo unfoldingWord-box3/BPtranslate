@@ -20,6 +20,7 @@ import { Hono } from "hono";
 import { rows } from "./rows.ts";
 import { chapters } from "./chapters.ts";
 import { templates } from "./templates.ts";
+import { articles } from "./articles.ts";
 import { projectConfig } from "./projectConfigRoutes.ts";
 import { attachAuth, chatConfirmMac, chatWriteEnv, requireCsrf } from "./auth.ts";
 import { requireWorkspaceMatch } from "./workspaces.ts";
@@ -103,6 +104,15 @@ function fresh({ preset = "ar-bsoj" } = {}) {
     `INSERT INTO tq_rows (id, book, chapter, verse, ref_raw, question, response, version, translation_state)
      VALUES ('q001', ?, 1, 1, '1:1', 'old q?', 'old a.', 2, 'ai_draft')`,
   ).run(BOOK);
+  // tW / tA article parts (#670 part d): an AI-drafted tW article, and a tA
+  // article whose body is approved and whose title has no translation yet.
+  const art = sqlite.prepare(
+    `INSERT INTO article_units (resource, path, article_id, part, source_md, target_md, translation_state, version)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  art.run("tw", "bible/kt/god.md", "kt/god", "body", "# God\n\nGod is the one true God.", "# الله\n\nمسودة", "ai_draft", 1);
+  art.run("ta", "translate/figs-aside/01.md", "translate/figs-aside", "body", "An aside is a short pause.", "الاستطراد وقفة قصيرة.", "validated", 3);
+  art.run("ta", "translate/figs-aside/title.md", "translate/figs-aside", "title", "Asides", null, null, 1);
 
   // The same middleware stack, in the same order, as index.ts.
   const app = new Hono();
@@ -113,6 +123,7 @@ function fresh({ preset = "ar-bsoj" } = {}) {
   app.route("/api/rows", rows);
   app.route("/api/chapters", chapters);
   app.route("/api/templates", templates);
+  app.route("/api/articles", articles);
   app.route("/api/project-config", projectConfig);
 
   // Records each context export the routes queue (#707).
@@ -170,7 +181,15 @@ function fresh({ preset = "ar-bsoj" } = {}) {
       .prepare(`SELECT row_key, user_id, action, source FROM edit_log WHERE kind = 'template' ORDER BY id`)
       .all()
       .map((r) => ({ ...r }));
-  return { app, env, ctx, call, tnRow, log, sqlite, d1, sessions, tpl, tplLog, queued };
+  const article = (resource, path) => ({
+    ...sqlite.prepare(`SELECT target_md, translation_state, version FROM article_units WHERE resource = ? AND path = ?`).get(resource, path),
+  });
+  const artLog = () =>
+    sqlite
+      .prepare(`SELECT kind, row_key, user_id, action, source, prev_version, new_version FROM edit_log WHERE kind IN ('tw', 'ta') ORDER BY id`)
+      .all()
+      .map((r) => ({ ...r }));
+  return { app, env, ctx, call, tnRow, log, sqlite, d1, sessions, tpl, tplLog, queued, article, artLog };
 }
 
 test("bpt_edit_row then bpt_approve: saved as the linked user, source chat, version-pinned", async () => {
@@ -845,6 +864,271 @@ test("#708: bpt_approve_template requires the state the reviewer was shown", asy
   assert.match(bad.data.error, /state is required/);
   assert.equal(tpl("figs-ellipsis-01").translation_state, "edited");
   assert.equal(tplLog().length, before);
+});
+
+// ── Issue #670 part (d): tW / tA articles from chat ─────────────────────────
+// The same three steps as the template tools: read an article's parts with
+// their version and state, save a part's wording pinned by If-Match, approve
+// a part pinned to the version AND state the reviewer was shown.
+
+const GOD = "bible/kt/god.md";
+const ASIDE = "translate/figs-aside/01.md";
+const ASIDE_TITLE = "translate/figs-aside/title.md";
+
+function webArticles(env, ctx) {
+  const web = new Hono();
+  web.use("*", async (c, next) => {
+    c.set("userId", 9);
+    c.set("role", "editor");
+    await next();
+  });
+  web.route("/api/articles", articles);
+  return (path, method, body, headers = {}) =>
+    web.request(path, { method, headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) }, env, ctx);
+}
+
+// A chat (pinned) article validate straight to the route, as the tool sends it.
+async function chatArticleValidate(app, env, ctx, resource, path, body, ifMatch) {
+  const principal = { userId: 9, username: "reviewer", role: "editor", linkId: 1 };
+  const headers = { "content-type": "application/json" };
+  if (ifMatch !== undefined) headers["If-Match"] = String(ifMatch);
+  const res = await app.request(
+    `/api/articles/${resource}/unit/validate?path=${encodeURIComponent(path)}`,
+    { method: "POST", headers, body: JSON.stringify(body) },
+    chatWriteEnv(env, principal),
+    ctx,
+  );
+  return { status: res.status, body: await res.json() };
+}
+
+test("bpt_get_article: a tW article by link or id, a tA article by support reference, each part with version and state", async () => {
+  const { call } = fresh();
+  for (const ref of ["rc://*/tw/dict/bible/kt/god", "kt/god"]) {
+    const r = await call("bpt_get_article", { resource: "tw", article: ref });
+    assert.equal(r.isError, false, JSON.stringify(r.data));
+    assert.equal(r.data.article_id, "kt/god");
+    assert.deepEqual(r.data.parts, [
+      { path: GOD, part: "body", source_md: "# God\n\nGod is the one true God.", target_md: "# الله\n\nمسودة", state: "ai_draft", version: 1 },
+    ]);
+  }
+  const ta = await call("bpt_get_article", { resource: "ta", article: "rc://*/ta/man/translate/figs-aside" });
+  assert.equal(ta.isError, false, JSON.stringify(ta.data));
+  assert.equal(ta.data.article_id, "translate/figs-aside");
+  // sub-title.md is not loaded, so it is not listed.
+  assert.deepEqual(ta.data.parts.map((p) => [p.part, p.path, p.state, p.version]), [
+    ["body", ASIDE, "validated", 3],
+    ["title", ASIDE_TITLE, null, 1],
+  ]);
+  const bare = await call("bpt_get_article", { resource: "ta", article: "figs-aside" });
+  assert.deepEqual(bare.data.parts.map((p) => p.path), [ASIDE, ASIDE_TITLE]);
+});
+
+test("bpt_get_article: an unknown or unparseable article is a clean error", async () => {
+  const { call } = fresh();
+  const missing = await call("bpt_get_article", { resource: "tw", article: "kt/grace" });
+  assert.equal(missing.isError, true);
+  assert.match(missing.data.error, /not loaded/);
+  const noCat = await call("bpt_get_article", { resource: "tw", article: "god" });
+  assert.equal(noCat.isError, true);
+  assert.match(noCat.data.error, /not a tW article/);
+  const badRes = await call("bpt_get_article", { resource: "tn", article: "kt/god" });
+  assert.equal(badRes.isError, true);
+  assert.match(badRes.data.error, /resource/);
+});
+
+test("article: edit then approve a part, as the linked user, source chat, version-pinned", async () => {
+  const { call, article, artLog } = fresh();
+  const edit = await call("bpt_edit_article", { resource: "tw", path: GOD, version: 1, text: "# الله\n\nالنص المصحح" });
+  assert.equal(edit.isError, false, JSON.stringify(edit.data));
+  assert.equal(edit.data.status, "applied");
+  assert.equal(edit.data.version, 2);
+  assert.equal(edit.data.state, "edited", "an edited AI draft needs approving again");
+  assert.equal(edit.data.part.target_md, "# الله\n\nالنص المصحح");
+  const ok = await call("bpt_approve_article", { resource: "tw", path: GOD, version: 2, state: "edited" });
+  assert.equal(ok.isError, false, JSON.stringify(ok.data));
+  assert.equal(ok.data.status, "applied");
+  assert.equal(ok.data.version, 2, "approving does not change the version");
+  assert.equal(ok.data.state, "validated");
+  assert.deepEqual(article("tw", GOD), { target_md: "# الله\n\nالنص المصحح", translation_state: "validated", version: 2 });
+  assert.deepEqual(artLog(), [
+    { kind: "tw", row_key: GOD, user_id: 9, action: "update", source: "chat", prev_version: 1, new_version: 2 },
+    { kind: "tw", row_key: GOD, user_id: 9, action: "validate", source: "chat", prev_version: 2, new_version: 2 },
+  ]);
+});
+
+test("article race: a web save lands after the chat showed the part; the chat edit is a conflict with both texts and changes nothing", async () => {
+  const { env, ctx, call, article, artLog } = fresh();
+  const shown = await call("bpt_get_article", { resource: "tw", article: "kt/god" });
+  const part = shown.data.parts[0];
+  assert.equal(part.version, 1);
+  const web = await webArticles(env, ctx)(`/api/articles/tw/unit?path=${encodeURIComponent(GOD)}`, "PATCH", { target_md: "web text" }, { "If-Match": "1" });
+  assert.equal(web.status, 200);
+
+  const r = await call("bpt_edit_article", { resource: "tw", path: GOD, version: part.version, text: "chat text" });
+  assert.equal(r.isError, false, JSON.stringify(r.data));
+  assert.equal(r.data.status, "conflict");
+  assert.equal(r.data.your_text, "chat text");
+  assert.equal(r.data.current.target_md, "web text");
+  assert.equal(r.data.current.version, 2);
+  assert.equal(r.data.current.state, "edited");
+  assert.deepEqual(article("tw", GOD), { target_md: "web text", translation_state: "edited", version: 2 });
+  assert.deepEqual(artLog(), [{ kind: "tw", row_key: GOD, user_id: 9, action: "update", source: null, prev_version: 1, new_version: 2 }]);
+});
+
+test("article: a stale-version approve is a conflict and changes nothing", async () => {
+  const { call, article, artLog } = fresh();
+  await call("bpt_edit_article", { resource: "tw", path: GOD, version: 1, text: "new text" });
+  const before = artLog().length;
+  const stale = await call("bpt_approve_article", { resource: "tw", path: GOD, version: 1, state: "edited" });
+  assert.equal(stale.isError, false, JSON.stringify(stale.data));
+  assert.equal(stale.data.status, "conflict");
+  assert.equal(stale.data.your_text, undefined);
+  assert.equal(stale.data.current.version, 2);
+  assert.equal(article("tw", GOD).translation_state, "edited");
+  assert.equal(artLog().length, before);
+});
+
+test("article: the web un-approves after the chat showed the part; bpt_approve_article at the same version is a conflict and changes nothing", async () => {
+  const { env, ctx, call, article, artLog } = fresh();
+  const shown = await call("bpt_get_article", { resource: "ta", article: "figs-aside" });
+  const body = shown.data.parts.find((p) => p.part === "body");
+  assert.deepEqual({ version: body.version, state: body.state }, { version: 3, state: "validated" });
+  const un = await webArticles(env, ctx)(`/api/articles/ta/unit/validate?path=${encodeURIComponent(ASIDE)}`, "POST", { value: 0 });
+  assert.equal(un.status, 200);
+  assert.deepEqual(article("ta", ASIDE), { target_md: "الاستطراد وقفة قصيرة.", translation_state: "edited", version: 3 });
+  const before = artLog().length;
+
+  const r = await call("bpt_approve_article", { resource: "ta", path: ASIDE, version: body.version, state: body.state });
+  assert.equal(r.isError, false, JSON.stringify(r.data));
+  assert.equal(r.data.status, "conflict");
+  assert.equal(r.data.current.version, 3);
+  assert.equal(r.data.current.state, "edited");
+  assert.match(r.data.message, /current\.state/);
+  assert.equal(article("ta", ASIDE).translation_state, "edited", "not approved");
+  assert.equal(artLog().length, before, "no audit entry for the refused approve");
+});
+
+test("article validate: a pinned miss is a 409 with current and writes nothing; a pinned match applies with one chat audit entry", async () => {
+  const { app, env, ctx, article, artLog } = fresh();
+  await webArticles(env, ctx)(`/api/articles/ta/unit/validate?path=${encodeURIComponent(ASIDE)}`, "POST", { value: 0 });
+  const before = artLog().length;
+  for (const [body, ifMatch] of [
+    [{ value: 1, expected_state: "validated" }, 3],
+    [{ value: 1, expected_state: "validated" }, undefined],
+    [{ value: 1, expected_state: "edited" }, 2],
+    [{ value: 1 }, 2],
+  ]) {
+    const r = await chatArticleValidate(app, env, ctx, "ta", ASIDE, body, ifMatch);
+    assert.equal(r.status, 409, `${JSON.stringify(body)} If-Match ${ifMatch}: ${JSON.stringify(r.body)}`);
+    assert.equal(r.body.error, "version_mismatch");
+    assert.equal(r.body.current.translation_state, "edited");
+    assert.equal(r.body.current.version, 3);
+  }
+  assert.equal(article("ta", ASIDE).translation_state, "edited");
+  assert.equal(artLog().length, before);
+
+  const ok = await chatArticleValidate(app, env, ctx, "ta", ASIDE, { value: 1, expected_state: "edited" }, 3);
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  assert.equal(ok.body.translation_state, "validated");
+  assert.deepEqual(artLog().slice(before), [
+    { kind: "ta", row_key: ASIDE, user_id: 9, action: "validate", source: "chat", prev_version: 3, new_version: 3 },
+  ]);
+});
+
+test("article validate: a bad expected_state or If-Match is a 400 and changes nothing", async () => {
+  const { app, env, ctx, article, artLog } = fresh();
+  const badState = await chatArticleValidate(app, env, ctx, "ta", ASIDE, { value: 0, expected_state: "approved" }, 3);
+  assert.equal(badState.status, 400);
+  assert.equal(badState.body.error, "validation_failed");
+  const badIfMatch = await chatArticleValidate(app, env, ctx, "ta", ASIDE, { value: 0 }, "abc");
+  assert.equal(badIfMatch.status, 400);
+  assert.equal(badIfMatch.body.error, "invalid_if_match");
+  assert.equal(article("ta", ASIDE).translation_state, "validated");
+  assert.equal(artLog().length, 0);
+});
+
+test("bpt_approve_article requires the state the reviewer was shown", async () => {
+  const { call, article, artLog } = fresh();
+  const missing = await call("bpt_approve_article", { resource: "tw", path: GOD, version: 1 });
+  assert.equal(missing.isError, true);
+  assert.match(missing.data.error, /state is required/);
+  const bad = await call("bpt_approve_article", { resource: "tw", path: GOD, version: 1, state: "approved" });
+  assert.equal(bad.isError, true);
+  assert.match(bad.data.error, /state is required/);
+  assert.equal(article("tw", GOD).translation_state, "ai_draft");
+  assert.equal(artLog().length, 0);
+});
+
+test("article tools: viewers, authoring projects, unknown parts, untranslated parts and empty text are refused; nothing is written", async () => {
+  const { call, article, artLog } = fresh();
+  for (const r of [
+    await call("bpt_get_article", { resource: "tw", article: "kt/god" }, VIEWER),
+    await call("bpt_edit_article", { resource: "tw", path: GOD, version: 1, text: "x" }, VIEWER),
+    await call("bpt_approve_article", { resource: "tw", path: GOD, version: 1, state: "ai_draft" }, VIEWER),
+  ]) {
+    assert.equal(r.isError, true);
+    assert.match(r.data.error, /cannot edit/);
+  }
+  const unknown = await call("bpt_edit_article", { resource: "tw", path: "bible/kt/grace.md", version: 1, text: "x" });
+  assert.equal(unknown.isError, true);
+  assert.match(unknown.data.error, /no tW article part/);
+  const untranslated = await call("bpt_approve_article", { resource: "ta", path: ASIDE_TITLE, version: 1, state: "edited" });
+  assert.equal(untranslated.isError, true);
+  assert.match(untranslated.data.error, /nothing to approve/);
+  for (const text of ["", "  \n"]) {
+    const empty = await call("bpt_edit_article", { resource: "ta", path: ASIDE_TITLE, version: 1, text });
+    assert.equal(empty.isError, true);
+    assert.match(empty.data.error, /text is required/);
+  }
+  const badPath = await call("bpt_edit_article", { resource: "tw", path: "bible/kt/god", version: 1, text: "x" });
+  assert.equal(badPath.isError, true);
+  assert.match(badPath.data.error, /path/);
+  assert.deepEqual(article("tw", GOD), { target_md: "# الله\n\nمسودة", translation_state: "ai_draft", version: 1 });
+  assert.deepEqual(article("ta", ASIDE_TITLE), { target_md: null, translation_state: null, version: 1 });
+  assert.equal(artLog().length, 0);
+
+  const authoring = fresh({ preset: "en-unfoldingword" });
+  for (const r of [
+    await authoring.call("bpt_get_article", { resource: "tw", article: "kt/god" }),
+    await authoring.call("bpt_edit_article", { resource: "tw", path: GOD, version: 1, text: "x" }),
+    await authoring.call("bpt_approve_article", { resource: "tw", path: GOD, version: 1, state: "ai_draft" }),
+  ]) {
+    assert.equal(r.isError, true);
+    assert.match(r.data.error, /authoring mode/);
+  }
+  assert.equal(authoring.artLog().length, 0);
+});
+
+test("the web app's article validate and patch (no pins) are unchanged: source NULL", async () => {
+  const { env, ctx, article, artLog } = fresh();
+  const post = webArticles(env, ctx);
+  const v = await post(`/api/articles/ta/unit/validate?path=${encodeURIComponent(ASIDE)}`, "POST", { value: 0 });
+  assert.equal(v.status, 200);
+  assert.equal(article("ta", ASIDE).translation_state, "edited");
+  const p = await post(`/api/articles/tw/unit?path=${encodeURIComponent(GOD)}`, "PATCH", { target_md: "web text" }, { "If-Match": "1" });
+  assert.equal(p.status, 200);
+  const a = await post(`/api/articles/tw/unit/validate?path=${encodeURIComponent(GOD)}`, "POST", { value: 1 });
+  assert.equal(a.status, 200);
+  assert.deepEqual(artLog(), [
+    { kind: "ta", row_key: ASIDE, user_id: 9, action: "unvalidate", source: null, prev_version: 3, new_version: 3 },
+    { kind: "tw", row_key: GOD, user_id: 9, action: "update", source: null, prev_version: 1, new_version: 2 },
+    { kind: "tw", row_key: GOD, user_id: 9, action: "validate", source: null, prev_version: 2, new_version: 2 },
+  ]);
+});
+
+test("bpt_get_article: a long translated article leaves out its English, and too much is refused", async () => {
+  const { call, sqlite } = fresh();
+  sqlite.prepare(`UPDATE article_units SET source_md = ?, target_md = ? WHERE path = ?`).run("An aside. ".repeat(1500), "ك".repeat(7000), ASIDE);
+  const r = await call("bpt_get_article", { resource: "ta", article: "figs-aside" });
+  assert.equal(r.isError, false, JSON.stringify(r.data).slice(0, 300));
+  const [body, title] = r.data.parts;
+  assert.equal(body.source_md, null);
+  assert.equal(body.source_left_out, true);
+  assert.equal(title.source_md, "Asides", "an untranslated part keeps its English");
+  sqlite.prepare(`UPDATE article_units SET target_md = ? WHERE path = ?`).run("ك".repeat(16000), ASIDE);
+  const tooBig = await call("bpt_get_article", { resource: "ta", article: "figs-aside" });
+  assert.equal(tooBig.isError, true);
+  assert.match(tooBig.data.error, /too long/);
 });
 
 // ── Issue #670 part (c): bpt_bulk_set_state ─────────────────────────────────

@@ -10,8 +10,10 @@
 // starts an AI draft through the web app's POST /api/pipelines/start, for
 // admins only, and bpt_job_status reads it back. The template tools
 // (bpt_templates_for_row, bpt_edit_template, bpt_approve_template) do the same
-// for note templates; their reads go through send("GET") as the linked user,
-// because the template routes are editor-only and getJson carries no user.
+// for note templates, and bpt_get_article, bpt_edit_article and
+// bpt_approve_article (part d) for tW/tA article parts; their reads go through
+// send("GET") as the linked user, because the template and article routes are
+// editor-only and getJson carries no user.
 //
 // Each tool reads through the SAME route handlers the web app uses (`getJson`
 // runs the Hono app in-process), so chat and web never disagree about counts
@@ -74,6 +76,7 @@ export interface ToolContext {
 
 import type { ChatPrincipal } from "./chatLinks.ts";
 import { isTsMilestone } from "./tsMilestone.ts";
+import { articleIdForTa, articleIdForTw, parseTaRef, parseTwRef, taPaths, twPath } from "./articlePopulate.ts";
 import { shortSupport, summarizePackageRefs, type PackageRefRows } from "./packageRefs.ts";
 import type { SourceNotes } from "./sourceNotes.ts";
 import { isTranslationConfig } from "./workflowLayouts.ts";
@@ -971,8 +974,13 @@ export function missingPlaceholders(placeholders: string[], text: string): strin
 }
 
 // An editor of a translation project, nothing else: an authoring project's
-// templates are the English source, not changed from chat.
-async function templateSession(args: Record<string, unknown>, ctx: ToolContext): Promise<McpSession> {
+// templates and tW/tA articles are the English source, not changed from chat.
+// `what` names them in the refusal.
+async function translationSession(
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+  what = "Its note templates are",
+): Promise<McpSession> {
   const session = await principalFrom(args, ctx);
   // send, not getJson: this route wants a signed-in user, and getJson has none.
   const { status, body } = await session.send("GET", "/api/project-config");
@@ -980,7 +988,7 @@ async function templateSession(args: Record<string, unknown>, ctx: ToolContext):
   const config = (body as { config?: ProjectConfig } | null)?.config;
   if (!config || !isTranslationConfig(config)) {
     throw new ToolInputError(
-      "This project writes its notes in English (authoring mode). Its note templates are the English source and are not changed from chat.",
+      `This project writes its notes in English (authoring mode). ${what} the English source and are not changed from chat.`,
     );
   }
   return session;
@@ -1054,7 +1062,7 @@ const templatesForRow: ToolDef = {
     additionalProperties: false,
   },
   run: async (args, ctx) => {
-    const session = await templateSession(args, ctx);
+    const session = await translationSession(args, ctx);
     const book = bookArg(args);
     const id = args.id;
     if (typeof id !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(id)) throw new ToolInputError("id is not a row id");
@@ -1120,7 +1128,7 @@ const templatesForRow: ToolDef = {
 
 // The arguments both template writes take, and the template as it is now.
 async function templateWriteTarget(args: Record<string, unknown>, ctx: ToolContext) {
-  const session = await templateSession(args, ctx);
+  const session = await translationSession(args, ctx);
   const id = templateIdArg(args);
   const version = intArg(args, "version", { min: 1, required: true })!;
   return { session, id, version, path: `/api/templates/unit?id=${encodeURIComponent(id)}` };
@@ -1213,6 +1221,233 @@ const approveTemplate: ToolDef = {
     }
     if (status !== 200) templateRefusal(t.id, status, body);
     return templateApplied(b);
+  },
+};
+
+// ── tW / tA articles (issue #670 part d) ────────────────────────────────────
+// The template tools' twins for article_units. One article is up to three
+// markdown files (parts: a tA article has body, title and sub-title), each
+// keyed by (resource, path) with its own version and state, so each part is
+// saved and approved on its own. Reads go through send("GET") as the linked
+// user, because the article routes are editor-only (like the template routes).
+
+const ARTICLES_ARE = "Its tW and tA articles are";
+const RESOURCE_LABEL = { tw: "tW", ta: "tA" } as const;
+
+function articleResourceArg(args: Record<string, unknown>): "tw" | "ta" {
+  if (args.resource !== "tw" && args.resource !== "ta") throw new ToolInputError('resource must be "tw" or "ta"');
+  return args.resource;
+}
+
+function articlePathArg(args: Record<string, unknown>): string {
+  const p = args.path;
+  if (typeof p !== "string" || !p.endsWith(".md") || p.length > 200 || p.includes("..") || /[\u0000-\u001f\u007f]/.test(p)) {
+    throw new ToolInputError("path is not an article part path: use the path bpt_get_article returned");
+  }
+  return p;
+}
+
+const articleUnitPath = (resource: "tw" | "ta", path: string) =>
+  `/api/articles/${resource}/unit?path=${encodeURIComponent(path)}`;
+
+// What the tools show of an article_units row; nothing else leaves the Worker.
+function projectArticlePart(u: Record<string, unknown>) {
+  return {
+    path: u.path,
+    part: u.part,
+    source_md: u.source_md,
+    target_md: (u.target_md as string | null) ?? null,
+    state: (u.translation_state as string | null) ?? null,
+    version: u.version,
+  };
+}
+
+// The part as it is now, or null when the project has no such part.
+async function getArticlePart(session: McpSession, resource: "tw" | "ta", path: string, write: boolean) {
+  const { status, body } = await session.send("GET", articleUnitPath(resource, path));
+  if (status === 200) return body as Record<string, unknown>;
+  if (status === 404) return null;
+  if (status === 403) throw new ToolInputError(`This user cannot edit in this project.${write ? " Nothing was changed." : ""}`);
+  throw new Error(`BPtranslate API /api/articles/${resource}/unit returned ${status}`);
+}
+
+// The answers an article write gives that are neither a success nor a conflict.
+function articleRefusal(resource: "tw" | "ta", path: string, status: number, body: unknown): never {
+  const b = (body ?? {}) as Record<string, unknown>;
+  if (status === 404) throw new ToolInputError(`There is no ${RESOURCE_LABEL[resource]} article part ${path} in this project. Nothing was changed.`);
+  if (status === 403) throw new ToolInputError("This user cannot edit in this project. Nothing was changed.");
+  if (status === 400) throw new ToolInputError(`BPtranslate refused the change (${String(b.error ?? "invalid")}). Nothing was changed.`);
+  throw new Error(`BPtranslate write for ${resource} ${path} returned ${status}`);
+}
+
+// retryWith: what to call again with. An approval pins the state too, and a
+// state change leaves the version as it was (see conflict).
+function articleConflict(yours: string | null, current: Record<string, unknown>, what: string, retryWith = "current.version") {
+  return {
+    status: "conflict",
+    message:
+      `Someone changed this article part after the reviewer saw it, so ${what} was NOT ${yours === null ? "made" : "saved"}. ` +
+      `Show the reviewer the current wording and ask; to go ahead, call again with ${retryWith}.`,
+    ...(yours !== null ? { your_text: yours } : {}),
+    current: projectArticlePart(current),
+  };
+}
+
+function articleApplied(u: Record<string, unknown>) {
+  return { status: "applied", version: u.version, state: u.translation_state ?? null, part: projectArticlePart(u) };
+}
+
+const getArticle: ToolDef = {
+  name: "bpt_get_article",
+  description:
+    "One translationWords (tW) or translationAcademy (tA) article, with each of its parts: path, part (body; a tA article also has title and sub-title), source_md (the English), target_md (this project's translation; null means not translated yet), state and version. Name the article the way a note or word link does: a tW link (rc://*/tw/dict/bible/kt/god) or category and name (kt/god); a tA link or support reference (rc://*/ta/man/translate/figs-aside, figs-aside). Show the reviewer a part before changing or approving it; then use bpt_edit_article and bpt_approve_article with that part's path, version and state. Requires edit access; not available in an English-authoring project.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      resource: { type: "string", enum: ["tw", "ta"] },
+      article: { type: "string", description: "The article's link, support reference, or id (kt/god, translate/figs-aside)" },
+    },
+    required: ["session_token", "resource", "article"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const session = await translationSession(args, ctx, ARTICLES_ARE);
+    const resource = articleResourceArg(args);
+    const raw = typeof args.article === "string" ? args.article : "";
+    let articleId: string;
+    let paths: { path: string; part: string }[];
+    if (resource === "tw") {
+      const ref = parseTwRef(raw);
+      if (!ref) {
+        throw new ToolInputError(`"${raw}" is not a tW article: give its link (rc://*/tw/dict/bible/kt/god) or its category and name (kt/god).`);
+      }
+      articleId = articleIdForTw(ref);
+      paths = [{ path: twPath(ref.cat, ref.slug), part: "body" }];
+    } else {
+      const ref = parseTaRef(raw);
+      if (!ref) {
+        throw new ToolInputError(`"${raw}" is not a tA article: give its link (rc://*/ta/man/translate/figs-aside) or its name (figs-aside).`);
+      }
+      articleId = articleIdForTa(ref);
+      paths = taPaths(ref.manual, ref.slug);
+    }
+    const parts: Record<string, unknown>[] = [];
+    for (const p of paths) {
+      const u = await getArticlePart(session, resource, p.path, false);
+      if (u) parts.push(projectArticlePart(u));
+    }
+    if (parts.length === 0) {
+      throw new ToolInputError(
+        `The ${RESOURCE_LABEL[resource]} article ${articleId} is not loaded into this project yet. An editor can add it in the BPtranslate web app.`,
+      );
+    }
+    // A long tA body in a two-byte script can pass the chat's 32 KB cap
+    // (GET_ROW_BYTE_BUDGET). Leave out the English of translated parts first,
+    // then refuse rather than send a cut-off result.
+    let out = parts;
+    if (getRowBytes({ parts: out }) > GET_ROW_BYTE_BUDGET - 1_000) {
+      out = parts.map((p) => (p.target_md ? { ...p, source_md: null, source_left_out: true } : p));
+      if (getRowBytes({ parts: out }) > GET_ROW_BYTE_BUDGET - 1_000) {
+        throw new ToolInputError(
+          `The ${RESOURCE_LABEL[resource]} article ${articleId} is too long to send in one chat message. Edit it in the BPtranslate web app.`,
+        );
+      }
+    }
+    return { resource, article_id: articleId, parts: out };
+  },
+};
+
+// The arguments both article writes take.
+async function articleWriteTarget(args: Record<string, unknown>, ctx: ToolContext) {
+  const session = await translationSession(args, ctx, ARTICLES_ARE);
+  const resource = articleResourceArg(args);
+  const path = articlePathArg(args);
+  const version = intArg(args, "version", { min: 1, required: true })!;
+  return { session, resource, path, version };
+}
+
+const ARTICLE_PATH_SCHEMA = { type: "string", description: "The part's path from bpt_get_article" };
+
+const editArticle: ToolDef = {
+  name: "bpt_edit_article",
+  description:
+    "Save the reviewer's wording for one part of a tW or tA article, replacing that part's translation (target_md) whole. Pass the version the reviewer was shown; it is saved only if the part is still at that version. Returns status applied with the new version and state (an AI draft or approved part becomes state edited, so it needs approving again: pass the NEW version and state to bpt_approve_article), or status conflict when someone changed the part since, with your_text and current (the wording and version now): nothing was saved, so show the reviewer the current wording and ask. Errors change nothing. Requires edit access.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      resource: { type: "string", enum: ["tw", "ta"] },
+      path: ARTICLE_PATH_SCHEMA,
+      version: { type: "integer", minimum: 1, description: "The part's version exactly as bpt_get_article showed it to the reviewer." },
+      text: { type: "string", description: "The whole new translation of this part, in markdown" },
+    },
+    required: ["session_token", "resource", "path", "version", "text"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const t = await articleWriteTarget(args, ctx);
+    const text = args.text;
+    // An empty PATCH leaves an untranslated part's state NULL, and the approve would then fail.
+    if (typeof text !== "string" || !text.trim()) throw new ToolInputError("text is required: the whole new translation of the part");
+    const { status, body } = await t.session.send("PATCH", articleUnitPath(t.resource, t.path), { target_md: text }, t.version);
+    const b = (body ?? {}) as Record<string, unknown>;
+    if (status === 409 && b.error === "version_mismatch") {
+      return articleConflict(text, b.current as Record<string, unknown>, "the new wording");
+    }
+    if (status !== 200) articleRefusal(t.resource, t.path, status, body);
+    return articleApplied(b);
+  },
+};
+
+const approveArticle: ToolDef = {
+  name: "bpt_approve_article",
+  description:
+    "Approve one part of a tW or tA article that the reviewer was shown and accepted, marking it validated. Only for wording the reviewer has actually read in this conversation. Pass the version and state exactly as the reviewer was shown them (after bpt_edit_article, the version and state it returned; approving does not change the version); the part is approved only if it is still at that version and in that state. Returns status applied, or status conflict when the part changed since (its wording, or its state: someone approved or un-approved it), with current (the wording, version and state now): nothing was approved, so show the reviewer the current wording first. A part with no translation yet cannot be approved. Errors change nothing. Requires edit access.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      resource: { type: "string", enum: ["tw", "ta"] },
+      path: ARTICLE_PATH_SCHEMA,
+      version: { type: "integer", minimum: 1, description: "The part's version exactly as bpt_get_article or bpt_edit_article returned it." },
+      state: {
+        type: "string",
+        enum: APPROVE_STATES,
+        description: "The part's state exactly as bpt_get_article or bpt_edit_article showed it to the reviewer.",
+      },
+    },
+    required: ["session_token", "resource", "path", "version", "state"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const t = await articleWriteTarget(args, ctx);
+    // Required: state flips never bump the version, so the version alone
+    // misses an un-approve that landed after the reviewer saw the part.
+    const state = args.state;
+    if (typeof state !== "string" || !(APPROVE_STATES as readonly string[]).includes(state)) {
+      throw new ToolInputError(`state is required: the part's state as the reviewer was shown it (${APPROVE_STATES.join(", ")})`);
+    }
+    const unit = await getArticlePart(t.session, t.resource, t.path, true);
+    if (!unit) articleRefusal(t.resource, t.path, 404, null);
+    if (unit.version !== t.version) return articleConflict(null, unit, "the approval", "current.version and current.state");
+    if (unit.translation_state == null) {
+      throw new ToolInputError(
+        `${t.path} has no translation yet, so there is nothing to approve. Save wording with bpt_edit_article first. Nothing was changed.`,
+      );
+    }
+    const { status, body } = await t.session.send(
+      "POST",
+      `/api/articles/${t.resource}/unit/validate?path=${encodeURIComponent(t.path)}`,
+      { value: 1, expected_state: state },
+      t.version,
+    );
+    const b = (body ?? {}) as Record<string, unknown>;
+    if (status === 409 && b.error === "version_mismatch") {
+      return articleConflict(null, b.current as Record<string, unknown>, "the approval", "current.version and current.state");
+    }
+    if (status !== 200) articleRefusal(t.resource, t.path, status, body);
+    return articleApplied(b);
   },
 };
 
@@ -1706,6 +1941,6 @@ const jobStatus: ToolDef = {
 
 export const TOOLS: ToolDef[] = [
   whoami, linkAccount, listBooks, packageStatus, chunkWork, getRow, chunkList, editRow, approve,
-  templatesForRow, editTemplate, approveTemplate, bulkSetState, draft, jobStatus,
+  templatesForRow, editTemplate, approveTemplate, getArticle, editArticle, approveArticle, bulkSetState, draft, jobStatus,
 ];
 
