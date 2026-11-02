@@ -20,7 +20,8 @@ import {
 } from "../sync/laneFreeze";
 import { DocColumn } from "./DocColumn";
 import { useProjectConfig } from "../hooks/useProjectConfig";
-import { versionLabel, versionIsRtl } from "../lib/versionLabels";
+import { versionDirection, versionLabel, versionIsRtl } from "../lib/versionLabels";
+import { TargetDirectionGate } from "./TargetDirectionGate";
 import type { TextLaneCheck } from "../lib/laneChecks";
 import type { FindMatch } from "./FindReplaceOverlay";
 import { HebrewLine } from "./HebrewLine";
@@ -217,6 +218,14 @@ function ScriptureColumnInner({
 }: Props) {
   const { t } = useTranslation();
   const projectConfig = useProjectConfig();
+  // Every lane but the originals takes its direction from the project config,
+  // which is null until it loads with nothing cached. The body waits on it
+  // rather than guessing LTR, which painted Arabic lanes backwards (issue
+  // #728, as #451 did for the verse view). Stacked mode always shows ULT and
+  // UST; columns and book mode show the enabled versions, so a view of only
+  // originals never waits.
+  const shownVersions = mode === "stacked" ? ["ULT", "UST"] : enabledVersions;
+  const targetDirKnown = shownVersions.every((v) => versionDirection(projectConfig, v) !== null);
   // Local freeze flag covers the WS→config-refresh window so editors lock
   // immediately (projectConfig.replacementJobId may still be null).
   const freezeEpoch = useSyncExternalStore(
@@ -562,6 +571,7 @@ function ScriptureColumnInner({
             />
           </Suspense>
         )}
+        <TargetDirectionGate known={targetDirKnown}>
         {mode === "stacked" ? (
           <StackedBody
             book={book}
@@ -660,6 +670,7 @@ function ScriptureColumnInner({
             ))}
           </Box>
         )}
+        </TargetDirectionGate>
       </Box>
     </Box>
   );
