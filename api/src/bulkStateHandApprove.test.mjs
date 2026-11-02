@@ -291,3 +291,82 @@ test("translation-memory examples skip bulk-only rows and include them once appr
   assert.deepEqual(await tmIds("tn"), ["ai02", "imp1"]);
   assert.deepEqual(await tmIds("tq"), ["tq01"]);
 });
+
+// Codex review of #733: a tombstone keeps its review state. When the reimport
+// brings master's content into a deleted slot (reclaim of a reissued id, or
+// resurrect of a row an earlier prune wrongly removed), that content is a new,
+// unreviewed master row: it must not inherit 'validated', the bulk stamp, the
+// approved snapshot or the AI-draft provenance of the row that used to be there.
+function seedValidatedTombstone(sqlite, kind, id, { updatedBy = null, deleteSource = "nightly_finalize" } = {}) {
+  if (kind === "tn") {
+    sqlite
+      .prepare(
+        `INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, note, occurrence, sort_order, version, updated_by,
+                              translation_state, pre_draft_json, admin_bulk_state, draft_meta_json, source_row_hash, deleted_at)
+         VALUES (?, ?, 1, 4, '1:4', 'approved old note', 1, 10, 3, ?, 'validated',
+                 '{"note":"approved old note"}', 'ai_draft', '{"source":"ai"}', 'hash-old', 1700000000)`,
+      )
+      .run(id, BOOK, updatedBy);
+  } else {
+    sqlite
+      .prepare(
+        `INSERT INTO tq_rows (id, book, chapter, verse, ref_raw, question, response, sort_order, version, updated_by,
+                              translation_state, pre_draft_json, admin_bulk_state, draft_meta_json, source_row_hash, deleted_at)
+         VALUES (?, ?, 1, 4, '1:4', 'old q?', 'old a.', 10, 3, ?, 'validated',
+                 '{"question":"old q?"}', 'ai_draft', '{"source":"ai"}', 'hash-old', 1700000000)`,
+      )
+      .run(id, BOOK, updatedBy);
+  }
+  sqlite
+    .prepare(
+      `INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action, source)
+       VALUES (?, ?, ?, NULL, 2, 3, 'delete', ?)`,
+    )
+    .run(kind, id, BOOK, deleteSource);
+}
+const reviewCols = (r) => ({
+  translation_state: r.translation_state,
+  pre_draft_json: r.pre_draft_json,
+  admin_bulk_state: r.admin_bulk_state,
+  draft_meta_json: r.draft_meta_json,
+  source_row_hash: r.source_row_hash,
+});
+const UNREVIEWED = {
+  translation_state: null,
+  pre_draft_json: null,
+  admin_bulk_state: null,
+  draft_meta_json: null,
+  source_row_hash: null,
+};
+const masterAt = (kind, id, refRaw, chapter, verse) =>
+  kind === "tn"
+    ? { id, refRaw, chapter, verse, occurrence: 1, tags: null, support_reference: null, quote: null, note: "REISSUED NOTE" }
+    : { id, refRaw, chapter, verse, occurrence: null, tags: null, quote: null, question: "REISSUED Q?", response: "new." };
+
+for (const kind of ["tn", "tq"]) {
+  test(`${kind}: reclaiming a validated tombstone for a reissued id lands master's row unreviewed`, async () => {
+    const { sqlite, row, fewShotIds } = fresh();
+    seedValidatedTombstone(sqlite, kind, "rc01", { updatedBy: ADMIN });
+    const env = { DB: makeDb(sqlite) };
+    const counts = await applyTsvRows(env, BOOK, kind, [masterAt(kind, "rc01", "3:5", 3, 5)], null);
+    const r = row(kind, "rc01");
+    assert.equal(r.deleted_at, null, "the reissued id is reclaimed, not skipped");
+    assert.equal(r.chapter, 3);
+    assert.equal(kind === "tn" ? r.note : r.question, kind === "tn" ? "REISSUED NOTE" : "REISSUED Q?");
+    assert.deepEqual(reviewCols(r), UNREVIEWED, "no review state carries onto master's new row");
+    assert.equal(counts.tombstone_blocked ?? 0, 0);
+    assert.deepEqual(fewShotIds(kind), [], "it is not an AI example");
+  });
+
+  test(`${kind}: resurrecting a validated tombstone an earlier prune removed lands it unreviewed`, async () => {
+    const { sqlite, row, fewShotIds } = fresh();
+    seedValidatedTombstone(sqlite, kind, "rs01", { deleteSource: "dcs_reimport" });
+    const env = { DB: makeDb(sqlite) };
+    const counts = await applyTsvRows(env, BOOK, kind, [masterAt(kind, "rs01", "1:4", 1, 4)], null);
+    const r = row(kind, "rs01");
+    assert.equal(r.deleted_at, null, "the wrongly pruned row is still revived");
+    assert.equal(counts.resurrected, 1);
+    assert.deepEqual(reviewCols(r), UNREVIEWED, "revived as master's unreviewed content");
+    assert.deepEqual(fewShotIds(kind), []);
+  });
+}

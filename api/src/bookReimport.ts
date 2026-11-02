@@ -1397,7 +1397,9 @@ function buildTsvUpdateStmt(
   const ownerGuard = reseedAi || reclaim ? "" : "updated_by IS NULL AND ";
   // An approval is a state flip with no version bump, so version-CAS cannot see
   // one that lands between the read and this write: re-assert it here (#414).
-  const approvedGuard = kind === "twl" ? "" : " AND translation_state IS NOT 'validated'";
+  // Not for resurrect/reclaim: those write into a TOMBSTONE, whose review state
+  // describes deleted content, and reset it below instead.
+  const approvedGuard = kind === "twl" || resurrect || reclaim ? "" : " AND translation_state IS NOT 'validated'";
   const pristine = reclaim
     ? deletedGuard
     : kind === "tn"
@@ -1429,11 +1431,22 @@ function buildTsvUpdateStmt(
       ? "restored_from_version = NULL, review_kind = NULL, review_reason = NULL, "
       : "restored_from_version = NULL, "
     : "";
+  // Resurrect and reclaim (tn/tq): master's content now fills a deleted slot.
+  // It is a master-owned row nobody has reviewed, exactly like a fresh INSERT
+  // (tryInsertTsvRow leaves all five NULL), so the deleted row's review state
+  // must not carry onto it: a kept 'validated' would label unreviewed content
+  // approved and make it an AI few-shot example, a kept admin_bulk_state or
+  // pre_draft_json would describe the old content, and draft_meta_json /
+  // source_row_hash describe an AI draft that is gone (Codex review of #733).
+  const resetReviewState =
+    (resurrect || reclaim) && kind !== "twl"
+      ? "translation_state = NULL, pre_draft_json = NULL, admin_bulk_state = NULL, draft_meta_json = NULL, source_row_hash = NULL, "
+      : "";
   const newVersion = oldVersion + 1;
   if (kind === "tn") {
     return env.DB.prepare(
       `UPDATE tn_rows
-          SET ${clearDeleted}${clearOwner}${clearProtections}${clearReviewMeta}ref_raw = ?1, chapter = ?2, verse = ?3, tags = ?4,
+          SET ${clearDeleted}${clearOwner}${clearProtections}${clearReviewMeta}${resetReviewState}ref_raw = ?1, chapter = ?2, verse = ?3, tags = ?4,
               support_reference = ?5, quote = ?6, occurrence = ?7, note = ?8,
               sort_order = ?9, version = ?10, updated_at = ?11
         WHERE id = ?12 AND book = ?13 AND ${pristine} AND version = ?14`,
@@ -1446,7 +1459,7 @@ function buildTsvUpdateStmt(
   if (kind === "tq") {
     return env.DB.prepare(
       `UPDATE tq_rows
-          SET ${clearDeleted}${clearOwner}${clearReviewMeta}ref_raw = ?1, chapter = ?2, verse = ?3, tags = ?4,
+          SET ${clearDeleted}${clearOwner}${clearReviewMeta}${resetReviewState}ref_raw = ?1, chapter = ?2, verse = ?3, tags = ?4,
               quote = ?5, occurrence = ?6, question = ?7, response = ?8,
               sort_order = ?9, version = ?10, updated_at = ?11
         WHERE id = ?12 AND book = ?13 AND ${pristine} AND version = ?14`,
