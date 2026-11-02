@@ -542,6 +542,7 @@ test("tq: the skipped questions are reported to the starter, in words that fit q
   assert.match(list[0].message, /1:2/);
   assert.doesNotMatch(list[0].message, /\bnotes?\b/, "says questions, not notes");
   assert.doesNotMatch(list[0].message, /Not needed|restored/, "questions have no Not needed or Restore");
+  assert.match(list[0].message, /Run the AI on a question again if you want a draft for it\.$/);
   assert.equal(list[0].link_url, `#/${BOOK}/1`);
 });
 

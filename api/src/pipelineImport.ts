@@ -1502,8 +1502,9 @@ async function recordSkippedTouchedAlert(
     const shown = refs.slice(0, SKIPPED_REFS_SHOWN).join(", ");
     const more = refs.length > SKIPPED_REFS_SHOWN ? ` and ${refs.length - SKIPPED_REFS_SHOWN} more` : "";
     const one = refs.length === 1;
-    // Questions have no Not needed or Restore and no per-question Redo, so
-    // their text names only edit and Approve and offers no rerun.
+    // Questions have no Not needed or Restore, so their text names only edit
+    // and Approve. A single question can be re-run from the classic editor
+    // (Shell.handleTranslateQuestion queues a tq job with rowIds: [id]).
     const message =
       kind === "tn"
         ? `AI translation of ${job.book}: ${one ? "1 note was" : `${refs.length} notes were`} left as people changed ` +
@@ -1513,7 +1514,7 @@ async function recordSkippedTouchedAlert(
         : `AI translation of ${job.book}: ${one ? "1 question was" : `${refs.length} questions were`} left as people ` +
           `changed ${one ? "it" : "them"} (${job.book} ${shown}${more}). Someone edited or approved ` +
           `${one ? "it" : "them"} while the job waited in the queue, so the AI ${one ? "draft was" : "drafts were"} ` +
-          `not applied.`;
+          `not applied. Run the AI on a question again if you want a draft for it.`;
     await env.DB.prepare(
       `DELETE FROM system_alerts WHERE username = ?1 AND source = ?2 AND dismissed_at IS NULL`,
     )
