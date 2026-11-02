@@ -37,28 +37,44 @@ function fresh() {
   for (const f of readdirSync(dir).filter((f) => f.endsWith(".sql")).sort()) {
     sqlite.exec(readFileSync(join(dir, f), "utf8"));
   }
+  sqlite.prepare(`INSERT INTO users (id, dcs_user_id, dcs_username) VALUES (9, 9, 'translator')`).run();
+  // Returns the edit_log id (what an export's watermark is compared against).
   const edit = (rowKey, at, source = null) =>
+    Number(
+      sqlite
+        .prepare(
+          `INSERT INTO edit_log (kind, row_key, book, action, created_at, source)
+           VALUES ('verse', ?, ?, 'update', ?, ?)`,
+        )
+        .run(rowKey, rowKey.split("/")[0], at, source).lastInsertRowid,
+    );
+  // A verse row as the writers leave it: updated_by set by a person or the AI
+  // pipeline, NULL after an import or a reimport from Door43.
+  const verse = (bibleVersion, at, updatedBy, { book = "ZEC", chapter = 1, v = 1 } = {}) =>
     sqlite
       .prepare(
-        `INSERT INTO edit_log (kind, row_key, book, action, created_at, source)
-         VALUES ('verse', ?, ?, 'update', ?, ?)`,
+        `INSERT INTO verses (book, chapter, verse, bible_version, content_json, plain_text, updated_by, updated_at)
+         VALUES (?, ?, ?, ?, '{}', 'text', ?, ?)`,
       )
-      .run(rowKey, rowKey.split("/")[0], at, source);
+      .run(book, chapter, v, bibleVersion, updatedBy, at);
+  // The edit_log retention sweep (index.ts: 180 days).
+  const sweepEditLog = () => sqlite.exec(`DELETE FROM edit_log`);
   // An export snapshot: committed to its branch (sha) with a PR, or a skip
   // (sha null) with a reason such as 'unchanged' (render equalled master).
-  const snapshot = (resource, at, { sha = "abc123", pr = 7, error = null, book = "ZEC" } = {}) =>
+  // `wm`: MAX(edit_log.id) read before the render (NULL on older rows).
+  const snapshot = (resource, at, { sha = "abc123", pr = 7, error = null, book = "ZEC", wm = null } = {}) =>
     sqlite
       .prepare(
-        `INSERT INTO export_snapshots (book, resource, commit_sha, committed_at, rows_exported, pr_number, error)
-         VALUES (?, ?, ?, ?, 10, ?, ?)`,
+        `INSERT INTO export_snapshots (book, resource, commit_sha, committed_at, rows_exported, pr_number, error, edit_log_watermark)
+         VALUES (?, ?, ?, ?, 10, ?, ?, ?)`,
       )
-      .run(book, resource, sha, at, pr, error);
+      .run(book, resource, sha, at, pr, error, wm);
   const mergedAtOf = (resource) =>
     sqlite
       .prepare(`SELECT committed_at, merged_at FROM export_snapshots WHERE resource = ? ORDER BY id`)
       .all(resource)
       .map((r) => ({ ...r }));
-  return { db: makeDb(sqlite), edit, snapshot, mergedAtOf };
+  return { db: makeDb(sqlite), edit, verse, sweepEditLog, snapshot, mergedAtOf };
 }
 
 // Export on, nothing merged on Door43, unless a test says otherwise.
@@ -173,6 +189,68 @@ test("another book's edits and source-text versions do not count", async () => {
   edit("HAG/1/1/ULT", 1000);
   edit("ZEC/1/1/UHB", 1000);
   assert.deepEqual(await scriptureStatus(db, "ZEC", deps()), { ult: "current", ust: "current" });
+});
+
+test("an edit made after the export read D1 but before its snapshot was stamped stays pending after the merge", async () => {
+  const { db, edit, snapshot } = fresh();
+  const before = edit("ZEC/1/1/ULT", 1000);
+  // The export reads the watermark (= `before`) and renders; meanwhile a
+  // translator saves; then the Door43 round trips finish and the snapshot is
+  // stamped at 2000, after the edit's created_at of 1500.
+  edit("ZEC/1/2/ULT", 1500);
+  snapshot("ult", 2000, { pr: 7, wm: before });
+  const d = deps({ merged: { "ult#7": 2500 } });
+  assert.deepEqual(await scriptureStatus(db, "ZEC", d), { ult: "pending", ust: "current" });
+});
+
+test("the same race with an 'unchanged' export also stays pending", async () => {
+  const { db, edit, snapshot } = fresh();
+  const before = edit("ZEC/1/1/UST", 1000);
+  edit("ZEC/1/2/UST", 1500);
+  snapshot("ust", 2000, { sha: null, pr: null, error: "unchanged", wm: before });
+  assert.deepEqual(await scriptureStatus(db, "ZEC", deps()), { ult: "current", ust: "pending" });
+});
+
+test("with a watermark, every edit at or below it is covered by the merged export", async () => {
+  const { db, edit, snapshot } = fresh();
+  edit("ZEC/1/1/ULT", 1000);
+  const last = edit("ZEC/1/2/ULT", 1500);
+  snapshot("ult", 2000, { pr: 7, wm: last });
+  const d = deps({ merged: { "ult#7": 2500 } });
+  assert.deepEqual(await scriptureStatus(db, "ZEC", d), { ult: "current", ust: "current" });
+});
+
+test("export off: a verse a person or the AI wrote stays unpublishable after edit_log is swept", async () => {
+  const { db, edit, verse, sweepEditLog } = fresh();
+  edit("ZEC/1/1/ULT", 1000);
+  verse("ULT", 1000, 9);
+  sweepEditLog();
+  const d = deps({ enabled: false });
+  assert.deepEqual(await scriptureStatus(db, "ZEC", d), { ult: "unpublishable", ust: "current" });
+});
+
+test("export off: verses straight from Door43 (updated_by NULL) are not flagged", async () => {
+  const { db, verse } = fresh();
+  verse("ULT", 1000, null);
+  verse("UST", 1000, null);
+  assert.deepEqual(await scriptureStatus(db, "ZEC", deps({ enabled: false })), { ult: "current", ust: "current" });
+});
+
+test("export on: an old unmerged verse write still counts after edit_log is swept", async () => {
+  const { db, verse, sweepEditLog, snapshot } = fresh();
+  snapshot("ust", 500, { sha: null, pr: null, error: "unchanged" });
+  verse("UST", 1000, 9);
+  sweepEditLog();
+  assert.deepEqual(await scriptureStatus(db, "ZEC", deps()), { ult: "current", ust: "pending" });
+});
+
+test("export on: a verse written before the last merged export is current, with or without edit_log", async () => {
+  const { db, verse, sweepEditLog, snapshot } = fresh();
+  verse("ULT", 1000, 9);
+  sweepEditLog();
+  snapshot("ult", 2000, { pr: 7 });
+  const d = deps({ merged: { "ult#7": 2500 } });
+  assert.deepEqual(await scriptureStatus(db, "ZEC", d), { ult: "current", ust: "current" });
 });
 
 // ── the route: GET /api/pipelines/unpublished-scripture/:book ──────────────

@@ -1105,6 +1105,10 @@ export class ExportWorkflow extends WorkflowEntrypoint<Env, ExportParams> {
     }
 
     try {
+    // The highest edit_log id before the render reads D1 (#679): an edit with
+    // a higher id may be missing from this export even if it predates the
+    // snapshot's committed_at, so the unpublished-text check compares ids.
+    const editLogWatermark = await this.currentEditLogWatermark();
     const built = await this.buildResource(book, resource, scriptureGen, chapters);
 
     // After render: lease + generation/config must still match what we rendered.
@@ -1791,7 +1795,7 @@ export class ExportWorkflow extends WorkflowEntrypoint<Env, ExportParams> {
       }
     }
 
-    await this.recordSnapshot(book, resource, branch, dcsCommitSha, built.rowCount, dcsSkippedReason, prNumber, prError, chapterLabel);
+    await this.recordSnapshot(book, resource, branch, dcsCommitSha, built.rowCount, dcsSkippedReason, prNumber, prError, chapterLabel, editLogWatermark);
 
     return {
       book,
@@ -2454,13 +2458,21 @@ export class ExportWorkflow extends WorkflowEntrypoint<Env, ExportParams> {
     // default) for a whole-book export — every existing call site is
     // unaffected.
     chapters: string | null = null,
+    // MAX(edit_log.id) read before the render (#679); null where the caller
+    // has none.
+    editLogWatermark: number | null = null,
   ): Promise<void> {
     await this.env.DB.prepare(
-      `INSERT INTO export_snapshots (book, resource, branch, commit_sha, rows_exported, error, pr_number, pr_error, chapters)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`,
+      `INSERT INTO export_snapshots (book, resource, branch, commit_sha, rows_exported, error, pr_number, pr_error, chapters, edit_log_watermark)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`,
     )
-      .bind(book, resource, branch, commitSha, rowsExported, skippedReason, prNumber, prError, chapters)
+      .bind(book, resource, branch, commitSha, rowsExported, skippedReason, prNumber, prError, chapters, editLogWatermark)
       .run();
+  }
+
+  private async currentEditLogWatermark(): Promise<number> {
+    const row = await this.env.DB.prepare(`SELECT COALESCE(MAX(id), 0) AS w FROM edit_log`).first<{ w: number }>();
+    return Number(row?.w ?? 0);
   }
 
   // Banner alert when the freshness gate skips an export to avoid clobbering
