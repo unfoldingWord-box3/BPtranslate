@@ -1452,7 +1452,7 @@
   },
   "aiStudio": {
     "title": "AI studio",
-    "subtitle": "Bulk-draft a chapter's ULT/UST, translation notes, or translation questions. A run locks the chapter for editing while it's in progress.",
+    "subtitle": "AI-translate a chapter's translation notes or translation questions. A run locks the chapter for editing while it's in progress.",
     "workspace": "Workspace",
     "notVisibleForRole": "AI pipeline status isn't visible for your role.",
     "runStatusNotVisible": "AI run status isn't visible for your role.",
