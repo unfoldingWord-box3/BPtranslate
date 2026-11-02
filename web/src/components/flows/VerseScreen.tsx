@@ -155,11 +155,16 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
   const [article, setArticle] = useState<VerseArticle | null>(null);
 
   // A selection names words of THIS verse; stepping verses invalidates it, and
-  // the article opened from it.
-  useEffect(() => {
+  // the article opened from it. Reset during render (the React "adjust state
+  // when a prop changes" pattern) so the new verse never paints with the old
+  // verse's selection.
+  const verseKey = `${book}|${chapter}|${verse}`;
+  const [prevVerseKey, setPrevVerseKey] = useState(verseKey);
+  if (verseKey !== prevVerseKey) {
+    setPrevVerseKey(verseKey);
     setSelection(null);
     setArticle(null);
-  }, [book, chapter, verse]);
+  }
 
   // The article belongs to the selection it was opened from: picking any other
   // word or resource closes it, so a stale article never sits beside a new
@@ -169,9 +174,11 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
     : selection.kind === "word"
       ? `w:${selection.positions.join(",")}`
       : `r:${selection.key}`;
-  useEffect(() => {
+  const [prevSelectionKey, setPrevSelectionKey] = useState(selectionKey);
+  if (selectionKey !== prevSelectionKey) {
+    setPrevSelectionKey(selectionKey);
     setArticle(null);
-  }, [selectionKey]);
+  }
 
   // Closing the article (Back or Escape) hands focus back to the control that
   // opened it, or to the selected resource row if that control is gone, instead
@@ -259,6 +266,7 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
   // the previous language until the verse data changes. Safe here — this memo
   // is pure derivation, no fetch (contrast the loader effects, which must NOT
   // depend on `t` or they refire on every language change).
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- `t` is a deliberate recompute signal (see above); the linter cannot see that collectOriginalWords reads the active language.
   const words = useMemo(() => collectOriginalWords(sourceVO), [sourceVO, t]);
 
   const lit = useMemo(
@@ -1095,8 +1103,10 @@ function AuditMode({
       ? { borderInlineEnd: `1px solid ${theme.palette.divider}`, paddingInlineEnd: 2 }
       : { borderInlineStart: `1px solid ${theme.palette.divider}`, paddingInlineStart: 2 };
 
-  let prevLit: string | null = null;
-  let prevSim: string | null = null;
+  // Each lane's text per source word, so a row can compare against the row
+  // above it (cell's "same phrase" marker) without mutating during the map.
+  const litTexts = words.map((w) => (lit.present ? laneTextFor(lit, w.position) : ""));
+  const simTexts = words.map((w) => (sim.present ? laneTextFor(sim, w.position) : ""));
 
   const cell = (text: string, prev: string | null) => {
     if (!text) {
@@ -1156,13 +1166,9 @@ function AuditMode({
           </tr>
         </thead>
         <tbody>
-          {words.map((w) => {
-            const litText = lit.present ? laneTextFor(lit, w.position) : "";
-            const simText = sim.present ? laneTextFor(sim, w.position) : "";
-            const litCell = lit.present ? cell(litText, prevLit) : "—";
-            const simCell = sim.present ? cell(simText, prevSim) : "—";
-            prevLit = litText;
-            prevSim = simText;
+          {words.map((w, i) => {
+            const litCell = lit.present ? cell(litTexts[i], i > 0 ? litTexts[i - 1] : null) : "—";
+            const simCell = sim.present ? cell(simTexts[i], i > 0 ? simTexts[i - 1] : null) : "—";
             const marks = notesAt.get(w.position) ?? [];
             const selected = selectedPositions.has(w.position);
             return (

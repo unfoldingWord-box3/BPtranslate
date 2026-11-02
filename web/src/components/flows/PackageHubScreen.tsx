@@ -413,6 +413,7 @@ function LifecycleCard({ book, name, chapters, admin, wide, cardSx }: LifecycleC
 
   useEffect(() => {
     if (!admin) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- blank the snapshots and clear the error before fetching for the new book; without it the previous book's export rows show until the fetch lands.
     setSnapshots(null);
     setSnapshotsError(false);
     void loadSnapshots();

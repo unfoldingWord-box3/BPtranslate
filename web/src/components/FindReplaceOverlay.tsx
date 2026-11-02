@@ -320,6 +320,7 @@ export function FindReplaceOverlay({
   const noteMatches = useMemo<NoteMatch[]>(() => {
     if (!open || !scope.tn || !find) return [];
     return collectNoteMatches(searchNotes(), compiled.re, noteOverrides);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `chapters` is a deliberate recompute signal: searchNotes() is a stable getter, so a note edit only re-reads the notes through the new `chapters` identity (see the comment above noteOverrides).
   }, [open, scope.tn, find, compiled.re, searchNotes, chapters, noteOverrides]);
 
   // Merge + order both scopes by chapter then verse, bible before note within
@@ -408,6 +409,7 @@ export function FindReplaceOverlay({
   // typing) clamp silently.
   useEffect(() => {
     if (results.length === 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- the clamp is paired with the navTo/onScrollToMatch side effects below, which must run after commit; splitting it would change when the scroll fires relative to the clamp.
       setActiveIdx(0);
       if (wantsScrollRef.current) {
         wantsScrollRef.current = false;
@@ -466,6 +468,7 @@ export function FindReplaceOverlay({
       };
   const [replaceSummary, setReplaceSummary] = useState<ReplaceSummary | null>(null);
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- clearing noteOverrides re-derives `results`, which the clamp/auto-scroll effect above consumes once per reshape; moving this into render would change which result list that effect navigates on after a query change.
     setReplaceSummary(null);
     setNoteOverrides(new Map());
   }, [find, regex, caseSensitive, scope.bible, scope.tn]);

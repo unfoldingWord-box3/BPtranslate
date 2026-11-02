@@ -5,7 +5,7 @@
 // reaches preferences — kept free of prefs-rail dependencies so that's a one-line
 // import move.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Alert,
   Box,
@@ -25,10 +25,14 @@ import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import SaveIcon from "@mui/icons-material/Save";
 import { useTranslation } from "react-i18next";
 import { api, ApiError, type AiProviderSettings } from "../sync/api";
+import { adminKeyWarningCopyKey } from "../lib/aiErrorCopy";
 
-// Temporary: hide the shared uW subscription ("default") from the picker and
-// steer orgs toward Gemini (bsoj has a key; Gemini/Grok have been strongest for
-// translation). Backend still accepts provider=default / Clear → default.
+type KeyStatus = { available: boolean; reason: string | null };
+
+// "default" is not in the picker: it means "no org key", and there is no shared
+// account behind it (#551), so the server refuses it on PUT. Clear (DELETE) is
+// what leaves the org on it. Gemini is the suggested starting point for a new
+// key (bsoj has a key; Gemini/Grok have been strongest for translation).
 const PROVIDER_ORDER = ["gemini", "xai", "claude", "openai"] as const;
 const UI_DEFAULT_PROVIDER = "gemini" as const;
 
@@ -67,6 +71,37 @@ export function AiServiceSection() {
   const [replacing, setReplacing] = useState(false);
   const [clearOpen, setClearOpen] = useState(false);
   const [clearing, setClearing] = useState(false);
+  // GET /api/ai-provider/status: `configured` above only says a key is stored;
+  // this says whether it can actually be used (it decrypts). A rotated wrapping
+  // secret leaves a key that looks configured but fails every run (#551 part F).
+  const [keyStatus, setKeyStatus] = useState<KeyStatus | null>(null);
+
+  // Only the latest probe may set keyStatus: a slow load-time probe resolving
+  // after the post-Save one would otherwise show a stale warning under a key
+  // that was just saved. `mounted` stops a late answer landing after unmount.
+  const statusSeq = useRef(0);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  // Best effort: a failed probe shows no warning rather than a wrong one.
+  const refreshStatus = () => {
+    const seq = ++statusSeq.current;
+    const isCurrent = () => mounted.current && seq === statusSeq.current;
+    setKeyStatus(null);
+    api
+      .getAiProviderStatus()
+      .then((res) => {
+        if (isCurrent()) setKeyStatus(res);
+      })
+      .catch(() => {
+        if (isCurrent()) setKeyStatus(null);
+      });
+  };
 
   // Map a server row into draft fields. provider=default is no longer selectable,
   // so treat it as an empty slate pre-filled with Gemini + its first model.
@@ -86,13 +121,16 @@ export function AiServiceSection() {
       const res = await api.getAiProvider();
       setSettings(res);
       applySettingsToDraft(res);
+      refreshStatus();
     } catch {
       setLoadError(true);
     }
   };
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- mount-time load; the same `load` backs the Retry button, so it must clear loadError at start or a retry keeps showing the failure alert while it refetches.
     void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only load; `load` is a new function every render (the Retry button calls it directly), so listing it would refetch on every render.
   }, []);
 
   if (settings === null) {
@@ -124,6 +162,8 @@ export function AiServiceSection() {
   // Key field and Replace need the wrapping secret; Clear still works without it
   // (server-side Clear wipes the key without needing to encrypt a new one).
   const keyActionsDisabled = !encryptionAvailable;
+  // Shown in place of "Configured •••• hint" when the stored key can't be used.
+  const keyWarning = adminKeyWarningCopyKey(settings.configured, keyStatus);
 
   const handleProviderChange = (next: string) => {
     setDraftProvider(next);
@@ -143,6 +183,9 @@ export function AiServiceSection() {
       if (current) {
         setSettings(current);
         applySettingsToDraft(current);
+        // Another admin may have re-entered (or cleared) the key: re-probe so
+        // the can't-be-read warning matches the reloaded row.
+        refreshStatus();
         setApiKey("");
         setReplacing(false);
       }
@@ -175,6 +218,7 @@ export function AiServiceSection() {
       const res = await api.putAiProvider(settings.version, body);
       setSettings(res);
       applySettingsToDraft(res);
+      refreshStatus();
       setApiKey("");
       setReplacing(false);
       save.setMsg(t("preferences.saved"));
@@ -191,6 +235,7 @@ export function AiServiceSection() {
       const res = await api.clearAiProvider(settings.version);
       setSettings(res);
       applySettingsToDraft(res);
+      refreshStatus();
       setApiKey("");
       setReplacing(false);
       save.setMsg(t("preferences.saved"));
@@ -212,6 +257,15 @@ export function AiServiceSection() {
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
         {t("preferences.aiService.intro")}
       </Typography>
+
+      {/* `configured` = a usable key is stored (server's publicShape), so this
+          also covers a never-written row and the moment after Clear key. The
+          form below keeps its Gemini pre-fill as the start for a new key. */}
+      {!settings.configured && (
+        <Alert severity="info" sx={{ mb: 2 }}>
+          {t("preferences.aiService.noKey")}
+        </Alert>
+      )}
 
       {!encryptionAvailable && (
         <Alert severity="warning" sx={{ mb: 2 }}>
@@ -248,11 +302,19 @@ export function AiServiceSection() {
           ))}
         </TextField>
 
+        {!showKeyField && keyWarning && (
+          <Alert severity="warning" role="alert">
+            {t(keyWarning)}
+          </Alert>
+        )}
+
         {!showKeyField && (
           <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" gap={1}>
-            <Typography variant="body2">
-              {t("preferences.aiService.configured", { hint: settings.keyHint ?? "" })}
-            </Typography>
+            {!keyWarning && (
+              <Typography variant="body2">
+                {t("preferences.aiService.configured", { hint: settings.keyHint ?? "" })}
+              </Typography>
+            )}
             <Button size="small" onClick={() => setReplacing(true)} disabled={keyActionsDisabled}>
               {t("preferences.aiService.replace")}
             </Button>

@@ -45,6 +45,7 @@ import { useTemplateBulkDraft } from "../../hooks/useTemplateBulkDraft";
 import { useUnsavedGuard } from "../../hooks/useUnsavedGuard";
 import { drafts as draftStore, type DraftRecord } from "../../sync/drafts";
 import type { TemplateUnitMeta } from "../../sync/api";
+import { AI_NEEDS_ORG_KEY, QUICK_DRAFTS_NEED_ORG_KEY } from "../../lib/aiProviderErrors";
 
 export interface CurateScreenProps extends FlowScreenContext {
   templateId: string | null;
@@ -158,7 +159,8 @@ export default function CurateScreen({ role, templateId }: CurateScreenProps) {
   const bulkMessage = useMemo(() => {
     if (!bulkResult) return null;
     const { drafted, failed, reason, lastErrorCode } = bulkResult;
-    if (reason === "disabled") return t("moreTools.curate.aiNotConfigured");
+    if (reason === "disabled")
+      return lastErrorCode === AI_NEEDS_ORG_KEY ? t("ai.needsOrgKey") : t("moreTools.curate.aiNotConfigured");
     if (reason === "aborted_failures")
       return t("moreTools.curate.bulkStopped", { drafted, code: lastErrorCode ?? t("moreTools.curate.unknown") });
     if (reason === "cancelled") return t("moreTools.curate.bulkCancelled", { drafted });
@@ -245,14 +247,22 @@ export default function CurateScreen({ role, templateId }: CurateScreenProps) {
                   </Button>
                 </Stack>
               ) : (
-                <Tooltip title={aiDisabled ? t("moreTools.curate.aiNotConfiguredAdmin") : ""}>
+                <Tooltip
+                  title={
+                    QUICK_DRAFTS_NEED_ORG_KEY
+                      ? t("ai.needsOrgKey") // #551: can't use the org's own AI key yet
+                      : aiDisabled
+                        ? t("moreTools.curate.aiNotConfiguredAdmin")
+                        : ""
+                  }
+                >
                   <span>
                     <Button
                       fullWidth
                       size="small"
                       variant="outlined"
                       startIcon={<AutoAwesomeIcon fontSize="small" />}
-                      disabled={aiDisabled || draftableUnits.length === 0}
+                      disabled={QUICK_DRAFTS_NEED_ORG_KEY || aiDisabled || draftableUnits.length === 0}
                       onClick={handleDraftAll}
                       sx={{ minHeight: 44 }}
                     >

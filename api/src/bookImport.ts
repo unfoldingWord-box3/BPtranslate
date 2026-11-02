@@ -23,6 +23,7 @@ import { aquiferDrafts, AQUIFER_SOURCE, pickId } from "./aquiferImport.ts";
 import { aquiferRepairFormatting } from "./aquiferRepair.ts";
 import { bulkReviewState } from "./reviewState.ts";
 import { convertAquiferBook, type EnRow, type ResolvedNote } from "./aquiferConvert.ts";
+import { loadEnglishLinks } from "./aquiferLinks.ts";
 import { aquiferJsonUrl, aquiferLangFor } from "./aquiferSources.ts";
 import {
   BOOK_NUMBERS,
@@ -53,6 +54,7 @@ import {
   type ResolvedSourceRange,
 } from "./bookSource.ts";
 import { populateReferencedArticles } from "./articlePopulate";
+import { bookSourcePlansForClient } from "./sourceNotes.ts";
 import type { Context } from "hono";
 import { reimportBookFromDcs, recordResourceSync, resourceSourceRef, type Resource } from "./bookReimport";
 import { lintTnRows, lintUsfmVerses } from "./lint";
@@ -153,7 +155,14 @@ books.get("/:book/sources", requireAuth, async (c) => {
   const book = (c.req.param("book") ?? "").toUpperCase();
   if (!BOOK_NUMBERS[book]) return c.json({ error: "unknown_book", book }, 404);
   const overrides = await listBookSourceOverrides(c.env, book);
-  return c.json({ book, overrides });
+  // Which source each chapter's English tN source note is read from (#691),
+  // resolved here so the web app's Source panel follows the same rules as
+  // import and the chat tools. null for an authoring project; a plan that
+  // could not be resolved is left out of the response (#697), and the
+  // overrides list above still answers.
+  // tqQuestionSources is the same for the English source question (#695).
+  const { tnNoteSources, tqQuestionSources } = await bookSourcePlansForClient(c.env, book);
+  return c.json({ book, overrides, tnNoteSources, tqQuestionSources });
 });
 
 // Body:
@@ -587,7 +596,10 @@ async function fetchAquiferRangeNotes(
   }
   if (!Array.isArray(aqItems)) throw new Error(`aquifer range: Aquifer JSON shape unexpected for ${book}`);
 
-  const { notes } = convertAquiferBook(aqItems as Parameters<typeof convertAquiferBook>[0], enRows);
+  // Link-first join (metadata.json); throws on a failed read rather than falling
+  // back to the quote-first join, which can pick the wrong en_tn row.
+  const links = await loadEnglishLinks(aqLang, aqItems as Parameters<typeof loadEnglishLinks>[1]);
+  const { notes } = convertAquiferBook(aqItems as Parameters<typeof convertAquiferBook>[0], enRows, links);
 
   return aquiferRanges.map((range) => {
     const inRange = notes.filter((n) => {

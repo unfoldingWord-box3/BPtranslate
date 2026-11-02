@@ -77,6 +77,7 @@ import {
   verseObjectsOf,
 } from "../lib/verseRange";
 import { buildTnQuickRequest } from "../lib/tnQuickRequest";
+import { isAiNeedsOrgKey, QUICK_DRAFTS_NEED_ORG_KEY } from "../lib/aiProviderErrors";
 import { isApprovableRow } from "../lib/reviewApproval";
 import { buildQuoteFromSelection, selectionFromQuote } from "../lib/quoteBuilder";
 import { shortSupport } from "../lib/supportReference";
@@ -86,6 +87,7 @@ import i18n from "../i18n";
 import {
   api,
   ApiError,
+  isChapterLockedBody,
   type ChapterLockedBody,
   type TnRow,
   type TqRow,
@@ -194,10 +196,19 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
   const [activeKind, setActiveKind] = useState<RowKindTQ>("tn");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [draftValue, setDraftValue] = useState("");
+  // The saved text the editor diffs against. `baseline` (state) is what render
+  // reads for hasDiff; `baselineRef` is the same value for handlers and
+  // effects, several of which read it after an await. Always write both
+  // through setBaseline so they never disagree.
+  const [baseline, setBaselineState] = useState("");
   const baselineRef = useRef<string>("");
+  const setBaseline = useCallback((next: string) => {
+    baselineRef.current = next;
+    setBaselineState(next);
+  }, []);
   const hydratedKeyRef = useRef<string | null>(null);
   const saveButtonRef = useRef<HTMLButtonElement | null>(null);
-  const quoteButtonRef = useRef<HTMLButtonElement | null>(null);
+  const [quoteButtonEl, setQuoteButtonEl] = useState<HTMLButtonElement | null>(null);
   const templateButtonRef = useRef<HTMLButtonElement | null>(null);
 
   const [saving, setSaving] = useState(false);
@@ -263,6 +274,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
   // row disappeared (e.g. a peer deleted it).
   useEffect(() => {
     if (rows.length === 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- the selection fix feeds selectedRow, which the draft-hydration effect below keys on; moving it into render would change when hydration first runs.
       setSelectedId(null);
       return;
     }
@@ -286,7 +298,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
     if (hydratedKeyRef.current === key) return;
     hydratedKeyRef.current = key;
     const fallback = contentOf(selectedRow);
-    baselineRef.current = fallback;
+    setBaseline(fallback);
     setDraftValue(fallback);
     let cancelled = false;
     void drafts.get(key).then((rec) => {
@@ -297,7 +309,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
       const patchVal = payload?.patch?.[fieldName];
       if (typeof patchVal === "string") setDraftValue(unescapeNewlines(patchVal));
       const baselineVal = payload?.baseline?.[fieldName];
-      if (typeof baselineVal === "string") baselineRef.current = unescapeNewlines(baselineVal);
+      if (typeof baselineVal === "string") setBaseline(unescapeNewlines(baselineVal));
     });
     return () => {
       cancelled = true;
@@ -305,7 +317,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedRow?.id, activeKind, book]);
 
-  const hasDiff = draftValue !== baselineRef.current;
+  const hasDiff = draftValue !== baseline;
 
   // The grid can hold an unsaved `question` for the selected row under the very
   // same drafts key. Read it here so a card keystroke rewrites the record WITH
@@ -456,6 +468,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
       });
     }
     if (settled.length > 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- prunes settled grid entries in the same pass that writes and clears their drafts-store records (IndexedDB), which has to stay after commit.
       setGridEdits((prev) => {
         const next = { ...prev };
         for (const id of settled) delete next[id];
@@ -486,6 +499,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
     if (activeKind !== "tq" || !selectedRow) return;
     const id = selectedRow.id;
     const rowQuestion = (selectedRow as TqRow).question ?? "";
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- the mirror half of a handshake with the draft-writing effect above (that one skips the selected row, this one owns its entry); moving either into render would reorder them.
     setGridEdits((prev) => {
       const cur = prev[id];
       const entry: { question?: string; response?: string } = {};
@@ -709,7 +723,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
       const baseline = { [fieldName]: baselineRef.current };
       applyLocalRowPatch(activeKind, selectedRow.id, patch as Partial<TnRow & TqRow>);
       await outbox.enqueueRow(activeKind, selectedRow.id, selectedRow.version, patch, { book, baseline });
-      baselineRef.current = draftValue;
+      setBaseline(draftValue);
     } finally {
       setSaving(false);
     }
@@ -739,6 +753,10 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) {
         say(t("flowReview.queue.approveNeedsDraft"), "warning");
+      } else if (err instanceof ApiError && isChapterLockedBody(err.body)) {
+        // An AI translation will write this note; the server refuses the
+        // approval until it finishes (issue #602).
+        say(t("shell.noteLockedByTranslate"), "warning");
       } else {
         say(t("flowReview.queue.approveFailed", { status: statusOf(err) }), "warning");
       }
@@ -765,7 +783,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
     if (list.length === 0) return;
     setApproveAllProgress({ done: 0, total: list.length });
     let approved = 0;
-    let firstFailure: { row: QueueRow; status: number | null } | null = null;
+    let firstFailure: { row: QueueRow; status: number | null; locked: boolean } | null = null;
     for (let i = 0; i < list.length; i++) {
       const row = list[i];
       try {
@@ -780,7 +798,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
         // client row, a server guard 404) must never abort the rest of the batch (#238).
         const failStatus = err instanceof ApiError ? err.status : null;
         if (!firstFailure) {
-          firstFailure = { row, status: failStatus };
+          firstFailure = { row, status: failStatus, locked: err instanceof ApiError && isChapterLockedBody(err.body) };
         }
         // ...with one exception: 401 (session dead) and 403 (role refused) are
         // properties of the CALLER, not of this row, so they are certain to repeat
@@ -796,10 +814,15 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
     setApproveAllProgress(null);
     if (firstFailure) {
       const st = firstFailure.status;
-      // The validate endpoints are lock-exempt (api/src/rows.ts:1186-1189), so
-      // a 409 here can only be workspace_mismatch, which reloads the page —
-      // there is no reachable "chapter locked by an AI run" case to hint at.
-      const extra = st === 404 ? t("flowReview.queue.approveAllExtraNoDraft") : "";
+      // A 409 is either workspace_mismatch (which reloads the page) or, for a
+      // note, chapter_locked: an AI translation will write it, so the server
+      // refuses the approval until the run finishes (issue #602).
+      const extra =
+        st === 404
+          ? t("flowReview.queue.approveAllExtraNoDraft")
+          : firstFailure.locked
+            ? ` ${t("shell.noteLockedByTranslate")}`
+            : "";
       setApproveAllError(
         t("flowReview.queue.approveAllPartial", {
           ref: refFor(book, firstFailure.row),
@@ -867,7 +890,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
         // flight. Then drop the drafts record.
         const next = unescapeNewlines(updated.note);
         setDraftValue(next);
-        baselineRef.current = next;
+        setBaseline(next);
         void drafts.clear(rowKey("tn", book, row.id));
       }
       say(
@@ -876,6 +899,10 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
           : t("flowReview.queue.movedToTrash"),
       );
     } catch (err) {
+      if (err instanceof ApiError && isChapterLockedBody(err.body)) {
+        say(t("shell.noteLockedByTranslate"), "warning");
+        return;
+      }
       say(t("flowReview.queue.trashFailed", { status: statusOf(err) }), "warning");
     }
   }
@@ -987,6 +1014,8 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
 
   // ── draft toolbar: Suggest (tn-quick) + Template ──────────────────────────
   const suggestBlockedReason = (() => {
+    // #551: tn-quick can't use the org's own AI key yet, so Suggest is off.
+    if (QUICK_DRAFTS_NEED_ORG_KEY) return t("ai.needsOrgKey");
     if (activeKind !== "tn") return t("flowReview.queue.suggestNotesOnly");
     if (!selectedRow) return t("flowReview.queue.noNoteSelected");
     const row = selectedRow as TnRow;
@@ -1028,7 +1057,8 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
         res.warnings.length > 0 ? "warning" : "info",
       );
     } catch (err) {
-      say(t("flowReview.queue.aiSuggestFailed", { status: statusOf(err) }), "warning");
+      if (isAiNeedsOrgKey(err)) say(t("ai.needsOrgKey"), "warning");
+      else say(t("flowReview.queue.aiSuggestFailed", { status: statusOf(err) }), "warning");
     } finally {
       setSuggesting(false);
     }
@@ -1080,7 +1110,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
       baseline: { [fieldName]: baselineRef.current },
       restoredFromVersion: fromVersion,
     });
-    baselineRef.current = text;
+    setBaseline(text);
     setDraftValue(text);
   }
 
@@ -1160,7 +1190,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
       if (textual) {
         void drafts.clear(rowKey(op.target.rowKind, book, op.target.id));
         if (selectedRow?.id === op.target.id && activeKind === kind) {
-          baselineRef.current = theirsText;
+          setBaseline(theirsText);
           setDraftValue(theirsText);
         }
       }
@@ -1435,7 +1465,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
                   // card's Draft box holds (they are one value) — move its
                   // baseline too, or the card stays "dirty" and re-writes the
                   // draft the store is about to clear.
-                  if (selectedRow?.id === row.id) baselineRef.current = patch.response;
+                  if (selectedRow?.id === row.id) setBaseline(patch.response);
                 }}
                 onDeleteRow={(row) => void handleDeleteQuestion(row)}
               />
@@ -1551,7 +1581,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
                         ? t("flowReview.queue.pickSourceWords")
                         : t("flowReview.queue.noSourceVerse", { label: sourceLabel })
                     }
-                    buildButtonRef={quoteButtonRef}
+                    buildButtonRef={setQuoteButtonEl}
                   />
                 )}
 
@@ -1829,7 +1859,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
       {selectedRow && activeKind === "tn" && (
         <QuoteBuilderPopper
           open={quoteOpen}
-          anchorEl={quoteButtonRef.current}
+          anchorEl={quoteButtonEl}
           book={book}
           chapter={chapter}
           verse={selectedRow.verse}

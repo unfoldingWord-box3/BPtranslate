@@ -44,10 +44,14 @@ test("translateRunner: the decision table, one row per gate", () => {
     assert.equal(translateRunner(INTERNAL, { pipeline_type: t }, CONFIGURED), "proxy", `${t} → proxy`);
   }
 
-  // Gate 3 — BYO key. 'none' is the shared uW subscription (whose key lives on
-  // the bot, not here); 'error' never reaches this point in dispatchNext, and
-  // must read as proxy regardless.
-  assert.equal(translateRunner(INTERNAL, TRANSLATE, { kind: "none" }), "proxy", "shared subscription → proxy");
+  // Gate 3 — BYO key. There is no shared-subscription kind any more (#551):
+  // anything but 'configured' is an 'error', which never reaches this point in
+  // dispatchNext (the job fails first) and must read as proxy regardless.
+  assert.equal(
+    translateRunner(INTERNAL, TRANSLATE, { kind: "error", reason: "ai_provider_not_configured" }),
+    "proxy",
+    "no org key → proxy (dispatchNext fails the job before this matters)",
+  );
   assert.equal(
     translateRunner(INTERNAL, TRANSLATE, { kind: "error", reason: "api_key_missing" }),
     "proxy",

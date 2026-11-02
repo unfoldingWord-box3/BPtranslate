@@ -168,6 +168,19 @@ curl -X POST https://<dev-worker>/api/workspaces/pool/claim \
   slot (HTTP 200, `alreadyClaimed: true`) and consumes nothing.
 - `503 pool_exhausted` when no live `available` slot remains — add capacity.
 
+## Chat (BT Servant)
+
+Adding a workspace needs no chat step. BT Servant holds one registration for
+every org: the MCP server `bpt` at `https://<worker>/api/mcp`, with the one
+`MCP_SERVICE_TOKEN` secret as its bearer (issue #676). There is no per-workspace
+URL, token or registration.
+
+Reviewers link themselves: in the web app, inside the new workspace, account
+menu → Link chat assistant gives a one-time code; they send it to the bot in a
+one-to-one chat. The code was issued in that workspace, so the link (and every
+chat read through it) is bound to it. Viewers can link to read; saving needs
+editor. A reviewer in two workspaces links each one once.
+
 ## Not yet built (later PRs of #81)
 
 - Dynamic DB creation via the D1 HTTP API + a runtime migration runner (to make
