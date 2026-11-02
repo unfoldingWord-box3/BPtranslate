@@ -875,6 +875,7 @@
   },
   "pipeline": {
     "aiButton": "AI",
+    "importButton": "Import",
     "startAiRun": "Start an AI run",
     "generateUltUst": "Generate ULT + UST",
     "writeTranslationNotes": "Write translation notes",
@@ -1453,6 +1454,7 @@
   "aiStudio": {
     "title": "AI studio",
     "subtitle": "AI-translate a chapter's translation notes or translation questions. A run locks the chapter for editing while it's in progress.",
+    "subtitleSourceProject": "AI translation runs are for translation projects. This workspace is a source project, so it has none to start; you can still import a book from Door43 here.",
     "workspace": "Workspace",
     "notVisibleForRole": "AI pipeline status isn't visible for your role.",
     "runStatusNotVisible": "AI run status isn't visible for your role.",
