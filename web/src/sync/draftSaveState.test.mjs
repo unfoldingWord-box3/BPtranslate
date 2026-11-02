@@ -17,6 +17,7 @@ import {
   liveRowOpHoldsDraft,
   rowDraftSettledByOp,
   verseDraftHasActiveSave,
+  rowDraftHasActiveSave,
   withPendingReverts,
   isPendingRowSave,
   rowSaveEnded,
@@ -701,4 +702,31 @@ assert.equal(isEditorsPendingSave({ patch: { note: "N1" }, shown: {}, opId: "op1
 assert.equal(isEditorsPendingSave({ patch: { note: "N1" }, shown: {}, opId: "op1" }, tnOp({ id: "op2" }), tnTarget), false, "#658: another op with the same patch does not end a recovered save");
 assert.equal(isEditorsPendingSave({ patch: { note: "N1" }, shown: {} }, tnOp({ id: "any" }), tnTarget), true, "#658: an editor's own save still ends by row and patch");
 
-console.log("draftSaveState: 110 passed");
+// #372: a row draft whose exact patch is already queued (an offline save) is
+// not "unsaved"; conflicted / failed saves still are, and newer typing after
+// the save is too.
+const queuedRowDraft = {
+  key: "row:tn:abcd",
+  payload: { patch: { note: "N1" }, baseline: { note: "N0" } },
+  expectedVersion: 4,
+  updatedAt: 1,
+  meta: { kind: "row", rowKind: "tn", id: "abcd", book: "ZEC", chapter: 1, verse: 1 },
+};
+assert.equal(rowDraftHasActiveSave(queuedRowDraft, [tnOp({ status: "pending" })]), true, "#372: queued row save hides the draft");
+assert.equal(rowDraftHasActiveSave(queuedRowDraft, [tnOp({ status: "in_flight" })]), true, "#372: in-flight row save hides the draft");
+assert.equal(rowDraftHasActiveSave(queuedRowDraft, [tnOp({ status: "conflict" })]), false, "#372: conflicted row save still reminds");
+assert.equal(rowDraftHasActiveSave(queuedRowDraft, [tnOp({ status: "failed" })]), false, "#372: failed row save still reminds");
+assert.equal(
+  rowDraftHasActiveSave(queuedRowDraft, [tnOp({ status: "pending", patch: { note: "N0.5" } })]),
+  false,
+  "#372: typing after the queued save still reminds",
+);
+assert.equal(
+  rowDraftHasActiveSave(queuedRowDraft, [tnOp({ status: "pending", target: { kind: "row", rowKind: "tn", id: "zzzz", book: "ZEC" } })]),
+  false,
+  "#372: another row's save does not hide this draft",
+);
+assert.equal(rowDraftHasActiveSave(draft, [op("pending")]), false, "#372: verse drafts are not row drafts");
+assert.equal(rowDraftHasActiveSave(queuedRowDraft, []), false, "#372: nothing queued, still unsaved");
+
+console.log("draftSaveState: 118 passed");

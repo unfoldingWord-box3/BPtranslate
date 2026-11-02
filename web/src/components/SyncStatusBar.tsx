@@ -18,6 +18,7 @@ import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import EditNoteIcon from "@mui/icons-material/EditNote";
 import { onOutboxResult, outbox, isOpPending, type OutboxOp, type OpTarget } from "../sync/outbox";
 import { drafts, type DraftRecord, type DraftMeta } from "../sync/drafts";
+import { draftFlowHash, formatDraftMeta } from "../lib/draftLocation";
 
 // If we believe we're online but haven't seen a successful save in this
 // long while pending ops exist, treat it as effectively offline —
@@ -120,20 +121,6 @@ function draftPreviewLine(d: DraftRecord): string | null {
     return points.length > 60 ? `${points.slice(0, 60).join("")}…` : line;
   }
   return null;
-}
-
-function formatDraftMeta(m: DraftMeta): string {
-  if (m.kind === "verse") return `${m.bibleVersion} ${m.book} ${m.chapter}:${m.verse}`;
-  if (m.kind === "article") {
-    // tA parts split into title / sub-title / body; name the part so two drafts
-    // on the same article are tellable apart.
-    return `${m.resource.toUpperCase()} ${m.articleId}${m.part === "body" ? "" : ` · ${m.part}`}`;
-  }
-  // Note templates have no reference either; the support_ref is what a
-  // translator recognises them by, so lead with it and keep the id for
-  // disambiguation (several templates can share a support_ref).
-  if (m.kind === "template") return `${m.supportRef} · ${m.templateId}`;
-  return `${m.rowKind.toUpperCase()} ${m.book} ${m.chapter}:${m.verse}`;
 }
 
 export interface SyncSummary {
@@ -461,48 +448,18 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
   } as const;
 
   const navigateToDraft = (m: DraftMeta) => {
-    // Article drafts have no scripture reference to navigate to — route to the
-    // article route instead so "jump to unsaved" still lands the user on the
-    // editor holding the draft.
-    if (m.kind === "article") {
+    // On the flows screens every draft routes to its flows editor
+    // (draftFlowHash), so the jump stays in the new UI. In classic, article
+    // and template drafts have no scripture reference to navigate to, so they
+    // route to the classic article / template editors by id.
+    if (flowRouting) {
+      location.assign(draftFlowHash(m));
+    } else if (m.kind === "article") {
       location.assign(`#/articles/${m.resource}/${encodeURIComponent(m.articleId)}`);
     } else if (m.kind === "template") {
-      // Same reasoning as articles: no scripture reference to navigate to, so
-      // route to the template's own hash instead of calling onNavigate with
-      // book/chapter/verse this variant does not carry.
       location.assign(`#/templates/${encodeURIComponent(m.templateId)}`);
-    } else if (m.kind === "verse") {
-      // 3-segment #/scripture/B/C/V: App.tsx's `ts` route accepts the optional
-      // verse segment and TranslateScriptureScreen seeds its cursor from it on
-      // mount, so this lands the translator on the exact drafted verse, not
-      // just the top of the chapter (#229, #389).
-      if (flowRouting) location.assign(`#/scripture/${m.book}/${m.chapter}/${m.verse}`);
-      else onNavigate?.(m.book, m.chapter, m.verse);
     } else {
-      // Row draft — branch by rowKind so tq/twl don't land on Translate Notes.
-      if (flowRouting) {
-        if (m.rowKind === "tn") {
-          // Carry the exact row id so the notes screen lands on the note that
-          // holds the draft, not just the verse's first card — several notes
-          // can share a verse, and the point of this jump is telling them apart.
-          location.assign(`#/notes/${m.book}/${m.chapter}/${m.verse}?row=${encodeURIComponent(m.id)}`);
-        } else if (m.rowKind === "tq") {
-          // Carry verse + exact row id (like tn) so the questions screen lands
-          // on the question holding the draft, not just the chapter — several
-          // questions can share a verse, and telling them apart is the point of
-          // this jump. parseHash accepts the verse and ?row= tail (#335).
-          location.assign(`#/questions/${m.book}/${m.chapter}/${m.verse}?row=${encodeURIComponent(m.id)}`);
-        } else {
-          // twl row: the new UI has no word-links editor since the old flows
-          // words screen retired (#173), so open the classic editor at that
-          // verse. ?twl= starts its resource column on the Words tab with this
-          // row active; the row's WordsTable entry restores the draft from the
-          // drafts store (same rowKey).
-          location.assign(`#/${m.book}/${m.chapter}/${m.verse}?twl=${encodeURIComponent(m.id)}`);
-        }
-      } else {
-        onNavigate?.(m.book, m.chapter, m.verse);
-      }
+      onNavigate?.(m.book, m.chapter, m.verse);
     }
     setDraftMenuEl(null);
   };

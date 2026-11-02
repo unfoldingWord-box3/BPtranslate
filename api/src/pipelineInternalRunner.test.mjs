@@ -26,7 +26,7 @@ import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 import { SignJWT } from "jose";
 
-import { dispatchNext, pollAllNonTerminal, pipelines } from "./pipelines.ts";
+import { dispatchNext, enqueueFollowUp, enqueueFollowUpFromChain, pollAllNonTerminal, pipelines } from "./pipelines.ts";
 import { attachAuth } from "./auth.ts";
 import { tnQuick } from "./tnQuick.ts";
 import { templates } from "./templates.ts";
@@ -1282,3 +1282,92 @@ test("import (internal, #559): a whole-chapter job (no rowIds, no verse range) s
   assert.equal(tnRow(sqlite, "cd34").version, 8, "whole-chapter scope is unchanged by the fix");
   assert.equal(tnRow(sqlite, "cd34").translation_state, "ai_draft");
 });
+
+// ── edit_log watermark (#601, migration 0076) ─────────────────────────────
+// Every enqueue path stamps the highest edit_log.id at queue time, so the
+// translate apply can tell an edit made after the enqueue from one made before,
+// even inside the same second. Children inherit their parent's watermark.
+
+function seedEditLog(sqlite, n) {
+  const ins = sqlite.prepare(
+    `INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action) VALUES ('tn', 'x', 'OBA', 1, 1, 2, 'update')`,
+  );
+  for (let i = 0; i < n; i++) ins.run();
+}
+
+test("POST /start stamps the job with the edit_log watermark", async () => {
+  const sqlite = freshSqlite();
+  await seedByoKey(sqlite, { provider: "openai", model: "gpt-5.5" });
+  seedEditLog(sqlite, 3);
+  const env = freshEnv(sqlite, { JWT_SIGNING_KEY: ROUTE_SIGNING, JWT_ISSUER: ROUTE_ISSUER });
+  const app = routeApp();
+  const tok = await editorToken("1", env.WORKSPACE_SLUG);
+  await withFetch(
+    async () => new Response(JSON.stringify({ jobId: "bot-wm", provider: "openai" }), { status: 200 }),
+    async () => {
+      const res = await app.request("/api/pipelines/start", postReq(tok, START_TRANSLATE), env);
+      assert.equal(res.status, 200, await res.clone().text());
+    },
+  );
+  const rows = sqlite.prepare(`SELECT edit_log_watermark FROM pipeline_jobs`).all();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].edit_log_watermark, 3);
+});
+
+function seedParent(sqlite, watermark) {
+  sqlite
+    .prepare(
+      `INSERT INTO pipeline_jobs (job_id, user_id, pipeline_type, book, start_chapter, end_chapter, session_key, state, created_at, updated_at, edit_log_watermark)
+       VALUES ('parent', 1, 'translate', 'OBA', 1, 1, 'sess-parent', 'done', 100, 100, ?)`,
+    )
+    .run(watermark);
+}
+
+for (const [label, enqueue] of [
+  [
+    "follow-up",
+    (env) =>
+      enqueueFollowUp(env, {
+        parentJobId: "parent",
+        parentSessionKey: "sess-parent",
+        pipelineType: "translate",
+        book: "OBA",
+        startChapter: 1,
+        endChapter: 1,
+        followUpOptionsJson: JSON.stringify({ resourceType: "tq" }),
+        userId: 1,
+      }),
+  ],
+  [
+    "chain",
+    (env) =>
+      enqueueFollowUpFromChain(env, {
+        parentJobId: "parent",
+        parentSessionKey: "sess-parent",
+        book: "OBA",
+        startChapter: 1,
+        endChapter: 1,
+        chainJson: JSON.stringify([{ pipelineType: "translate", options: { resourceType: "tq" } }]),
+        userId: 1,
+      }),
+  ],
+]) {
+  test(`a ${label} child inherits its parent's edit_log watermark`, async () => {
+    const sqlite = freshSqlite();
+    seedParent(sqlite, 2);
+    seedEditLog(sqlite, 5); // edits between the parent's and the child's enqueue
+    await enqueue(freshEnv(sqlite));
+    const child = sqlite.prepare(`SELECT edit_log_watermark FROM pipeline_jobs WHERE job_id != 'parent'`).all();
+    assert.equal(child.length, 1);
+    assert.equal(child[0].edit_log_watermark, 2, "edits after the parent was queued still count for the child");
+  });
+
+  test(`a ${label} child of a pre-watermark parent gets the current watermark`, async () => {
+    const sqlite = freshSqlite();
+    seedParent(sqlite, null);
+    seedEditLog(sqlite, 4);
+    await enqueue(freshEnv(sqlite));
+    const child = sqlite.prepare(`SELECT edit_log_watermark FROM pipeline_jobs WHERE job_id != 'parent'`).all();
+    assert.equal(child[0].edit_log_watermark, 4);
+  });
+}
