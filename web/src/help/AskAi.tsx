@@ -71,11 +71,12 @@ export default function AskAi({ open, articles, lang, routeKey, onOpenArticle, c
 
   if (!status || !status.enabled) return null;
 
-  if (!status.configured) {
+  if (!status.configured || !status.keyUsable) {
     return (
       <Box sx={{ px: 2, py: 1.5, borderBlockStart: "1px solid", borderColor: "divider" }}>
         <Typography variant="body2" color="text.secondary">
-          {t("help.ask.notConfigured")}
+          {/* A saved key that no longer decrypts can't answer either. */}
+          {t(status.configured ? "help.ask.unavailable" : "help.ask.notConfigured")}
         </Typography>
       </Box>
     );

@@ -1183,6 +1183,8 @@ export interface HelpStatus {
   remainingUsd: number;
   /** False when what is left is below one question's reservation (remainingUsd is then 0). */
   canAsk: boolean;
+  /** False when a key is saved but no longer decrypts (server wrapping key rotated). */
+  keyUsable: boolean;
 }
 export interface HelpAskBody {
   lang: string;
