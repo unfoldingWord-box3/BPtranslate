@@ -203,6 +203,15 @@ export async function chatRoleFor(wsEnv: Env, username: string): Promise<Role | 
   return chatRole(await effectiveRole(wsEnv, username));
 }
 
+// Whether the linked user is an admin in this workspace: their real role, not
+// the editor-capped chat role. Starting an AI draft from chat is admin-only
+// (Benjamin, 2026-10-30, #670), decided here because BT Servant cannot see
+// roles. Call after chatRoleFor in the same request, which has re-checked the
+// Door43 team.
+export async function chatIsAdmin(wsEnv: Env, username: string): Promise<boolean> {
+  return (await effectiveRole(wsEnv, username)) === "admin";
+}
+
 // The signed-in user's live links, newest first, for the web app's list.
 export async function listLinks(env: Env, userId: number) {
   const rs = await sharedDb(env)

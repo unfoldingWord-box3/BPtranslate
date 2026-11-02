@@ -295,3 +295,60 @@ test("A5: discarding the failed op removes the text it wrote back", () => {
   assert.equal(rowDraftAfterRefusedDiscard(draft({ patch: { question: "ABC" } }), failed), undefined);
   assert.equal(rowDraftAfterRefusedDiscard(undefined, failed), undefined);
 });
+
+// Issue #724: the classic note card keeps its own draft until a save confirms,
+// with a baseline pinned to the server copy. A Save it made carries a
+// draftRef; when that save is refused, the field its draft still holds with
+// the sent text is marked refused, so the card's no-diff clear keeps it after
+// an AI apply moves the row on.
+const tnTarget = { ...target, rowKind: "tn", id: "n-1" };
+const tnMeta = { ...meta, rowKind: "tn", id: "n-1" };
+const tnBaseline = { quote: "q0", note: "n0", support_reference: null };
+const tnDraft = (patch, extra = {}) =>
+  draft({ patch, baseline: tnBaseline }, { key: "row:tn:ZEC:n-1", meta: tnMeta, ...extra });
+
+test("#724: a NoteCard draft still holding the sent note gets it marked refused, payload unchanged", () => {
+  const existing = tnDraft({ note: "Line one\nline two" });
+  const tnOp = op({ note: "Line one\\nline two" }, { target: tnTarget });
+  const out = rowDraftAfterRefusal("row:tn:ZEC:n-1", existing, tnOp, [], at);
+  assert.deepEqual(out.payload, existing.payload);
+  assert.deepEqual(out.refused, { note: "Line one\\nline two" });
+  // Marked already: nothing more to write.
+  assert.equal(rowDraftAfterRefusal("row:tn:ZEC:n-1", out, tnOp, [], at), undefined);
+});
+
+test("#724: a tN save the card did not make (no draftRef: find/replace, quote builder) marks nothing", () => {
+  const existing = tnDraft({ note: "X" });
+  const tnOp = op({ note: "X" }, { target: tnTarget, draftRef: undefined });
+  assert.equal(rowDraftAfterRefusal("row:tn:ZEC:n-1", existing, tnOp, [], at), undefined);
+});
+
+test("#724: a NoteCard draft holding newer text, or none, for the field marks nothing", () => {
+  const tnOp = op({ note: "X" }, { target: tnTarget });
+  assert.equal(rowDraftAfterRefusal("row:tn:ZEC:n-1", tnDraft({ note: "XY" }), tnOp, [], at), undefined);
+  assert.equal(rowDraftAfterRefusal("row:tn:ZEC:n-1", tnDraft({ quote: "q1" }), tnOp, [], at), undefined);
+});
+
+test("#724: a NoteCard re-write keeps the refused record for a field its patch holds, never carries it", () => {
+  const prev = tnDraft({ note: "X" }, { refused: { note: "X" } });
+  const same = tnDraft({ note: "X" }, { generation: "g-2" });
+  const kept = withCarriedRefusal(prev, same);
+  assert.deepEqual(kept.payload, same.payload);
+  assert.deepEqual(kept.refused, { note: "X" });
+  // Newer typing: the patch holds it, the record stays for a later no-diff.
+  const newer = tnDraft({ note: "XY" });
+  assert.deepEqual(withCarriedRefusal(prev, newer).refused, { note: "X" });
+  assert.deepEqual(withCarriedRefusal(prev, newer).payload, newer.payload);
+});
+
+test("#724: the card's no-diff clear after the AI note lands keeps the refused note as the draft", () => {
+  const current = { quote: "q0", note: "AI note", support_reference: null };
+  // The draft holds just the refused note: it is left as it is.
+  assert.equal(rowDraftOnNoDiff(tnDraft({ note: "X" }, { refused: { note: "X" } }), current, []), undefined);
+  // It also held a quote the card no longer shows: only the refused note stays.
+  const out = rowDraftOnNoDiff(tnDraft({ note: "X", quote: "q1" }, { refused: { note: "X" } }), current, []);
+  assert.deepEqual(out.payload.patch, { note: "X" });
+  assert.deepEqual(out.refused, { note: "X" });
+  // No refused record: the plain clear, as before.
+  assert.equal(rowDraftOnNoDiff(tnDraft({ note: "X" }), { note: "AI note" }, []), "clear");
+});

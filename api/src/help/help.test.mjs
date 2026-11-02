@@ -318,10 +318,23 @@ test("(1) PUT /settings on an empty DB does not break the AI key form's If-Match
 test("status reports enabled/configured/model/cap", async () => {
   const { send } = await setup();
   const j = await (await send("GET", "/api/help/status")).json();
-  assert.deepEqual(j, { enabled: true, configured: true, provider: "claude", model: "claude-haiku-4-5", capUsd: 2, remainingUsd: 2, canAsk: true });
+  assert.deepEqual(j, { enabled: true, configured: true, provider: "claude", model: "claude-haiku-4-5", capUsd: 2, remainingUsd: 2, canAsk: true, keyUsable: true });
   const d = await (await (await setup({ provider: "default" })).send("GET", "/api/help/status")).json();
   assert.equal(d.configured, false);
   assert.equal(d.canAsk, false);
+});
+
+test("status: a saved key that no longer decrypts (wrapping key rotated) is not askable", async () => {
+  const rotated = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64");
+  const { send } = await setup({ wrappingKey: rotated });
+  const j = await (await send("GET", "/api/help/status")).json();
+  assert.equal(j.configured, true);
+  assert.equal(j.keyUsable, false);
+  assert.equal(j.canAsk, false);
+  // ...which is what /ask would say: 409 key_decrypt_failed.
+  const res = await send("POST", "/api/help/ask", { body: ask() });
+  assert.equal(res.status, 409);
+  assert.equal((await res.json()).reason, "key_decrypt_failed");
 });
 
 test("status: less left than one question's worst case reads as $0 and canAsk false", async () => {
@@ -390,7 +403,10 @@ test("gemini and chat-completions adapter request shapes", async () => {
   await makeChatCompletionsHelpAdapter("xai", "https://api.x.ai/v1", fakeFetch({ choices: [{ message: { content: "ok" } }], usage: {} }))({ model: "grok-4.3", system: "S", messages: msgs, apiKey: "k", timeoutMs: 1000 });
   assert.equal("reasoning_effort" in seen.body, false);
   assert.equal(seen.url, "https://api.x.ai/v1/chat/completions");
-  assert.equal(seen.body.max_completion_tokens, 2048);
+  // xAI documents max_tokens for Chat Completions (docs.x.ai, text/comparison);
+  // an unknown max_completion_tokens could be ignored (uncapped output) or 400.
+  assert.equal(seen.body.max_tokens, 2048);
+  assert.equal("max_completion_tokens" in seen.body, false);
 });
 
 test("(6) openai/xai bill reasoning tokens reported only in total_tokens", async () => {

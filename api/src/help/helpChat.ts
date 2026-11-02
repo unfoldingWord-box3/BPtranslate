@@ -175,9 +175,13 @@ export function makeChatCompletionsHelpAdapter(
   fetchImpl: FetchLike = fetch,
 ): HelpAdapter {
   return async ({ model, system, messages, apiKey, timeoutMs }) => {
+    // The output cap is what bounds the reservation, so send the field each
+    // provider documents: OpenAI's reasoning models take max_completion_tokens
+    // (they reject max_tokens); xAI's Chat Completions documents max_tokens.
+    const capField = provider === "openai" ? "max_completion_tokens" : "max_tokens";
     const body: Record<string, unknown> = {
       model,
-      max_completion_tokens: maxOutputFor(provider),
+      [capField]: maxOutputFor(provider),
       messages: [{ role: "system", content: system }, ...messages],
     };
     if (provider === "openai") body.reasoning_effort = "low";

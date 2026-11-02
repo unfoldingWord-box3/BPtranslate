@@ -7,7 +7,7 @@
 import { Hono } from "hono";
 import type { Env } from "../index";
 import { requireAuth, requireAdmin, currentUserId } from "../auth.ts";
-import { getAiProviderConfig, resolveDispatchAi } from "../aiProvider.ts";
+import { getAiProviderConfig, keyDecrypts, resolveDispatchAi } from "../aiProvider.ts";
 import { decryptApiKey } from "../aiKeyCrypto.ts";
 import { scrubSecrets } from "../translate/llm.ts";
 import { getProviderConfig } from "../translate/providerCatalog.ts";
@@ -129,8 +129,11 @@ export function makeHelpRoutes(deps: HelpRouteDeps = {}) {
     }
     // Below the reservation of the shortest possible question, /ask can only 429:
     // report $0 and let the UI disable Ask instead of showing "$0.06 left".
+    // A saved key that no longer decrypts (wrapping key rotated) makes every
+    // /ask a 409 key_decrypt_failed: report it, and don't offer Ask.
+    const keyUsable = ai.kind === "configured" && (await keyDecrypts(ai, c.env.AI_KEY_WRAPPING_KEY));
     let canAsk = false;
-    if (enabled && ai.kind === "configured" && model) {
+    if (enabled && ai.kind === "configured" && keyUsable && model) {
       const { system } = buildSystemPrompt(c.req.query("lang") || "en");
       const minimal = withRouteContext([{ role: "user", content: "?" }], "")[0].content;
       canAsk = left >= worstCaseMicros(ai.provider, inputTokenBound([system, minimal]), maxOutputFor(ai.provider));
@@ -144,6 +147,7 @@ export function makeHelpRoutes(deps: HelpRouteDeps = {}) {
       capUsd: usdOf(cap),
       remainingUsd: usdOf(left),
       canAsk,
+      keyUsable,
     });
   });
 
