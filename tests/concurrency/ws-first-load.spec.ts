@@ -60,6 +60,17 @@ for (const [name, hash] of [
       const ws = req.headers()["x-workspace"];
       if (ws !== undefined) sent.push({ what: `${req.method()} ${url.pathname}`, ws });
     });
+    // The workspace the server says this session is in, straight from
+    // /api/auth/me (not from localStorage, which the app under test writes).
+    let serverWs: string | undefined;
+    page.on("response", async (res) => {
+      if (new URL(res.url()).pathname !== "/api/auth/me" || res.status() !== 200) return;
+      try {
+        serverWs = ((await res.json()) as { workspace?: string }).workspace ?? serverWs;
+      } catch {
+        /* body gone after the reconcile reload */
+      }
+    });
 
     const configOk = page.waitForResponse(
       (r) => new URL(r.url()).pathname === "/api/project-config" && r.status() === 200,
@@ -69,12 +80,13 @@ for (const [name, hash] of [
     await configOk;
     await page.waitForLoadState("networkidle");
 
-    // After the reconcile, localStorage mirrors the server's workspace.
-    const settled = await page.evaluate(() => localStorage.getItem("bible-editor.workspace"));
-    expect(settled, "the first load should have adopted the server's workspace").toBeTruthy();
-    const wrong = sent.filter((s) => s.ws !== settled).map((s) => `${s.what} claimed ${s.ws}`);
+    expect(serverWs, "/api/auth/me should name the session's workspace").toBeTruthy();
+    expect(sent.map((s) => s.what), "App's own alerts fetch is among the checked requests").toContain(
+      "GET /api/alerts/me",
+    );
+    const wrong = sent.filter((s) => s.ws !== serverWs).map((s) => `${s.what} claimed ${s.ws}`);
     console.log(`[#749 ${name}] ${sent.length} requests, wrong workspace: ${wrong.join("; ") || "none"}`);
-    expect(wrong, `API calls sent under a workspace other than ${settled}`).toEqual([]);
+    expect(wrong, `API calls sent under a workspace other than ${serverWs}`).toEqual([]);
     await context.close();
   });
 }
@@ -111,5 +123,38 @@ test("#749: a workspace the server keeps reporting differently does not reload-l
   console.log(`[#749 loop guard] navigations: ${navigations}`);
   expect(navigations, "the tab kept reloading").toBe(settled);
   expect(navigations, "more reloads than the two one-shot guards allow").toBeLessThanOrEqual(3);
+  await context.close();
+});
+
+// The hold is decided once per sign-in, not on every render. Another tab
+// switching org rewrites the shared localStorage slug; a re-render in THIS tab
+// afterwards (here a hash navigation) must leave its editor on screen, not
+// swap it for a "signing in" spinner that no reload will ever lift.
+test("#749: another tab changing the workspace slug does not blank a running tab", async ({ browser }) => {
+  const { context } = await newUserContext(browser, "ws-first-load-sibling");
+  const page = await context.newPage();
+  await page.route("https://git.door43.org/**", (route) =>
+    route.fulfill({ status: 404, body: "not mocked" }),
+  );
+  const v = `${RTL_FIXTURE.book}/${RTL_FIXTURE.chapter}`;
+  await page.goto(`/#/verse/${v}/${RTL_FIXTURE.verse}`);
+  const title = page.getByRole("heading", { level: 1 });
+  await expect(title).toBeVisible({ timeout: 60_000 });
+  await page.waitForLoadState("networkidle");
+
+  // Full page loads only (a hash change is a same-document navigation).
+  let navigations = 0;
+  page.on("load", () => navigations++);
+  await page.evaluate(() => {
+    localStorage.setItem("bible-editor.workspace", "other-tab-749");
+    // sync/api.ts's own 409 reload is not under test: keep it out of the way.
+    sessionStorage.setItem("bible-editor.ws-mismatch-reloaded", "1");
+  });
+  await page.evaluate((hash) => {
+    location.hash = hash;
+  }, `#/verse/${v}/${RTL_FIXTURE.verse + 1}`);
+  await page.waitForTimeout(2_000);
+  expect(navigations, "nothing should reload this tab").toBe(0);
+  await expect(title, "the editor stays on screen").toBeVisible();
   await context.close();
 });
