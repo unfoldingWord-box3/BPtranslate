@@ -115,7 +115,8 @@ export async function sweepContextExportQueue(
 // template — BSOJ's sat at 114 examples for two months while ~3,000 notes were
 // validated. Marking the workspace pending and starting a run when none holds
 // the lease is exactly what a save does, so a run already in flight picks this
-// up in its follow-up. Skipped without a service token (a dry run then).
+// up in its follow-up. Does nothing without a service token: no run, nothing
+// marked pending (any run would be a dry run).
 export async function requestDailyContextExport(
   env: Pick<Env, "DB" | "EXPORT_WORKFLOW" | "WORKSPACE_SLUG" | "DCS_SERVICE_TOKEN">,
 ): Promise<void> {
