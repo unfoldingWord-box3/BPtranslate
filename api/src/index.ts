@@ -503,10 +503,13 @@ async function runScheduledTick(controller: ScheduledController, env: Env, _ctx:
       // don't have a real policy yet, but the table grows without bound
       // otherwise (every keystroke that lands a PATCH writes a row). Gated
       // on minute-of-hour so it fires ~once/hour instead of every 5 min.
+      // Translation-preferences history (kind 'prefs', #786) is kept: one
+      // entry per save, rare, and the only record of who changed the
+      // instructions every AI draft is given.
       const minuteOfHour = Math.floor(Date.now() / 60_000) % 60;
       if (minuteOfHour < 5) {
         await env.DB.prepare(
-          `DELETE FROM edit_log WHERE created_at < unixepoch() - (180 * 86400)`,
+          `DELETE FROM edit_log WHERE created_at < unixepoch() - (180 * 86400) AND kind <> 'prefs'`,
         ).run();
       }
       return;

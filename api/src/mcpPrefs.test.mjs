@@ -119,7 +119,9 @@ function fresh({ preset = "ar-bsoj", prefs = true } = {}) {
     const r = sqlite.prepare(`SELECT * FROM translation_prefs WHERE id = 1`).get();
     return r ? { ...r } : null;
   };
-  return { call, row, queued, sessions, realAdmin };
+  // The preferences history (#786; prefsHistory.test.mjs covers it in full).
+  const history = () => sqlite.prepare(`SELECT * FROM edit_log WHERE kind = 'prefs' ORDER BY id`).all();
+  return { call, row, queued, sessions, realAdmin, history };
 }
 
 function makeDb(sqlite) {
@@ -179,7 +181,7 @@ test("bpt_get_preferences: never saved is version 0 with empty fields", async ()
 });
 
 test("bpt_edit_preferences: an admin's append, replace and set land as one save by the linked user, and queue a context export", async () => {
-  const { call, row, queued } = fresh();
+  const { call, row, queued, history } = fresh();
   const r = await call("bpt_edit_preferences", {
     version: 5,
     set: { register: "informal", audience: "Young readers" },
@@ -200,6 +202,16 @@ test("bpt_edit_preferences: an admin's append, replace and set land as one save 
   assert.equal(saved.updated_by, 8, "saved as the linked admin");
   assert.equal(saved.purpose, "Church use", "fields not named are left alone");
   assert.equal(saved.instructions_md, "- Put the verb first.\n- Use الله for God.");
+  const h = history();
+  assert.equal(h.length, 1, "the save is in the preferences history");
+  assert.equal(h[0].source, "chat");
+  assert.equal(h[0].user_id, 8);
+  assert.deepEqual(Object.keys(JSON.parse(h[0].payload_json).changed).sort(), [
+    "audience",
+    "common_issues_md",
+    "instructions_md",
+    "register",
+  ]);
   await settle();
   assert.equal(queued.length, 1, "the save queues a context export, as a web save does");
 });
