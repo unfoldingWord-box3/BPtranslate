@@ -8,7 +8,7 @@ screenshots:
   - admin-ai-1 #/admin/ai
 ---
 
-**AI studio** is where you have AI translate a chapter's translation notes or translation questions, and where you save the AI provider key of your organization. A run locks its chapter for editing until it finishes.
+**AI studio** is where you have AI translate a chapter's translation notes or translation questions, and where you save the AI provider key of your organization. While a **Translate chapter** or **Translate questions** run is running or paused on a chapter, nobody can save that chapter's verses, questions or word links, or add or delete a note, question or word link there; a **Translate chapter** run also locks the chapter's notes. A run that is still waiting in line locks nothing, and **Import from Door43**, **Pull Aquifer drafts** and **Re-source notes from English** never lock anything.
 
 ![The AI studio with the run controls and the runs table](../screenshots/en/admin-ai-1.png)
 
