@@ -80,9 +80,11 @@ export function rebuildPrefsVersion(
   for (const e of entriesNewestFirst) {
     if (e.new_version !== at || !e.changed) return { ok: false, reason: "gap" };
     for (const [f, v] of Object.entries(e.changed)) {
-      if ((PREFS_HISTORY_FIELDS as readonly string[]).includes(f) && v) {
-        fields[f as PrefsHistoryField] = v.prev;
-      }
+      if (!(PREFS_HISTORY_FIELDS as readonly string[]).includes(f)) continue;
+      // A field change that isn't { prev: string | null } can't be undone safely.
+      const prev = v && typeof v === "object" ? (v as { prev?: unknown }).prev : undefined;
+      if (prev !== null && typeof prev !== "string") return { ok: false, reason: "gap" };
+      fields[f as PrefsHistoryField] = prev;
     }
     at = e.prev_version;
     if (at === target) return { ok: true, fields: fields as TranslationPrefsInput };

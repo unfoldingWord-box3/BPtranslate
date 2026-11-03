@@ -35,7 +35,7 @@ To put an earlier version back:
 2. Find the version you want and press **Restore**.
 3. Read the message and press **Restore** again. Text you have typed on the page but not saved is replaced.
 
-The restore is saved as a new version, so you can undo it the same way. The list starts from the day this history was turned on. Saves made before then are not listed, but the list offers the version **As it was before the earliest recorded change**.
+The restore is saved as a new version, so you can undo it the same way. The list starts from the day this history was turned on. Saves made before then are not listed. If the preferences were already saved before that day, the end of the list (once you have loaded all of it) offers the version **As it was before the earliest recorded change**.
 
 ## Update the context pack
 The AI reads the last exported pack, not your live text. After you change terms or instructions:

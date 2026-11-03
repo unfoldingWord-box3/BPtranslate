@@ -79,6 +79,9 @@ test("refuses to rebuild across an entry whose change could not be read", () => 
   assert.equal(rebuildPrefsVersion(CURRENT, unreadable, 3).ok, true, "versions newer than it still rebuild");
   assert.deepEqual(rebuildPrefsVersion(CURRENT, unreadable, 2), { ok: false, reason: "gap" });
   assert.deepEqual(rebuildPrefsVersion(CURRENT, unreadable, 1), { ok: false, reason: "gap" });
+  // A field change without a usable `prev` is refused too, not restored as undefined.
+  const badField = [HISTORY[0], { ...HISTORY[1], changed: { audience: "oops" } }, HISTORY[2], HISTORY[3]];
+  assert.deepEqual(rebuildPrefsVersion(CURRENT, badField, 2), { ok: false, reason: "gap" });
 });
 
 test("refuses a version the loaded entries don't reach", () => {
