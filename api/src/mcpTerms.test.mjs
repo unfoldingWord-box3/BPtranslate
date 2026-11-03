@@ -574,9 +574,11 @@ test("POST /terms/:id/restore: a live term is 409 not_deleted, an unknown id 404
   assert.equal(live.body.current.id, 1);
   assert.equal(live.body.current.version, 3);
   assert.equal((await send("POST", RESTORE(99))).status, 404);
-  const bad = await send("POST", RESTORE("abc"));
-  assert.equal(bad.status, 400);
-  assert.equal(bad.body.error, "bad_id");
+  for (const raw of ["abc", "1abc", "1.9"]) {
+    const bad = await send("POST", RESTORE(raw));
+    assert.equal(bad.status, 400, `id ${raw}`);
+    assert.equal(bad.body.error, "bad_id");
+  }
   assert.deepEqual(table(), before);
   await settle();
   assert.equal(queued.length, 0);
@@ -595,7 +597,7 @@ test("bpt_restore_term: undoes bpt_delete_term, and the term is listed again wit
   const { call, term } = fresh();
   const before = term(2);
   assert.equal((await call("bpt_delete_term", { id: 2, version: 1 })).data.status, "deleted");
-  const r = await call("bpt_restore_term", { id: 2 });
+  const r = await call("bpt_restore_term", { id: 2, version: 1 });
   assert.equal(r.isError, false, JSON.stringify(r.data));
   assert.equal(r.data.status, "restored");
   assert.equal(r.data.term.id, 2);
@@ -611,24 +613,62 @@ test("bpt_restore_term: editors and viewers are refused, as are a live term, an 
   await settle();
   queued.length = 0;
   const before = table();
-  const editor = await call("bpt_restore_term", { id: 3 }, EDITOR);
+  const editor = await call("bpt_restore_term", { id: 3, version: 2 }, EDITOR);
   assert.equal(editor.isError, true);
   assert.match(editor.data.error, /project admins only, and reviewer is not one here\. Nothing was saved\./);
-  const viewer = await call("bpt_restore_term", { id: 3 }, VIEWER);
+  const viewer = await call("bpt_restore_term", { id: 3, version: 2 }, VIEWER);
   assert.equal(viewer.isError, true);
   assert.match(viewer.data.error, /cannot edit in this project/);
-  const live = await call("bpt_restore_term", { id: 1 });
+  const live = await call("bpt_restore_term", { id: 1, version: 3 });
   assert.equal(live.isError, true);
   assert.match(live.data.error, /Term 1 is not deleted.*Nothing was saved\./);
-  const missing = await call("bpt_restore_term", { id: 99 });
+  const missing = await call("bpt_restore_term", { id: 99, version: 1 });
   assert.equal(missing.isError, true);
   assert.match(missing.data.error, /no term with id 99 in this project\. Nothing was saved\./);
   assert.deepEqual(table(), before);
   const add = await call("bpt_add_term", { concept_id: "god", source_term: "God", target_term: "الله" });
   assert.equal(add.data.status, "added");
   const afterAdd = table();
-  const dup = await call("bpt_restore_term", { id: 3 });
+  const dup = await call("bpt_restore_term", { id: 3, version: 2 });
   assert.equal(dup.isError, true);
-  assert.match(dup.data.error, new RegExp(`already has a term .*id ${add.data.term.id}.*Nothing was saved\\.`));
+  assert.match(dup.data.error, new RegExp(`Term 3 cannot come back: .*id ${add.data.term.id}:.*Nothing was saved\\.`));
+  assert.doesNotMatch(dup.data.error, /bpt_edit_term/, "a restore is not an edit");
   assert.deepEqual(table(), afterAdd);
+});
+
+test("POST /terms/:id/restore: with If-Match, only the version that was deleted comes back; an unreadable If-Match is a 400", async () => {
+  const { send, table, term } = fresh();
+  assert.equal((await send("DELETE", "/api/translation-memory/terms/1", undefined, 3)).status, 200);
+  // Someone else restores, edits and deletes it again before a late restore arrives.
+  assert.equal((await send("POST", RESTORE(1), undefined, 3)).status, 200);
+  assert.equal((await send("PATCH", "/api/translation-memory/terms/1", { comment: "changed" }, 4)).status, 200);
+  assert.equal((await send("DELETE", "/api/translation-memory/terms/1", undefined, 5)).status, 200);
+  const before = table();
+  const late = await send("POST", RESTORE(1), undefined, 3);
+  assert.equal(late.status, 409);
+  assert.equal(late.body.error, "version_mismatch");
+  assert.equal(late.body.current.version, 5);
+  assert.equal(late.body.current.comment, "changed");
+  const bad = await send("POST", RESTORE(1), undefined, "abc");
+  assert.equal(bad.status, 400);
+  assert.equal(bad.body.error, "invalid_if_match");
+  assert.deepEqual(table(), before);
+  const ok = await send("POST", RESTORE(1), undefined, 5);
+  assert.equal(ok.status, 200);
+  assert.equal(term(1).deleted_at, null);
+});
+
+test("bpt_restore_term: a version other than the deleted one is a conflict with the term as it is now, and nothing is restored", async () => {
+  const { call, table } = fresh();
+  assert.equal((await call("bpt_delete_term", { id: 1, version: 3 })).data.status, "deleted");
+  const before = table();
+  const r = await call("bpt_restore_term", { id: 1, version: 2 });
+  assert.equal(r.isError, false, JSON.stringify(r.data));
+  assert.equal(r.data.status, "conflict");
+  assert.equal(r.data.current.version, 3);
+  assert.match(r.data.message, /nothing was restored/);
+  assert.deepEqual(table(), before);
+  const noVersion = await call("bpt_restore_term", { id: 1 });
+  assert.equal(noVersion.isError, true);
+  assert.deepEqual(table(), before);
 });

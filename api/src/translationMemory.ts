@@ -590,17 +590,26 @@ translationMemory.delete("/terms/:id", requireEditor, async (c) => {
 // content, version bumped. A live term is 409 not_deleted (with current), as
 // DELETE on a deleted term is 404 rather than a quiet no-op. If a live row
 // has taken the same identity since the delete (the unique index, 0063), it is
-// 409 duplicate_term with that row, and nothing changes. Terms are not
-// written to edit_log, so neither is a restore.
+// 409 duplicate_term with that row, and nothing changes. If-Match is optional,
+// as on DELETE: with it, only a term still at that version is restored (a
+// delete does not change the version), so a late restore cannot bring back a
+// later edit someone else deleted. Terms are not written to edit_log, so
+// neither is a restore.
 translationMemory.post("/terms/:id/restore", requireEditor, async (c) => {
-  const id = parseInt(c.req.param("id"), 10);
-  if (!Number.isFinite(id)) return c.json({ error: "bad_id" }, 400);
+  // Digits only: parseInt would read "1abc" as term 1.
+  const rawId = c.req.param("id");
+  if (!/^\d+$/.test(rawId)) return c.json({ error: "bad_id" }, 400);
+  const id = parseInt(rawId, 10);
+  const header = c.req.header("If-Match");
+  const expected = parseIfMatch(header);
+  if (header != null && expected == null) return c.json({ error: "invalid_if_match" }, 400);
   const existing = await c.env.DB.prepare(`SELECT ${TERM_COLS}, deleted_at FROM terminology WHERE id = ?1`)
     .bind(id)
     .first<TermRow & { deleted_at: number | null }>();
   if (!existing) return c.json({ error: "not_found" }, 404);
   const { deleted_at, ...term } = existing;
   if (deleted_at == null) return c.json({ error: "not_deleted", current: term }, 409);
+  if (expected != null && term.version !== expected) return c.json({ error: "version_mismatch", current: term }, 409);
 
   const dupSql = `SELECT ${TERM_COLS} FROM terminology
       WHERE deleted_at IS NULL AND id != ?1
@@ -621,9 +630,9 @@ translationMemory.post("/terms/:id/restore", requireEditor, async (c) => {
   try {
     const res = await c.env.DB.prepare(
       `UPDATE terminology SET deleted_at = NULL, version = version + 1, updated_at = ?1, updated_by = ?2
-        WHERE id = ?3 AND deleted_at IS NOT NULL`,
+        WHERE id = ?3 AND deleted_at IS NOT NULL AND (?4 IS NULL OR version = ?4)`,
     )
-      .bind(now, userId ?? null, id)
+      .bind(now, userId ?? null, id, expected)
       .run();
     changed = res.meta.changes;
   } catch (err) {
@@ -632,10 +641,13 @@ translationMemory.post("/terms/:id/restore", requireEditor, async (c) => {
     return c.json({ error: "duplicate_term", current: await findDup() }, 409);
   }
   if (!changed) {
-    // A concurrent restore won the race.
-    const cur = await c.env.DB.prepare(`SELECT ${TERM_COLS} FROM terminology WHERE id = ?1`).bind(id).first<TermRow>();
+    // A concurrent restore (or restore, edit and delete) won the race.
+    const cur = await c.env.DB.prepare(`SELECT ${TERM_COLS}, deleted_at FROM terminology WHERE id = ?1`)
+      .bind(id)
+      .first<TermRow & { deleted_at: number | null }>();
     if (!cur) return c.json({ error: "not_found" }, 404);
-    return c.json({ error: "not_deleted", current: cur }, 409);
+    const { deleted_at: stillDeleted, ...latest } = cur;
+    return c.json({ error: stillDeleted == null ? "not_deleted" : "version_mismatch", current: latest }, 409);
   }
   const row = await c.env.DB.prepare(`SELECT ${TERM_COLS} FROM terminology WHERE id = ?1`).bind(id).first<TermRow>();
   queueContextExport(c);
