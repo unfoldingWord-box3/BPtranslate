@@ -122,7 +122,8 @@ function fresh({ preset = "ar-bsoj", terms = true } = {}) {
     const r = sqlite.prepare(`SELECT * FROM terminology WHERE id = ?`).get(id);
     return r ? { ...r } : null;
   };
-  return { call, table, term, queued, sqlite, realAdmin };
+  // send: a direct call to the term routes as the admin's chat principal.
+  return { call, table, term, queued, sqlite, realAdmin, send: sessions[ADMIN].send };
 }
 
 function makeDb(sqlite) {
@@ -225,15 +226,30 @@ test("bpt_edit_term: an admin's edit lands, and moving off forbidden clears repl
 
 test("bpt_delete_term: an admin's delete soft-deletes the term, and it leaves the list", async () => {
   const { call, term } = fresh();
-  const r = await call("bpt_delete_term", { id: 3 });
+  const r = await call("bpt_delete_term", { id: 3, version: 2 });
   assert.equal(r.isError, false, JSON.stringify(r.data));
   assert.deepEqual(r.data, { status: "deleted", id: 3 });
   assert.ok(term(3).deleted_at, "soft-deleted, as the web app deletes");
   const list = await call("bpt_list_terms", {});
   assert.deepEqual(list.data.terms.map((t) => t.id), [2, 1]);
-  const again = await call("bpt_delete_term", { id: 3 });
+  const again = await call("bpt_delete_term", { id: 3, version: 2 });
   assert.equal(again.isError, true);
   assert.match(again.data.error, /no term with id 3.*Nothing was saved/);
+});
+
+test("bpt_delete_term: a stale version is a conflict with the term as it is now, and the term stays", async () => {
+  const { call, table, term } = fresh();
+  const before = table();
+  const r = await call("bpt_delete_term", { id: 1, version: 2 });
+  assert.equal(r.isError, false, JSON.stringify(r.data));
+  assert.equal(r.data.status, "conflict");
+  assert.match(r.data.message, /nothing was deleted/);
+  assert.equal(r.data.current.version, 3);
+  assert.equal(term(1).deleted_at, null);
+  assert.deepEqual(table(), before);
+  const noVersion = await call("bpt_delete_term", { id: 1 });
+  assert.equal(noVersion.isError, true);
+  assert.deepEqual(table(), before);
 });
 
 test("an editor's add, edit and delete are refused, and nothing changes", async () => {
@@ -242,7 +258,7 @@ test("an editor's add, edit and delete are refused, and nothing changes", async 
   for (const r of [
     await call("bpt_add_term", { concept_id: "faith", source_term: "faith" }, EDITOR),
     await call("bpt_edit_term", { id: 1, version: 3, target_term: "x" }, EDITOR),
-    await call("bpt_delete_term", { id: 1 }, EDITOR),
+    await call("bpt_delete_term", { id: 1, version: 3 }, EDITOR),
   ]) {
     assert.equal(r.isError, true);
     assert.match(r.data.error, /project admins only, and reviewer is not one here\. Nothing was saved\./);
@@ -312,7 +328,7 @@ test("viewers and authoring projects are refused for reads and writes", async ()
     await authoring.call("bpt_list_terms", {}),
     await authoring.call("bpt_add_term", { concept_id: "x", source_term: "x" }),
     await authoring.call("bpt_edit_term", { id: 1, version: 3, target_term: "x" }),
-    await authoring.call("bpt_delete_term", { id: 1 }),
+    await authoring.call("bpt_delete_term", { id: 1, version: 3 }),
   ]) {
     assert.equal(r.isError, true);
     assert.match(r.data.error, /translation projects only/);
@@ -324,7 +340,7 @@ test("an admin removed since linking is refused by the write tools", async () =>
   const { call, table, realAdmin } = fresh();
   const before = table();
   realAdmin.set(1, false);
-  const r = await call("bpt_delete_term", { id: 1 });
+  const r = await call("bpt_delete_term", { id: 1, version: 3 });
   assert.equal(r.isError, true);
   assert.match(r.data.error, /admins only/);
   assert.deepEqual(table(), before);
@@ -434,4 +450,72 @@ test("bpt_edit_term: a replacement without status forbidden is refused, and noth
   const ok = await call("bpt_edit_term", { id: 2, version: 1, status: "forbidden", replacement: "نعمة الله" });
   assert.equal(ok.isError, false, JSON.stringify(ok.data));
   assert.equal(ok.data.term.replacement, "نعمة الله");
+});
+
+// Issue #791: the term routes themselves (the web client calls these too).
+
+test("DELETE /terms/:id: a stale If-Match is a 409 with the term as it is now, and the term stays", async () => {
+  const { send, table, term, queued } = fresh();
+  const before = table();
+  const r = await send("DELETE", "/api/translation-memory/terms/1", undefined, 2);
+  assert.equal(r.status, 409);
+  assert.equal(r.body.error, "version_mismatch");
+  assert.equal(r.body.current.id, 1);
+  assert.equal(r.body.current.version, 3);
+  assert.deepEqual(table(), before);
+  await settle();
+  assert.equal(queued.length, 0, "a refused delete queues no export");
+  const ok = await send("DELETE", "/api/translation-memory/terms/1", undefined, 3);
+  assert.equal(ok.status, 200);
+  assert.deepEqual(ok.body, { ok: true });
+  assert.ok(term(1).deleted_at);
+  const gone = await send("DELETE", "/api/translation-memory/terms/1", undefined, 3);
+  assert.equal(gone.status, 404, "already deleted is not_found, not a version conflict");
+});
+
+test("DELETE /terms/:id: without If-Match it deletes as before; an unreadable If-Match is a 400", async () => {
+  const { send, table, term } = fresh();
+  const before = table();
+  const bad = await send("DELETE", "/api/translation-memory/terms/3", undefined, "abc");
+  assert.equal(bad.status, 400);
+  assert.equal(bad.body.error, "invalid_if_match");
+  for (const blank of ["", "  "]) {
+    const r = await send("DELETE", "/api/translation-memory/terms/3", undefined, blank);
+    assert.equal(r.status, 400, `blank If-Match ${JSON.stringify(blank)} is not an unpinned delete`);
+  }
+  assert.deepEqual(table(), before);
+  const plain = await send("DELETE", "/api/translation-memory/terms/3");
+  assert.equal(plain.status, 200);
+  assert.ok(term(3).deleted_at);
+  const missing = await send("DELETE", "/api/translation-memory/terms/99");
+  assert.equal(missing.status, 404);
+});
+
+test("GET /terms: an unknown status is a 400 and returns no terms; an empty one is no filter", async () => {
+  const { send } = fresh();
+  const bad = await send("GET", "/api/translation-memory/terms?status=bogus");
+  assert.equal(bad.status, 400);
+  assert.equal(bad.body.error, "bad_status");
+  assert.ok(bad.body.allowed.includes("preferred"));
+  assert.equal(bad.body.terms, undefined);
+  const empty = await send("GET", "/api/translation-memory/terms?status=");
+  assert.equal(empty.status, 200);
+  assert.equal(empty.body.terms.length, 3);
+});
+
+test("GET /terms/count: takes the same q and status filters as GET /terms, so a filtered count equals the filtered list", async () => {
+  const { send } = fresh();
+  const base = "/api/translation-memory/terms";
+  for (const qs of ["", "?status=preferred", "?status=forbidden", "?status=deprecated", "?q=grace", "?q=GOD", "?q=grace&status=forbidden", "?q=nothing-matches", "?q=%25"]) {
+    const list = await send("GET", `${base}${qs}`);
+    const count = await send("GET", `${base}/count${qs}`);
+    assert.equal(list.status, 200, qs);
+    assert.equal(count.status, 200, qs);
+    assert.equal(count.body.count, list.body.terms.length, `count matches list for "${qs}"`);
+  }
+  assert.equal((await send("GET", `${base}/count?status=forbidden`)).body.count, 1);
+  assert.equal((await send("GET", `${base}/count?q=grace`)).body.count, 2);
+  assert.equal((await send("GET", `${base}/count`)).body.count, 3);
+  const bad = await send("GET", `${base}/count?status=bogus`);
+  assert.equal(bad.status, 400);
 });

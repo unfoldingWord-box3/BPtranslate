@@ -2581,10 +2581,10 @@ function parseTermCursor(raw: unknown, q: string | undefined, status: string | u
   return k as TermKey;
 }
 
-const termConflict = (current: unknown) => ({
+const termConflict = (current: unknown, outcome = NOT_SAVED) => ({
   status: "conflict",
   current: termView(current),
-  message: `Someone changed this term after the reviewer saw it, so ${NOT_SAVED.toLowerCase()} Show the reviewer the term as it is now (current) and ask before trying again with its version.`,
+  message: `Someone changed this term after the reviewer saw it, so ${outcome.toLowerCase()} Show the reviewer the term as it is now (current) and ask before trying again with its version.`,
 });
 
 const listTerms: ToolDef = {
@@ -2778,24 +2778,29 @@ const deleteTerm: ToolDef = {
   description:
     "Delete one term from this project's terminology (the web app's Style page). AI drafts and checks stop following it. " +
     "Project admins only; anyone else is refused. Show the reviewer the term (bpt_list_terms) and get a clear yes first. " +
-    "Not pinned to a version: it deletes the term with this id whatever changed since it was shown, so read it again just before if time has passed. " +
+    "Pass the id and version bpt_list_terms showed; it is deleted only if the term is still at that version. " +
     "There is no undo from chat; adding it again with bpt_add_term makes a new term. " +
-    "Returns status deleted with the id. Errors change nothing.",
+    "Returns status deleted with the id, or status conflict with the term as it is now when someone changed it since: nothing was deleted, so show the reviewer and ask. " +
+    "Errors change nothing.",
   inputSchema: {
     type: "object",
     properties: {
       session_token: SESSION_TOKEN_SCHEMA,
       id: { type: "integer", minimum: 1, description: "The term's id from bpt_list_terms" },
+      version: { type: "integer", minimum: 1, description: "The term's version exactly as bpt_list_terms showed it" },
     },
-    required: ["session_token", "id"],
+    required: ["session_token", "id", "version"],
     additionalProperties: false,
   },
   run: async (args, ctx) => {
     const id = termIdArg(args);
+    const version = intArg(args, "version", { min: 1, required: true })!;
     const session = await termsSession(args, ctx);
     await requireTermAdmin(session);
     const path = `${TERMS_PATH}/${id}`;
-    const { status: code, body } = await session.send("DELETE", path);
+    const { status: code, body } = await session.send("DELETE", path, undefined, version);
+    const b = (body ?? {}) as Record<string, unknown>;
+    if (code === 409 && b.error === "version_mismatch") return termConflict(b.current, "Nothing was deleted.");
     const refused = termRefusal(code, body, id);
     if (refused) throw refused;
     if (code !== 200) throw new Error(`BPtranslate write ${path} returned ${code}`);
