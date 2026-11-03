@@ -84,8 +84,8 @@ Highlights that bite repeatedly:
   hash-only storage, role re-read from the link's workspace on every call and capped at editor. Reads go
   through `readerFrom()` and write tools must call `principalFrom()` (editor only) in `mcpTools.ts`; never
   accept a workspace, username or user id as a tool argument. The one exception to the editor cap is
-  `session.sendAsAdmin` (#784), used only by `bpt_edit_preferences` because `PUT /api/translation-memory/prefs`
-  is admin-only in the web app too. It is built by `adminSender` (`mcpTools.ts`), which allows only the routes in
+  `session.sendAsAdmin` (#784), used only by `bpt_edit_preferences` and `bpt_get_preferences_history` (#798)
+  because `PUT /api/translation-memory/prefs` and `GET .../prefs/history` are admin-only in the web app too. It is built by `adminSender` (`mcpTools.ts`), which allows only the routes in
   `CHAT_ADMIN_ROUTES`, re-reads the real role on every call and answers 403 without calling the route for a
   non-admin. `send()` stays capped, so an admin's other chat writes still run as editor. A feature the admin desk
   shows admins only but whose route accepts editors (the terminology tools, #785) gets a `session.isAdmin()`

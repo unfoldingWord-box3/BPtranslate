@@ -435,9 +435,32 @@ test("bpt_list_terms: past the route's 2000-row cap the result says there may be
   sqlite.prepare(`UPDATE terminology SET deleted_at = unixepoch() WHERE concept_id = 'c2000'`).run();
   const exact = await call("bpt_list_terms", { limit: 1 }, EDITOR);
   assert.equal(exact.data.may_be_more, undefined);
-  // Filtered, nothing can tell, so it still says there may be more.
+  // Filtered, the filtered count says that is everything too (issue #796).
   const filtered = await call("bpt_list_terms", { limit: 1, status: "preferred" }, EDITOR);
-  assert.equal(filtered.data.may_be_more, true);
+  assert.equal(filtered.data.may_be_more, undefined);
+  const searched = await call("bpt_list_terms", { limit: 1, q: "c" }, EDITOR);
+  assert.equal(searched.data.may_be_more, undefined);
+});
+
+test("bpt_list_terms: a filtered search at the cap asks the filtered count, not the whole-project one", async () => {
+  const { call, sqlite } = fresh({ terms: false });
+  const ins = sqlite.prepare(`INSERT INTO terminology (concept_id, source_term, status, version) VALUES (?, 'x', ?, 1)`);
+  for (let i = 0; i < 2000; i++) ins.run(`c${String(i).padStart(4, "0")}`, "preferred");
+  ins.run("z0000", "admitted");
+  // 2001 terms in all, so unfiltered there may be more...
+  const all = await call("bpt_list_terms", { limit: 1 }, EDITOR);
+  assert.equal(all.data.may_be_more, true);
+  // ...but exactly 2000 preferred ones, and the read returned all of them.
+  const preferred = await call("bpt_list_terms", { limit: 1, status: "preferred" }, EDITOR);
+  assert.equal(preferred.data.may_be_more, undefined);
+  const searched = await call("bpt_list_terms", { limit: 1, q: "c" }, EDITOR);
+  assert.equal(searched.data.may_be_more, undefined);
+  // More than 2000 matching a filter: there are more than one read returns.
+  ins.run("c2000", "preferred");
+  const over = await call("bpt_list_terms", { limit: 1, status: "preferred" }, EDITOR);
+  assert.equal(over.data.may_be_more, true);
+  const overSearched = await call("bpt_list_terms", { limit: 1, q: "c" }, EDITOR);
+  assert.equal(overSearched.data.may_be_more, true);
 });
 
 test("bpt_edit_term: a replacement without status forbidden is refused, and nothing changes", async () => {

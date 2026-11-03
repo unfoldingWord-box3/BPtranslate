@@ -121,7 +121,27 @@ function fresh({ preset = "ar-bsoj", prefs = true } = {}) {
   };
   // The preferences history (#786; prefsHistory.test.mjs covers it in full).
   const history = () => sqlite.prepare(`SELECT * FROM edit_log WHERE kind = 'prefs' ORDER BY id`).all();
-  return { call, row, queued, sessions, realAdmin, history };
+  // A save from the web app (#798 tests): the real router behind the admin a
+  // verified session cookie would stamp, as prefsHistory.test.mjs does, with
+  // no chat principal, so edit_log records source NULL.
+  const web = new Hono();
+  web.use("*", async (c, next) => {
+    c.set("userId", 8);
+    c.set("role", "admin");
+    await next();
+  });
+  web.use("*", attachAuth);
+  web.route("/api/translation-memory", translationMemory);
+  const webPut = async (body, ifMatch) =>
+    asJson(
+      await web.request(
+        "/api/translation-memory/prefs",
+        { method: "PUT", headers: { "Content-Type": "application/json", "If-Match": String(ifMatch) }, body: JSON.stringify(body) },
+        env,
+        ctx,
+      ),
+    );
+  return { call, row, queued, sessions, realAdmin, history, webPut };
 }
 
 function makeDb(sqlite) {
@@ -376,7 +396,114 @@ test("bpt_get_preferences: a small field is kept when a large one is left out", 
   assert.equal(all.data.preferences.common_issues_md, "short");
 });
 
-test("sendAsAdmin refuses any route but PUT /prefs", async () => {
+test("sendAsAdmin refuses any route but PUT /prefs and GET /prefs/history", async () => {
   const { sessions } = fresh();
-  await assert.rejects(sessions[ADMIN].sendAsAdmin("PUT", "/api/project-config", {}), /does not allow/);
+  const send = sessions[ADMIN].sendAsAdmin;
+  await assert.rejects(send("PUT", "/api/project-config", {}), /does not allow/);
+  // Matched exactly on the path, not as a prefix, and per method.
+  await assert.rejects(send("GET", "/api/translation-memory/prefs"), /does not allow/);
+  await assert.rejects(send("GET", "/api/translation-memory/prefs?limit=1"), /does not allow/);
+  await assert.rejects(send("PUT", "/api/translation-memory/prefs/history", {}), /does not allow/);
+  await assert.rejects(send("GET", "/api/translation-memory/prefs/history/x"), /does not allow/);
+  assert.equal((await send("GET", "/api/translation-memory/prefs/history?limit=1")).status, 200);
+});
+
+// ── bpt_get_preferences_history (issue #798) ────────────────────────────────
+
+test("bpt_get_preferences_history: a web save and a chat save, newest first, with source and changed fields", async () => {
+  const { call, webPut } = fresh();
+  assert.equal((await webPut({ audience: "Arabic-speaking church leaders" }, 5)).status, 200);
+  const edit = await call("bpt_edit_preferences", { version: 6, set: { register: "informal" } });
+  assert.equal(edit.data.status, "applied");
+  const r = await call("bpt_get_preferences_history", {});
+  assert.equal(r.isError, false);
+  assert.equal(r.data.entries.length, 2);
+  assert.equal(r.data.next, null);
+  assert.equal(r.data.cut_note, undefined, "nothing was cut");
+  const [chat, web] = r.data.entries;
+  assert.equal(chat.version, 7);
+  assert.equal(chat.source, "chat");
+  assert.equal(chat.username, "boss");
+  assert.deepEqual(chat.changed, { register: { prev: "formal", new: "informal" } });
+  assert.equal(web.version, 6);
+  assert.equal(web.source, "web");
+  assert.equal(web.username, "boss");
+  assert.deepEqual(web.changed, { audience: { prev: "Arabic readers", new: "Arabic-speaking church leaders" } });
+  assert.match(web.at, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
+});
+
+test("bpt_get_preferences_history: a non-admin gets the admins-only answer", async () => {
+  const { call, webPut } = fresh();
+  await webPut({ audience: "x" }, 5);
+  const ed = await call("bpt_get_preferences_history", {}, EDITOR);
+  assert.equal(ed.isError, true);
+  assert.match(ed.data.error, /admins only/);
+  // A viewer is refused earlier, as by every preferences tool.
+  assert.equal((await call("bpt_get_preferences_history", {}, VIEWER)).isError, true);
+});
+
+test("bpt_get_preferences_history: an admin removed since the check gets the route's refusal", async () => {
+  const { call, realAdmin, webPut } = fresh();
+  await webPut({ audience: "x" }, 5);
+  // isAdmin says yes, then sendAsAdmin re-reads the role and says no.
+  let reads = 0;
+  const orig = realAdmin.get.bind(realAdmin);
+  realAdmin.get = (k) => (k === 1 ? ++reads === 1 : orig(k));
+  const r = await call("bpt_get_preferences_history", {});
+  assert.equal(r.isError, true);
+  assert.match(r.data.error, /no longer a project admin/);
+});
+
+test("bpt_get_preferences_history: long values come back cut, with their full length", async () => {
+  const { call, webPut } = fresh();
+  const huge = "Watch the conjunctions. ".repeat(2000); // 48,000 characters
+  assert.equal((await webPut({ common_issues_md: huge }, 5)).status, 200);
+  const r = await call("bpt_get_preferences_history", {});
+  assert.equal(r.isError, false);
+  const ch = r.data.entries[0].changed.common_issues_md;
+  assert.equal(ch.prev, "- Translators drop the conjunction.");
+  assert.equal(ch.prev_total_chars, undefined);
+  assert.equal(ch.new, huge.slice(0, 300));
+  assert.equal(ch.new_total_chars, huge.length);
+  assert.match(r.data.cut_note, /Style page, History/);
+  // A cut never splits a character outside the BMP in two.
+  const emoji = `${"a".repeat(299)}😀${"b".repeat(50)}`;
+  assert.equal((await webPut({ audience: emoji }, 6)).status, 200);
+  const e = (await call("bpt_get_preferences_history", { limit: 1 })).data.entries[0].changed.audience;
+  assert.equal(e.new, "a".repeat(299));
+  assert.equal(e.new_total_chars, emoji.length);
+});
+
+test("bpt_get_preferences_history: limit and before page through the entries", async () => {
+  const { call, webPut } = fresh();
+  for (let v = 5; v < 8; v++) assert.equal((await webPut({ purpose: `purpose ${v}` }, v)).status, 200);
+  const p1 = await call("bpt_get_preferences_history", { limit: 2 });
+  assert.deepEqual(p1.data.entries.map((e) => e.version), [8, 7]);
+  assert.notEqual(p1.data.next, null);
+  const p2 = await call("bpt_get_preferences_history", { limit: 2, before: p1.data.next });
+  assert.deepEqual(p2.data.entries.map((e) => e.version), [6]);
+  assert.equal(p2.data.next, null);
+  // The default page is 10 and the cap 50.
+  assert.equal((await call("bpt_get_preferences_history", {})).data.entries.length, 3);
+  assert.equal((await call("bpt_get_preferences_history", { limit: 500 })).data.entries.length, 3);
+  const bad = await call("bpt_get_preferences_history", { before: 0 });
+  assert.equal(bad.isError, true);
+});
+
+test("bpt_get_preferences_history: a page too big for one response stops early, and next picks up after the last entry shown", async () => {
+  const { call, webPut } = fresh();
+  // Every save rewrites all six text fields with long text, so even cut to
+  // 300 characters each, ten entries pass the response budget.
+  const fields = ["audience", "purpose", "script_notes", "instructions_md", "common_issues_md", "notes"];
+  for (let v = 5; v < 15; v++) {
+    const body = Object.fromEntries(fields.map((f) => [f, `${f} ${v} `.repeat(200)]));
+    assert.equal((await webPut(body, v)).status, 200);
+  }
+  const p1 = await call("bpt_get_preferences_history", { limit: 10 });
+  assert.equal(p1.isError, false);
+  const shown = p1.data.entries.map((e) => e.version);
+  assert.ok(shown.length > 0 && shown.length < 10, `stopped early (${shown.length})`);
+  assert.notEqual(p1.data.next, null);
+  const p2 = await call("bpt_get_preferences_history", { limit: 10, before: p1.data.next });
+  assert.equal(p2.data.entries[0].version, shown[shown.length - 1] - 1, "no entry skipped");
 });
