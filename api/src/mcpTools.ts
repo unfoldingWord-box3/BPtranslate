@@ -13,7 +13,9 @@
 // for note templates, and bpt_get_article, bpt_edit_article and
 // bpt_approve_article (part d) for tW/tA article parts; their reads go through
 // send("GET") as the linked user, because the template and article routes are
-// editor-only and getJson carries no user.
+// editor-only and getJson carries no user. bpt_get_preferences and
+// bpt_edit_preferences (#784) read and change the project's translation
+// preferences; the edit is admin-only and writes through sendAsAdmin.
 //
 // Each tool reads through the SAME route handlers the web app uses (`getJson`
 // runs the Hono app in-process), so chat and web never disagree about counts
@@ -58,6 +60,11 @@ export interface McpSession {
   // The linked user's real role in this workspace is admin (chatLinks.ts
   // chatIsAdmin). principal.role is capped at editor; bpt_draft asks this.
   isAdmin: () => Promise<boolean>;
+  // send() with the user's real admin role instead of the editor cap, for a
+  // route that is admin-only in the web app too (bpt_edit_preferences). It
+  // re-reads the role and answers 403 not_an_admin without calling the route
+  // when the user is not an admin.
+  sendAsAdmin: (method: string, path: string, body?: unknown, ifMatch?: number) => Promise<{ status: number; body: unknown }>;
   // Per-kind counts of what a pipeline job's apply staged, applied and
   // rejected (pipelines.ts jobResultCounts): a second read that skips the
   // route handlers, like packageRefs. bpt_job_status calls it only after the
@@ -81,6 +88,7 @@ import { shortSupport, summarizePackageRefs, type PackageRefRows } from "./packa
 import type { SourceNotes } from "./sourceNotes.ts";
 import { isTranslationConfig } from "./workflowLayouts.ts";
 import type { ProjectConfig } from "./projectConfig.ts";
+import { REGISTERS } from "./translationMemoryLib.ts";
 
 export class ToolInputError extends Error {}
 
@@ -980,17 +988,14 @@ async function translationSession(
   args: Record<string, unknown>,
   ctx: ToolContext,
   what = "Its note templates are",
+  refusal = `This project writes its notes in English (authoring mode). ${what} the English source and are not changed from chat.`,
 ): Promise<McpSession> {
   const session = await principalFrom(args, ctx);
   // send, not getJson: this route wants a signed-in user, and getJson has none.
   const { status, body } = await session.send("GET", "/api/project-config");
   if (status !== 200) throw new Error(`BPtranslate API /api/project-config returned ${status}`);
   const config = (body as { config?: ProjectConfig } | null)?.config;
-  if (!config || !isTranslationConfig(config)) {
-    throw new ToolInputError(
-      `This project writes its notes in English (authoring mode). ${what} the English source and are not changed from chat.`,
-    );
-  }
+  if (!config || !isTranslationConfig(config)) throw new ToolInputError(refusal);
   return session;
 }
 
@@ -1750,6 +1755,313 @@ const bulkSetState: ToolDef = {
   },
 };
 
+// ── Translation preferences (issue #784) ────────────────────────────────────
+// The Style page's brief, instructions and common issues: one row per project
+// (translation_prefs), read and saved through the web app's own
+// GET / PUT /api/translation-memory/prefs. GET is editor-only, so the read goes
+// through send("GET") as the linked user. PUT is admin-only in the web app, so
+// the edit asks session.isAdmin first and writes through sendAsAdmin, the one
+// route call that is not capped at editor. Saving queues a context export
+// (the route does it), which is how the next AI drafts get the new wording.
+// Terminology and examples are not here.
+
+const PREFS_PATH = "/api/translation-memory/prefs";
+const PREF_TEXT_FIELDS = ["audience", "purpose", "script_notes", "instructions_md", "common_issues_md", "notes"] as const;
+type PrefTextField = (typeof PREF_TEXT_FIELDS)[number];
+const PREF_FIELDS = [...PREF_TEXT_FIELDS, "register"] as const;
+type PrefField = (typeof PREF_FIELDS)[number];
+type Prefs = { version: number } & Record<PrefTextField, string | null> & { register: string };
+const PREFS_RESULT_BUDGET = GET_ROW_BYTE_BUDGET - 1_000;
+const NOT_SAVED = "Nothing was saved.";
+
+const PREF_FIELDS_HELP =
+  "audience (who the translation is for), purpose (what it is for), register (default, formal or informal: how formal AI drafts are), " +
+  "script_notes (script and direction notes), instructions_md (markdown added to every AI drafting and checking prompt), " +
+  "common_issues_md (markdown listing problems reviewers keep flagging), notes (the admins' own notes; not sent to the AI)";
+
+type SendFn = (method: string, path: string, body?: unknown, ifMatch?: number) => Promise<{ status: number; body: unknown }>;
+
+// The only routes a chat tool may call with the user's admin role. Each is
+// admin-only in the web app too; adding one is a decision, not a reuse.
+export const CHAT_ADMIN_ROUTES: ReadonlySet<string> = new Set([`PUT ${PREFS_PATH}`]);
+
+// Builds session.sendAsAdmin (index.ts): refuses a route not listed above,
+// re-reads the real role on every call, and answers the route's own 403
+// shape, without calling it, for a user who is not an admin now.
+export function adminSender(isAdmin: () => Promise<boolean>, sendAsAdminRole: SendFn): SendFn {
+  return async (method, path, body, ifMatch) => {
+    if (!CHAT_ADMIN_ROUTES.has(`${method} ${path}`)) throw new Error(`sendAsAdmin does not allow ${method} ${path}`);
+    if (!(await isAdmin())) return { status: 403, body: { error: "forbidden", reason: "not_an_admin" } };
+    return sendAsAdminRole(method, path, body, ifMatch);
+  };
+}
+
+// Readable by an editor of a translation project; an authoring project has
+// none (the web app shows the same refusal on its Style page).
+async function prefsSession(args: Record<string, unknown>, ctx: ToolContext): Promise<McpSession> {
+  return translationSession(args, ctx, "", "Translation preferences apply to translation projects only, and this project writes its notes in English.");
+}
+
+async function readPrefs(session: McpSession): Promise<Prefs> {
+  const { status, body } = await session.send("GET", PREFS_PATH);
+  if (status !== 200) throw new Error(`BPtranslate API ${PREFS_PATH} returned ${status}`);
+  const p = ((body ?? {}) as { prefs?: Record<string, unknown> }).prefs ?? {};
+  const out = { version: Number(p.version ?? 0), register: String(p.register ?? "default") } as Prefs;
+  for (const f of PREF_TEXT_FIELDS) out[f] = typeof p[f] === "string" ? (p[f] as string) : null;
+  return out;
+}
+
+// Whole fields, leaving out the largest text fields first until the result
+// fits. A single field over the budget on its own is cut, and says so: the
+// edit tool's append and replace still work on it.
+function prefsView(p: Prefs, fields: PrefField[], extra: Record<string, unknown>) {
+  const values: Record<string, unknown> = {};
+  for (const f of fields) values[f] = p[f];
+  const out = (v: Record<string, unknown>, leftOut: string[], more: Record<string, unknown> = {}) => ({
+    version: p.version,
+    ...extra,
+    preferences: v,
+    ...(leftOut.length
+      ? { left_out: leftOut, left_out_note: "Too long to include together: call again with field set to one of these to read it." }
+      : {}),
+    ...more,
+  });
+  if (fields.length === 1) {
+    const f = fields[0];
+    const text = values[f];
+    if (typeof text !== "string" || getRowBytes(out(values, [])) <= PREFS_RESULT_BUDGET) return out(values, []);
+    const cut = (keep: number) => out({ [f]: text.slice(0, keep) }, [], { truncated: { field: f, chars_shown: keep, total_chars: text.length } });
+    let keep = text.length;
+    while (keep > 0 && getRowBytes(cut(keep)) > PREFS_RESULT_BUDGET) keep = Math.floor(keep * 0.9);
+    return cut(keep);
+  }
+  const bySize = PREF_TEXT_FIELDS.filter((f) => typeof values[f] === "string").sort((a, b) => byteLength(values[b]) - byteLength(values[a]));
+  const leftOut: string[] = [];
+  for (const f of bySize) {
+    if (getRowBytes(out(values, leftOut)) <= PREFS_RESULT_BUDGET) break;
+    delete values[f];
+    leftOut.push(f);
+  }
+  return out(values, leftOut);
+}
+
+function prefFieldArg(raw: unknown, key: string, allowed: readonly string[]): PrefField {
+  if (typeof raw !== "string" || !allowed.includes(raw)) {
+    throw new ToolInputError(`${key} must be one of ${allowed.join(", ")}, got ${JSON.stringify(raw)}. ${NOT_SAVED}`);
+  }
+  return raw as PrefField;
+}
+
+function plainObject(raw: unknown, key: string): Record<string, unknown> {
+  if (raw === undefined || raw === null) return {};
+  if (typeof raw !== "object" || Array.isArray(raw)) throw new ToolInputError(`${key} must be an object of field: text. ${NOT_SAVED}`);
+  return raw as Record<string, unknown>;
+}
+
+export interface PrefsChanges {
+  set: Partial<Record<PrefField, string | null>>;
+  append: Partial<Record<PrefTextField, string>>;
+  replace: { field: PrefTextField; old_text: string; new_text: string }[];
+}
+
+// Parses the edit tool's three kinds of change. One field takes one kind, so
+// a set never silently wins over an append to the same field.
+export function parsePrefsChanges(args: Record<string, unknown>): PrefsChanges {
+  const set: PrefsChanges["set"] = {};
+  for (const [k, v] of Object.entries(plainObject(args.set, "set"))) {
+    const f = prefFieldArg(k, "a set field", PREF_FIELDS);
+    if (f === "register") {
+      if (typeof v !== "string" || !(REGISTERS as readonly string[]).includes(v)) {
+        throw new ToolInputError(`register must be one of ${REGISTERS.join(", ")}. ${NOT_SAVED}`);
+      }
+      set.register = v;
+    } else {
+      if (v !== null && typeof v !== "string") throw new ToolInputError(`set.${f} must be text, or null to clear it. ${NOT_SAVED}`);
+      // The web app saves an emptied box as null.
+      set[f] = v === null || !v.trim() ? null : v;
+    }
+  }
+  const append: PrefsChanges["append"] = {};
+  for (const [k, v] of Object.entries(plainObject(args.append, "append"))) {
+    const f = prefFieldArg(k, "an append field", PREF_TEXT_FIELDS) as PrefTextField;
+    if (typeof v !== "string" || !v.trim()) throw new ToolInputError(`append.${f} must be the text to add. ${NOT_SAVED}`);
+    append[f] = v;
+  }
+  const replace: PrefsChanges["replace"] = [];
+  if (args.replace !== undefined && args.replace !== null) {
+    if (!Array.isArray(args.replace) || args.replace.length > 20) {
+      throw new ToolInputError(`replace must be a list of at most 20 changes. ${NOT_SAVED}`);
+    }
+    for (const r of args.replace as unknown[]) {
+      const o = plainObject(r, "each replace");
+      const f = prefFieldArg(o.field, "replace field", PREF_TEXT_FIELDS) as PrefTextField;
+      if (typeof o.old_text !== "string" || !o.old_text) throw new ToolInputError(`replace old_text is required. ${NOT_SAVED}`);
+      if (typeof o.new_text !== "string") throw new ToolInputError(`replace new_text is required ("" removes old_text). ${NOT_SAVED}`);
+      replace.push({ field: f, old_text: o.old_text, new_text: o.new_text });
+    }
+  }
+  const kinds = new Map<string, string>();
+  const claim = (f: string, kind: string) => {
+    const had = kinds.get(f);
+    if (had && had !== kind) throw new ToolInputError(`${f} is in both ${had} and ${kind}: give each field one kind of change. ${NOT_SAVED}`);
+    kinds.set(f, kind);
+  };
+  for (const f of Object.keys(set)) claim(f, "set");
+  for (const f of Object.keys(append)) claim(f, "append");
+  for (const r of replace) claim(r.field, "replace");
+  if (!kinds.size) throw new ToolInputError(`Give at least one change in set, append or replace. ${NOT_SAVED}`);
+  return { set, append, replace };
+}
+
+// The new value of every changed field, from the stored values the reviewer
+// was shown. Pure, so the matching rules are testable on their own.
+export function applyPrefsChanges(current: Prefs, ch: PrefsChanges): Partial<Record<PrefField, string | null>> {
+  const next: Partial<Record<PrefField, string | null>> = { ...ch.set };
+  for (const [f, text] of Object.entries(ch.append) as [PrefTextField, string][]) {
+    const had = current[f] ?? "";
+    next[f] = had.trim() ? `${had.replace(/\s+$/, "")}\n\n${text}` : text;
+  }
+  for (const r of ch.replace) {
+    const had = (r.field in next ? next[r.field] : current[r.field]) ?? "";
+    const at = had.indexOf(r.old_text);
+    if (at < 0) throw new ToolInputError(`${r.field} does not contain this old_text: ${JSON.stringify(r.old_text.slice(0, 200))}. ${NOT_SAVED}`);
+    if (had.indexOf(r.old_text, at + 1) >= 0) {
+      throw new ToolInputError(`${r.field} contains this old_text more than once; include more of the surrounding text so it matches once. ${NOT_SAVED}`);
+    }
+    const after = had.slice(0, at) + r.new_text + had.slice(at + r.old_text.length);
+    next[r.field] = after.trim() ? after : null;
+  }
+  return next;
+}
+
+const prefsConflict = (version: number) => ({
+  status: "conflict",
+  current_version: version,
+  message: `Someone changed the translation preferences after the reviewer saw them, so ${NOT_SAVED.toLowerCase()} Call bpt_get_preferences, show the reviewer what is there now, and ask before trying again.`,
+});
+
+const FIELD_SCHEMA = { type: "string", enum: [...PREF_FIELDS] };
+const TEXT_FIELD_PROPS = Object.fromEntries(PREF_TEXT_FIELDS.map((f) => [f, { type: "string" }]));
+
+const getPreferences: ToolDef = {
+  name: "bpt_get_preferences",
+  description:
+    `This project's translation preferences, the ones on the web app's Style page that shape every AI draft: ${PREF_FIELDS_HELP}. ` +
+    "Editors see every field but notes. null means not filled in. Returns version (0 means never saved), can_edit (whether this user may change them: project admins only) and preferences. " +
+    "When they are too long to send together, the longest are named in left_out: call again with field set to one of them. " +
+    "A single field too long even on its own comes back cut, with truncated saying how many characters were shown; append and replace in bpt_edit_preferences still work on it. " +
+    "Show the reviewer the current wording before changing it with bpt_edit_preferences, and pass it this version. " +
+    "Requires edit access; translation projects only. Terminology and examples are not here (use the web app). Read-only.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      field: { ...FIELD_SCHEMA, description: "Return only this field" },
+    },
+    required: ["session_token"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const only = args.field === undefined || args.field === null ? undefined : prefFieldArg(args.field, "field", PREF_FIELDS);
+    const session = await prefsSession(args, ctx);
+    const admin = await session.isAdmin();
+    // The web app shows these only to admins; editors see what the AI is
+    // told, but not the admins' own notes.
+    if (only === "notes" && !admin) throw new ToolInputError("The notes are the admins' own; only a project admin can read them here.");
+    const prefs = await readPrefs(session);
+    const fields = only ? [only] : PREF_FIELDS.filter((f) => admin || f !== "notes");
+    return prefsView(prefs, fields, { can_edit: admin });
+  },
+};
+
+const editPreferences: ToolDef = {
+  name: "bpt_edit_preferences",
+  description:
+    `Change this project's translation preferences (the web app's Style page): ${PREF_FIELDS_HELP}. ` +
+    "They are part of every AI draft and check for everyone in the project from then on, so change only what the reviewer asked for, " +
+    "show them the exact new wording, and get a clear yes first. Project admins only; anyone else is refused. " +
+    "Three kinds of change, one kind per field: set (replace a field whole; null or empty clears it), append (add a paragraph at the end of a text field), " +
+    "replace (swap old_text, which must appear exactly once in the field, for new_text; an empty new_text deletes it). " +
+    "Prefer append and replace for instructions_md and common_issues_md, so the rest of the text stays exactly as it is. " +
+    "Pass the version bpt_get_preferences showed; it is saved only if the preferences are still at that version. " +
+    "Returns status applied with the new version and the changed fields' new text (or changed_left_out when too long), " +
+    "or status conflict when someone changed them since: nothing was saved, so read them again and ask. " +
+    "A request is limited to about 64 KB, so add very long text in several appends. " +
+    "Saving starts an update of what AI drafts are told; the next drafts use the new wording once it finishes. Errors change nothing.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      version: { type: "integer", minimum: 0, description: "The version exactly as bpt_get_preferences showed it" },
+      set: {
+        type: "object",
+        description: "Fields to replace whole",
+        properties: {
+          ...Object.fromEntries(PREF_TEXT_FIELDS.map((f) => [f, { type: ["string", "null"] }])),
+          register: { type: "string", enum: [...REGISTERS] },
+        },
+        additionalProperties: false,
+      },
+      append: {
+        type: "object",
+        description: "Text to add at the end of a field, as a new paragraph",
+        properties: TEXT_FIELD_PROPS,
+        additionalProperties: false,
+      },
+      replace: {
+        type: "array",
+        maxItems: 20,
+        description: "Exact text swaps, applied in order",
+        items: {
+          type: "object",
+          properties: {
+            field: { type: "string", enum: [...PREF_TEXT_FIELDS] },
+            old_text: { type: "string", description: "Text now in the field, exactly once" },
+            new_text: { type: "string", description: "What replaces it; empty deletes it" },
+          },
+          required: ["field", "old_text", "new_text"],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ["session_token", "version"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const version = intArg(args, "version", { min: 0, required: true })!;
+    const changes = parsePrefsChanges(args);
+    const session = await prefsSession(args, ctx);
+    if (!(await session.isAdmin())) {
+      throw new ToolInputError(
+        `Changing the translation preferences is for project admins only, and ${session.principal.username} is not one here. ${NOT_SAVED}`,
+      );
+    }
+    const current = await readPrefs(session);
+    if (current.version !== version) return prefsConflict(current.version);
+    const next = applyPrefsChanges(current, changes);
+    const { status, body } = await session.sendAsAdmin("PUT", PREFS_PATH, next, version);
+    const b = (body ?? {}) as Record<string, unknown>;
+    if (status === 409 && b.error === "version_mismatch") {
+      return prefsConflict(Number((b.current as Record<string, unknown> | null)?.version ?? 0));
+    }
+    if (status === 403 && b.reason === "not_an_admin") {
+      throw new ToolInputError(`${session.principal.username} is no longer a project admin here. ${NOT_SAVED}`);
+    }
+    if (status === 400 && b.error === "validation_failed") {
+      const issues = (b.issues as { path?: unknown[]; message?: string }[] | undefined) ?? [];
+      const what = issues.map((i) => `${String(i.path?.[0] ?? "?")}: ${i.message ?? "invalid"}`).join("; ");
+      throw new ToolInputError(`BPtranslate refused the change (${what || "invalid"}). ${NOT_SAVED}`);
+    }
+    if (status !== 200) throw new Error(`BPtranslate write ${PREFS_PATH} returned ${status}`);
+    const saved = ((b.prefs ?? {}) as Record<string, unknown>);
+    const changed = Object.keys(next);
+    const values = Object.fromEntries(changed.map((f) => [f, saved[f] ?? null]));
+    const out = { status: "applied", version: saved.version, changed: values };
+    if (getRowBytes(out) <= PREFS_RESULT_BUDGET) return out;
+    return { status: "applied", version: saved.version, changed_left_out: changed };
+  },
+};
+
 // ── AI draft from chat (issue #670 part b) ──────────────────────────────────
 // Starts a translate run for some notes or questions through the same
 // POST /api/pipelines/start the web app uses, as the linked user. Admin-only
@@ -1969,5 +2281,6 @@ const jobStatus: ToolDef = {
 export const TOOLS: ToolDef[] = [
   whoami, linkAccount, listBooks, packageStatus, chunkWork, getRow, chunkList, editRow, approve,
   templatesForRow, editTemplate, approveTemplate, getArticle, editArticle, approveArticle, bulkSetState, draft, jobStatus,
+  getPreferences, editPreferences,
 ];
 
