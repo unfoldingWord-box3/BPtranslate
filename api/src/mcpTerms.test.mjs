@@ -514,6 +514,39 @@ test("DELETE /terms/:id: without If-Match it deletes as before; an unreadable If
   assert.equal(missing.status, 404);
 });
 
+// Issue #804: PATCH and DELETE take only an all-digit id that fits a safe
+// integer, as restore does; parseInt alone read "1abc" and "1.9" as term 1.
+const BAD_IDS = ["abc", "1abc", "1.9", "9".repeat(20), "9".repeat(400)];
+
+test("PATCH /terms/:id: a non-integer or over-long id is a 400 bad_id, and nothing changes", async () => {
+  const { send, table, queued } = fresh();
+  const before = table();
+  for (const raw of BAD_IDS) {
+    const r = await send("PATCH", `/api/translation-memory/terms/${raw}`, { target_term: "changed" }, 3);
+    assert.equal(r.status, 400, `id ${raw}`);
+    assert.equal(r.body.error, "bad_id", `id ${raw}`);
+  }
+  assert.deepEqual(table(), before);
+  await settle();
+  assert.equal(queued.length, 0);
+});
+
+test("DELETE /terms/:id: a non-integer or over-long id is a 400 bad_id, and nothing changes", async () => {
+  const { send, table, queued } = fresh();
+  const before = table();
+  for (const raw of BAD_IDS) {
+    const pinned = await send("DELETE", `/api/translation-memory/terms/${raw}`, undefined, 3);
+    assert.equal(pinned.status, 400, `id ${raw}`);
+    assert.equal(pinned.body.error, "bad_id", `id ${raw}`);
+    const plain = await send("DELETE", `/api/translation-memory/terms/${raw}`);
+    assert.equal(plain.status, 400, `id ${raw}, no If-Match`);
+    assert.equal(plain.body.error, "bad_id", `id ${raw}, no If-Match`);
+  }
+  assert.deepEqual(table(), before);
+  await settle();
+  assert.equal(queued.length, 0);
+});
+
 test("GET /terms: an unknown status is a 400 and returns no terms; an empty one is no filter", async () => {
   const { send } = fresh();
   const bad = await send("GET", "/api/translation-memory/terms?status=bogus");

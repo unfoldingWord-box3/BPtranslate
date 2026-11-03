@@ -459,10 +459,19 @@ translationMemory.post("/terms", requireEditor, async (c) => {
   return c.json(row, 201);
 });
 
+// A term id from the path, or null. Digits only: parseInt would read "1abc"
+// and "1.9" as term 1. A digit string too long for an exact integer (or for a
+// number at all, which parses to Infinity) is not a term id either.
+function parseTermId(raw: string): number | null {
+  if (!/^\d+$/.test(raw)) return null;
+  const id = parseInt(raw, 10);
+  return Number.isSafeInteger(id) ? id : null;
+}
+
 // PATCH /terms/:id — If-Match version CAS.
 translationMemory.patch("/terms/:id", requireEditor, async (c) => {
-  const id = parseInt(c.req.param("id"), 10);
-  if (!Number.isFinite(id)) return c.json({ error: "bad_id" }, 400);
+  const id = parseTermId(c.req.param("id"));
+  if (id == null) return c.json({ error: "bad_id" }, 400);
   const expected = parseIfMatch(c.req.header("If-Match"));
   if (expected == null) return c.json({ error: "if_match_required" }, 428);
   let body: unknown;
@@ -561,8 +570,8 @@ translationMemory.patch("/terms/:id", requireEditor, async (c) => {
 // only happens if the term is still at that version (409 version_mismatch +
 // current, as PATCH answers); without it the delete is unpinned, as before.
 translationMemory.delete("/terms/:id", requireEditor, async (c) => {
-  const id = parseInt(c.req.param("id"), 10);
-  if (!Number.isFinite(id)) return c.json({ error: "bad_id" }, 400);
+  const id = parseTermId(c.req.param("id"));
+  if (id == null) return c.json({ error: "bad_id" }, 400);
   const header = c.req.header("If-Match");
   const expected = parseIfMatch(header);
   // A header that is present but empty or unreadable must not quietly become
@@ -596,13 +605,8 @@ translationMemory.delete("/terms/:id", requireEditor, async (c) => {
 // later edit someone else deleted. Terms are not written to edit_log, so
 // neither is a restore.
 translationMemory.post("/terms/:id/restore", requireEditor, async (c) => {
-  // Digits only: parseInt would read "1abc" as term 1.
-  const rawId = c.req.param("id");
-  if (!/^\d+$/.test(rawId)) return c.json({ error: "bad_id" }, 400);
-  const id = parseInt(rawId, 10);
-  // A digit string too long for an exact integer (or for a number at all,
-  // which parses to Infinity) is not a term id either.
-  if (!Number.isSafeInteger(id)) return c.json({ error: "bad_id" }, 400);
+  const id = parseTermId(c.req.param("id"));
+  if (id == null) return c.json({ error: "bad_id" }, 400);
   const header = c.req.header("If-Match");
   const expected = parseIfMatch(header);
   if (header != null && expected == null) return c.json({ error: "invalid_if_match" }, 400);
