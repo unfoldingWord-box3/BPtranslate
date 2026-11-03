@@ -228,7 +228,7 @@ test("bpt_delete_term: an admin's delete soft-deletes the term, and it leaves th
   const { call, term } = fresh();
   const r = await call("bpt_delete_term", { id: 3, version: 2 });
   assert.equal(r.isError, false, JSON.stringify(r.data));
-  assert.deepEqual(r.data, { status: "deleted", id: 3 });
+  assert.deepEqual(r.data, { status: "deleted", id: 3, version: 2 });
   assert.ok(term(3).deleted_at, "soft-deleted, as the web app deletes");
   const list = await call("bpt_list_terms", {});
   assert.deepEqual(list.data.terms.map((t) => t.id), [2, 1]);
@@ -574,7 +574,7 @@ test("POST /terms/:id/restore: a live term is 409 not_deleted, an unknown id 404
   assert.equal(live.body.current.id, 1);
   assert.equal(live.body.current.version, 3);
   assert.equal((await send("POST", RESTORE(99))).status, 404);
-  for (const raw of ["abc", "1abc", "1.9"]) {
+  for (const raw of ["abc", "1abc", "1.9", "9".repeat(400)]) {
     const bad = await send("POST", RESTORE(raw));
     assert.equal(bad.status, 400, `id ${raw}`);
     assert.equal(bad.body.error, "bad_id");
@@ -666,7 +666,9 @@ test("bpt_restore_term: a version other than the deleted one is a conflict with 
   assert.equal(r.isError, false, JSON.stringify(r.data));
   assert.equal(r.data.status, "conflict");
   assert.equal(r.data.current.version, 3);
+  assert.equal(r.data.current.deleted, true, "the conflict says the term is still deleted");
   assert.match(r.data.message, /nothing was restored/);
+  assert.match(r.data.message, /still deleted/);
   assert.deepEqual(table(), before);
   const noVersion = await call("bpt_restore_term", { id: 1 });
   assert.equal(noVersion.isError, true);

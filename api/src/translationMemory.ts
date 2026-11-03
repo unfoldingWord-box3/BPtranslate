@@ -600,6 +600,9 @@ translationMemory.post("/terms/:id/restore", requireEditor, async (c) => {
   const rawId = c.req.param("id");
   if (!/^\d+$/.test(rawId)) return c.json({ error: "bad_id" }, 400);
   const id = parseInt(rawId, 10);
+  // A digit string too long for an exact integer (or for a number at all,
+  // which parses to Infinity) is not a term id either.
+  if (!Number.isSafeInteger(id)) return c.json({ error: "bad_id" }, 400);
   const header = c.req.header("If-Match");
   const expected = parseIfMatch(header);
   if (header != null && expected == null) return c.json({ error: "invalid_if_match" }, 400);

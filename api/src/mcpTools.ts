@@ -2781,7 +2781,7 @@ const deleteTerm: ToolDef = {
     "Project admins only; anyone else is refused. Show the reviewer the term (bpt_list_terms) and get a clear yes first. " +
     "Pass the id and version bpt_list_terms showed; it is deleted only if the term is still at that version. " +
     "To undo it, pass the same id and version to bpt_restore_term (adding it again with bpt_add_term would make a new term). " +
-    "Returns status deleted with the id, or status conflict with the term as it is now when someone changed it since: nothing was deleted, so show the reviewer and ask. " +
+    "Returns status deleted with the id and version (bpt_restore_term needs both, and a deleted term no longer shows in bpt_list_terms), or status conflict with the term as it is now when someone changed it since: nothing was deleted, so show the reviewer and ask. " +
     "Errors change nothing.",
   inputSchema: {
     type: "object",
@@ -2805,7 +2805,7 @@ const deleteTerm: ToolDef = {
     const refused = termRefusal(code, body, id);
     if (refused) throw refused;
     if (code !== 200) throw new Error(`BPtranslate write ${path} returned ${code}`);
-    return { status: "deleted", id };
+    return { status: "deleted", id, version };
   },
 };
 
@@ -2822,7 +2822,7 @@ const restoreTerm: ToolDef = {
     properties: {
       session_token: SESSION_TOKEN_SCHEMA,
       id: { type: "integer", minimum: 1, description: "The deleted term's id, as bpt_delete_term returned it" },
-      version: { type: "integer", minimum: 1, description: "The version passed to bpt_delete_term for this term" },
+      version: { type: "integer", minimum: 1, description: "The deleted term's version, as bpt_delete_term returned it" },
     },
     required: ["session_token", "id", "version"],
     additionalProperties: false,
@@ -2836,7 +2836,16 @@ const restoreTerm: ToolDef = {
     const { status: code, body } = await session.send("POST", path, undefined, version);
     const b = (body ?? {}) as Record<string, unknown>;
     if (code === 404) throw new ToolInputError(`There is no term with id ${id} in this project. ${NOT_SAVED}`);
-    if (code === 409 && b.error === "version_mismatch") return termConflict(b.current, "Nothing was restored.");
+    // The route only answers version_mismatch for a term that is still
+    // deleted, so say so: current is not in bpt_list_terms.
+    if (code === 409 && b.error === "version_mismatch") {
+      return {
+        status: "conflict",
+        current: { ...termView(b.current), deleted: true },
+        message:
+          "Someone restored, changed and deleted this term again since, so nothing was restored. It is still deleted: current shows it as it is now, and it is not in bpt_list_terms. Show the reviewer and ask before trying again with its version.",
+      };
+    }
     if (code === 409 && b.error === "not_deleted") {
       throw new ToolInputError(`Term ${id} is not deleted, so there is nothing to restore; bpt_list_terms shows it. ${NOT_SAVED}`);
     }
