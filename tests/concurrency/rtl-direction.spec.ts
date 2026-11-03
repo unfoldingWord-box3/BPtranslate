@@ -9,6 +9,7 @@ import {
   type BrowserContext,
   type Locator,
   type Page,
+  type Route,
 } from "@playwright/test";
 import { fetchChapter, mintToken, newUserContext } from "./helpers";
 import { RTL_FIXTURE } from "./global-setup";
@@ -191,6 +192,28 @@ async function expectRtlWordOrder(scope: Locator, label: string): Promise<void> 
 }
 
 /**
+ * Wrap a page.route handler so a request still in flight when the test closes
+ * its context ends quietly instead of failing the test. One page load sends
+ * GET /api/project-config more than once (each useProjectConfig /
+ * useWorkflowLayouts mount calls load(), which only reuses a fetch still in
+ * flight), and the later GET can still be inside route.fetch() when the last
+ * assertion passes and the test calls context.close(). Playwright then reports
+ * "route.fetch: Target page, context or browser has been closed" from the
+ * callback, sometimes against the next test (#776). Any other error, or any
+ * error while the page is still open, still fails the test.
+ */
+function closeTolerant(page: Page, handler: (route: Route) => Promise<unknown>) {
+  return async (route: Route): Promise<void> => {
+    try {
+      await handler(route);
+    } catch (err) {
+      if (page.isClosed() || /Target page, context or browser has been closed/.test(String(err))) return;
+      throw err;
+    }
+  };
+}
+
+/**
  * Serve this page's GET /api/project-config with the real response patched —
  * by default to an Arabic (RTL) target project. The shared DB row stays
  * `en-unfoldingword`, so no other spec sees the switch.
@@ -199,18 +222,21 @@ async function patchProjectConfig(
   page: Page,
   patch: Record<string, unknown> = { direction: "rtl" },
 ): Promise<void> {
-  await page.route("**/api/project-config", async (route) => {
-    if (route.request().method() !== "GET") return route.continue();
-    const res = await route.fetch();
-    // A failed config read would otherwise surface as a confusing JSON error
-    // (or a silently unpatched LTR project); name the status instead.
-    if (!res.ok()) {
-      throw new Error(`GET /api/project-config returned ${res.status()}: ${await res.text()}`);
-    }
-    const json = await res.json();
-    json.config = { ...json.config, ...patch };
-    return route.fulfill({ response: res, json });
-  });
+  await page.route(
+    "**/api/project-config",
+    closeTolerant(page, async (route) => {
+      if (route.request().method() !== "GET") return route.continue();
+      const res = await route.fetch();
+      // A failed config read would otherwise surface as a confusing JSON error
+      // (or a silently unpatched LTR project); name the status instead.
+      if (!res.ok()) {
+        throw new Error(`GET /api/project-config returned ${res.status()}: ${await res.text()}`);
+      }
+      const json = await res.json();
+      json.config = { ...json.config, ...patch };
+      return route.fulfill({ response: res, json });
+    }),
+  );
 }
 
 /**
@@ -527,14 +553,17 @@ test.describe("RTL paint on Arabic surfaces (#486)", () => {
     await blockDoor43(page);
     let release!: () => void;
     const held = new Promise<void>((r) => (release = r));
-    await page.route("**/api/project-config", async (route) => {
-      if (route.request().method() !== "GET") return route.continue();
-      await held;
-      const res = await route.fetch();
-      const json = await res.json();
-      json.config = { ...json.config, ...RTL_PROJECT };
-      return route.fulfill({ response: res, json });
-    });
+    await page.route(
+      "**/api/project-config",
+      closeTolerant(page, async (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        await held;
+        const res = await route.fetch();
+        const json = await res.json();
+        json.config = { ...json.config, ...RTL_PROJECT };
+        return route.fulfill({ response: res, json });
+      }),
+    );
     await page.goto(`/#/verse/${V}`);
     const spinner = page.getByRole("status").filter({ hasText: enUi("flowVerse.verse.directionLoading") });
     await expect(spinner).toBeVisible({ timeout: 15_000 });
@@ -557,14 +586,17 @@ test.describe("RTL paint on Arabic surfaces (#486)", () => {
     await page.setViewportSize({ width: 1280, height: 900 });
     await blockDoor43(page);
     let offline = true;
-    await page.route("**/api/project-config", async (route) => {
-      if (route.request().method() !== "GET") return route.continue();
-      if (offline) return route.abort("internetdisconnected");
-      const res = await route.fetch();
-      const json = await res.json();
-      json.config = { ...json.config, ...RTL_PROJECT };
-      return route.fulfill({ response: res, json });
-    });
+    await page.route(
+      "**/api/project-config",
+      closeTolerant(page, async (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        if (offline) return route.abort("internetdisconnected");
+        const res = await route.fetch();
+        const json = await res.json();
+        json.config = { ...json.config, ...RTL_PROJECT };
+        return route.fulfill({ response: res, json });
+      }),
+    );
     await page.goto(`/#/verse/${V}`);
     const alert = page.getByRole("alert").filter({ hasText: enUi("flowVerse.verse.directionLoadFailed") });
     await expect(alert).toBeVisible({ timeout: 15_000 });
@@ -584,14 +616,17 @@ test.describe("RTL paint on Arabic surfaces (#486)", () => {
     await page.setViewportSize({ width: 1280, height: 900 });
     await blockDoor43(page);
     let offline = true;
-    await page.route("**/api/project-config", async (route) => {
-      if (route.request().method() !== "GET") return route.continue();
-      if (offline) return route.abort("internetdisconnected");
-      const res = await route.fetch();
-      const json = await res.json();
-      json.config = { ...json.config, ...RTL_PROJECT };
-      return route.fulfill({ response: res, json });
-    });
+    await page.route(
+      "**/api/project-config",
+      closeTolerant(page, async (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        if (offline) return route.abort("internetdisconnected");
+        const res = await route.fetch();
+        const json = await res.json();
+        json.config = { ...json.config, ...RTL_PROJECT };
+        return route.fulfill({ response: res, json });
+      }),
+    );
     await page.goto(`/#/verse/${V}`);
     const alert = page.getByRole("alert").filter({ hasText: enUi("flowVerse.verse.directionLoadFailed") });
     await expect(alert).toBeVisible({ timeout: 15_000 });
@@ -762,14 +797,17 @@ async function openWithHeldConfig(
   await blockDoor43(page);
   let release!: () => void;
   const held = new Promise<void>((r) => (release = r));
-  await page.route("**/api/project-config", async (route) => {
-    if (route.request().method() !== "GET") return route.continue();
-    await held;
-    const res = await route.fetch();
-    const json = await res.json();
-    json.config = { ...json.config, ...RTL_PROJECT };
-    return route.fulfill({ response: res, json });
-  });
+  await page.route(
+    "**/api/project-config",
+    closeTolerant(page, async (route) => {
+      if (route.request().method() !== "GET") return route.continue();
+      await held;
+      const res = await route.fetch();
+      const json = await res.json();
+      json.config = { ...json.config, ...RTL_PROJECT };
+      return route.fulfill({ response: res, json });
+    }),
+  );
   await page.goto(hash);
   return { page, release };
 }
@@ -898,14 +936,17 @@ test.describe("RTL target lanes wait for the project config (#728)", () => {
     await page.setViewportSize(DESK);
     await blockDoor43(page);
     let offline = true;
-    await page.route("**/api/project-config", async (route) => {
-      if (route.request().method() !== "GET") return route.continue();
-      if (offline) return route.abort("internetdisconnected");
-      const res = await route.fetch();
-      const json = await res.json();
-      json.config = { ...json.config, ...RTL_PROJECT };
-      return route.fulfill({ response: res, json });
-    });
+    await page.route(
+      "**/api/project-config",
+      closeTolerant(page, async (route) => {
+        if (route.request().method() !== "GET") return route.continue();
+        if (offline) return route.abort("internetdisconnected");
+        const res = await route.fetch();
+        const json = await res.json();
+        json.config = { ...json.config, ...RTL_PROJECT };
+        return route.fulfill({ response: res, json });
+      }),
+    );
     await page.goto(`/#/alignment/${V}`);
     const alert = page.getByRole("alert").filter({ hasText: enUi("flowVerse.verse.directionLoadFailed") });
     await expect(alert).toBeVisible({ timeout: 15_000 });
