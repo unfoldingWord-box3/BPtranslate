@@ -779,10 +779,36 @@ const chunkList: ToolDef = {
 // punctuation usfm-js parks on a marker's own text, and footnotes and cross
 // references (nodes that carry only content) left out. Paged by verse at
 // PAGE_BYTE_BUDGET, like bpt_chunk_work, so a long chapter is never cut off.
+// readingNodes runs first, for two things derivePlainText does not do (it also
+// feeds the locked-lane save, so it is left alone here).
+
+// Headings and other titles. usfm-js parks a heading at the end of the verse
+// BEFORE the one it heads, so its text would land on the wrong verse. \d (a
+// Psalm superscription) is scripture and stays.
+const HEADING_TAG = /^(s\d*|ms\d*|mr|r|qa|sp)$/;
+
+// Drops headings, and turns the nextChar of a node with no text of its own
+// (usfm-js keeps the space after \x* there) back into text, so the words on
+// either side of a cross reference or footnote are not glued together.
+function readingNodes(nodes: unknown[]): unknown[] {
+  const out: unknown[] = [];
+  for (const n of nodes) {
+    if (!n || typeof n !== "object") continue;
+    const o = n as Record<string, unknown>;
+    if (typeof o.tag === "string" && HEADING_TAG.test(o.tag)) continue;
+    out.push(Array.isArray(o.children) ? { ...o, children: readingNodes(o.children) } : o);
+    if (typeof o.text !== "string" && typeof o.nextChar === "string") out.push({ type: "text", text: o.nextChar });
+  }
+  return out;
+}
+
+const verseText = (content: VerseEntry["content"]) =>
+  derivePlainText({ verseObjects: readingNodes(content?.verseObjects ?? []) });
+
 const getVerses: ToolDef = {
   name: "bpt_get_verses",
   description:
-    "The verse text of one chapter of this project's translation, as plain text (USFM markers, word alignment and footnotes removed), to read a note or question beside the verse it is about. Reads ULT, the project's literal text, by default; if ULT is not available it reads UST, then the source text (UHB or UGNT), and the note says so. lane always names the text that was read; pass lane (e.g. UST) to read another. A bridged verse (\\v 9-10) comes back once, with verse_end. Results are paged: if next_verse_start is not null, call again with verse_start set to it (and the same verse_end) for the rest; never call a range complete until next_verse_start is null. A verse marked truncated had its text cut.",
+    "The verse text of one chapter of this project's translation, as plain text (USFM markers, word alignment, footnotes, cross references and section headings removed), to read a note or question beside the verse it is about. Reads ULT, the project's literal text, by default; if ULT is not available it reads UST, then the source text (UHB or UGNT), and the note says so. lane always names the text that was read; pass lane (e.g. UST) to read another. A bridged verse (\\v 9-10) comes back once, with verse_end. Results are paged: if next_verse_start is not null, call again with verse_start set to it (and the same verse_end) for the rest; never call a range complete until next_verse_start is null. A verse marked truncated had its text cut.",
   inputSchema: {
     type: "object",
     properties: {
@@ -835,7 +861,7 @@ const getVerses: ToolDef = {
     let i = 0;
     for (; i < units.length; i++) {
       const { v, start, end } = units[i];
-      const { text, cut } = capText(derivePlainText(v.content), ROW_TEXT_CAP);
+      const { text, cut } = capText(verseText(v.content), ROW_TEXT_CAP);
       const item = { verse: start, ...(end > start ? { verse_end: end } : {}), text, ...(cut ? { truncated: true as const } : {}) };
       const size = byteLength(item);
       // Always return at least one verse, or paging would never move.

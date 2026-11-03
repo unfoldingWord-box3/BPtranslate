@@ -61,6 +61,20 @@ const UHB_TIT1 = laneFrom("\\p\n\\v 1 Παῦλος δοῦλος θεοῦ\n\\v
 const LONG = laneFrom(
   Array.from({ length: 60 }, (_, i) => `\\v ${i + 1} ${"ب".repeat(399)}${i + 1}`).join("\n"),
 );
+// Unaligned text: a footnote and a cross reference followed by plain text
+// (usfm-js keeps the space after \f* / \x* on the note node as nextChar), and
+// headings that usfm-js parks at the end of the verse BEFORE the one they head.
+const NOTES_AND_HEADINGS = laneFrom(
+  [
+    "\\p",
+    "\\v 1 Grace\\f + \\ft Or: favor.\\f* to you, and\\x - \\xo 1:1 \\xt Gen 1:1\\x* peace.",
+    "\\qa BETH",
+    "\\s1 A section heading",
+    "\\v 2 Next verse.",
+    "\\d A superscription",
+    "\\v 3 Last.",
+  ].join("\n"),
+);
 // One verse longer than a row may be on its own.
 const HUGE = laneFrom(`\\v 1 ${"x".repeat(ROW_TEXT_CAP + 500)}`);
 
@@ -71,6 +85,7 @@ const CHAPTERS = {
   "/api/chapters/TIT/4": { verses: {} }, // nothing
   "/api/chapters/TIT/5": { verses: { ULT: LONG } },
   "/api/chapters/TIT/6": { verses: { ULT: HUGE } },
+  "/api/chapters/TIT/7": { verses: { ULT: NOTES_AND_HEADINGS } },
 };
 
 const calls = [];
@@ -130,6 +145,18 @@ test("ULT text as plain text: alignment and footnotes gone, quotes and punctuati
   assert.equal(r.data.returned, 4);
   assert.deepEqual(calls.at(-1), "/api/chapters/TIT/1", "one read of the chapter route");
   assert.ok(!/zaln|\\w|\\f|footnote|slave/.test(r.wire), "no USFM, alignment or footnote text on the wire");
+});
+
+test("the space after a footnote or cross reference survives; headings are left out, \\d is kept", async () => {
+  const r = await call({ book: "TIT", chapter: 7 });
+  assert.deepEqual(r.data.verses, [
+    // Without nextChar this read "Graceto you, andpeace.", and without
+    // dropping headings it ended "... peace. BETH A section heading".
+    { verse: 1, text: "Grace to you, and peace." },
+    // The \d superscription is scripture; usfm-js parks it on verse 2.
+    { verse: 2, text: "Next verse. A superscription" },
+    { verse: 3, text: "Last." },
+  ]);
 });
 
 test("a range: a bridged verse overlapping it is returned whole, once", async () => {
