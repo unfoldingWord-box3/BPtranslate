@@ -2231,7 +2231,9 @@ function historyEntryView(e: Record<string, unknown>): { view: Record<string, un
       for (const side of ["prev", "new"] as const) {
         const text = ch?.[side] ?? null;
         if (typeof text === "string" && text.length > HISTORY_VALUE_CHARS) {
-          v[side] = text.slice(0, HISTORY_VALUE_CHARS);
+          // Not between the two halves of a character outside the BMP.
+          const keep = /[\uD800-\uDBFF]/.test(text[HISTORY_VALUE_CHARS - 1]) ? HISTORY_VALUE_CHARS - 1 : HISTORY_VALUE_CHARS;
+          v[side] = text.slice(0, keep);
           v[`${side}_total_chars`] = text.length;
           cut = true;
         } else {

@@ -466,6 +466,12 @@ test("bpt_get_preferences_history: long values come back cut, with their full le
   assert.equal(ch.new, huge.slice(0, 300));
   assert.equal(ch.new_total_chars, huge.length);
   assert.match(r.data.cut_note, /Style page, History/);
+  // A cut never splits a character outside the BMP in two.
+  const emoji = `${"a".repeat(299)}😀${"b".repeat(50)}`;
+  assert.equal((await webPut({ audience: emoji }, 6)).status, 200);
+  const e = (await call("bpt_get_preferences_history", { limit: 1 })).data.entries[0].changed.audience;
+  assert.equal(e.new, "a".repeat(299));
+  assert.equal(e.new_total_chars, emoji.length);
 });
 
 test("bpt_get_preferences_history: limit and before page through the entries", async () => {
