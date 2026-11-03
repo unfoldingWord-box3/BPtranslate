@@ -1923,16 +1923,21 @@ const PREF_FIELDS_HELP =
 
 type SendFn = (method: string, path: string, body?: unknown, ifMatch?: number) => Promise<{ status: number; body: unknown }>;
 
+const PREFS_HISTORY_PATH = `${PREFS_PATH}/history`;
+
 // The only routes a chat tool may call with the user's admin role. Each is
 // admin-only in the web app too; adding one is a decision, not a reuse.
-export const CHAT_ADMIN_ROUTES: ReadonlySet<string> = new Set([`PUT ${PREFS_PATH}`]);
+// GET /prefs/history (#798) is read-only.
+export const CHAT_ADMIN_ROUTES: ReadonlySet<string> = new Set([`PUT ${PREFS_PATH}`, `GET ${PREFS_HISTORY_PATH}`]);
 
 // Builds session.sendAsAdmin (index.ts): refuses a route not listed above,
 // re-reads the real role on every call, and answers the route's own 403
-// shape, without calling it, for a user who is not an admin now.
+// shape, without calling it, for a user who is not an admin now. The route
+// is matched exactly on the path before any query string (the history read
+// pages with ?limit=&before=).
 export function adminSender(isAdmin: () => Promise<boolean>, sendAsAdminRole: SendFn): SendFn {
   return async (method, path, body, ifMatch) => {
-    if (!CHAT_ADMIN_ROUTES.has(`${method} ${path}`)) throw new Error(`sendAsAdmin does not allow ${method} ${path}`);
+    if (!CHAT_ADMIN_ROUTES.has(`${method} ${path.split("?")[0]}`)) throw new Error(`sendAsAdmin does not allow ${method} ${path}`);
     if (!(await isAdmin())) return { status: 403, body: { error: "forbidden", reason: "not_an_admin" } };
     return sendAsAdminRole(method, path, body, ifMatch);
   };
@@ -2201,6 +2206,121 @@ const editPreferences: ToolDef = {
     const out = { status: "applied", version: saved.version, changed: values };
     if (getRowBytes(out) <= PREFS_RESULT_BUDGET) return out;
     return { status: "applied", version: saved.version, changed_left_out: changed };
+  },
+};
+
+// ── Translation preferences history (issue #798) ────────────────────────────
+// Who changed the preferences, when, from where, and what each save changed:
+// GET /api/translation-memory/prefs/history (#788), admin-only in the web app,
+// so read through sendAsAdmin. Read-only: restoring stays in the web app.
+
+const MAX_HISTORY_PAGE = 50;
+const DEFAULT_HISTORY_PAGE = 10;
+// A stored value can be 50,000 characters, twice per field; each is cut to
+// this many so one call cannot fill the model's context.
+const HISTORY_VALUE_CHARS = 300;
+
+function historyEntryView(e: Record<string, unknown>): { view: Record<string, unknown>; cut: boolean } {
+  let cut = false;
+  // null: the route could not read the stored change; kept null, not {}.
+  let changed: Record<string, Record<string, unknown>> | null = null;
+  if (e.changed && typeof e.changed === "object") {
+    changed = {};
+    for (const [f, ch] of Object.entries(e.changed as Record<string, { prev?: unknown; new?: unknown } | null>)) {
+      const v: Record<string, unknown> = {};
+      for (const side of ["prev", "new"] as const) {
+        const text = ch?.[side] ?? null;
+        if (typeof text === "string" && text.length > HISTORY_VALUE_CHARS) {
+          v[side] = text.slice(0, HISTORY_VALUE_CHARS);
+          v[`${side}_total_chars`] = text.length;
+          cut = true;
+        } else {
+          v[side] = text;
+        }
+      }
+      changed[f] = v;
+    }
+  }
+  const created = Number(e.created_at);
+  return {
+    view: {
+      version: e.new_version,
+      username: e.username ?? null,
+      at: Number.isFinite(created) ? new Date(created * 1000).toISOString() : null,
+      // The route stores null for the web app.
+      source: e.source ?? "web",
+      changed,
+    },
+    cut,
+  };
+}
+
+const getPreferencesHistory: ToolDef = {
+  name: "bpt_get_preferences_history",
+  description:
+    "Who changed this project's translation preferences (the web app's Style page), when, and what each save changed, newest first. Project admins only; anyone else is refused. " +
+    "Each entry has version (the version that save made), username, at (ISO date and time), source (web or chat) and changed: for each field the save changed, its prev and new text. " +
+    `changed is {} for a save that changed nothing, and null when the stored change cannot be read. Text longer than ${HISTORY_VALUE_CHARS} characters is cut to its first ${HISTORY_VALUE_CHARS}, with prev_total_chars or new_total_chars giving the full length; ` +
+    "bpt_get_preferences reads the current text in full. Paged: if next is not null, call again with before set to it for older entries. " +
+    "There is no restore tool: to put back an earlier version, send the reviewer to the web app's Style page, History. Translation projects only. Read-only.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      before: { type: "integer", minimum: 1, description: "next from the previous call, for older entries" },
+      limit: { type: "integer", minimum: 1, maximum: MAX_HISTORY_PAGE, description: `Most entries (default ${DEFAULT_HISTORY_PAGE})` },
+    },
+    required: ["session_token"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const limit = Math.min(intArg(args, "limit", { min: 1 }) ?? DEFAULT_HISTORY_PAGE, MAX_HISTORY_PAGE);
+    // Not intArg: before is an edit_log id, shared by every edit in the
+    // project, so it can pass intArg's 999,999 ceiling.
+    let before: number | undefined;
+    if (args.before !== undefined && args.before !== null) {
+      const raw = args.before;
+      const n = typeof raw === "string" && /^\d{1,15}$/.test(raw.trim()) ? Number(raw) : raw;
+      if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 1) throw new ToolInputError("before must be the next value a previous call returned");
+      before = n;
+    }
+    const session = await prefsSession(args, ctx);
+    if (!(await session.isAdmin())) {
+      throw new ToolInputError(`The translation preferences history is for project admins only, and ${session.principal.username} is not one here.`);
+    }
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (before !== undefined) params.set("before", String(before));
+    const { status, body } = await session.sendAsAdmin("GET", `${PREFS_HISTORY_PATH}?${params}`);
+    const b = (body ?? {}) as Record<string, unknown>;
+    if (status === 403 && b.reason === "not_an_admin") {
+      throw new ToolInputError(`${session.principal.username} is no longer a project admin here.`);
+    }
+    if (status === 400 && b.error === "invalid_before") throw new ToolInputError("before must be the next value a previous call returned");
+    if (status !== 200) throw new Error(`BPtranslate API ${PREFS_HISTORY_PATH} returned ${status}`);
+    const all = (b.entries as Record<string, unknown>[] | undefined) ?? [];
+    const entries: Record<string, unknown>[] = [];
+    let anyCut = false;
+    let bytes = 0;
+    let i = 0;
+    for (; i < all.length; i++) {
+      const { view, cut } = historyEntryView(all[i]);
+      // Measured as it travels (getRowBytes: mcp.ts encodes the result twice).
+      const size = getRowBytes(view);
+      // Always return at least one entry, or before would never move.
+      if (entries.length > 0 && bytes + size > PREFS_RESULT_BUDGET - 1_000) break;
+      entries.push(view);
+      bytes += size;
+      anyCut ||= cut;
+    }
+    // Stopped early for size: the next page starts after the last entry shown.
+    const next = i < all.length ? Number(all[i - 1].id) : ((b.next as number | null | undefined) ?? null);
+    return {
+      entries,
+      next,
+      ...(anyCut
+        ? { cut_note: `Text over ${HISTORY_VALUE_CHARS} characters is cut; the full text of every version is in the web app's Style page, History.` }
+        : {}),
+    };
   },
 };
 
@@ -2811,6 +2931,6 @@ const deleteTerm: ToolDef = {
 export const TOOLS: ToolDef[] = [
   whoami, linkAccount, listBooks, packageStatus, chunkWork, getRow, chunkList, getVerses, editRow, approve,
   templatesForRow, editTemplate, approveTemplate, getArticle, editArticle, approveArticle, bulkSetState, draft, jobStatus,
-  getPreferences, editPreferences, listTerms, addTerm, editTerm, deleteTerm,
+  getPreferences, getPreferencesHistory, editPreferences, listTerms, addTerm, editTerm, deleteTerm,
 ];
 
