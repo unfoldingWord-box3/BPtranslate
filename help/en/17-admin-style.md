@@ -20,7 +20,7 @@ Use the list on the left to jump to a section. After you change a section, press
 - **Brief:** fill in **Audience**, **Purpose**, **Register** and **Script / direction notes**. Register is how formal the drafts should be: **Default (auto)**, **Formal** or **Informal**.
 - **Instructions:** free text (Markdown) added to every AI drafting and checking request. Use **Preview** to see how it looks.
 - **Common issues:** free text about problems that reviewers flag again and again.
-- **Terminology:** your decisions about terms. You can give a preferred rendering, mark a term as forbidden with what to use instead, or mark it do-not-translate. This section can also import and export a CSV file.
+- **Terminology:** your decisions about terms. You can give a preferred rendering, mark a term as forbidden with what to use instead, or mark it do-not-translate. This section can also import and export a CSV file. After you delete a term, a message at the bottom of the page offers **Undo** for a few seconds. Press it to bring the term back as it was. If someone has added the same term again in the meantime, nothing is restored and the message says so.
 - **Examples:** notes and questions that were approved in the editor. The AI sees them as models of good work. Switch between **Notes** and **Questions**. Press **Revoke** to remove an example. Revoking returns the item to the edited state.
 - **QA rules** and **Templates:** QA rules are listed with **Coming soon**. **Templates** shows how many note templates are translated. Press **Open template curation →** to work on them (see [Note templates](#help:admin-templates)).
 

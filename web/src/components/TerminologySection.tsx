@@ -15,6 +15,7 @@ import {
 } from "@mui/material";
 import { alpha } from "@mui/material/styles";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+import CloseIcon from "@mui/icons-material/Close";
 import AddIcon from "@mui/icons-material/Add";
 import DownloadIcon from "@mui/icons-material/Download";
 import UploadIcon from "@mui/icons-material/Upload";
@@ -110,6 +111,16 @@ function isDuplicateTermError(e: unknown, codelessCountsAsDuplicate = false): bo
   return code === "duplicate_term";
 }
 
+// How a term is named in a message: its rendering, or the source term when it
+// has none.
+function termLabel(term: Term): string {
+  return term.target_term || term.source_term;
+}
+
+// How long the Undo offer stays up after a delete. Longer than the 3 s status
+// messages: it has to outlast reading the message and moving to the button.
+const UNDO_HIDE_MS = 10_000;
+
 export function TerminologySection({ direction }: { direction: "ltr" | "rtl" }) {
   const { t } = useTranslation();
   const [statusFilter, setStatusFilter] = useState<string>("");
@@ -122,6 +133,52 @@ export function TerminologySection({ direction }: { direction: "ltr" | "rtl" }) 
   const [importOpen, setImportOpen] = useState(false);
   const save = useSaveState();
   const groups = useMemo(() => groupTerms(terms), [terms]);
+  // The term the Undo offer would bring back (#801). It lives here, not in
+  // TermRow: the delete refetches the list, which unmounts that row. One
+  // snackbar at a time: a new message replaces the offer, a new delete
+  // replaces the message.
+  const [undo, setUndo] = useState<Term | null>(null);
+  const showMsg = (msg: string) => {
+    setUndo(null);
+    save.setMsg(msg);
+  };
+  const onDeleted = (term: Term) => {
+    save.clear();
+    setUndo(term);
+  };
+
+  const onUndo = async () => {
+    if (!undo) return;
+    const term = undo;
+    setUndo(null);
+    try {
+      // The version the term had when it was deleted (a delete keeps it), so
+      // a late Undo cannot bring back someone else's later edit.
+      await api.restoreTerm(term.id, term.version);
+      save.setMsg(t("preferences.termRestored", { term: termLabel(term) }));
+      refetch();
+    } catch (e) {
+      const body = e instanceof ApiError ? (e.body as { error?: string; current?: Term | null } | null) : null;
+      if (e instanceof ApiError && e.status === 409 && body?.error === "not_deleted") {
+        // Already live again (restored elsewhere): just show it.
+        refetch();
+      } else if (isDuplicateTermError(e)) {
+        // A live term with the same identity was added since the delete.
+        // Nothing changed on the server, so leave the list alone. The
+        // duplicate has the deleted term's identity, so fall back to it if
+        // the server could not name the row.
+        const dup = body?.current ?? term;
+        save.setMsg(t("preferences.restoreDuplicate", { term: termLabel(dup), concept: dup.concept_id }));
+      } else if (e instanceof ApiError && e.status === 409) {
+        // version_mismatch: someone restored, changed and deleted it again.
+        save.setMsg(t("preferences.restoreChanged"));
+      } else if (e instanceof ApiError && e.status === 404) {
+        save.setMsg(t("preferences.restoreGone"));
+      } else {
+        save.setMsg(t("preferences.actionFailed"));
+      }
+    }
+  };
 
   useEffect(() => {
     const h = setTimeout(() => setDebouncedQ(query.trim()), 300);
@@ -155,7 +212,7 @@ export function TerminologySection({ direction }: { direction: "ltr" | "rtl" }) 
       </Typography>
 
       {importOpen && (
-        <ImportPanel onApplied={refetch} onError={() => save.setMsg(t("preferences.actionFailed"))} />
+        <ImportPanel onApplied={refetch} onError={() => showMsg(t("preferences.actionFailed"))} />
       )}
 
       <Stack direction="row" spacing={1} flexWrap="wrap" gap={1}>
@@ -183,7 +240,7 @@ export function TerminologySection({ direction }: { direction: "ltr" | "rtl" }) 
         </TextField>
       </Stack>
 
-      <NewTermRow direction={direction} onCreated={refetch} onError={(msg) => save.setMsg(msg)} />
+      <NewTermRow direction={direction} onCreated={refetch} onError={showMsg} />
 
       {loading && terms.length === 0 ? (
         <CircularProgress size={22} />
@@ -200,12 +257,34 @@ export function TerminologySection({ direction }: { direction: "ltr" | "rtl" }) 
               direction={direction}
               countIsComplete={terms.length < TERMS_PAGE_LIMIT}
               onChanged={refetch}
-              onError={(msg) => save.setMsg(msg)}
+              onDeleted={onDeleted}
+              onError={showMsg}
             />
           ))}
         </Stack>
       )}
       <Snackbar open={!!save.msg} autoHideDuration={3000} onClose={save.clear} message={save.msg ?? ""} />
+      <Snackbar
+        key={undo?.id}
+        open={!!undo}
+        autoHideDuration={UNDO_HIDE_MS}
+        // Ignore clickaway: undoing after re-adding the term by hand means
+        // clicking into the form, and that must not take the offer away.
+        onClose={(_e, reason) => {
+          if (reason !== "clickaway") setUndo(null);
+        }}
+        message={undo ? t("preferences.termDeleted", { term: termLabel(undo) }) : ""}
+        action={
+          <>
+            <Button color="inherit" size="small" onClick={onUndo}>
+              {t("common.undo")}
+            </Button>
+            <IconButton size="small" color="inherit" aria-label={t("common.close")} onClick={() => setUndo(null)}>
+              <CloseIcon fontSize="small" />
+            </IconButton>
+          </>
+        }
+      />
     </Stack>
   );
 }
@@ -332,6 +411,7 @@ function TermConceptGroup({
   direction,
   countIsComplete,
   onChanged,
+  onDeleted,
   onError,
 }: {
   group: TermGroup;
@@ -341,6 +421,7 @@ function TermConceptGroup({
   // asserting a number that may be short.
   countIsComplete: boolean;
   onChanged: () => void;
+  onDeleted: (term: Term) => void;
   onError: (msg: string) => void;
 }) {
   const { t } = useTranslation();
@@ -383,6 +464,7 @@ function TermConceptGroup({
             term={term}
             direction={direction}
             onChanged={onChanged}
+            onDeleted={onDeleted}
             onError={onError}
           />
         ))}
@@ -530,11 +612,15 @@ function TermRow({
   term,
   direction,
   onChanged,
+  onDeleted,
   onError,
 }: {
   term: Term;
   direction: "ltr" | "rtl";
   onChanged: () => void;
+  // Called after a successful delete with the term as it was, so the section
+  // can offer Undo.
+  onDeleted: (term: Term) => void;
   onError: (msg: string) => void;
 }) {
   const { t } = useTranslation();
@@ -592,6 +678,7 @@ function TermRow({
     setBusy(true);
     try {
       await api.deleteTerm(term.id, term.version);
+      onDeleted(term);
       onChanged();
     } catch (e) {
       // Someone else changed this term after it was shown: nothing was

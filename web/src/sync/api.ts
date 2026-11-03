@@ -2328,6 +2328,17 @@ export const api = {
       method: "DELETE",
       ...(expectedVersion !== undefined ? { headers: { "If-Match": String(expectedVersion) } } : {}),
     }),
+  // Undo a soft delete (#801): same id comes back, version + 1. Send the
+  // version the term had when it was deleted (a delete does not change it), so
+  // a late Undo cannot bring back a later edit that someone else restored,
+  // changed and deleted again (409 `version_mismatch`). Other 409s:
+  // `duplicate_term` (a live term with the same identity exists) and
+  // `not_deleted` (already live). 404 when the id is gone.
+  restoreTerm: (id: number, expectedVersion: number) =>
+    request<Term>(`/api/translation-memory/terms/${id}/restore`, {
+      method: "POST",
+      headers: { "If-Match": String(expectedVersion) },
+    }),
   importTerms: (csvText: string, dryRun: boolean) =>
     request<TermImportResult>(`/api/translation-memory/terms/import${dryRun ? "?dryRun=1" : ""}`, {
       method: "POST",
