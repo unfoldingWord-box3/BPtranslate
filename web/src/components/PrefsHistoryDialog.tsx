@@ -271,7 +271,9 @@ function EntryCard({
   onRestore: () => void;
 }) {
   const { t } = useTranslation();
-  const fields = PREFS_HISTORY_FIELDS.filter((f) => entry.changed?.[f]);
+  // Key presence, not truthiness: a stored null/garbage change must still show
+  // (as "unreadable" in FieldDiff), not vanish as "no changes".
+  const fields = PREFS_HISTORY_FIELDS.filter((f) => entry.changed != null && Object.hasOwn(entry.changed, f));
   return (
     <Box
       data-testid="prefs-history-entry"
