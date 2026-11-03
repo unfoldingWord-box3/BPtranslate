@@ -298,12 +298,15 @@ translationMemory.get("/prefs/history", requireAdmin, async (c) => {
   const rows = results ?? [];
   const page = rows.slice(0, limit);
   const entries = page.map(({ payload_json, ...e }) => {
-    let changed: Record<string, { prev: string | null; new: string | null }> = {};
+    // null = the stored change can't be read. The list still shows the entry,
+    // and the client refuses to rebuild across it rather than treat it as
+    // "nothing changed".
+    let changed: Record<string, { prev: string | null; new: string | null }> | null = null;
     try {
       const p = payload_json ? JSON.parse(payload_json) : null;
-      if (p && typeof p.changed === "object" && p.changed !== null) changed = p.changed;
+      if (p && typeof p.changed === "object" && p.changed !== null && !Array.isArray(p.changed)) changed = p.changed;
     } catch {
-      // A garbled payload shows as "no changes" rather than failing the list.
+      // left null
     }
     return { ...e, changed };
   });

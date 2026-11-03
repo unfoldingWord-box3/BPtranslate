@@ -589,7 +589,9 @@
       "instructions_md": "Instructions",
       "common_issues_md": "Common issues",
       "notes": "Notes"
-    }
+    },
+    "restoreVersion": "Restore version {{version}}",
+    "unreadable": "This change could not be read. Versions older than it can't be restored."
   },
   "export": {
     "noText": "No {{version}} text to export for {{target}}.",

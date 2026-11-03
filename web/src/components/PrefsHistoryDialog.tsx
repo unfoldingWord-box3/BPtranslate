@@ -72,6 +72,13 @@ function PrefsHistoryDialog({ onClose, apply, onRestored }: Props & { onClose: (
   const [error, setError] = useState(false);
   const [msg, setMsg] = useState<{ severity: "success" | "warning" | "error"; text: string } | null>(null);
   const [confirm, setConfirm] = useState<number | null>(null);
+  // The version the confirm dialog names; kept after it closes so the title
+  // doesn't flash "version 0" during the close animation.
+  const [shownTarget, setShownTarget] = useState(0);
+  const ask = (v: number) => {
+    setShownTarget(v);
+    setConfirm(v);
+  };
   const [restoring, setRestoring] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
 
@@ -181,8 +188,8 @@ function PrefsHistoryDialog({ onClose, apply, onRestored }: Props & { onClose: (
               entry={e}
               isCurrent={e.new_version === currentVersion}
               canRestore={restorable.has(e.new_version) && e.new_version !== currentVersion}
-              busy={restoring}
-              onRestore={() => setConfirm(e.new_version)}
+              busy={restoring || loading}
+              onRestore={() => ask(e.new_version)}
             />
           ))}
           {beforeOldest !== null && (
@@ -195,8 +202,9 @@ function PrefsHistoryDialog({ onClose, apply, onRestored }: Props & { onClose: (
                 <Button
                   size="small"
                   startIcon={<RestoreIcon />}
-                  disabled={restoring}
-                  onClick={() => setConfirm(beforeOldest)}
+                  disabled={restoring || loading}
+                  aria-label={t("prefsHistory.restoreVersion", { version: beforeOldest })}
+                  onClick={() => ask(beforeOldest)}
                 >
                   {t("prefsHistory.restore")}
                 </Button>
@@ -218,9 +226,9 @@ function PrefsHistoryDialog({ onClose, apply, onRestored }: Props & { onClose: (
       </DialogActions>
 
       <Dialog open={confirm !== null} onClose={() => setConfirm(null)} aria-labelledby="prefs-restore-title">
-        <DialogTitle id="prefs-restore-title">{t("prefsHistory.confirmTitle", { version: confirm ?? 0 })}</DialogTitle>
+        <DialogTitle id="prefs-restore-title">{t("prefsHistory.confirmTitle", { version: shownTarget })}</DialogTitle>
         <DialogContent>
-          <DialogContentText>{t("prefsHistory.confirmBody", { version: confirm ?? 0 })}</DialogContentText>
+          <DialogContentText>{t("prefsHistory.confirmBody", { version: shownTarget })}</DialogContentText>
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setConfirm(null)}>{t("preferences.cancel")}</Button>
@@ -247,7 +255,7 @@ function EntryCard({
   onRestore: () => void;
 }) {
   const { t } = useTranslation();
-  const fields = PREFS_HISTORY_FIELDS.filter((f) => entry.changed[f]);
+  const fields = PREFS_HISTORY_FIELDS.filter((f) => entry.changed?.[f]);
   return (
     <Box
       data-testid="prefs-history-entry"
@@ -269,19 +277,29 @@ function EntryCard({
           })}
         </Typography>
         {canRestore && (
-          <Button size="small" startIcon={<RestoreIcon />} disabled={busy} onClick={onRestore}>
+          <Button
+            size="small"
+            startIcon={<RestoreIcon />}
+            disabled={busy}
+            aria-label={t("prefsHistory.restoreVersion", { version: entry.new_version })}
+            onClick={onRestore}
+          >
             {t("prefsHistory.restore")}
           </Button>
         )}
       </Stack>
-      {fields.length === 0 ? (
+      {entry.changed === null ? (
+        <Typography variant="body2" color="warning.main">
+          {t("prefsHistory.unreadable")}
+        </Typography>
+      ) : fields.length === 0 ? (
         <Typography variant="body2" color="text.secondary">
           {t("prefsHistory.noChanges")}
         </Typography>
       ) : (
         <Stack spacing={1.25}>
           {fields.map((f) => (
-            <FieldDiff key={f} field={f} change={entry.changed[f]!} />
+            <FieldDiff key={f} field={f} change={entry.changed![f]!} />
           ))}
         </Stack>
       )}

@@ -33,7 +33,8 @@ export interface PrefsHistoryEntry {
   prev_version: number;
   new_version: number;
   created_at: number;
-  changed: Partial<Record<PrefsHistoryField, { prev: string | null; new: string | null }>>;
+  /** null when the stored change could not be read: a rebuild must not cross it. */
+  changed: Partial<Record<PrefsHistoryField, { prev: string | null; new: string | null }>> | null;
 }
 
 export type RebuildResult =
@@ -60,7 +61,8 @@ export function restorableVersions(entries: PrefsHistoryEntry[], complete: boole
  * - "stale": the newest entry is not the current version (a save landed
  *   after the list was read, or the list is out of date);
  * - "gap": two neighbouring entries don't chain (prev_version of one is not
- *   the new_version of the next), so some change in between is unknown;
+ *   the new_version of the next), or an entry's change could not be read,
+ *   so some change in between is unknown;
  * - "not_found": the loaded entries don't reach back to `target`.
  */
 export function rebuildPrefsVersion(
@@ -76,7 +78,7 @@ export function rebuildPrefsVersion(
   if (!first || first.new_version !== current.version) return { ok: false, reason: "stale" };
   let at = current.version;
   for (const e of entriesNewestFirst) {
-    if (e.new_version !== at) return { ok: false, reason: "gap" };
+    if (e.new_version !== at || !e.changed) return { ok: false, reason: "gap" };
     for (const [f, v] of Object.entries(e.changed)) {
       if ((PREFS_HISTORY_FIELDS as readonly string[]).includes(f) && v) {
         fields[f as PrefsHistoryField] = v.prev;

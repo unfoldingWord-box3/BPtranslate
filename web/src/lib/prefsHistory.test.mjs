@@ -74,6 +74,13 @@ test("refuses across a gap in the chain rather than guessing the missing change"
   assert.deepEqual(rebuildPrefsVersion(CURRENT, gappy, 1), { ok: false, reason: "gap" });
 });
 
+test("refuses to rebuild across an entry whose change could not be read", () => {
+  const unreadable = [HISTORY[0], { ...HISTORY[1], changed: null }, HISTORY[2], HISTORY[3]];
+  assert.equal(rebuildPrefsVersion(CURRENT, unreadable, 3).ok, true, "versions newer than it still rebuild");
+  assert.deepEqual(rebuildPrefsVersion(CURRENT, unreadable, 2), { ok: false, reason: "gap" });
+  assert.deepEqual(rebuildPrefsVersion(CURRENT, unreadable, 1), { ok: false, reason: "gap" });
+});
+
 test("refuses a version the loaded entries don't reach", () => {
   const firstPage = HISTORY.slice(0, 2); // v4, v3
   assert.deepEqual(rebuildPrefsVersion(CURRENT, firstPage, 1), { ok: false, reason: "not_found" });

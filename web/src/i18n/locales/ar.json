@@ -605,7 +605,9 @@
       "instructions_md": "التعليمات",
       "common_issues_md": "المشكلات الشائعة",
       "notes": "ملاحظات"
-    }
+    },
+    "restoreVersion": "استعادة النسخة {{version}}",
+    "unreadable": "تعذّرت قراءة هذا التغيير. لا يمكن استعادة النسخ الأقدم منه."
   },
   "export": {
     "noText": "لا يوجد نص {{version}} لتصديره من أجل {{target}}.",

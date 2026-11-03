@@ -348,6 +348,16 @@ test("GET /prefs/history pages by id with `before`, and lists only preferences e
   assert.equal((await getHistory("?before=abc")).status, 400);
 });
 
+test("GET /prefs/history marks an unreadable stored change as null, not as 'no changes'", async () => {
+  const { sqlite, put, getHistory } = fresh();
+  assert.equal((await put({ audience: "A" }, 5)).status, 200);
+  sqlite.prepare(`UPDATE edit_log SET payload_json = '{not json' WHERE kind = 'prefs'`).run();
+  const r = await getHistory();
+  assert.equal(r.status, 200);
+  assert.equal(r.body.entries[0].changed, null);
+  assert.deepEqual(rebuildPrefsVersion(r.body.current, r.body.entries, 5), { ok: false, reason: "gap" });
+});
+
 test("GET /prefs/history with nothing saved is empty at version 0", async () => {
   const { getHistory } = fresh({ prefs: false });
   const r = await getHistory();
