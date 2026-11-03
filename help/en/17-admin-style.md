@@ -3,7 +3,7 @@ id: admin-style
 title: Teaching the AI your style (admin)
 routes: [style]
 roles: [admin]
-keywords: [style, brief, audience, register, instructions, common issues, terminology, glossary, term, examples, few-shot, context pack, qa rules, ai, prompt, export]
+keywords: [style, brief, audience, register, instructions, common issues, terminology, glossary, term, examples, few-shot, context pack, qa rules, ai, prompt, export, history, restore, undo, who changed, chat]
 screenshots:
   - admin-style-1 #/admin/style
 ---
@@ -23,6 +23,19 @@ Use the list on the left to jump to a section. After you change a section, press
 - **Terminology:** your decisions about terms. You can give a preferred rendering, mark a term as forbidden with what to use instead, or mark it do-not-translate. This section can also import and export a CSV file.
 - **Examples:** notes and questions that were approved in the editor. The AI sees them as models of good work. Switch between **Notes** and **Questions**. Press **Revoke** to remove an example. Revoking returns the item to the edited state.
 - **QA rules** and **Templates:** QA rules are listed with **Coming soon**. **Templates** shows how many note templates are translated. Press **Open template curation →** to work on them (see [Note templates](#help:admin-templates)).
+
+## See who changed the preferences, and undo a change
+Every save of **Brief**, **Instructions** and **Common issues** is kept, whether it was made here or by the chat assistant. Press **History** above the Brief section to see the list, newest first.
+- Each version shows who saved it and when, and whether it came from the **Web app** or the **Chat assistant**.
+- Under each version you see every field that changed, with its text **Before** and **After**.
+- Press **Load older changes** to see further back.
+
+To put an earlier version back:
+1. Press **History**.
+2. Find the version you want and press **Restore**.
+3. Read the message and press **Restore** again. Text you have typed on the page but not saved is replaced.
+
+The restore is saved as a new version, so you can undo it the same way. The list starts from the day this history was turned on. Saves made before then are not listed. If the preferences were already saved before that day, the end of the list (once you have loaded all of it) offers the version **As it was before the earliest recorded change**.
 
 ## Update the context pack
 The AI reads the last exported pack, not your live text. After you change terms or instructions:

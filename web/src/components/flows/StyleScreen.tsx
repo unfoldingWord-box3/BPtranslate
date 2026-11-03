@@ -49,6 +49,7 @@ import {
   useExamples,
 } from "../../hooks/useTranslationMemory";
 import { MarkdownView } from "../MarkdownView";
+import { PrefsHistoryButton } from "../PrefsHistoryDialog";
 import { TerminologySection } from "../TerminologySection";
 import { bookName } from "../../lib/bookNames";
 import { formatNumber } from "../../lib/formatDate";
@@ -573,6 +574,9 @@ export default function StyleScreen({ role, me }: StyleScreenProps) {
   const exportStatusState = useContextExportStatus(role !== "viewer" || memoryAvailable);
 
   const [current, setCurrent] = useState<SectionKey>("qa");
+  // Bumped by a restore from the preferences history (#788) to remount the
+  // seed-once prefs editors.
+  const [prefsGen, setPrefsGen] = useState(0);
 
   const sectionLabels: Array<{ key: SectionKey; labelKey: string }> = [
     ...(memoryAvailable ? MEMORY_SECTION_LABELS : []),
@@ -678,8 +682,19 @@ export default function StyleScreen({ role, me }: StyleScreenProps) {
               </Alert>
             ) : (
               <>
-                <BriefPanel prefsState={prefsState} />
+                {/* Change history + restore (#788). Outside the keyed editors
+                    below so a restore's remount doesn't close the dialog. */}
+                <Stack direction="row" alignItems="center" justifyContent="flex-end" gap={1}>
+                  <Typography variant="caption" color="text.secondary">
+                    {t("prefsHistory.caption")}
+                  </Typography>
+                  <PrefsHistoryButton apply={prefsState.apply} onRestored={() => setPrefsGen((g) => g + 1)} />
+                </Stack>
+                {/* Keyed by prefsGen: these editors seed their text once, so a
+                    restore remounts them to show (and save on top of) it. */}
+                <BriefPanel key={`brief-${prefsGen}`} prefsState={prefsState} />
                 <MarkdownPrefPanel
+                  key={`instructions-${prefsGen}`}
                   id="instructions"
                   field="instructions_md"
                   title={t("moreTools.style.sectionInstructions")}
@@ -689,6 +704,7 @@ export default function StyleScreen({ role, me }: StyleScreenProps) {
                   prefsState={prefsState}
                 />
                 <MarkdownPrefPanel
+                  key={`commonIssues-${prefsGen}`}
                   id="commonIssues"
                   field="common_issues_md"
                   title={t("moreTools.style.sectionCommonIssues")}

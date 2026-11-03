@@ -56,6 +56,7 @@ import {
 import { currentPrefsFromConflict } from "../sync/prefsConflict";
 import { bookName } from "../lib/bookNames";
 import { MarkdownView } from "./MarkdownView";
+import { PrefsHistoryButton } from "./PrefsHistoryDialog";
 import { defaultReplaceSelection } from "../lib/setupWizard";
 import { SetupWizard } from "./SetupWizard";
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
@@ -151,6 +152,9 @@ export function PreferencesWorkspace({ onNavigate, onBack, section, role }: Prop
   // section's save can't leave another section holding a stale version that
   // self-409s on its very next save.
   const prefsState = useTranslationPrefs(memoryAvailable);
+  // Bumped by a restore from the preferences history (#788) to remount the
+  // seed-once prefs sections.
+  const [prefsGen, setPrefsGen] = useState(0);
 
   // Deep-link / rail-driven anchor scroll: when the routed section is a memory
   // section and the long page is available, scroll it into view. Runs on mount
@@ -337,13 +341,26 @@ export function PreferencesWorkspace({ onNavigate, onBack, section, role }: Prop
             // visible anchor label — no duplicate heading needed.
             <Stack spacing={4} divider={<Divider />}>
               <Box id="pref-sec-brief" sx={{ scrollMarginTop: "16px" }}>
-                <BriefSection prefsState={prefsState} />
+                {/* Change history + restore (#788), admin-only like the PUT it
+                    makes. Outside the keyed sections so a restore's remount
+                    doesn't close the dialog. */}
+                {role === "admin" && (
+                  <Stack direction="row" alignItems="center" justifyContent="flex-end" gap={1} sx={{ mb: 1 }}>
+                    <Typography variant="caption" color="text.secondary">
+                      {t("prefsHistory.caption")}
+                    </Typography>
+                    <PrefsHistoryButton apply={prefsState.apply} onRestored={() => setPrefsGen((g) => g + 1)} />
+                  </Stack>
+                )}
+                {/* Keyed by prefsGen: these sections seed their text once, so a
+                    restore remounts them to show (and save on top of) it. */}
+                <BriefSection key={`brief-${prefsGen}`} prefsState={prefsState} />
               </Box>
               <Box id="pref-sec-instructions" sx={{ scrollMarginTop: "16px" }}>
-                <InstructionsSection prefsState={prefsState} />
+                <InstructionsSection key={`instructions-${prefsGen}`} prefsState={prefsState} />
               </Box>
               <Box id="pref-sec-commonIssues" sx={{ scrollMarginTop: "16px" }}>
-                <CommonIssuesSection prefsState={prefsState} />
+                <CommonIssuesSection key={`commonIssues-${prefsGen}`} prefsState={prefsState} />
               </Box>
               <Box id="pref-sec-terminology" sx={{ scrollMarginTop: "16px" }}>
                 <TerminologySection direction={cfg?.direction ?? "ltr"} />
