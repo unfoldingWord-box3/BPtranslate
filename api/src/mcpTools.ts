@@ -18,7 +18,8 @@
 // bpt_edit_preferences (#784) read and change the project's translation
 // preferences; the edit is admin-only and writes through sendAsAdmin.
 // bpt_list_terms, bpt_add_term, bpt_edit_term and bpt_delete_term (#785) read
-// and change the project's terminology; the writes are admin-only, checked
+// and change the project's terminology, and bpt_restore_term (#795) undoes a
+// delete; the writes are admin-only, checked
 // with session.isAdmin, and go through plain send (the term routes are
 // editor-only).
 //
@@ -2779,7 +2780,7 @@ const deleteTerm: ToolDef = {
     "Delete one term from this project's terminology (the web app's Style page). AI drafts and checks stop following it. " +
     "Project admins only; anyone else is refused. Show the reviewer the term (bpt_list_terms) and get a clear yes first. " +
     "Pass the id and version bpt_list_terms showed; it is deleted only if the term is still at that version. " +
-    "There is no undo from chat; adding it again with bpt_add_term makes a new term. " +
+    "To undo it, pass the same id to bpt_restore_term (adding it again with bpt_add_term would make a new term). " +
     "Returns status deleted with the id, or status conflict with the term as it is now when someone changed it since: nothing was deleted, so show the reviewer and ask. " +
     "Errors change nothing.",
   inputSchema: {
@@ -2808,9 +2809,44 @@ const deleteTerm: ToolDef = {
   },
 };
 
+const restoreTerm: ToolDef = {
+  name: "bpt_restore_term",
+  description:
+    "Undo bpt_delete_term: bring one deleted term back into this project's terminology (the web app's Style page), with the same id and content. " +
+    "AI drafts and checks follow it again from then on, so restore only what the reviewer asked for and get a clear yes first. " +
+    "Project admins only; anyone else is refused. Pass the id bpt_delete_term returned. " +
+    "Returns status restored with the term and its new version. " +
+    "Refused, changing nothing, when the term is not deleted, or when the project has since gained a term with the same concept_id, source_term, target_term and status.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      id: { type: "integer", minimum: 1, description: "The deleted term's id, as bpt_delete_term returned it" },
+    },
+    required: ["session_token", "id"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const id = termIdArg(args);
+    const session = await termsSession(args, ctx);
+    await requireTermAdmin(session);
+    const path = `${TERMS_PATH}/${id}/restore`;
+    const { status: code, body } = await session.send("POST", path);
+    const b = (body ?? {}) as Record<string, unknown>;
+    if (code === 404) throw new ToolInputError(`There is no term with id ${id} in this project. ${NOT_SAVED}`);
+    if (code === 409 && b.error === "not_deleted") {
+      throw new ToolInputError(`Term ${id} is not deleted, so there is nothing to restore; bpt_list_terms shows it. ${NOT_SAVED}`);
+    }
+    const refused = termRefusal(code, body, id);
+    if (refused) throw refused;
+    if (code !== 200) throw new Error(`BPtranslate write ${path} returned ${code}`);
+    return { status: "restored", term: termView(body) };
+  },
+};
+
 export const TOOLS: ToolDef[] = [
   whoami, linkAccount, listBooks, packageStatus, chunkWork, getRow, chunkList, getVerses, editRow, approve,
   templatesForRow, editTemplate, approveTemplate, getArticle, editArticle, approveArticle, bulkSetState, draft, jobStatus,
-  getPreferences, editPreferences, listTerms, addTerm, editTerm, deleteTerm,
+  getPreferences, editPreferences, listTerms, addTerm, editTerm, deleteTerm, restoreTerm,
 ];
 
