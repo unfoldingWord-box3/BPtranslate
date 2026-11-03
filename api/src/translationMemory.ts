@@ -502,9 +502,9 @@ translationMemory.delete("/terms/:id", requireEditor, async (c) => {
   if (!Number.isFinite(id)) return c.json({ error: "bad_id" }, 400);
   const header = c.req.header("If-Match");
   const expected = parseIfMatch(header);
-  // A header that is present but unreadable must not quietly become an
-  // unpinned delete.
-  if (header != null && header.trim() !== "" && expected == null) return c.json({ error: "bad_if_match" }, 400);
+  // A header that is present but empty or unreadable must not quietly become
+  // an unpinned delete.
+  if (header != null && expected == null) return c.json({ error: "bad_if_match" }, 400);
   const now = Math.floor(Date.now() / 1000);
   const res = await c.env.DB.prepare(
     `UPDATE terminology SET deleted_at = ?1, updated_at = ?1

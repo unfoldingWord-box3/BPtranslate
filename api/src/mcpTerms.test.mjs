@@ -478,6 +478,10 @@ test("DELETE /terms/:id: without If-Match it deletes as before; an unreadable If
   const bad = await send("DELETE", "/api/translation-memory/terms/3", undefined, "abc");
   assert.equal(bad.status, 400);
   assert.equal(bad.body.error, "bad_if_match");
+  for (const blank of ["", "  "]) {
+    const r = await send("DELETE", "/api/translation-memory/terms/3", undefined, blank);
+    assert.equal(r.status, 400, `blank If-Match ${JSON.stringify(blank)} is not an unpinned delete`);
+  }
   assert.deepEqual(table(), before);
   const plain = await send("DELETE", "/api/translation-memory/terms/3");
   assert.equal(plain.status, 200);
