@@ -2286,8 +2286,9 @@ const jobStatus: ToolDef = {
 // The Style page's Terminology section (table terminology), through the web
 // app's own GET / POST /api/translation-memory/terms and PATCH / DELETE
 // /terms/:id. Every term route is editor-only and wants a signed-in user, so
-// reads and writes both go through send() as the linked user. The web app
-// shows Terminology only to admins (StyleScreen memoryAvailable), so the write
+// reads and writes both go through send() as the linked user. The admin desk
+// shows Terminology only to admins (StyleScreen memoryAvailable; classic
+// #/preferences still shows it to editors), and chat follows the desk, so the write
 // tools ask session.isAdmin first, as bpt_edit_preferences does; the route
 // itself accepts the editor-capped principal, so no sendAsAdmin route is
 // needed (Benjamin's call, #785). Every save queues a context export (the
@@ -2419,17 +2420,27 @@ function termAfter(a: TermKey, b: TermKey): boolean {
   }
   return a[3] > b[3];
 }
-function parseTermCursor(raw: unknown): TermKey | null {
+// The cursor also carries the search it was made for, so a cursor reused
+// with another q or status is refused instead of skipping matches.
+const termCursor = (k: TermKey, q: string | undefined, status: string | undefined) => JSON.stringify({ k, q: q ?? "", s: status ?? "" });
+function parseTermCursor(raw: unknown, q: string | undefined, status: string | undefined): TermKey | null {
   if (raw === undefined || raw === null || raw === "") return null;
-  try {
-    const k = JSON.parse(String(raw)) as unknown;
-    if (Array.isArray(k) && k.length === 4 && k.slice(0, 3).every((s) => typeof s === "string") && Number.isSafeInteger(k[3])) {
-      return k as TermKey;
+  const c = ((): { k?: unknown; q?: unknown; s?: unknown } | null => {
+    try {
+      const v = JSON.parse(String(raw)) as unknown;
+      return v && typeof v === "object" ? (v as { k?: unknown; q?: unknown; s?: unknown }) : null;
+    } catch {
+      return null;
     }
-  } catch {
-    // fall through
+  })();
+  const k = c?.k;
+  if (!c || !Array.isArray(k) || k.length !== 4 || !k.slice(0, 3).every((x) => typeof x === "string") || !Number.isSafeInteger(k[3])) {
+    throw new ToolInputError("cursor is not one this tool returned");
   }
-  throw new ToolInputError("cursor is not one this tool returned");
+  if (c.q !== (q ?? "") || c.s !== (status ?? "")) {
+    throw new ToolInputError("cursor belongs to a different search: pass the same q and status as the call that returned it, or leave cursor out to start again");
+  }
+  return k as TermKey;
 }
 
 const termConflict = (current: unknown) => ({
@@ -2445,8 +2456,8 @@ const listTerms: ToolDef = {
     "One concept can have several rows (several renderings, or a preferred and a forbidden one). " +
     "q finds terms whose concept_id, source_term or target_term contains it; status keeps one status. " +
     "Returns can_edit (whether this user may change terms: project admins only), total (matching terms), and terms, each with its id and version. " +
-    "Results are paged: if next_cursor is not null, call again with it to get the rest; never say the list is complete until it is null. " +
-    "When more_than_total is true, the project has more matching terms than one read returns: narrow with q or status. " +
+    "Results are paged: if next_cursor is not null, call again with it (and the same q and status) to get the rest; never say the list is complete until it is null and may_be_more is absent. " +
+    "When may_be_more is true, the project may have more matching terms than one read returns: narrow with q or status. " +
     "Show the reviewer a term before changing it with bpt_edit_term or bpt_delete_term, and pass that term's id and version. " +
     "Requires edit access; translation projects only. Read-only.",
   inputSchema: {
@@ -2470,7 +2481,7 @@ const listTerms: ToolDef = {
     }
     const status = args.status === undefined || args.status === null ? undefined : termStatusArg(args.status);
     const limit = Math.min(intArg(args, "limit", { min: 1 }) ?? DEFAULT_TERMS_PAGE, MAX_TERMS_PAGE);
-    const cursor = parseTermCursor(args.cursor);
+    const cursor = parseTermCursor(args.cursor, q, status);
     const session = await termsSession(args, ctx);
     const admin = await session.isAdmin();
     const params = new URLSearchParams({ limit: String(TERMS_FETCH_LIMIT) });
@@ -2487,9 +2498,9 @@ const listTerms: ToolDef = {
     let i = from;
     for (; i < all.length && terms.length < limit; i++) {
       const t = termView(all[i]);
-      const size = byteLength(t);
-      // Always return at least one term, or the cursor would never move. One
-      // term at the route's length limits fits the budget on its own.
+      // Measured as it travels (getRowBytes: mcp.ts encodes the result twice).
+      const size = getRowBytes(t);
+      // Always return at least one term, or the cursor would never move.
       if (terms.length > 0 && bytes + size > PAGE_BYTE_BUDGET) break;
       terms.push(t);
       bytes += size;
@@ -2499,9 +2510,16 @@ const listTerms: ToolDef = {
       ...(status ? { status } : {}),
       can_edit: admin,
       total: all.length,
-      ...(all.length >= TERMS_FETCH_LIMIT ? { more_than_total: true } : {}),
+      ...(all.length >= TERMS_FETCH_LIMIT
+        ? {
+            // The route stops at this many rows, so exactly that many may
+            // also be everything; it cannot tell.
+            may_be_more: true,
+            may_be_more_note: `Only the first ${TERMS_FETCH_LIMIT} matching terms can be listed, so there may be more even when next_cursor is null, and total counts only these. Narrow it with q or status.`,
+          }
+        : {}),
       returned: terms.length,
-      next_cursor: i < all.length ? JSON.stringify(termKeyOf(all[i - 1])) : null,
+      next_cursor: i < all.length ? termCursor(termKeyOf(all[i - 1]), q, status) : null,
       terms,
     };
   },
@@ -2563,7 +2581,7 @@ const editTerm: ToolDef = {
     `Change one term in this project's terminology (the web app's Style page): ${TERM_FIELDS_HELP}. ` +
     "Every AI draft and check in the project follows it from then on, so change only what the reviewer asked for, show them the exact new term, and get a clear yes first. " +
     "Project admins only; anyone else is refused. Give only the fields to change; null or empty clears an optional one (concept_id and source_term cannot be cleared). " +
-    "Setting status to anything but forbidden clears replacement, as the web app does; a forbidden term must have a replacement. " +
+    "Setting status to anything but forbidden clears replacement, as the web app does; a forbidden term must have a replacement, and setting a replacement needs status forbidden in the same call. " +
     "Pass the id and version bpt_list_terms showed; it is saved only if the term is still at that version. " +
     "Returns status applied with the saved term and its new version, or status conflict with the term as it is now when someone changed it since: nothing was saved, so show the reviewer and ask. " +
     "Errors change nothing.",
@@ -2593,6 +2611,10 @@ const editTerm: ToolDef = {
       } else if ("replacement" in patch && !patch.replacement) {
         throw new ToolInputError(`A forbidden term needs a replacement: what to use instead. ${NOT_SAVED}`);
       }
+    } else if (patch.replacement) {
+      // The tool cannot see the stored status, and a replacement belongs only
+      // on a forbidden term (the web app clears it otherwise).
+      throw new ToolInputError(`To set a replacement, also pass status forbidden. ${NOT_SAVED}`);
     }
     if (!Object.keys(patch).length) throw new ToolInputError(`Give at least one field to change. ${NOT_SAVED}`);
     const session = await termsSession(args, ctx);

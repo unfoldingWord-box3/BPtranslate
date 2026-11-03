@@ -379,3 +379,52 @@ test("bpt_list_terms: a cursor it did not return is refused", async () => {
   assert.equal(r.isError, true);
   assert.match(r.data.error, /cursor is not one this tool returned/);
 });
+
+test("bpt_list_terms: quote-heavy comments still page under the 32 KB cap as they travel", async () => {
+  const { call, sqlite } = fresh({ terms: false });
+  const ins = sqlite.prepare(`INSERT INTO terminology (concept_id, source_term, status, comment, version) VALUES (?, 'x', 'preferred', ?, 1)`);
+  for (let i = 0; i < 40; i++) ins.run(`c${String(i).padStart(2, "0")}`, '"\\'.repeat(1500));
+  let cursor;
+  let seen = 0;
+  for (let pages = 0; pages < 60; pages++) {
+    const r = await call("bpt_list_terms", { limit: 100, ...(cursor ? { cursor } : {}) }, EDITOR);
+    assert.equal(r.isError, false, JSON.stringify(r.data));
+    assert.ok(r.wireBytes < 32_000, `page ${pages} is ${r.wireBytes} bytes on the wire`);
+    seen += r.data.returned;
+    cursor = r.data.next_cursor;
+    if (!cursor) break;
+  }
+  assert.equal(seen, 40);
+});
+
+test("bpt_list_terms: a cursor reused with another q or status is refused", async () => {
+  const { call } = fresh();
+  const first = await call("bpt_list_terms", { limit: 1 }, EDITOR);
+  assert.ok(first.data.next_cursor);
+  const other = await call("bpt_list_terms", { limit: 1, status: "preferred", cursor: first.data.next_cursor }, EDITOR);
+  assert.equal(other.isError, true);
+  assert.match(other.data.error, /different search/);
+  const same = await call("bpt_list_terms", { limit: 1, cursor: first.data.next_cursor }, EDITOR);
+  assert.equal(same.isError, false, JSON.stringify(same.data));
+});
+
+test("bpt_list_terms: past the route's 2000-row cap the result says there may be more", async () => {
+  const { call, sqlite } = fresh({ terms: false });
+  const ins = sqlite.prepare(`INSERT INTO terminology (concept_id, source_term, status, version) VALUES (?, 'x', 'preferred', 1)`);
+  for (let i = 0; i < 2001; i++) ins.run(`c${String(i).padStart(4, "0")}`);
+  const r = await call("bpt_list_terms", { limit: 1 }, EDITOR);
+  assert.equal(r.data.may_be_more, true);
+  assert.match(r.data.may_be_more_note, /may be more/);
+});
+
+test("bpt_edit_term: a replacement without status forbidden is refused, and nothing changes", async () => {
+  const { call, table } = fresh();
+  const before = table();
+  const r = await call("bpt_edit_term", { id: 1, version: 3, replacement: "x" });
+  assert.equal(r.isError, true);
+  assert.match(r.data.error, /also pass status forbidden/);
+  assert.deepEqual(table(), before);
+  const ok = await call("bpt_edit_term", { id: 2, version: 1, status: "forbidden", replacement: "نعمة الله" });
+  assert.equal(ok.isError, false, JSON.stringify(ok.data));
+  assert.equal(ok.data.term.replacement, "نعمة الله");
+});
