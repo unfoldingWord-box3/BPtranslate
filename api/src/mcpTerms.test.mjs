@@ -415,6 +415,13 @@ test("bpt_list_terms: past the route's 2000-row cap the result says there may be
   const r = await call("bpt_list_terms", { limit: 1 }, EDITOR);
   assert.equal(r.data.may_be_more, true);
   assert.match(r.data.may_be_more_note, /may be more/);
+  // Exactly 2000, unfiltered: the count says that is everything.
+  sqlite.prepare(`UPDATE terminology SET deleted_at = unixepoch() WHERE concept_id = 'c2000'`).run();
+  const exact = await call("bpt_list_terms", { limit: 1 }, EDITOR);
+  assert.equal(exact.data.may_be_more, undefined);
+  // Filtered, nothing can tell, so it still says there may be more.
+  const filtered = await call("bpt_list_terms", { limit: 1, status: "preferred" }, EDITOR);
+  assert.equal(filtered.data.may_be_more, true);
 });
 
 test("bpt_edit_term: a replacement without status forbidden is refused, and nothing changes", async () => {

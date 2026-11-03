@@ -2505,15 +2505,20 @@ const listTerms: ToolDef = {
       terms.push(t);
       bytes += size;
     }
+    // The route stops at TERMS_FETCH_LIMIT rows. Unfiltered, /terms/count
+    // says whether that was everything; filtered, nothing can tell.
+    let mayBeMore = all.length >= TERMS_FETCH_LIMIT;
+    if (mayBeMore && !q && !status) {
+      const { status: cc, body: cb } = await session.send("GET", `${TERMS_PATH}/count`);
+      if (cc === 200 && Number((cb as { count?: unknown } | null)?.count) <= all.length) mayBeMore = false;
+    }
     return {
       ...(q ? { q } : {}),
       ...(status ? { status } : {}),
       can_edit: admin,
       total: all.length,
-      ...(all.length >= TERMS_FETCH_LIMIT
+      ...(mayBeMore
         ? {
-            // The route stops at this many rows, so exactly that many may
-            // also be everything; it cannot tell.
             may_be_more: true,
             may_be_more_note: `Only the first ${TERMS_FETCH_LIMIT} matching terms can be listed, so there may be more even when next_cursor is null, and total counts only these. Narrow it with q or status.`,
           }
