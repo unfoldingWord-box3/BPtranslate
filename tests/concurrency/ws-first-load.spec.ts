@@ -1,5 +1,5 @@
 import { expect, test, type Request } from "@playwright/test";
-import { newUserContext } from "./helpers";
+import { closeTolerant, newUserContext } from "./helpers";
 import { RTL_FIXTURE } from "./global-setup";
 
 // Issue #749: on a first load in a fresh browser, the editors must not send
@@ -109,11 +109,14 @@ test("#749: a workspace the server keeps reporting differently does not reload-l
   // A new name on every call, so the slug the reconcile stores never matches
   // what the next /api/auth/me reports.
   let calls = 0;
-  await page.route("**/api/auth/me", async (route) => {
-    const res = await route.fetch();
-    const json = await res.json();
-    return route.fulfill({ response: res, json: { ...json, workspace: `never-matches-749-${++calls}` } });
-  });
+  await page.route(
+    "**/api/auth/me",
+    closeTolerant(page, async (route) => {
+      const res = await route.fetch();
+      const json = await res.json();
+      return route.fulfill({ response: res, json: { ...json, workspace: `never-matches-749-${++calls}` } });
+    }),
+  );
   let navigations = 0;
   page.on("framenavigated", (f) => {
     if (f === page.mainFrame()) navigations++;

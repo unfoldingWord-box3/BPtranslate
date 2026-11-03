@@ -9,9 +9,8 @@ import {
   type BrowserContext,
   type Locator,
   type Page,
-  type Route,
 } from "@playwright/test";
-import { fetchChapter, mintToken, newUserContext } from "./helpers";
+import { closeTolerant, fetchChapter, mintToken, newUserContext } from "./helpers";
 import { RTL_FIXTURE } from "./global-setup";
 import { expectRtlPaint } from "./rtl-paint";
 
@@ -189,28 +188,6 @@ async function expectRtlWordOrder(scope: Locator, label: string): Promise<void> 
     ).toBeGreaterThan(b.x);
   }
   expect(compared, `${label}: no two words shared a row — ${JSON.stringify(boxes)}`).toBeGreaterThan(0);
-}
-
-/**
- * Wrap a page.route handler so a request still in flight when the test closes
- * its context ends quietly instead of failing the test. One page load sends
- * GET /api/project-config more than once (each useProjectConfig /
- * useWorkflowLayouts mount calls load(), which only reuses a fetch still in
- * flight), and the later GET can still be inside route.fetch() when the last
- * assertion passes and the test calls context.close(). Playwright then reports
- * "route.fetch: Target page, context or browser has been closed" from the
- * callback, sometimes against the next test (#776). Any other error, or any
- * error while the page is still open, still fails the test.
- */
-function closeTolerant(page: Page, handler: (route: Route) => Promise<unknown>) {
-  return async (route: Route): Promise<void> => {
-    try {
-      await handler(route);
-    } catch (err) {
-      if (page.isClosed() || /Target page, context or browser has been closed/.test(String(err))) return;
-      throw err;
-    }
-  };
 }
 
 /**

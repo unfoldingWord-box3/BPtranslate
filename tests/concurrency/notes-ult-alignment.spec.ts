@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test, type Browser, type Page } from "@playwright/test";
-import { mintToken } from "./helpers";
+import { closeTolerant, mintToken } from "./helpers";
 
 // Flows notes screen: read-only ULT alignment strip (issue #431).
 //
@@ -39,19 +39,22 @@ async function openNotes(
     }
   });
   const page = await context.newPage();
-  await page.route("**/api/project-config", async (route) => {
-    if (route.request().method() !== "GET") return route.continue();
-    const res = await route.fetch();
-    const body = await res.json();
-    body.config = {
-      ...body.config,
-      mode: "translation",
-      // A different org than the project's own, so the screen does not read
-      // it as "the lit lane already IS this repo" and hide the toggle.
-      translationSource: { org: "Door43-Catalog", repos: { lit: "en_ult" } },
-    };
-    return route.fulfill({ response: res, json: body });
-  });
+  await page.route(
+    "**/api/project-config",
+    closeTolerant(page, async (route) => {
+      if (route.request().method() !== "GET") return route.continue();
+      const res = await route.fetch();
+      const body = await res.json();
+      body.config = {
+        ...body.config,
+        mode: "translation",
+        // A different org than the project's own, so the screen does not read
+        // it as "the lit lane already IS this repo" and hide the toggle.
+        translationSource: { org: "Door43-Catalog", repos: { lit: "en_ult" } },
+      };
+      return route.fulfill({ response: res, json: body });
+    }),
+  );
   await page.route("https://git.door43.org/**", (route) => {
     if (route.request().url().endsWith("/en_ult/raw/branch/master/38-ZEC.usfm")) {
       return route.fulfill({ status: 200, contentType: "text/plain", body: EN_ULT });
