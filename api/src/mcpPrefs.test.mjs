@@ -6,8 +6,9 @@
 // The tools run the REAL translation-memory and project-config routers
 // in-process, behind the REAL auth, CSRF and viewer middleware that index.ts
 // mounts, against the REAL migration schema. send and sendAsAdmin are built
-// here the way index.ts builds them, so these tests fail if PUT /prefs stops
-// being admin-only or if the editor-capped send could reach it.
+// here with the same adminSender index.ts uses, so these tests fail if
+// PUT /prefs stops being admin-only, if the editor-capped send could reach it,
+// or if adminSender stops re-checking the role or lets another route through.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -23,7 +24,7 @@ import { attachAuth, chatWriteEnv, requireCsrf } from "./auth.ts";
 import { requireWorkspaceMatch } from "./workspaces.ts";
 import { blockViewerWrites } from "./viewerGuard.ts";
 import { dispatch } from "./mcp.ts";
-import { applyPrefsChanges, parsePrefsChanges } from "./mcpTools.ts";
+import { adminSender, applyPrefsChanges, parsePrefsChanges } from "./mcpTools.ts";
 
 const ADMIN = "a".repeat(40);
 const EDITOR = "e".repeat(40);
@@ -93,11 +94,11 @@ function fresh({ preset = "ar-bsoj", prefs = true } = {}) {
       principal,
       getJson: async (path) => asJson(await app.request(path, {}, env, ctx)),
       send: (method, path, body, ifMatch) => sendAs(principal, method, path, body, ifMatch),
-      // As index.ts builds it.
-      sendAsAdmin: async (method, path, body, ifMatch) => {
-        if (!realAdmin.get(principal.linkId)) return { status: 403, body: { error: "forbidden", reason: "not_an_admin" } };
-        return sendAs({ ...principal, role: "admin" }, method, path, body, ifMatch);
-      },
+      // As index.ts builds it, with the real role read from realAdmin.
+      sendAsAdmin: adminSender(
+        async () => realAdmin.get(principal.linkId),
+        (method, path, body, ifMatch) => sendAs({ ...principal, role: "admin" }, method, path, body, ifMatch),
+      ),
       isAdmin: async () => realAdmin.get(principal.linkId),
     };
   };
@@ -158,9 +159,12 @@ test("bpt_get_preferences: an editor reads every field, and can_edit says who ma
     script_notes: null,
     instructions_md: "- Keep verbs first.\n- Use الله for God.",
     common_issues_md: "- Translators drop the conjunction.",
-    notes: null,
     register: "formal",
   });
+  assert.ok(!("notes" in ed.data.preferences), "an editor does not see the admins' notes");
+  const edNotes = await call("bpt_get_preferences", { field: "notes" }, EDITOR);
+  assert.equal(edNotes.isError, true);
+  assert.equal((await call("bpt_get_preferences", {})).data.preferences.notes, null, "an admin does");
   const ad = await call("bpt_get_preferences", { field: "register" });
   assert.equal(ad.data.can_edit, true);
   assert.deepEqual(ad.data.preferences, { register: "formal" });
@@ -337,4 +341,30 @@ test("bpt_get_preferences: one field longer than a result is cut, and says how m
   assert.ok(one.data.truncated.chars_shown > 5_000 && one.data.truncated.chars_shown < 15_000);
   // Still under BT Servant's 32 KB cap as it travels.
   assert.ok(Buffer.byteLength(JSON.stringify(JSON.stringify(one.data))) < 32_000);
+});
+
+test("applyPrefsChanges: a later replace sees what an earlier one left, even an emptied field", () => {
+  const cur = { version: 1, audience: null, purpose: null, register: "default", script_notes: null, instructions_md: "foo", common_issues_md: null, notes: null };
+  const ch = parsePrefsChanges({
+    replace: [
+      { field: "instructions_md", old_text: "foo", new_text: "" },
+      { field: "instructions_md", old_text: "foo", new_text: "bar" },
+    ],
+  });
+  assert.throws(() => applyPrefsChanges(cur, ch), /does not contain/);
+});
+
+test("bpt_get_preferences: a small field is kept when a large one is left out", async () => {
+  const { call, sessions } = fresh();
+  const big = "ت".repeat(16_000);
+  const put = await sessions[ADMIN].sendAsAdmin("PUT", "/api/translation-memory/prefs", { instructions_md: big, common_issues_md: "short" }, 5);
+  assert.equal(put.status, 200);
+  const all = await call("bpt_get_preferences", {});
+  assert.deepEqual(all.data.left_out, ["instructions_md"]);
+  assert.equal(all.data.preferences.common_issues_md, "short");
+});
+
+test("sendAsAdmin refuses any route but PUT /prefs", async () => {
+  const { sessions } = fresh();
+  await assert.rejects(sessions[ADMIN].sendAsAdmin("PUT", "/api/project-config", {}), /does not allow/);
 });

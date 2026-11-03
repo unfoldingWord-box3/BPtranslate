@@ -1771,9 +1771,6 @@ type PrefTextField = (typeof PREF_TEXT_FIELDS)[number];
 const PREF_FIELDS = [...PREF_TEXT_FIELDS, "register"] as const;
 type PrefField = (typeof PREF_FIELDS)[number];
 type Prefs = { version: number } & Record<PrefTextField, string | null> & { register: string };
-// The longer free-text fields first: they are the ones left out when the
-// whole set is over the chat's budget.
-const PREFS_LEAVE_OUT_ORDER: PrefTextField[] = ["common_issues_md", "instructions_md", "notes", "script_notes", "purpose", "audience"];
 const PREFS_RESULT_BUDGET = GET_ROW_BYTE_BUDGET - 1_000;
 const NOT_SAVED = "Nothing was saved.";
 
@@ -1781,6 +1778,23 @@ const PREF_FIELDS_HELP =
   "audience (who the translation is for), purpose (what it is for), register (default, formal or informal: how formal AI drafts are), " +
   "script_notes (script and direction notes), instructions_md (markdown added to every AI drafting and checking prompt), " +
   "common_issues_md (markdown listing problems reviewers keep flagging), notes (the admins' own notes; not sent to the AI)";
+
+type SendFn = (method: string, path: string, body?: unknown, ifMatch?: number) => Promise<{ status: number; body: unknown }>;
+
+// The only routes a chat tool may call with the user's admin role. Each is
+// admin-only in the web app too; adding one is a decision, not a reuse.
+export const CHAT_ADMIN_ROUTES: ReadonlySet<string> = new Set([`PUT ${PREFS_PATH}`]);
+
+// Builds session.sendAsAdmin (index.ts): refuses a route not listed above,
+// re-reads the real role on every call, and answers the route's own 403
+// shape, without calling it, for a user who is not an admin now.
+export function adminSender(isAdmin: () => Promise<boolean>, sendAsAdminRole: SendFn): SendFn {
+  return async (method, path, body, ifMatch) => {
+    if (!CHAT_ADMIN_ROUTES.has(`${method} ${path}`)) throw new Error(`sendAsAdmin does not allow ${method} ${path}`);
+    if (!(await isAdmin())) return { status: 403, body: { error: "forbidden", reason: "not_an_admin" } };
+    return sendAsAdminRole(method, path, body, ifMatch);
+  };
+}
 
 // Readable by an editor of a translation project; an authoring project has
 // none (the web app shows the same refusal on its Style page).
@@ -1797,39 +1811,38 @@ async function readPrefs(session: McpSession): Promise<Prefs> {
   return out;
 }
 
-// Whole fields, dropping the longest kinds first until the result fits. A
-// single field over the budget on its own (only common_issues_md can be) is
-// cut, and says so: the edit tool's append and replace still work on it.
-function prefsView(p: Prefs, only: PrefField | undefined, extra: Record<string, unknown>) {
-  const fields = only ? [only] : [...PREF_FIELDS];
+// Whole fields, leaving out the largest text fields first until the result
+// fits. A single field over the budget on its own is cut, and says so: the
+// edit tool's append and replace still work on it.
+function prefsView(p: Prefs, fields: PrefField[], extra: Record<string, unknown>) {
   const values: Record<string, unknown> = {};
   for (const f of fields) values[f] = p[f];
-  const out = (v: Record<string, unknown>, leftOut: string[]) => ({
+  const out = (v: Record<string, unknown>, leftOut: string[], more: Record<string, unknown> = {}) => ({
     version: p.version,
     ...extra,
     preferences: v,
     ...(leftOut.length
       ? { left_out: leftOut, left_out_note: "Too long to include together: call again with field set to one of these to read it." }
       : {}),
+    ...more,
   });
+  if (fields.length === 1) {
+    const f = fields[0];
+    const text = values[f];
+    if (typeof text !== "string" || getRowBytes(out(values, [])) <= PREFS_RESULT_BUDGET) return out(values, []);
+    const cut = (keep: number) => out({ [f]: text.slice(0, keep) }, [], { truncated: { field: f, chars_shown: keep, total_chars: text.length } });
+    let keep = text.length;
+    while (keep > 0 && getRowBytes(cut(keep)) > PREFS_RESULT_BUDGET) keep = Math.floor(keep * 0.9);
+    return cut(keep);
+  }
+  const bySize = PREF_TEXT_FIELDS.filter((f) => typeof values[f] === "string").sort((a, b) => byteLength(values[b]) - byteLength(values[a]));
   const leftOut: string[] = [];
-  for (const f of PREFS_LEAVE_OUT_ORDER) {
+  for (const f of bySize) {
     if (getRowBytes(out(values, leftOut)) <= PREFS_RESULT_BUDGET) break;
-    if (!(f in values) || values[f] === null || fields.length === 1) continue;
     delete values[f];
     leftOut.push(f);
   }
-  let res = out(values, leftOut);
-  if (getRowBytes(res) > PREFS_RESULT_BUDGET && fields.length === 1) {
-    const text = String(values[only!] ?? "");
-    let keep = text.length;
-    while (keep > 0 && getRowBytes(out({ [only!]: text.slice(0, keep) }, [])) > PREFS_RESULT_BUDGET) keep = Math.floor(keep * 0.9);
-    res = {
-      ...out({ [only!]: text.slice(0, keep) }, []),
-      truncated: { field: only, chars_shown: keep, total_chars: text.length },
-    } as typeof res;
-  }
-  return res;
+  return out(values, leftOut);
 }
 
 function prefFieldArg(raw: unknown, key: string, allowed: readonly string[]): PrefField {
@@ -1909,7 +1922,7 @@ export function applyPrefsChanges(current: Prefs, ch: PrefsChanges): Partial<Rec
     next[f] = had.trim() ? `${had.replace(/\s+$/, "")}\n\n${text}` : text;
   }
   for (const r of ch.replace) {
-    const had = (next[r.field] as string | null | undefined) ?? current[r.field] ?? "";
+    const had = (r.field in next ? next[r.field] : current[r.field]) ?? "";
     const at = had.indexOf(r.old_text);
     if (at < 0) throw new ToolInputError(`${r.field} does not contain this old_text: ${JSON.stringify(r.old_text.slice(0, 200))}. ${NOT_SAVED}`);
     if (had.indexOf(r.old_text, at + 1) >= 0) {
@@ -1934,7 +1947,7 @@ const getPreferences: ToolDef = {
   name: "bpt_get_preferences",
   description:
     `This project's translation preferences, the ones on the web app's Style page that shape every AI draft: ${PREF_FIELDS_HELP}. ` +
-    "null means not filled in. Returns version (0 means never saved), can_edit (whether this user may change them: project admins only) and preferences. " +
+    "Editors see every field but notes. null means not filled in. Returns version (0 means never saved), can_edit (whether this user may change them: project admins only) and preferences. " +
     "When they are too long to send together, the longest are named in left_out: call again with field set to one of them. " +
     "A single field too long even on its own comes back cut, with truncated saying how many characters were shown; append and replace in bpt_edit_preferences still work on it. " +
     "Show the reviewer the current wording before changing it with bpt_edit_preferences, and pass it this version. " +
@@ -1951,8 +1964,13 @@ const getPreferences: ToolDef = {
   run: async (args, ctx) => {
     const only = args.field === undefined || args.field === null ? undefined : prefFieldArg(args.field, "field", PREF_FIELDS);
     const session = await prefsSession(args, ctx);
+    const admin = await session.isAdmin();
+    // The web app shows these only to admins; editors see what the AI is
+    // told, but not the admins' own notes.
+    if (only === "notes" && !admin) throw new ToolInputError("The notes are the admins' own; only a project admin can read them here.");
     const prefs = await readPrefs(session);
-    return prefsView(prefs, only, { can_edit: await session.isAdmin() });
+    const fields = only ? [only] : PREF_FIELDS.filter((f) => admin || f !== "notes");
+    return prefsView(prefs, fields, { can_edit: admin });
   },
 };
 
@@ -1968,6 +1986,7 @@ const editPreferences: ToolDef = {
     "Pass the version bpt_get_preferences showed; it is saved only if the preferences are still at that version. " +
     "Returns status applied with the new version and the changed fields' new text (or changed_left_out when too long), " +
     "or status conflict when someone changed them since: nothing was saved, so read them again and ask. " +
+    "A request is limited to about 64 KB, so add very long text in several appends. " +
     "Saving starts an update of what AI drafts are told; the next drafts use the new wording once it finishes. Errors change nothing.",
   inputSchema: {
     type: "object",
@@ -2025,7 +2044,7 @@ const editPreferences: ToolDef = {
     if (status === 409 && b.error === "version_mismatch") {
       return prefsConflict(Number((b.current as Record<string, unknown> | null)?.version ?? 0));
     }
-    if (status === 403) {
+    if (status === 403 && b.reason === "not_an_admin") {
       throw new ToolInputError(`${session.principal.username} is no longer a project admin here. ${NOT_SAVED}`);
     }
     if (status === 400 && b.error === "validation_failed") {

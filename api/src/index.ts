@@ -30,6 +30,7 @@ import { syncTemplates } from "./templateSync";
 import { attachAuth, chatConfirmMac, chatWriteEnv, requireAuth, requireCsrf, mintDevToken, startDcsAuth, callbackDcsAuth, authMe, authLogout, refreshToken, updateLastLocation, currentUserId } from "./auth";
 import { workspaceRoutes } from "./workspaceRoutes";
 import { handleMcp, isMcpPath } from "./mcp";
+import { adminSender } from "./mcpTools";
 import { chatLinkRoutes } from "./chatLinkRoutes";
 import { chatIsAdmin, chatRoleFor, claimCode, lookupLink, revokeLink, type ChatLink } from "./chatLinks";
 import { readPackageRefs } from "./packageRefs";
@@ -578,16 +579,11 @@ export default {
             return { status: res.status, body: await res.json().catch(() => null) };
           },
           send: (method: string, path: string, body?: unknown, ifMatch?: number) => sendAs(principal, method, path, body, ifMatch),
-          // The one exception to the editor cap: a route that is admin-only
-          // in the web app too (PUT /api/translation-memory/prefs). The real
-          // role is re-read on every call, so an admin removed since the
-          // session opened gets the route's own 403.
-          sendAsAdmin: async (method: string, path: string, body?: unknown, ifMatch?: number) => {
-            if (!(await chatIsAdmin(wsEnv, link.username))) {
-              return { status: 403, body: { error: "forbidden", reason: "not_an_admin" } };
-            }
-            return sendAs({ ...principal, role: "admin" }, method, path, body, ifMatch);
-          },
+          // The one exception to the editor cap (mcpTools.ts adminSender).
+          sendAsAdmin: adminSender(
+            () => chatIsAdmin(wsEnv, link.username),
+            (method, path, body, ifMatch) => sendAs({ ...principal, role: "admin" }, method, path, body, ifMatch),
+          ),
           // Read-only D1 exception to the route-handler rule; see packageRefs.ts.
           packageRefs: (book: string) => readPackageRefs(wsEnv, book),
           sourceNotes: (book: string, chapter: number) => readSourceNotes(wsEnv, book, chapter),
