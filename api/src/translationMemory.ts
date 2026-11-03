@@ -9,7 +9,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import type { Env } from "./index";
-import { currentUserId, requireEditor, requireAdmin } from "./auth.ts";
+import { currentUserId, editSource, requireEditor, requireAdmin } from "./auth.ts";
 import {
   REGISTERS,
   TERM_STATUSES,
@@ -96,6 +96,42 @@ const PutPrefsBody = z.object({
   // D1 for compatibility but is never read.
 });
 
+// The fields a PUT can change. Every save records the ones that changed in
+// edit_log (issue #786; see PREFS_HISTORY_SQL).
+const PREFS_FIELDS = [
+  "audience",
+  "purpose",
+  "register",
+  "script_notes",
+  "instructions_md",
+  "common_issues_md",
+  "notes",
+] as const;
+type PrefsFields = Pick<PrefsRow, (typeof PREFS_FIELDS)[number]>;
+
+// { changed: { field: { prev, new } } } for each field whose value differs, so
+// the prior row is the saved one with every `prev` put back. A save that
+// changes nothing still bumps the version, so it still gets an entry ({}).
+function prefsHistoryPayload(prev: PrefsFields, next: PrefsFields): string {
+  const changed: Record<string, { prev: string | null; new: string | null }> = {};
+  for (const f of PREFS_FIELDS) {
+    if (prev[f] !== next[f]) changed[f] = { prev: prev[f], new: next[f] };
+  }
+  return JSON.stringify({ changed });
+}
+
+// One edit_log entry per successful save (issue #786): kind 'prefs', row_key
+// '1' (the singleton), book NULL; source is editSource(c), so 'chat' for the
+// chat assistant and NULL for the web app. Batched after the write it audits
+// and gated on changes(), so a lost CAS or first-write race records nothing.
+// Every edit_log reader filters on kind (tn/tq/twl/verse/tw/ta/template), so
+// these entries change nothing they compute; the retention sweep in index.ts
+// skips kind 'prefs' so the trail outlives 180 days.
+// ?1 user, ?2 prev_version, ?3 action, ?4 source, ?5 payload.
+const PREFS_HISTORY_SQL = `INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action, source, payload_json)
+  SELECT 'prefs', '1', NULL, ?1, ?2, ?2 + 1, ?3, ?4, ?5
+   WHERE (SELECT changes()) > 0`;
+
 // PUT /prefs — admin-only. If-Match version CAS. Upserts the singleton: on the
 // first write (row absent) the INSERT fires with version 1; thereafter the
 // UPDATE bumps version guarded on the expected value.
@@ -118,25 +154,41 @@ translationMemory.put("/prefs", requireAdmin, async (c) => {
     // First write: only valid against If-Match: 0. Coalesce omitted fields to defaults.
     if (expected !== 0) return c.json({ error: "version_mismatch", current: DEFAULT_PREFS }, 409);
     const d = parsed.data;
-    const insertRes = await c.env.DB.prepare(
-      `INSERT INTO translation_prefs
-         (id, audience, purpose, register, script_notes, instructions_md, common_issues_md, notes, assisted_mode, version, updated_at, updated_by)
-       VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?10)
-       ON CONFLICT(id) DO NOTHING`,
-    )
-      .bind(
-        d.audience ?? null,
-        d.purpose ?? null,
-        d.register ?? "default",
-        d.script_notes ?? null,
-        d.instructions_md ?? null,
-        d.common_issues_md ?? null,
-        d.notes ?? null,
+    const first: PrefsFields = {
+      audience: d.audience ?? null,
+      purpose: d.purpose ?? null,
+      register: d.register ?? "default",
+      script_notes: d.script_notes ?? null,
+      instructions_md: d.instructions_md ?? null,
+      common_issues_md: d.common_issues_md ?? null,
+      notes: d.notes ?? null,
+    };
+    const [insertRes] = await c.env.DB.batch([
+      c.env.DB.prepare(
+        `INSERT INTO translation_prefs
+           (id, audience, purpose, register, script_notes, instructions_md, common_issues_md, notes, assisted_mode, version, updated_at, updated_by)
+         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?10)
+         ON CONFLICT(id) DO NOTHING`,
+      ).bind(
+        first.audience,
+        first.purpose,
+        first.register,
+        first.script_notes,
+        first.instructions_md,
+        first.common_issues_md,
+        first.notes,
         0,
         now,
         userId ?? null,
-      )
-      .run();
+      ),
+      c.env.DB.prepare(PREFS_HISTORY_SQL).bind(
+        userId ?? null,
+        0,
+        "create",
+        editSource(c),
+        prefsHistoryPayload(DEFAULT_PREFS, first),
+      ),
+    ]);
     if (!insertRes.meta.changes) {
       // Lost a concurrent first-write race — report the winner's row as a 409,
       // same shape as the ordinary version-mismatch path below.
@@ -148,8 +200,14 @@ translationMemory.put("/prefs", requireAdmin, async (c) => {
     return c.json({ prefs: row });
   }
 
+  // A stale If-Match can't win the CAS below, but one AHEAD of the row read
+  // here could, if a concurrent save reached that version in between: the
+  // merge and the history entry would then be built from a row older than the
+  // one replaced. Refuse it, so a successful UPDATE replaces exactly `existing`.
+  if (existing.version !== expected) return c.json({ error: "version_mismatch", current: existing }, 409);
+
   // Merge omitted fields from the existing row (partial update semantics).
-  const merged = {
+  const merged: PrefsFields = {
     audience: parsed.data.audience !== undefined ? parsed.data.audience : existing.audience,
     purpose: parsed.data.purpose !== undefined ? parsed.data.purpose : existing.purpose,
     register: parsed.data.register ?? existing.register,
@@ -160,14 +218,14 @@ translationMemory.put("/prefs", requireAdmin, async (c) => {
       parsed.data.common_issues_md !== undefined ? parsed.data.common_issues_md : existing.common_issues_md,
     notes: parsed.data.notes !== undefined ? parsed.data.notes : existing.notes,
   };
-  const res = await c.env.DB.prepare(
-    `UPDATE translation_prefs
-        SET audience = ?1, purpose = ?2, register = ?3, script_notes = ?4,
-            instructions_md = ?5, common_issues_md = ?6, notes = ?7,
-            version = version + 1, updated_at = ?8, updated_by = ?9
-      WHERE id = 1 AND version = ?10`,
-  )
-    .bind(
+  const [res] = await c.env.DB.batch([
+    c.env.DB.prepare(
+      `UPDATE translation_prefs
+          SET audience = ?1, purpose = ?2, register = ?3, script_notes = ?4,
+              instructions_md = ?5, common_issues_md = ?6, notes = ?7,
+              version = version + 1, updated_at = ?8, updated_by = ?9
+        WHERE id = 1 AND version = ?10`,
+    ).bind(
       merged.audience,
       merged.purpose,
       merged.register,
@@ -178,8 +236,15 @@ translationMemory.put("/prefs", requireAdmin, async (c) => {
       now,
       userId ?? null,
       expected,
-    )
-    .run();
+    ),
+    c.env.DB.prepare(PREFS_HISTORY_SQL).bind(
+      userId ?? null,
+      expected,
+      "update",
+      editSource(c),
+      prefsHistoryPayload(existing, merged),
+    ),
+  ]);
   if (!res.meta.changes) return c.json({ error: "version_mismatch", current: existing }, 409);
   const row = await c.env.DB.prepare(`SELECT * FROM translation_prefs WHERE id = 1`).first<PrefsRow>();
   queueContextExport(c);
