@@ -18,7 +18,8 @@
 // bpt_edit_preferences (#784) read and change the project's translation
 // preferences; the edit is admin-only and writes through sendAsAdmin.
 // bpt_list_terms, bpt_add_term, bpt_edit_term and bpt_delete_term (#785) read
-// and change the project's terminology; the writes are admin-only, checked
+// and change the project's terminology, and bpt_restore_term (#795) undoes a
+// delete; the writes are admin-only, checked
 // with session.isAdmin, and go through plain send (the term routes are
 // editor-only).
 //
@@ -2902,8 +2903,8 @@ const deleteTerm: ToolDef = {
     "Delete one term from this project's terminology (the web app's Style page). AI drafts and checks stop following it. " +
     "Project admins only; anyone else is refused. Show the reviewer the term (bpt_list_terms) and get a clear yes first. " +
     "Pass the id and version bpt_list_terms showed; it is deleted only if the term is still at that version. " +
-    "There is no undo from chat; adding it again with bpt_add_term makes a new term. " +
-    "Returns status deleted with the id, or status conflict with the term as it is now when someone changed it since: nothing was deleted, so show the reviewer and ask. " +
+    "To undo it, pass the same id and version to bpt_restore_term (adding it again with bpt_add_term would make a new term). " +
+    "Returns status deleted with the id and version (bpt_restore_term needs both, and a deleted term no longer shows in bpt_list_terms), or status conflict with the term as it is now when someone changed it since: nothing was deleted, so show the reviewer and ask. " +
     "Errors change nothing.",
   inputSchema: {
     type: "object",
@@ -2927,13 +2928,69 @@ const deleteTerm: ToolDef = {
     const refused = termRefusal(code, body, id);
     if (refused) throw refused;
     if (code !== 200) throw new Error(`BPtranslate write ${path} returned ${code}`);
-    return { status: "deleted", id };
+    return { status: "deleted", id, version };
+  },
+};
+
+const restoreTerm: ToolDef = {
+  name: "bpt_restore_term",
+  description:
+    "Undo bpt_delete_term: bring one deleted term back into this project's terminology (the web app's Style page), with the same id and content. " +
+    "AI drafts and checks follow it again from then on, so restore only what the reviewer asked for and get a clear yes first. " +
+    "Project admins only; anyone else is refused. Pass the id and the version that were passed to bpt_delete_term (a delete does not change the version). " +
+    "Returns status restored with the term and its new version, or status conflict with the term as it is now when someone restored, changed or deleted it again since: nothing was restored, so show the reviewer and ask. " +
+    "Refused, changing nothing, when the term is not deleted, or when the project has since gained a term with the same concept_id, source_term, target_term and status (ignoring case and outer spaces).",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      id: { type: "integer", minimum: 1, description: "The deleted term's id, as bpt_delete_term returned it" },
+      version: { type: "integer", minimum: 1, description: "The deleted term's version, as bpt_delete_term returned it" },
+    },
+    required: ["session_token", "id", "version"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const id = termIdArg(args);
+    const version = intArg(args, "version", { min: 1, required: true })!;
+    const session = await termsSession(args, ctx);
+    await requireTermAdmin(session);
+    const path = `${TERMS_PATH}/${id}/restore`;
+    const { status: code, body } = await session.send("POST", path, undefined, version);
+    const b = (body ?? {}) as Record<string, unknown>;
+    if (code === 404) throw new ToolInputError(`There is no term with id ${id} in this project. ${NOT_SAVED}`);
+    // The route only answers version_mismatch for a term that is still
+    // deleted, so say so: current is not in bpt_list_terms.
+    if (code === 409 && b.error === "version_mismatch") {
+      return {
+        status: "conflict",
+        current: { ...termView(b.current), deleted: true },
+        message:
+          "Someone restored, changed and deleted this term again since, so nothing was restored. It is still deleted: current shows it as it is now, and it is not in bpt_list_terms. Show the reviewer and ask before trying again with its version.",
+      };
+    }
+    if (code === 409 && b.error === "not_deleted") {
+      throw new ToolInputError(`Term ${id} is not deleted, so there is nothing to restore; bpt_list_terms shows it. ${NOT_SAVED}`);
+    }
+    // termRefusal's duplicate text suggests editing the live term, which is
+    // not what a reviewer who wants the old term back asked for.
+    if (code === 409 && b.error === "duplicate_term") {
+      const cur = b.current ? termView(b.current) : null;
+      const which = cur ? ` (id ${cur.id}: ${JSON.stringify(cur.source_term)} -> ${JSON.stringify(cur.target_term)}, ${cur.status})` : "";
+      throw new ToolInputError(
+        `Term ${id} cannot come back: the project now has a term with the same concept_id, source_term, target_term and status${which}. Show the reviewer that term and ask what they want. ${NOT_SAVED}`,
+      );
+    }
+    const refused = termRefusal(code, body, id);
+    if (refused) throw refused;
+    if (code !== 200) throw new Error(`BPtranslate write ${path} returned ${code}`);
+    return { status: "restored", term: termView(body) };
   },
 };
 
 export const TOOLS: ToolDef[] = [
   whoami, linkAccount, listBooks, packageStatus, chunkWork, getRow, chunkList, getVerses, editRow, approve,
   templatesForRow, editTemplate, approveTemplate, getArticle, editArticle, approveArticle, bulkSetState, draft, jobStatus,
-  getPreferences, getPreferencesHistory, editPreferences, listTerms, addTerm, editTerm, deleteTerm,
+  getPreferences, getPreferencesHistory, editPreferences, listTerms, addTerm, editTerm, deleteTerm, restoreTerm,
 ];
 

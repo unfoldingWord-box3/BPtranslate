@@ -123,7 +123,7 @@ function fresh({ preset = "ar-bsoj", terms = true } = {}) {
     return r ? { ...r } : null;
   };
   // send: a direct call to the term routes as the admin's chat principal.
-  return { call, table, term, queued, sqlite, realAdmin, send: sessions[ADMIN].send };
+  return { call, table, term, queued, sqlite, realAdmin, send: sessions[ADMIN].send, sendAs };
 }
 
 function makeDb(sqlite) {
@@ -228,7 +228,7 @@ test("bpt_delete_term: an admin's delete soft-deletes the term, and it leaves th
   const { call, term } = fresh();
   const r = await call("bpt_delete_term", { id: 3, version: 2 });
   assert.equal(r.isError, false, JSON.stringify(r.data));
-  assert.deepEqual(r.data, { status: "deleted", id: 3 });
+  assert.deepEqual(r.data, { status: "deleted", id: 3, version: 2 });
   assert.ok(term(3).deleted_at, "soft-deleted, as the web app deletes");
   const list = await call("bpt_list_terms", {});
   assert.deepEqual(list.data.terms.map((t) => t.id), [2, 1]);
@@ -541,4 +541,159 @@ test("GET /terms/count: takes the same q and status filters as GET /terms, so a 
   assert.equal((await send("GET", `${base}/count`)).body.count, 3);
   const bad = await send("GET", `${base}/count?status=bogus`);
   assert.equal(bad.status, 400);
+});
+
+// Issue #795: POST /terms/:id/restore and bpt_restore_term undo a soft delete.
+
+const RESTORE = (id) => `/api/translation-memory/terms/${id}/restore`;
+const contentOf = (t) => {
+  const { concept_id, source_term, target_term, status, replacement, comment, tw_link } = t;
+  return { concept_id, source_term, target_term, status, replacement, comment, tw_link };
+};
+
+test("POST /terms/:id/restore: a deleted term comes back with the same id and content, a new version, and is listed again", async () => {
+  const { send, term, queued } = fresh();
+  const before = term(1);
+  assert.equal((await send("DELETE", "/api/translation-memory/terms/1", undefined, 3)).status, 200);
+  await settle();
+  queued.length = 0;
+  const r = await send("POST", RESTORE(1));
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.id, 1);
+  assert.equal(r.body.version, 4, "the restore bumps the version (the delete did not)");
+  assert.deepEqual(contentOf(r.body), contentOf(before));
+  const saved = term(1);
+  assert.equal(saved.deleted_at, null);
+  assert.equal(saved.updated_by, 8, "saved as the signed-in user");
+  const list = await send("GET", "/api/translation-memory/terms");
+  assert.ok(list.body.terms.some((t) => t.id === 1), "GET /terms lists it again");
+  await settle();
+  assert.equal(queued.length, 1, "the restore queues a context export, as other term saves do");
+});
+
+test("POST /terms/:id/restore: a live duplicate added since the delete is a 409 with that term, and nothing changes", async () => {
+  const { send, table, queued } = fresh();
+  assert.equal((await send("DELETE", "/api/translation-memory/terms/1")).status, 200);
+  const re = await send("POST", "/api/translation-memory/terms", { concept_id: "Grace", source_term: "grace", target_term: "نعمة" });
+  assert.equal(re.status, 201, "the deleted row does not block a new one");
+  await settle();
+  queued.length = 0;
+  const before = table();
+  const r = await send("POST", RESTORE(1));
+  assert.equal(r.status, 409);
+  assert.equal(r.body.error, "duplicate_term");
+  assert.equal(r.body.current.id, re.body.id);
+  assert.deepEqual(table(), before);
+  await settle();
+  assert.equal(queued.length, 0, "a refused restore queues no export");
+});
+
+test("POST /terms/:id/restore: a live term is 409 not_deleted, an unknown id 404, a bad id 400, and nothing changes", async () => {
+  const { send, table, queued } = fresh();
+  const before = table();
+  const live = await send("POST", RESTORE(1));
+  assert.equal(live.status, 409);
+  assert.equal(live.body.error, "not_deleted");
+  assert.equal(live.body.current.id, 1);
+  assert.equal(live.body.current.version, 3);
+  assert.equal((await send("POST", RESTORE(99))).status, 404);
+  for (const raw of ["abc", "1abc", "1.9", "9".repeat(400)]) {
+    const bad = await send("POST", RESTORE(raw));
+    assert.equal(bad.status, 400, `id ${raw}`);
+    assert.equal(bad.body.error, "bad_id");
+  }
+  assert.deepEqual(table(), before);
+  await settle();
+  assert.equal(queued.length, 0);
+});
+
+test("POST /terms/:id/restore: a viewer is refused, and the term stays deleted", async () => {
+  const { send, sendAs, table } = fresh();
+  assert.equal((await send("DELETE", "/api/translation-memory/terms/3")).status, 200);
+  const before = table();
+  const r = await sendAs({ userId: 10, username: "reader", role: null, linkId: 3 }, "POST", RESTORE(3));
+  assert.equal(r.status, 403);
+  assert.deepEqual(table(), before);
+});
+
+test("bpt_restore_term: undoes bpt_delete_term, and the term is listed again with the same id", async () => {
+  const { call, term } = fresh();
+  const before = term(2);
+  assert.equal((await call("bpt_delete_term", { id: 2, version: 1 })).data.status, "deleted");
+  const r = await call("bpt_restore_term", { id: 2, version: 1 });
+  assert.equal(r.isError, false, JSON.stringify(r.data));
+  assert.equal(r.data.status, "restored");
+  assert.equal(r.data.term.id, 2);
+  assert.equal(r.data.term.version, 2);
+  assert.deepEqual(contentOf(r.data.term), contentOf(before));
+  const list = await call("bpt_list_terms", {});
+  assert.deepEqual(list.data.terms.map((t) => t.id), [3, 2, 1]);
+});
+
+test("bpt_restore_term: editors and viewers are refused, as are a live term, an unknown id and a duplicate; nothing changes", async () => {
+  const { call, table, queued } = fresh();
+  assert.equal((await call("bpt_delete_term", { id: 3, version: 2 })).data.status, "deleted");
+  await settle();
+  queued.length = 0;
+  const before = table();
+  const editor = await call("bpt_restore_term", { id: 3, version: 2 }, EDITOR);
+  assert.equal(editor.isError, true);
+  assert.match(editor.data.error, /project admins only, and reviewer is not one here\. Nothing was saved\./);
+  const viewer = await call("bpt_restore_term", { id: 3, version: 2 }, VIEWER);
+  assert.equal(viewer.isError, true);
+  assert.match(viewer.data.error, /cannot edit in this project/);
+  const live = await call("bpt_restore_term", { id: 1, version: 3 });
+  assert.equal(live.isError, true);
+  assert.match(live.data.error, /Term 1 is not deleted.*Nothing was saved\./);
+  const missing = await call("bpt_restore_term", { id: 99, version: 1 });
+  assert.equal(missing.isError, true);
+  assert.match(missing.data.error, /no term with id 99 in this project\. Nothing was saved\./);
+  assert.deepEqual(table(), before);
+  const add = await call("bpt_add_term", { concept_id: "god", source_term: "God", target_term: "الله" });
+  assert.equal(add.data.status, "added");
+  const afterAdd = table();
+  const dup = await call("bpt_restore_term", { id: 3, version: 2 });
+  assert.equal(dup.isError, true);
+  assert.match(dup.data.error, new RegExp(`Term 3 cannot come back: .*id ${add.data.term.id}:.*Nothing was saved\\.`));
+  assert.doesNotMatch(dup.data.error, /bpt_edit_term/, "a restore is not an edit");
+  assert.deepEqual(table(), afterAdd);
+});
+
+test("POST /terms/:id/restore: with If-Match, only the version that was deleted comes back; an unreadable If-Match is a 400", async () => {
+  const { send, table, term } = fresh();
+  assert.equal((await send("DELETE", "/api/translation-memory/terms/1", undefined, 3)).status, 200);
+  // Someone else restores, edits and deletes it again before a late restore arrives.
+  assert.equal((await send("POST", RESTORE(1), undefined, 3)).status, 200);
+  assert.equal((await send("PATCH", "/api/translation-memory/terms/1", { comment: "changed" }, 4)).status, 200);
+  assert.equal((await send("DELETE", "/api/translation-memory/terms/1", undefined, 5)).status, 200);
+  const before = table();
+  const late = await send("POST", RESTORE(1), undefined, 3);
+  assert.equal(late.status, 409);
+  assert.equal(late.body.error, "version_mismatch");
+  assert.equal(late.body.current.version, 5);
+  assert.equal(late.body.current.comment, "changed");
+  const bad = await send("POST", RESTORE(1), undefined, "abc");
+  assert.equal(bad.status, 400);
+  assert.equal(bad.body.error, "invalid_if_match");
+  assert.deepEqual(table(), before);
+  const ok = await send("POST", RESTORE(1), undefined, 5);
+  assert.equal(ok.status, 200);
+  assert.equal(term(1).deleted_at, null);
+});
+
+test("bpt_restore_term: a version other than the deleted one is a conflict with the term as it is now, and nothing is restored", async () => {
+  const { call, table } = fresh();
+  assert.equal((await call("bpt_delete_term", { id: 1, version: 3 })).data.status, "deleted");
+  const before = table();
+  const r = await call("bpt_restore_term", { id: 1, version: 2 });
+  assert.equal(r.isError, false, JSON.stringify(r.data));
+  assert.equal(r.data.status, "conflict");
+  assert.equal(r.data.current.version, 3);
+  assert.equal(r.data.current.deleted, true, "the conflict says the term is still deleted");
+  assert.match(r.data.message, /nothing was restored/);
+  assert.match(r.data.message, /still deleted/);
+  assert.deepEqual(table(), before);
+  const noVersion = await call("bpt_restore_term", { id: 1 });
+  assert.equal(noVersion.isError, true);
+  assert.deepEqual(table(), before);
 });
