@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Box,
@@ -141,11 +141,15 @@ export function TerminologySection({ direction }: { direction: "ltr" | "rtl" }) 
   // True when the last Undo failed for a reason worth retrying (network, 5xx):
   // the offer comes back saying so, instead of a message that ends it.
   const [undoFailed, setUndoFailed] = useState(false);
+  // Counts deletes, so a restore that fails after a newer delete does not
+  // replace that newer term's Undo offer with its own.
+  const deleteSeq = useRef(0);
   const showMsg = (msg: string) => {
     setUndo(null);
     save.setMsg(msg);
   };
   const onDeleted = (term: Term) => {
+    deleteSeq.current += 1;
     save.clear();
     setUndoFailed(false);
     setUndo(term);
@@ -154,6 +158,7 @@ export function TerminologySection({ direction }: { direction: "ltr" | "rtl" }) 
   const onUndo = async () => {
     if (!undo) return;
     const term = undo;
+    const seq = deleteSeq.current;
     setUndo(null);
     try {
       // The version the term had when it was deleted (a delete keeps it), so
@@ -180,7 +185,9 @@ export function TerminologySection({ direction }: { direction: "ltr" | "rtl" }) 
         save.setMsg(t("preferences.restoreGone"));
       } else {
         // The term is still deleted and the same id and version can be sent
-        // again, so keep the offer open rather than end it with an error.
+        // again, so keep the offer open rather than end it with an error,
+        // unless another term was deleted meanwhile: its offer stays.
+        if (deleteSeq.current !== seq) return;
         setUndoFailed(true);
         setUndo(term);
       }
