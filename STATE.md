@@ -87,7 +87,9 @@ Highlights that bite repeatedly:
   `session.sendAsAdmin` (#784), used only by `bpt_edit_preferences` because `PUT /api/translation-memory/prefs`
   is admin-only in the web app too. It is built by `adminSender` (`mcpTools.ts`), which allows only the routes in
   `CHAT_ADMIN_ROUTES`, re-reads the real role on every call and answers 403 without calling the route for a
-  non-admin. `send()` stays capped, so an admin's other chat writes still run as editor.
+  non-admin. `send()` stays capped, so an admin's other chat writes still run as editor. A feature the admin desk
+  shows admins only but whose route accepts editors (the terminology tools, #785) gets a `session.isAdmin()`
+  check in the tool and writes through plain `send()`, never a `CHAT_ADMIN_ROUTES` entry.
 - **Local alignment testing needs the `mltest` workspace, not the default.** `POST /api/auth/dev`
   with no `be_ws` cookie lands on `bsoj` (the first entry in `WORKSPACES`). Its `ar-bsoj` preset
   quarantines the ULT/UST lanes as soon as verses exist (`ensureLaneState` in
