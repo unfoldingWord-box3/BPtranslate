@@ -243,6 +243,7 @@ test("bpt_delete_term: a stale version is a conflict with the term as it is now,
   const r = await call("bpt_delete_term", { id: 1, version: 2 });
   assert.equal(r.isError, false, JSON.stringify(r.data));
   assert.equal(r.data.status, "conflict");
+  assert.match(r.data.message, /nothing was deleted/);
   assert.equal(r.data.current.version, 3);
   assert.equal(term(1).deleted_at, null);
   assert.deepEqual(table(), before);
@@ -477,7 +478,7 @@ test("DELETE /terms/:id: without If-Match it deletes as before; an unreadable If
   const before = table();
   const bad = await send("DELETE", "/api/translation-memory/terms/3", undefined, "abc");
   assert.equal(bad.status, 400);
-  assert.equal(bad.body.error, "bad_if_match");
+  assert.equal(bad.body.error, "invalid_if_match");
   for (const blank of ["", "  "]) {
     const r = await send("DELETE", "/api/translation-memory/terms/3", undefined, blank);
     assert.equal(r.status, 400, `blank If-Match ${JSON.stringify(blank)} is not an unpinned delete`);

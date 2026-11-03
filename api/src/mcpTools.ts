@@ -2581,10 +2581,10 @@ function parseTermCursor(raw: unknown, q: string | undefined, status: string | u
   return k as TermKey;
 }
 
-const termConflict = (current: unknown) => ({
+const termConflict = (current: unknown, outcome = NOT_SAVED) => ({
   status: "conflict",
   current: termView(current),
-  message: `Someone changed this term after the reviewer saw it, so ${NOT_SAVED.toLowerCase()} Show the reviewer the term as it is now (current) and ask before trying again with its version.`,
+  message: `Someone changed this term after the reviewer saw it, so ${outcome.toLowerCase()} Show the reviewer the term as it is now (current) and ask before trying again with its version.`,
 });
 
 const listTerms: ToolDef = {
@@ -2800,7 +2800,7 @@ const deleteTerm: ToolDef = {
     const path = `${TERMS_PATH}/${id}`;
     const { status: code, body } = await session.send("DELETE", path, undefined, version);
     const b = (body ?? {}) as Record<string, unknown>;
-    if (code === 409 && b.error === "version_mismatch") return termConflict(b.current);
+    if (code === 409 && b.error === "version_mismatch") return termConflict(b.current, "Nothing was deleted.");
     const refused = termRefusal(code, body, id);
     if (refused) throw refused;
     if (code !== 200) throw new Error(`BPtranslate write ${path} returned ${code}`);
