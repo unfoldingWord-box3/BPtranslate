@@ -22,10 +22,12 @@ const TOKEN = "bpt_" + "g".repeat(43);
 // Parse one chapter of USFM into the chapter route's per-lane verse map. A
 // bridged verse ("3-4") becomes one entry keyed by its first verse, with
 // verse_end, as the route keys it.
-function laneFrom(chapterUsfm) {
-  const json = usfm.toJSON(`\\id TIT\n\\c 1\n${chapterUsfm}`);
+// The chapter-front entry ("front": a Psalm superscription, or just a \p) is
+// stored as verse 0 (scripts/import-book.mjs, importParsers.ts).
+function laneFrom(chapterUsfm, { book = "TIT", chapter = 1 } = {}) {
+  const json = usfm.toJSON(`\\id ${book}\n\\c ${chapter}\n${chapterUsfm}`);
   const out = {};
-  for (const [key, v] of Object.entries(json.chapters["1"])) {
+  for (const [key, v] of Object.entries(json.chapters[String(chapter)])) {
     if (key === "front") {
       out[0] = { verse: 0, verse_end: null, content: v };
       continue;
@@ -71,9 +73,41 @@ const NOTES_AND_HEADINGS = laneFrom(
     "\\qa BETH",
     "\\s1 A section heading",
     "\\v 2 Next verse.",
-    "\\d A superscription",
+    "\\lit Lord, have mercy.",
     "\\v 3 Last.",
   ].join("\n"),
+);
+// Psalms 2-3 as real USFM: chapter 3's superscription \d sits after \c and
+// before \v 1, so usfm-js puts it in chapter 3's front entry (verse 0).
+const PSA = usfm.toJSON(
+  [
+    "\\id PSA",
+    "\\c 2",
+    "\\q1",
+    "\\v 12 Blessed are all who take refuge in him.",
+    "\\c 3",
+    "\\d A psalm of David, when he fled from Absalom his son.",
+    "\\q1",
+    "\\v 1 Yahweh, how many are my enemies!",
+    "\\q2 Many are rising up against me.",
+    "\\v 2 Many say of me,",
+  ].join("\n"),
+);
+function laneOf(chapterJson) {
+  const out = {};
+  for (const [key, v] of Object.entries(chapterJson)) {
+    const s = key === "front" ? 0 : Number(key);
+    out[s] = { verse: s, verse_end: null, content: v };
+  }
+  return out;
+}
+// Verses full of straight quotes and backslashes: each costs 1 byte in the
+// text, 2 in the tool's JSON, and 4 once mcp.ts encodes that JSON again.
+const ESCAPES = Object.fromEntries(
+  Array.from({ length: 60 }, (_, i) => [
+    i + 1,
+    { verse: i + 1, verse_end: null, content: { verseObjects: [{ type: "text", text: `${'"\\'.repeat(200)}${i + 1}` }] } },
+  ]),
 );
 // One verse longer than a row may be on its own.
 const HUGE = laneFrom(`\\v 1 ${"x".repeat(ROW_TEXT_CAP + 500)}`);
@@ -86,6 +120,9 @@ const CHAPTERS = {
   "/api/chapters/TIT/5": { verses: { ULT: LONG } },
   "/api/chapters/TIT/6": { verses: { ULT: HUGE } },
   "/api/chapters/TIT/7": { verses: { ULT: NOTES_AND_HEADINGS } },
+  "/api/chapters/TIT/8": { verses: { ULT: ESCAPES } },
+  "/api/chapters/PSA/2": { verses: { ULT: laneOf(PSA.chapters["2"]) } },
+  "/api/chapters/PSA/3": { verses: { ULT: laneOf(PSA.chapters["3"]) } },
 };
 
 const calls = [];
@@ -147,16 +184,47 @@ test("ULT text as plain text: alignment and footnotes gone, quotes and punctuati
   assert.ok(!/zaln|\\w|\\f|footnote|slave/.test(r.wire), "no USFM, alignment or footnote text on the wire");
 });
 
-test("the space after a footnote or cross reference survives; headings are left out, \\d is kept", async () => {
+test("the space after a footnote or cross reference survives; headings and \\lit are left out", async () => {
   const r = await call({ book: "TIT", chapter: 7 });
   assert.deepEqual(r.data.verses, [
     // Without nextChar this read "Graceto you, andpeace.", and without
     // dropping headings it ended "... peace. BETH A section heading".
     { verse: 1, text: "Grace to you, and peace." },
-    // The \d superscription is scripture; usfm-js parks it on verse 2.
-    { verse: 2, text: "Next verse. A superscription" },
+    // usfm-js parks \lit (display text) on the verse before.
+    { verse: 2, text: "Next verse." },
     { verse: 3, text: "Last." },
   ]);
+});
+
+test("a Psalm superscription comes back as verse 0 by default, on neither verse 1 nor the previous chapter", async () => {
+  const r = await call({ book: "PSA", chapter: 3 });
+  assert.equal(r.isError, false, JSON.stringify(r.data));
+  assert.deepEqual(r.data.verses, [
+    { verse: 0, text: "A psalm of David, when he fled from Absalom his son." },
+    { verse: 1, text: "Yahweh, how many are my enemies! Many are rising up against me." },
+    { verse: 2, text: "Many say of me," },
+  ]);
+  const prev = await call({ book: "PSA", chapter: 2 });
+  assert.deepEqual(prev.data.verses, [{ verse: 12, text: "Blessed are all who take refuge in him." }]);
+  const from1 = await call({ book: "PSA", chapter: 3, verse_start: 1, verse_end: 1 });
+  assert.deepEqual(from1.data.verses.map((v) => v.verse), [1], "an explicit verse_start 1 leaves the front matter out");
+  const only0 = await call({ book: "PSA", chapter: 3, verse_start: 0, verse_end: 0 });
+  assert.deepEqual(only0.data.verses.map((v) => v.verse), [0]);
+});
+
+test("pages are measured as they travel: straight quotes and backslashes cost double", async () => {
+  const seen = [];
+  let start = 1;
+  for (let pages = 1; ; pages++) {
+    const r = await call({ book: "TIT", chapter: 8, verse_start: start });
+    assert.equal(r.isError, false);
+    assert.ok(Buffer.byteLength(r.wire) < 32_000, `page ${pages} travels in ${Buffer.byteLength(r.wire)} bytes`);
+    seen.push(...r.data.verses.map((v) => v.verse));
+    if (r.data.next_verse_start === null) break;
+    start = r.data.next_verse_start;
+    assert.ok(pages < 30, "paging terminates");
+  }
+  assert.deepEqual(seen, Array.from({ length: 60 }, (_, i) => i + 1));
 });
 
 test("a range: a bridged verse overlapping it is returned whole, once", async () => {
@@ -183,8 +251,8 @@ test("lane: pick another lane by name; an unknown lane names the ones there are"
 test("no ULT: falls back like bpt_chunks and says which lane it used", async () => {
   const r = await call({ book: "TIT", chapter: 2, verse_start: 1, verse_end: 2 });
   assert.equal(r.data.lane, "UST");
-  assert.match(r.data.note, /ULT is not available/);
-  assert.match(r.data.note, /UST/);
+  // ULT may exist for other chapters, so the note speaks of this one only.
+  assert.equal(r.data.note, "ULT has no text for TIT 2 here, so the UST text was used.");
   assert.deepEqual(r.data.verses, [
     { verse: 1, text: "Paul writes this letter." },
     { verse: 2, text: "He hopes." },

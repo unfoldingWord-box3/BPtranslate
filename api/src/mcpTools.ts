@@ -783,9 +783,10 @@ const chunkList: ToolDef = {
 // feeds the locked-lane save, so it is left alone here).
 
 // Headings and other titles. usfm-js parks a heading at the end of the verse
-// BEFORE the one it heads, so its text would land on the wrong verse. \d (a
-// Psalm superscription) is scripture and stays.
-const HEADING_TAG = /^(s\d*|ms\d*|mr|r|qa|sp)$/;
+// BEFORE the one it heads, so its text would land on the wrong verse. \lit
+// (a liturgical note) is parked the same way. \d (a Psalm superscription) is
+// scripture and stays: it comes before \v 1, in the chapter's verse 0.
+const HEADING_TAG = /^(s\d*|ms\d*|mr|r|qa|sp|lit)$/;
 
 // Drops headings, and turns the nextChar of a node with no text of its own
 // (usfm-js keeps the space after \x* there) back into text, so the words on
@@ -808,14 +809,18 @@ const verseText = (content: VerseEntry["content"]) =>
 const getVerses: ToolDef = {
   name: "bpt_get_verses",
   description:
-    "The verse text of one chapter of this project's translation, as plain text (USFM markers, word alignment, footnotes, cross references and section headings removed), to read a note or question beside the verse it is about. Reads ULT, the project's literal text, by default; if ULT is not available it reads UST, then the source text (UHB or UGNT), and the note says so. lane always names the text that was read; pass lane (e.g. UST) to read another. A bridged verse (\\v 9-10) comes back once, with verse_end. Results are paged: if next_verse_start is not null, call again with verse_start set to it (and the same verse_end) for the rest; never call a range complete until next_verse_start is null. A verse marked truncated had its text cut.",
+    "The verse text of one chapter of this project's translation, as plain text (USFM markers, word alignment, footnotes, cross references and section headings removed), to read a note or question beside the verse it is about. Reads ULT, the project's literal text, by default; if this chapter has no ULT text it reads UST, then the source text (UHB or UGNT), and the note says so. lane always names the text that was read; pass lane (e.g. UST) to read another. Verse 0 holds the chapter's front matter, such as a Psalm superscription: it comes first when verse_start is omitted and it has text. A bridged verse (\\v 9-10) comes back once, with verse_end. Results are paged: if next_verse_start is not null, call again with verse_start set to it (and the same verse_end) for the rest; never call a range complete until next_verse_start is null. A verse marked truncated had its text cut.",
   inputSchema: {
     type: "object",
     properties: {
       session_token: SESSION_TOKEN_SCHEMA,
       book: { type: "string", description: "3-letter book code, e.g. TIT" },
       chapter: { type: "integer", minimum: 1 },
-      verse_start: { type: "integer", minimum: 0, description: "First verse (default 1; 0 is the chapter's front matter)" },
+      verse_start: {
+        type: "integer",
+        minimum: 0,
+        description: "First verse. Omit to start at verse 0, the chapter's front matter (such as a Psalm superscription), which comes back only when it has text",
+      },
       verse_end: { type: "integer", minimum: 0, description: "Last verse, inclusive; omit for the rest of the chapter" },
       lane: { type: "string", description: "The text to read: ULT (the default) or UST, or UHB/UGNT for the source text" },
     },
@@ -826,7 +831,8 @@ const getVerses: ToolDef = {
     const session = await readerFrom(args, ctx);
     const book = bookArg(args);
     const chapter = intArg(args, "chapter", { min: 1, required: true })!;
-    const vs = intArg(args, "verse_start", { min: 0 }) ?? 1;
+    const vsArg = intArg(args, "verse_start", { min: 0 });
+    const vs = vsArg ?? 0;
     const ve = intArg(args, "verse_end", { min: 0 }) ?? Number.MAX_SAFE_INTEGER;
     if (ve < vs) throw new ToolInputError("verse_end is before verse_start");
     let asked: string | null = null;
@@ -848,29 +854,35 @@ const getVerses: ToolDef = {
       );
     }
 
-    // Every verse (or bridged block) that overlaps the range, in order.
+    // Every verse (or bridged block) that overlaps the range, in order. The
+    // chapter's front matter (verse 0, stored that way by the importers) is
+    // left out of a default start when it holds no text, as most chapters'
+    // (a bare \p) does.
     const units = Object.values(verses[lane])
       .map((v) => {
         const start = Number(v.verse);
-        return { v, start, end: Math.max(start, Number(v.verse_end ?? start)) };
+        return { start, end: Math.max(start, Number(v.verse_end ?? start)), text: verseText(v.content) };
       })
-      .filter((u) => u.end >= vs && u.start <= ve)
+      .filter((u) => u.end >= vs && u.start <= ve && (vsArg !== undefined || u.start > 0 || u.text !== ""))
       .sort((a, b) => a.start - b.start);
     const out: { verse: number; verse_end?: number; text: string; truncated?: true }[] = [];
     let bytes = 0;
     let i = 0;
     for (; i < units.length; i++) {
-      const { v, start, end } = units[i];
-      const { text, cut } = capText(verseText(v.content), ROW_TEXT_CAP);
+      const { start, end } = units[i];
+      const { text, cut } = capText(units[i].text, ROW_TEXT_CAP);
       const item = { verse: start, ...(end > start ? { verse_end: end } : {}), text, ...(cut ? { truncated: true as const } : {}) };
-      const size = byteLength(item);
+      // Measured as it travels: mcp.ts sends the result as a JSON string
+      // inside JSON, so every quote and backslash costs double.
+      const size = getRowBytes(item);
       // Always return at least one verse, or paging would never move.
       if (out.length > 0 && bytes + size > PAGE_BYTE_BUDGET) break;
       out.push(item);
       bytes += size;
     }
     const notes: string[] = [];
-    if (!asked && lane !== "ULT") notes.push(`ULT is not available in this project, so the ${lane} text was used.`);
+    // Only this chapter is known: ULT may exist elsewhere, or be held back.
+    if (!asked && lane !== "ULT") notes.push(`ULT has no text for ${book} ${chapter} here, so the ${lane} text was used.`);
     if (units.length === 0) notes.push(`${lane} has no verses in this range of ${book} ${chapter}.`);
     return {
       book,
