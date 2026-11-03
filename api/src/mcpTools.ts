@@ -16,6 +16,10 @@
 // editor-only and getJson carries no user. bpt_get_preferences and
 // bpt_edit_preferences (#784) read and change the project's translation
 // preferences; the edit is admin-only and writes through sendAsAdmin.
+// bpt_list_terms, bpt_add_term, bpt_edit_term and bpt_delete_term (#785) read
+// and change the project's terminology; the writes are admin-only, checked
+// with session.isAdmin, and go through plain send (the term routes are
+// editor-only).
 //
 // Each tool reads through the SAME route handlers the web app uses (`getJson`
 // runs the Hono app in-process), so chat and web never disagree about counts
@@ -88,7 +92,7 @@ import { shortSupport, summarizePackageRefs, type PackageRefRows } from "./packa
 import type { SourceNotes } from "./sourceNotes.ts";
 import { isTranslationConfig } from "./workflowLayouts.ts";
 import type { ProjectConfig } from "./projectConfig.ts";
-import { REGISTERS } from "./translationMemoryLib.ts";
+import { REGISTERS, TERM_STATUSES } from "./translationMemoryLib.ts";
 
 export class ToolInputError extends Error {}
 
@@ -2278,9 +2282,365 @@ const jobStatus: ToolDef = {
   },
 };
 
+// ── Terminology (issue #785) ────────────────────────────────────────────────
+// The Style page's Terminology section (table terminology), through the web
+// app's own GET / POST /api/translation-memory/terms and PATCH / DELETE
+// /terms/:id. Every term route is editor-only and wants a signed-in user, so
+// reads and writes both go through send() as the linked user. The web app
+// shows Terminology only to admins (StyleScreen memoryAvailable), so the write
+// tools ask session.isAdmin first, as bpt_edit_preferences does; the route
+// itself accepts the editor-capped principal, so no sendAsAdmin route is
+// needed (Benjamin's call, #785). Every save queues a context export (the
+// routes do it). CSV import and export stay in the web app.
+
+const TERMS_PATH = "/api/translation-memory/terms";
+// GET /terms returns at most this many rows (its own cap).
+const TERMS_FETCH_LIMIT = 2000;
+const DEFAULT_TERMS_PAGE = 50;
+const MAX_TERMS_PAGE = 100;
+const TERM_TEXT_FIELDS = ["concept_id", "source_term", "target_term", "replacement", "comment", "tw_link"] as const;
+type TermTextField = (typeof TERM_TEXT_FIELDS)[number];
+const TERM_REQUIRED_FIELDS: readonly TermTextField[] = ["concept_id", "source_term"];
+// The route's own length limits (translationMemory.ts TermBody).
+const TERM_MAX_CHARS: Record<TermTextField, number> = {
+  concept_id: 200,
+  source_term: 500,
+  target_term: 1000,
+  replacement: 1000,
+  comment: 4000,
+  tw_link: 500,
+};
+
+const TERM_FIELDS_HELP =
+  "concept_id (groups the renderings of one concept, e.g. a tW article name like grace), source_term (the source-language word), " +
+  "target_term (how this project renders it), status (preferred: use this; admitted: also acceptable; deprecated: avoid; " +
+  "forbidden: never use, and replacement says what to use instead; do_not_translate: keep the source form), " +
+  "comment (why, for reviewers), tw_link (rc:// link to the tW article)";
+
+const TERM_STATUS_SCHEMA = { type: "string", enum: [...TERM_STATUSES] };
+
+// Readable by an editor of a translation project; an authoring project has
+// none (the web app shows Terminology on translation projects only).
+async function termsSession(args: Record<string, unknown>, ctx: ToolContext): Promise<McpSession> {
+  return translationSession(args, ctx, "", "Terminology applies to translation projects only, and this project writes its notes in English.");
+}
+
+async function requireTermAdmin(session: McpSession): Promise<void> {
+  if (!(await session.isAdmin())) {
+    throw new ToolInputError(
+      `Changing the terminology is for project admins only, and ${session.principal.username} is not one here. ${NOT_SAVED}`,
+    );
+  }
+}
+
+function termView(raw: unknown): Record<string, unknown> {
+  const t = (raw ?? {}) as Record<string, unknown>;
+  return {
+    id: t.id,
+    version: t.version,
+    concept_id: t.concept_id,
+    source_term: t.source_term,
+    target_term: t.target_term ?? null,
+    status: t.status,
+    replacement: t.replacement ?? null,
+    comment: t.comment ?? null,
+    tw_link: t.tw_link ?? null,
+    source_status: t.source_status,
+  };
+}
+
+function termStatusArg(raw: unknown, key = "status"): (typeof TERM_STATUSES)[number] {
+  if (typeof raw !== "string" || !(TERM_STATUSES as readonly string[]).includes(raw)) {
+    throw new ToolInputError(`${key} must be one of ${TERM_STATUSES.join(", ")}, got ${JSON.stringify(raw)}.`);
+  }
+  return raw as (typeof TERM_STATUSES)[number];
+}
+
+// One text field of a term, trimmed as the web app trims it. Required fields
+// must not be empty; an optional one that is empty (or null) clears it.
+function termTextArg(raw: unknown, f: TermTextField): string | null {
+  const required = TERM_REQUIRED_FIELDS.includes(f);
+  if (raw === null && !required) return null;
+  if (typeof raw !== "string") throw new ToolInputError(`${f} must be text${required ? "" : ", or null to clear it"}. ${NOT_SAVED}`);
+  const v = raw.trim();
+  if (!v) {
+    if (required) throw new ToolInputError(`${f} cannot be empty. ${NOT_SAVED}`);
+    return null;
+  }
+  if (v.length > TERM_MAX_CHARS[f]) throw new ToolInputError(`${f} is longer than ${TERM_MAX_CHARS[f]} characters. ${NOT_SAVED}`);
+  return v;
+}
+
+function termIdArg(args: Record<string, unknown>): number {
+  return intArg(args, "id", { min: 1, required: true })!;
+}
+
+// The route's refusals, as one message each. The duplicate shape carries the
+// term already there, so the assistant can offer to change that one instead.
+function termRefusal(status: number, body: unknown, id?: number): ToolInputError | null {
+  const b = (body ?? {}) as Record<string, unknown>;
+  if (status === 409 && b.error === "duplicate_term") {
+    const cur = b.current ? termView(b.current) : null;
+    const which = cur
+      ? ` (id ${cur.id}, version ${cur.version}: ${JSON.stringify(cur.source_term)} -> ${JSON.stringify(cur.target_term)}, ${cur.status})`
+      : "";
+    return new ToolInputError(
+      `This project already has a term with the same concept_id, source_term, target_term and status${which}. Change that one with bpt_edit_term instead. ${NOT_SAVED}`,
+    );
+  }
+  if (status === 404) return new ToolInputError(`There is no term with id ${id} in this project (it may have been deleted). ${NOT_SAVED}`);
+  if (status === 400 && b.error === "validation_failed") {
+    const issues = (b.issues as { path?: unknown[]; message?: string }[] | undefined) ?? [];
+    const what = issues.map((i) => (i.path?.length ? `${String(i.path[0])}: ` : "") + (i.message ?? "invalid")).join("; ");
+    return new ToolInputError(`BPtranslate refused the change (${what || "invalid"}). ${NOT_SAVED}`);
+  }
+  if (status === 403) return new ToolInputError(`BPtranslate did not allow this change (403). ${NOT_SAVED}`);
+  return null;
+}
+
+// SQLite's BINARY collation, which GET /terms sorts by: UTF-8 bytes, then
+// length. JS < compares UTF-16 code units, which disagrees for characters
+// above U+FFFF, so the cursor compares bytes.
+function compareBinary(a: string, b: string): number {
+  const x = utf8.encode(a);
+  const y = utf8.encode(b);
+  const n = Math.min(x.length, y.length);
+  for (let i = 0; i < n; i++) if (x[i] !== y[i]) return x[i] - y[i];
+  return x.length - y.length;
+}
+
+// Keyset cursor in the route's order: concept_id, source_term, status, id.
+type TermKey = [string, string, string, number];
+const termKeyOf = (t: Record<string, unknown>): TermKey => [String(t.concept_id), String(t.source_term), String(t.status), Number(t.id)];
+function termAfter(a: TermKey, b: TermKey): boolean {
+  for (let i = 0; i < 3; i++) {
+    const c = compareBinary(a[i] as string, b[i] as string);
+    if (c !== 0) return c > 0;
+  }
+  return a[3] > b[3];
+}
+function parseTermCursor(raw: unknown): TermKey | null {
+  if (raw === undefined || raw === null || raw === "") return null;
+  try {
+    const k = JSON.parse(String(raw)) as unknown;
+    if (Array.isArray(k) && k.length === 4 && k.slice(0, 3).every((s) => typeof s === "string") && Number.isSafeInteger(k[3])) {
+      return k as TermKey;
+    }
+  } catch {
+    // fall through
+  }
+  throw new ToolInputError("cursor is not one this tool returned");
+}
+
+const termConflict = (current: unknown) => ({
+  status: "conflict",
+  current: termView(current),
+  message: `Someone changed this term after the reviewer saw it, so ${NOT_SAVED.toLowerCase()} Show the reviewer the term as it is now (current) and ask before trying again with its version.`,
+});
+
+const listTerms: ToolDef = {
+  name: "bpt_list_terms",
+  description:
+    `This project's terminology, the list on the web app's Style page that every AI draft and check is told to follow: ${TERM_FIELDS_HELP}. ` +
+    "One concept can have several rows (several renderings, or a preferred and a forbidden one). " +
+    "q finds terms whose concept_id, source_term or target_term contains it; status keeps one status. " +
+    "Returns can_edit (whether this user may change terms: project admins only), total (matching terms), and terms, each with its id and version. " +
+    "Results are paged: if next_cursor is not null, call again with it to get the rest; never say the list is complete until it is null. " +
+    "When more_than_total is true, the project has more matching terms than one read returns: narrow with q or status. " +
+    "Show the reviewer a term before changing it with bpt_edit_term or bpt_delete_term, and pass that term's id and version. " +
+    "Requires edit access; translation projects only. Read-only.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      q: { type: "string", description: "Text to look for in concept_id, source_term or target_term (case-insensitive for A-Z only)" },
+      status: { ...TERM_STATUS_SCHEMA, description: "Only terms with this status" },
+      cursor: { type: "string", description: "next_cursor from the previous page" },
+      limit: { type: "integer", minimum: 1, maximum: MAX_TERMS_PAGE, description: `Most terms per page (default ${DEFAULT_TERMS_PAGE})` },
+    },
+    required: ["session_token"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    let q: string | undefined;
+    if (args.q !== undefined && args.q !== null) {
+      if (typeof args.q !== "string") throw new ToolInputError("q must be text");
+      q = args.q.trim() || undefined;
+      if (q && q.length > 200) throw new ToolInputError("q must be at most 200 characters");
+    }
+    const status = args.status === undefined || args.status === null ? undefined : termStatusArg(args.status);
+    const limit = Math.min(intArg(args, "limit", { min: 1 }) ?? DEFAULT_TERMS_PAGE, MAX_TERMS_PAGE);
+    const cursor = parseTermCursor(args.cursor);
+    const session = await termsSession(args, ctx);
+    const admin = await session.isAdmin();
+    const params = new URLSearchParams({ limit: String(TERMS_FETCH_LIMIT) });
+    if (q) params.set("q", q);
+    if (status) params.set("status", status);
+    // send, not getJson: the term routes want a signed-in editor.
+    const { status: code, body } = await session.send("GET", `${TERMS_PATH}?${params}`);
+    if (code !== 200) throw new Error(`BPtranslate API ${TERMS_PATH} returned ${code}`);
+    const all = ((body as { terms?: Record<string, unknown>[] } | null)?.terms ?? []);
+    const start = cursor ? all.findIndex((t) => termAfter(termKeyOf(t), cursor)) : 0;
+    const from = start === -1 ? all.length : start;
+    const terms: Record<string, unknown>[] = [];
+    let bytes = 0;
+    let i = from;
+    for (; i < all.length && terms.length < limit; i++) {
+      const t = termView(all[i]);
+      const size = byteLength(t);
+      // Always return at least one term, or the cursor would never move. One
+      // term at the route's length limits fits the budget on its own.
+      if (terms.length > 0 && bytes + size > PAGE_BYTE_BUDGET) break;
+      terms.push(t);
+      bytes += size;
+    }
+    return {
+      ...(q ? { q } : {}),
+      ...(status ? { status } : {}),
+      can_edit: admin,
+      total: all.length,
+      ...(all.length >= TERMS_FETCH_LIMIT ? { more_than_total: true } : {}),
+      returned: terms.length,
+      next_cursor: i < all.length ? JSON.stringify(termKeyOf(all[i - 1])) : null,
+      terms,
+    };
+  },
+};
+
+const termFieldProps = (nullable: boolean) =>
+  Object.fromEntries(
+    TERM_TEXT_FIELDS.map((f) => [
+      f,
+      { type: nullable && !TERM_REQUIRED_FIELDS.includes(f) ? ["string", "null"] : "string", maxLength: TERM_MAX_CHARS[f] },
+    ]),
+  );
+
+const addTerm: ToolDef = {
+  name: "bpt_add_term",
+  description:
+    `Add one term to this project's terminology (the web app's Style page): ${TERM_FIELDS_HELP}. ` +
+    "Every AI draft and check in the project follows it from then on, so add only what the reviewer asked for, show them the exact term, and get a clear yes first. " +
+    "Project admins only; anyone else is refused. concept_id and source_term are required; status defaults to preferred. " +
+    "replacement is only for status forbidden, and a forbidden term must have one. " +
+    "Before adding, look with bpt_list_terms (q) for a term already there: a second rendering of the same concept is fine, but the same concept_id, source_term, target_term and status twice is refused. " +
+    "Returns status added with the new term (its id and version). Errors change nothing.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      ...termFieldProps(true),
+      status: { ...TERM_STATUS_SCHEMA, description: "Default preferred" },
+    },
+    required: ["session_token", "concept_id", "source_term"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const term: Record<string, unknown> = {};
+    for (const f of TERM_TEXT_FIELDS) {
+      if (TERM_REQUIRED_FIELDS.includes(f) || (args[f] !== undefined && args[f] !== null)) term[f] = termTextArg(args[f], f);
+    }
+    const status = args.status === undefined || args.status === null ? "preferred" : termStatusArg(args.status);
+    term.status = status;
+    if (status === "forbidden" && !term.replacement) {
+      throw new ToolInputError(`A forbidden term needs a replacement: what to use instead. ${NOT_SAVED}`);
+    }
+    if (status !== "forbidden" && term.replacement) {
+      throw new ToolInputError(`replacement is only for forbidden terms; this one is ${status}. ${NOT_SAVED}`);
+    }
+    const session = await termsSession(args, ctx);
+    await requireTermAdmin(session);
+    const { status: code, body } = await session.send("POST", TERMS_PATH, term);
+    const refused = termRefusal(code, body);
+    if (refused) throw refused;
+    if (code !== 201) throw new Error(`BPtranslate write ${TERMS_PATH} returned ${code}`);
+    return { status: "added", term: termView(body) };
+  },
+};
+
+const editTerm: ToolDef = {
+  name: "bpt_edit_term",
+  description:
+    `Change one term in this project's terminology (the web app's Style page): ${TERM_FIELDS_HELP}. ` +
+    "Every AI draft and check in the project follows it from then on, so change only what the reviewer asked for, show them the exact new term, and get a clear yes first. " +
+    "Project admins only; anyone else is refused. Give only the fields to change; null or empty clears an optional one (concept_id and source_term cannot be cleared). " +
+    "Setting status to anything but forbidden clears replacement, as the web app does; a forbidden term must have a replacement. " +
+    "Pass the id and version bpt_list_terms showed; it is saved only if the term is still at that version. " +
+    "Returns status applied with the saved term and its new version, or status conflict with the term as it is now when someone changed it since: nothing was saved, so show the reviewer and ask. " +
+    "Errors change nothing.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      id: { type: "integer", minimum: 1, description: "The term's id from bpt_list_terms" },
+      version: { type: "integer", minimum: 1, description: "The term's version exactly as bpt_list_terms showed it" },
+      ...termFieldProps(true),
+      status: TERM_STATUS_SCHEMA,
+    },
+    required: ["session_token", "id", "version"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const id = termIdArg(args);
+    const version = intArg(args, "version", { min: 1, required: true })!;
+    const patch: Record<string, unknown> = {};
+    for (const f of TERM_TEXT_FIELDS) if (args[f] !== undefined) patch[f] = termTextArg(args[f], f);
+    if (args.status !== undefined && args.status !== null) {
+      const status = termStatusArg(args.status);
+      patch.status = status;
+      if (status !== "forbidden") {
+        if (patch.replacement) throw new ToolInputError(`replacement is only for forbidden terms; this one would be ${status}. ${NOT_SAVED}`);
+        patch.replacement = null;
+      } else if ("replacement" in patch && !patch.replacement) {
+        throw new ToolInputError(`A forbidden term needs a replacement: what to use instead. ${NOT_SAVED}`);
+      }
+    }
+    if (!Object.keys(patch).length) throw new ToolInputError(`Give at least one field to change. ${NOT_SAVED}`);
+    const session = await termsSession(args, ctx);
+    await requireTermAdmin(session);
+    const path = `${TERMS_PATH}/${id}`;
+    const { status: code, body } = await session.send("PATCH", path, patch, version);
+    const b = (body ?? {}) as Record<string, unknown>;
+    if (code === 409 && b.error === "version_mismatch") return termConflict(b.current);
+    const refused = termRefusal(code, body, id);
+    if (refused) throw refused;
+    if (code !== 200) throw new Error(`BPtranslate write ${path} returned ${code}`);
+    return { status: "applied", term: termView(body) };
+  },
+};
+
+const deleteTerm: ToolDef = {
+  name: "bpt_delete_term",
+  description:
+    "Delete one term from this project's terminology (the web app's Style page). AI drafts and checks stop following it. " +
+    "Project admins only; anyone else is refused. Show the reviewer the term (bpt_list_terms) and get a clear yes first. " +
+    "Not pinned to a version: it deletes the term with this id whatever changed since it was shown, so read it again just before if time has passed. " +
+    "There is no undo from chat; adding it again with bpt_add_term makes a new term. " +
+    "Returns status deleted with the id. Errors change nothing.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      id: { type: "integer", minimum: 1, description: "The term's id from bpt_list_terms" },
+    },
+    required: ["session_token", "id"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const id = termIdArg(args);
+    const session = await termsSession(args, ctx);
+    await requireTermAdmin(session);
+    const path = `${TERMS_PATH}/${id}`;
+    const { status: code, body } = await session.send("DELETE", path);
+    const refused = termRefusal(code, body, id);
+    if (refused) throw refused;
+    if (code !== 200) throw new Error(`BPtranslate write ${path} returned ${code}`);
+    return { status: "deleted", id };
+  },
+};
+
 export const TOOLS: ToolDef[] = [
   whoami, linkAccount, listBooks, packageStatus, chunkWork, getRow, chunkList, editRow, approve,
   templatesForRow, editTemplate, approveTemplate, getArticle, editArticle, approveArticle, bulkSetState, draft, jobStatus,
-  getPreferences, editPreferences,
+  getPreferences, editPreferences, listTerms, addTerm, editTerm, deleteTerm,
 ];
 
