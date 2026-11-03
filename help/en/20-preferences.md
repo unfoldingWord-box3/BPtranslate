@@ -37,3 +37,4 @@ The same card has the switches **Text read-only** and **Alignment writable**. Th
 
 ## Other things on this page
 - The context pack bar at the top left shows the pack state. **Export context now** builds a new pack. See [Style](#help:admin-style).
+- Admins see a **History** button above the Brief section. It lists every save of the brief, instructions and common issues and can restore an earlier version. See [Style](#help:admin-style).

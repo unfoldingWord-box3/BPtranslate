@@ -67,6 +67,14 @@ export const ADMIN_SURFACES: AdminSurfaceEntry[] = [
     notes: "Both markdown prefs share MarkdownPrefPanel on the desk side (Style).",
   },
   {
+    id: "prefsHistory",
+    label: "Preferences change history + restore (brief / instructions / common issues)",
+    classic: { section: "brief", file: PREFS },
+    desk: { page: "style", file: STYLE, anchor: "<PrefsHistoryButton" },
+    notes:
+      "#788. Both sides mount the shared PrefsHistoryButton (components/PrefsHistoryDialog.tsx) above the Brief editor; classic shows it to admins only.",
+  },
+  {
     id: "terminology",
     label: "Terminology",
     classic: { section: "terminology", file: PREFS },

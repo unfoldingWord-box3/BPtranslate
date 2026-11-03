@@ -22,6 +22,9 @@ import { Hono } from "hono";
 import { translationMemory } from "./translationMemory.ts";
 import { attachAuth, chatWriteEnv } from "./auth.ts";
 import { rowTouchedAfterJobSql, rowTouchedAfterJobBindings } from "./pipelineDedupSql.ts";
+// The web app's restore helper (issue #788), so the restore test below runs
+// the real client algorithm against the real router.
+import { rebuildPrefsVersion } from "../../web/src/lib/prefsHistory.ts";
 
 const FIELDS = ["audience", "purpose", "register", "script_notes", "instructions_md", "common_issues_md", "notes"];
 let slugCounter = 0;
@@ -59,7 +62,7 @@ function makeDb(sqlite) {
   };
 }
 
-function fresh({ prefs = true } = {}) {
+function fresh({ prefs = true, role = "admin" } = {}) {
   const sqlite = new DatabaseSync(":memory:");
   const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations");
   for (const f of readdirSync(dir).filter((f) => f.endsWith(".sql")).sort()) {
@@ -81,7 +84,7 @@ function fresh({ prefs = true } = {}) {
   // runs after and replaces it with the chat principal on a chat request.
   app.use("*", async (c, next) => {
     c.set("userId", 8);
-    c.set("role", "admin");
+    c.set("role", role);
     await next();
   });
   app.use("*", attachAuth);
@@ -117,7 +120,12 @@ function fresh({ prefs = true } = {}) {
       .all()
       .map((r) => ({ ...r, payload: JSON.parse(r.payload_json) }));
   const logCount = () => Number(sqlite.prepare(`SELECT COUNT(*) AS n FROM edit_log`).get().n);
-  return { sqlite, put, row, history, logCount };
+  // GET /prefs/history (issue #788), as the web user.
+  const getHistory = async (query = "") => {
+    const res = await app.request(`/api/translation-memory/prefs/history${query}`, { method: "GET" }, env, ctx);
+    return { status: res.status, body: await res.json().catch(() => null) };
+  };
+  return { sqlite, put, row, history, logCount, getHistory };
 }
 
 const pick = (r) => Object.fromEntries(FIELDS.map((f) => [f, r[f]]));
@@ -282,4 +290,127 @@ test("readers of edit_log are unaffected: a prefs save is not a person touching 
     )
     .run();
   assert.equal(touched(), true);
+});
+
+// ---------------------------------------------------------------------------
+// Issue #788: GET /prefs/history, and restore (client-side rebuild + PUT).
+// ---------------------------------------------------------------------------
+
+test("GET /prefs/history lists entries newest first with who, web or chat, and the parsed changes", async () => {
+  const { put, getHistory } = fresh();
+  assert.equal((await put({ register: "informal" }, 5)).status, 200);
+  assert.equal((await put({ audience: "Young readers" }, 6, { chat: true })).status, 200);
+  const r = await getHistory();
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.current.version, 7);
+  assert.equal(r.body.next, null);
+  assert.equal(r.body.entries.length, 2);
+  const [chat, web] = r.body.entries;
+  assert.equal(chat.source, "chat");
+  assert.equal(chat.username, "other-admin");
+  assert.equal(chat.user_id, 9);
+  assert.equal(chat.prev_version, 6);
+  assert.equal(chat.new_version, 7);
+  assert.equal(chat.action, "update");
+  assert.deepEqual(chat.changed, { audience: { prev: "Arabic readers", new: "Young readers" } });
+  assert.equal(typeof chat.created_at, "number");
+  assert.equal("payload_json" in chat, false, "the raw payload is not sent");
+  assert.equal(web.source, null);
+  assert.equal(web.username, "boss");
+  assert.deepEqual(web.changed, { register: { prev: "formal", new: "informal" } });
+});
+
+test("GET /prefs/history pages by id with `before`, and lists only preferences entries", async () => {
+  const { sqlite, put, getHistory } = fresh();
+  sqlite
+    .prepare(
+      `INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action) VALUES ('tn', '1', 'ZEC', 8, 1, 2, 'update')`,
+    )
+    .run();
+  for (let v = 5; v < 10; v++) assert.equal((await put({ notes: `n${v}` }, v)).status, 200);
+  const p1 = await getHistory("?limit=2");
+  assert.deepEqual(
+    p1.body.entries.map((e) => e.new_version),
+    [10, 9],
+  );
+  assert.notEqual(p1.body.next, null);
+  const p2 = await getHistory(`?limit=2&before=${p1.body.next}`);
+  assert.deepEqual(
+    p2.body.entries.map((e) => e.new_version),
+    [8, 7],
+  );
+  const p3 = await getHistory(`?limit=2&before=${p2.body.next}`);
+  assert.deepEqual(
+    p3.body.entries.map((e) => e.new_version),
+    [6],
+  );
+  assert.equal(p3.body.next, null);
+  assert.equal((await getHistory("?before=abc")).status, 400);
+});
+
+test("GET /prefs/history with nothing saved is empty at version 0", async () => {
+  const { getHistory } = fresh({ prefs: false });
+  const r = await getHistory();
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body.entries, []);
+  assert.equal(r.body.current.version, 0);
+  assert.equal(r.body.next, null);
+});
+
+test("GET /prefs/history is admin-only", async () => {
+  const { getHistory } = fresh({ role: "editor" });
+  assert.equal((await getHistory()).status, 403);
+});
+
+// The issue's success check: two saves, then restoring the first leaves the row
+// equal to the first version and adds a third history entry.
+test("restore: two saves, then restoring the first version puts it back as a third entry", async () => {
+  const { put, row, history, getHistory } = fresh({ prefs: false });
+  assert.equal((await put({ audience: "Readers", instructions_md: "- One." }, 0)).status, 200);
+  const v1 = pick(row());
+  assert.equal(
+    (await put({ audience: "Children", instructions_md: "- Two.", register: "informal" }, 1, { chat: true })).status,
+    200,
+  );
+  assert.notDeepEqual(pick(row()), v1);
+
+  const h = await getHistory();
+  const rebuilt = rebuildPrefsVersion(h.body.current, h.body.entries, 1);
+  assert.equal(rebuilt.ok, true, JSON.stringify(rebuilt));
+  const r = await put(rebuilt.fields, h.body.current.version);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+
+  assert.deepEqual(pick(row()), v1, "the row is the first version again");
+  assert.equal(row().version, 3, "the restore is a new version");
+  const entries = history();
+  assert.equal(entries.length, 3, "the restore is recorded as a third entry");
+  assert.equal(entries[2].source, null);
+  assert.equal(entries[2].prev_version, 2);
+  assert.deepEqual(entries[2].payload.changed, {
+    audience: { prev: "Children", new: "Readers" },
+    register: { prev: "informal", new: "default" },
+    instructions_md: { prev: "- Two.", new: "- One." },
+  });
+});
+
+test("restore: a save after the history was read makes the restore 409 or refuse, never misrestore", async () => {
+  const { put, row, getHistory } = fresh();
+  assert.equal((await put({ audience: "A" }, 5)).status, 200);
+  assert.equal((await put({ audience: "B" }, 6)).status, 200);
+  const h = await getHistory();
+  // Someone saves between reading the list and pressing Restore.
+  assert.equal((await put({ audience: "C" }, 7, { chat: true })).status, 200);
+  const rebuilt = rebuildPrefsVersion(h.body.current, h.body.entries, 6);
+  assert.equal(rebuilt.ok, true);
+  const r = await put(rebuilt.fields, h.body.current.version);
+  assert.equal(r.status, 409, "the stale If-Match is refused");
+  assert.equal(row().audience, "C", "the newer save stands");
+  // A fresh list reads the new save and rebuilds correctly.
+  const h2 = await getHistory();
+  const again = rebuildPrefsVersion(h2.body.current, h2.body.entries, 6);
+  assert.equal(again.ok, true);
+  assert.equal(again.fields.audience, "A");
+  // A current row newer than the list (the other read order) is refused outright.
+  const ahead = { ...h2.body.current, version: h2.body.current.version + 1 };
+  assert.deepEqual(rebuildPrefsVersion(ahead, h2.body.entries, 6), { ok: false, reason: "stale" });
 });

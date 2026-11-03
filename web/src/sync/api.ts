@@ -6,6 +6,7 @@ import type { ScriptureStatus } from "../lib/unpublishedScriptureWarning";
 import type { LayoutSpec } from "../lib/layoutSpec";
 import type { ReviewSweepBody, ReviewSweepResource, ReviewSweepTarget } from "../lib/reviewStateSweep";
 import type { NoteSourcePlan } from "../lib/sourceNotePlan";
+import type { PrefsHistoryEntry } from "../lib/prefsHistory";
 import { getWorkspaceSlug, setWorkspaceSlug } from "./workspace";
 
 export type RowKind = "tn" | "tq" | "twl";
@@ -2240,6 +2241,17 @@ export const api = {
       headers: { "Content-Type": "application/json", "If-Match": String(expectedVersion) },
       body: JSON.stringify(patch),
     }),
+  // Change history of the preferences row (issue #788), newest first. `next`
+  // is the `before` cursor for the next (older) page, or null at the end.
+  getTranslationPrefsHistory: (opts: { before?: number; limit?: number } = {}) => {
+    const qs = new URLSearchParams();
+    if (opts.before != null) qs.set("before", String(opts.before));
+    if (opts.limit != null) qs.set("limit", String(opts.limit));
+    const q = qs.toString();
+    return request<{ current: TranslationPrefs; entries: PrefsHistoryEntry[]; next: number | null }>(
+      `/api/translation-memory/prefs/history${q ? `?${q}` : ""}`,
+    );
+  },
 
   // ── Org-wide AI provider config (migration 0065) ──
   getAiProvider: () => request<AiProviderSettings>(`/api/ai-provider`),

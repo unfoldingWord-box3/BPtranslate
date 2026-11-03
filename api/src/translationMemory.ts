@@ -251,6 +251,66 @@ translationMemory.put("/prefs", requireAdmin, async (c) => {
   return c.json({ prefs: row });
 });
 
+// GET /prefs/history — admin-only (issue #788). The 'prefs' edit_log entries
+// PUT /prefs writes (above), newest first, with who saved (dcs_username), where
+// from (source: null = web app, 'chat' = chat assistant) and the parsed
+// { field: { prev, new } } map. Paged by id: `before` is the `next` of the
+// previous page. Entries can be large (common_issues_md allows 50,000 chars,
+// twice per entry), hence the small page cap.
+//
+// `current` is the row as it stands. Restore is client-side: it rebuilds an
+// earlier version by undoing every newer entry's `prev` values from `current`,
+// then PUTs that with If-Match current.version, so the restore is itself a new
+// entry. `current` is read BEFORE the entries, so a save landing between the
+// two reads leaves entries[0].new_version ahead of current.version: the client
+// refuses to rebuild across that gap, and the PUT would 409 anyway.
+translationMemory.get("/prefs/history", requireAdmin, async (c) => {
+  const limitRaw = Number(c.req.query("limit") ?? 20);
+  const limit = Number.isInteger(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 50) : 20;
+  const beforeRaw = c.req.query("before");
+  const before = beforeRaw === undefined ? null : Number(beforeRaw);
+  if (before !== null && (!Number.isInteger(before) || before < 1)) {
+    return c.json({ error: "invalid_before" }, 400);
+  }
+  const current =
+    (await c.env.DB.prepare(`SELECT * FROM translation_prefs WHERE id = 1`).first<PrefsRow>()) ?? DEFAULT_PREFS;
+  const { results } = await c.env.DB.prepare(
+    `SELECT e.id, e.user_id, u.dcs_username AS username, e.source, e.action,
+            e.prev_version, e.new_version, e.created_at, e.payload_json
+       FROM edit_log e
+       LEFT JOIN users u ON u.id = e.user_id
+      WHERE e.kind = 'prefs' AND e.row_key = '1' AND (?1 IS NULL OR e.id < ?1)
+      ORDER BY e.id DESC
+      LIMIT ?2`,
+  )
+    .bind(before, limit + 1)
+    .all<{
+      id: number;
+      user_id: number | null;
+      username: string | null;
+      source: string | null;
+      action: string;
+      prev_version: number;
+      new_version: number;
+      created_at: number;
+      payload_json: string | null;
+    }>();
+  const rows = results ?? [];
+  const page = rows.slice(0, limit);
+  const entries = page.map(({ payload_json, ...e }) => {
+    let changed: Record<string, { prev: string | null; new: string | null }> = {};
+    try {
+      const p = payload_json ? JSON.parse(payload_json) : null;
+      if (p && typeof p.changed === "object" && p.changed !== null) changed = p.changed;
+    } catch {
+      // A garbled payload shows as "no changes" rather than failing the list.
+    }
+    return { ...e, changed };
+  });
+  const next = rows.length > limit ? page[page.length - 1].id : null;
+  return c.json({ current, entries, next });
+});
+
 // ---------------------------------------------------------------------------
 // Terminology CRUD + CSV.
 // ---------------------------------------------------------------------------
