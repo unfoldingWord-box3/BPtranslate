@@ -20,6 +20,7 @@ import {
   exportContextPackUnderLease,
   queueContextExport,
   runContextExportExclusive,
+  requestDailyContextExport,
   sweepContextExportQueue,
 } from "./contextExportQueue.ts";
 import { commitContextPackToMaster, getBranchTipSha } from "./contextExportDcs.ts";
@@ -530,4 +531,23 @@ test("with a service token the sweep starts one run for pending saves with no li
   await sweepContextExportQueue(h.env);
   assert.equal(h.created.length, 1);
   assert.equal(h.created[0].params.queued, true);
+});
+
+test("the daily context export (#793) starts a run even with no save pending, and only one while a run holds the lease", async () => {
+  const h = harness();
+  await requestDailyContextExport(h.env);
+  assert.equal(h.created.length, 1, "no save pending, but the daily tick still exports");
+  assert.equal(h.created[0].params.contextOnly, true);
+  assert.equal(h.created[0].params.queued, true);
+  // A live run holds the lease: the tick marks pending for its follow-up instead of starting a second run.
+  h.sqlite.prepare(`UPDATE context_export_lock SET holder = 'x#1', lease_until = unixepoch() + 600, pending = 0`).run();
+  await requestDailyContextExport(h.env);
+  assert.equal(h.created.length, 1);
+  assert.equal(h.sqlite.prepare(`SELECT pending FROM context_export_lock`).get().pending, 1);
+});
+
+test("the daily context export does nothing without a service token", async () => {
+  const h2 = harness({ token: null });
+  await requestDailyContextExport(h2.env);
+  assert.equal(h2.created.length, 0);
 });

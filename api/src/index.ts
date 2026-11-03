@@ -36,7 +36,7 @@ import { chatIsAdmin, chatRoleFor, claimCode, lookupLink, revokeLink, type ChatL
 import { readPackageRefs } from "./packageRefs";
 import { readSourceNotes } from "./sourceNotes";
 import { blockViewerWrites } from "./viewerGuard";
-import { sweepContextExportQueue } from "./contextExportQueue";
+import { requestDailyContextExport, sweepContextExportQueue } from "./contextExportQueue";
 import { listWorkspaces, resolveWorkspaceFresh, workspaceEnv, parseWorkspaceCookie, requireWorkspaceMatch, primeWorkspaces } from "./workspaces";
 
 export interface Env {
@@ -58,7 +58,7 @@ export interface Env {
   ALLOWED_ORIGINS?: string;
   DEV_AUTH_ENABLED?: string;
   // "true" only on deployments that register the nightly export cron (prod).
-  // Absent/other on the dev worker (crons = []) — the UI uses this to show the
+  // Absent/other on the dev worker (no nightly export cron) — the UI uses this to show the
   // 05:30 schedule vs. a manual-exports notice (#240).
   NIGHTLY_EXPORTS_ENABLED?: string;
   DCS_CLIENT_ID?: string;
@@ -165,13 +165,17 @@ export interface Env {
   DB_POOL1?: D1Database;
 }
 
-// Cron patterns must match the [env.production.triggers] crons list in
-// wrangler.toml (the default env registers no crons — see the note there).
+// Cron patterns must match the crons lists in wrangler.toml: production
+// registers EXPORT_CRON and POLL_CRON, the default env only CONTEXT_CRON.
 // There's no runtime way to assert they line up (wrangler doesn't expose
 // triggers to the Worker), but constants in code give grep something to find
 // when the schedule changes.
 const EXPORT_CRON = "30 5 * * *";
 const POLL_CRON = "*/5 * * * *";
+// Daily context-pack export (#793). Registered on the DEFAULT env only (the
+// live dev worker): production's EXPORT_CRON nightly export already renders the
+// context pack, so registering this there too would export it twice a night.
+const CONTEXT_CRON = "15 4 * * *";
 // Dormant: not yet registered in wrangler.toml [env.production.triggers].
 // Branch below is unreachable until the cron entry is added there.
 // Scheduled for 08:00 UTC — 2 hours after EXPORT_CRON so DCS-side merge of
@@ -512,6 +516,10 @@ async function runScheduledTick(controller: ScheduledController, env: Env, _ctx:
           `DELETE FROM edit_log WHERE created_at < unixepoch() - (180 * 86400) AND kind <> 'prefs'`,
         ).run();
       }
+      return;
+    }
+    if (controller.cron === CONTEXT_CRON) {
+      await requestDailyContextExport(env);
       return;
     }
     if (controller.cron === REIMPORT_CRON) {
