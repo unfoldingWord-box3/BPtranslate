@@ -2765,11 +2765,12 @@ const listTerms: ToolDef = {
       terms.push(t);
       bytes += size;
     }
-    // The route stops at TERMS_FETCH_LIMIT rows. Unfiltered, /terms/count
-    // says whether that was everything; filtered, nothing can tell.
+    // The route stops at TERMS_FETCH_LIMIT rows. /terms/count takes the same
+    // q and status filters, so it says whether that was everything.
     let mayBeMore = all.length >= TERMS_FETCH_LIMIT;
-    if (mayBeMore && !q && !status) {
-      const { status: cc, body: cb } = await session.send("GET", `${TERMS_PATH}/count`);
+    if (mayBeMore) {
+      params.delete("limit");
+      const { status: cc, body: cb } = await session.send("GET", `${TERMS_PATH}/count?${params}`);
       if (cc === 200 && Number((cb as { count?: unknown } | null)?.count) <= all.length) mayBeMore = false;
     }
     return {
