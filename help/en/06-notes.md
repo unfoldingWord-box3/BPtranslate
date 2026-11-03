@@ -57,7 +57,7 @@ In a source project, one that does not translate from another language (such as 
 
 On a phone the icon is not in the top bar. It is the first item in your account menu, with the same name.
 
-While a **Translate chapter** run is running or paused on a chapter, that chapter's notes can't be saved. During a **Translate questions** run you can still edit existing notes, but you can't add or delete one. A run that is still waiting in line locks nothing. Admins follow the runs in [AI studio](#help:admin-ai).
+While a **Translate chapter** run is starting, running or paused on a chapter, that chapter's notes can't be saved. During a **Translate questions** run you can still edit and remove existing notes, but you can't add one. A run that is still waiting in line locks nothing. Admins follow the runs in [AI studio](#help:admin-ai).
 
 ## Good to know
 - Your text is kept in your browser while you type. The top bar shows **N unsaved** until you save. See [Saving and working offline](#help:save-and-sync).

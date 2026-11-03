@@ -56,7 +56,7 @@ In a source project, one that does not translate from another language (such as 
 
 On a phone the icon is not in the top bar. It is the first item in your account menu, with the same name.
 
-While a **Translate chapter** or **Translate questions** run is running or paused on a chapter, that chapter's verses can't be saved. A run that is still waiting in line locks nothing. Admins follow the runs in [AI studio](#help:admin-ai).
+While a **Translate chapter** or **Translate questions** run is starting, running or paused on a chapter, that chapter's verses can't be saved. A run that is still waiting in line locks nothing. Admins follow the runs in [AI studio](#help:admin-ai).
 
 ## Good to know
 - If you only have view access, you see a notice and the boxes are read-only.
