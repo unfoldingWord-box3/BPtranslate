@@ -2328,6 +2328,14 @@ export const api = {
       method: "DELETE",
       ...(expectedVersion !== undefined ? { headers: { "If-Match": String(expectedVersion) } } : {}),
     }),
+  // Undo a delete (#801). expectedVersion is the version the term had when it
+  // was deleted (a delete does not change it), so a late undo cannot bring
+  // back a later edit someone else deleted: that is a 409 `version_mismatch`.
+  restoreTerm: (id: number, expectedVersion: number) =>
+    request<Term>(`/api/translation-memory/terms/${id}/restore`, {
+      method: "POST",
+      headers: { "If-Match": String(expectedVersion) },
+    }),
   importTerms: (csvText: string, dryRun: boolean) =>
     request<TermImportResult>(`/api/translation-memory/terms/import${dryRun ? "?dryRun=1" : ""}`, {
       method: "POST",

@@ -30,6 +30,7 @@ import {
 } from "../sync/api";
 import { useTerms } from "../hooks/useTranslationMemory";
 import { useSaveState } from "./useSaveState";
+import { restoreFailure, restoreMessage, type RestoreOutcome } from "../lib/termRestore";
 
 // Term-status → semantic palette (design §10). Not the violet AI identity —
 // status is not an AI-draft state.
@@ -122,6 +123,30 @@ export function TerminologySection({ direction }: { direction: "ltr" | "rtl" }) 
   const [importOpen, setImportOpen] = useState(false);
   const save = useSaveState();
   const groups = useMemo(() => groupTerms(terms), [terms]);
+  // The term just deleted, offered back through the Undo snackbar (#801).
+  // version is the one it was deleted at: the restore sends it as If-Match.
+  const [undo, setUndo] = useState<{ id: number; version: number } | null>(null);
+
+  const onDeleted = (term: Term) => {
+    save.clear();
+    setUndo({ id: term.id, version: term.version });
+    refetch();
+  };
+  const onUndo = async () => {
+    if (!undo) return;
+    const { id, version } = undo;
+    setUndo(null);
+    let outcome: RestoreOutcome;
+    try {
+      await api.restoreTerm(id, version);
+      outcome = { kind: "restored" };
+    } catch (e) {
+      outcome = e instanceof ApiError ? restoreFailure(e.status, e.body) : { kind: "failed" };
+    }
+    const m = restoreMessage(outcome);
+    save.setMsg(t(m.key, m.values));
+    if (m.refresh) refetch();
+  };
 
   useEffect(() => {
     const h = setTimeout(() => setDebouncedQ(query.trim()), 300);
@@ -200,12 +225,27 @@ export function TerminologySection({ direction }: { direction: "ltr" | "rtl" }) 
               direction={direction}
               countIsComplete={terms.length < TERMS_PAGE_LIMIT}
               onChanged={refetch}
+              onDeleted={onDeleted}
               onError={(msg) => save.setMsg(msg)}
             />
           ))}
         </Stack>
       )}
       <Snackbar open={!!save.msg} autoHideDuration={3000} onClose={save.clear} message={save.msg ?? ""} />
+      <Snackbar
+        key={undo?.id}
+        open={!!undo}
+        autoHideDuration={8000}
+        onClose={(_e, reason) => {
+          if (reason !== "clickaway") setUndo(null);
+        }}
+        message={t("preferences.termDeleted")}
+        action={
+          <Button color="inherit" size="small" onClick={onUndo}>
+            {t("common.undo")}
+          </Button>
+        }
+      />
     </Stack>
   );
 }
@@ -332,6 +372,7 @@ function TermConceptGroup({
   direction,
   countIsComplete,
   onChanged,
+  onDeleted,
   onError,
 }: {
   group: TermGroup;
@@ -341,6 +382,7 @@ function TermConceptGroup({
   // asserting a number that may be short.
   countIsComplete: boolean;
   onChanged: () => void;
+  onDeleted: (term: Term) => void;
   onError: (msg: string) => void;
 }) {
   const { t } = useTranslation();
@@ -383,6 +425,7 @@ function TermConceptGroup({
             term={term}
             direction={direction}
             onChanged={onChanged}
+            onDeleted={onDeleted}
             onError={onError}
           />
         ))}
@@ -530,11 +573,16 @@ function TermRow({
   term,
   direction,
   onChanged,
+  onDeleted,
   onError,
 }: {
   term: Term;
   direction: "ltr" | "rtl";
   onChanged: () => void;
+  // Called after a successful delete, with the term as it was deleted, so the
+  // section can offer Undo (#801). The row unmounts on the refetch, so the
+  // snackbar has to live in the section, not here.
+  onDeleted: (term: Term) => void;
   onError: (msg: string) => void;
 }) {
   const { t } = useTranslation();
@@ -592,7 +640,7 @@ function TermRow({
     setBusy(true);
     try {
       await api.deleteTerm(term.id, term.version);
-      onChanged();
+      onDeleted(term);
     } catch (e) {
       // Someone else changed this term after it was shown: nothing was
       // deleted, so say so and refresh the row instead of a generic failure.
