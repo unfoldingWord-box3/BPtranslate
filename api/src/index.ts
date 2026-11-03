@@ -554,6 +554,22 @@ export default {
           role: await chatRoleFor(wsEnv, link.username),
           linkId: link.linkId,
         };
+        // Writes run as the linked user: the principal rides a per-call env
+        // clone (chatWriteEnv), never the env the reads use.
+        // No body means no body and no Content-Type: a chat read as the
+        // linked user (the template routes are editor-only).
+        const sendAs = async (p: typeof principal, method: string, path: string, body?: unknown, ifMatch?: number) => {
+          const headers: Record<string, string> = {};
+          if (body !== undefined) headers["Content-Type"] = "application/json";
+          if (ifMatch !== undefined) headers["If-Match"] = String(ifMatch);
+          const req = new Request(new URL(path, request.url), {
+            method,
+            headers,
+            ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+          });
+          const res = await app.fetch(req, chatWriteEnv(wsEnv, p), ctx);
+          return { status: res.status, body: await res.json().catch(() => null) };
+        };
         return {
           workspace: { slug: ws.slug, label: ws.label, org: ws.org },
           principal,
@@ -561,21 +577,16 @@ export default {
             const res = await app.fetch(new Request(new URL(path, request.url)), wsEnv, ctx);
             return { status: res.status, body: await res.json().catch(() => null) };
           },
-          // Writes run as the linked user: the principal rides a per-call env
-          // clone (chatWriteEnv), never the env the reads use.
-          // No body means no body and no Content-Type: a chat read as the
-          // linked user (the template routes are editor-only).
-          send: async (method: string, path: string, body?: unknown, ifMatch?: number) => {
-            const headers: Record<string, string> = {};
-            if (body !== undefined) headers["Content-Type"] = "application/json";
-            if (ifMatch !== undefined) headers["If-Match"] = String(ifMatch);
-            const req = new Request(new URL(path, request.url), {
-              method,
-              headers,
-              ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-            });
-            const res = await app.fetch(req, chatWriteEnv(wsEnv, principal), ctx);
-            return { status: res.status, body: await res.json().catch(() => null) };
+          send: (method: string, path: string, body?: unknown, ifMatch?: number) => sendAs(principal, method, path, body, ifMatch),
+          // The one exception to the editor cap: a route that is admin-only
+          // in the web app too (PUT /api/translation-memory/prefs). The real
+          // role is re-read on every call, so an admin removed since the
+          // session opened gets the route's own 403.
+          sendAsAdmin: async (method: string, path: string, body?: unknown, ifMatch?: number) => {
+            if (!(await chatIsAdmin(wsEnv, link.username))) {
+              return { status: 403, body: { error: "forbidden", reason: "not_an_admin" } };
+            }
+            return sendAs({ ...principal, role: "admin" }, method, path, body, ifMatch);
           },
           // Read-only D1 exception to the route-handler rule; see packageRefs.ts.
           packageRefs: (book: string) => readPackageRefs(wsEnv, book),

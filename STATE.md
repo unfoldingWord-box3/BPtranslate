@@ -83,7 +83,10 @@ Highlights that bite repeatedly:
   anonymously, the same data the web app's browser fetch shows (never with the DCS service token). Links: one-time code from the web app (any signed-in user, viewers included), 30-day token,
   hash-only storage, role re-read from the link's workspace on every call and capped at editor. Reads go
   through `readerFrom()` and write tools must call `principalFrom()` (editor only) in `mcpTools.ts`; never
-  accept a workspace, username or user id as a tool argument.
+  accept a workspace, username or user id as a tool argument. The one exception to the editor cap is
+  `session.sendAsAdmin` (#784), used only by `bpt_edit_preferences` because `PUT /api/translation-memory/prefs`
+  is admin-only in the web app too: it re-reads the real role on every call and answers 403 without calling
+  the route for a non-admin. `send()` stays capped, so an admin's other chat writes still run as editor.
 - **Local alignment testing needs the `mltest` workspace, not the default.** `POST /api/auth/dev`
   with no `be_ws` cookie lands on `bsoj` (the first entry in `WORKSPACES`). Its `ar-bsoj` preset
   quarantines the ULT/UST lanes as soon as verses exist (`ensureLaneState` in
