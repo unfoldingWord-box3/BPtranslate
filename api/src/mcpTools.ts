@@ -1,6 +1,7 @@
 // Tools for the chat MCP endpoint (mcp.ts). Phase 1 of the "Book packages via
 // chat" plan: a reviewer in BT Servant can see what a book still needs, read
-// the notes for a verse range, and link the chat to their BPtranslate account
+// the notes and the verse text (bpt_get_verses, #783) for a verse range, and
+// link the chat to their BPtranslate account
 // (chatLinks.ts). Every tool but bpt_link_account takes the session_token,
 // because the link decides which workspace is read (issue #676). Reads go
 // through readerFrom; writes (bpt_edit_row, bpt_approve: issue #670 part a;
@@ -86,6 +87,7 @@ export interface ToolContext {
 }
 
 import type { ChatPrincipal } from "./chatLinks.ts";
+import { derivePlainText } from "./alignmentCanonical.ts";
 import { isTsMilestone } from "./tsMilestone.ts";
 import { articleIdForTa, articleIdForTw, parseTaRef, parseTwRef, taPaths, twPath } from "./articlePopulate.ts";
 import { shortSupport, summarizePackageRefs, type PackageRefRows } from "./packageRefs.ts";
@@ -655,6 +657,16 @@ function verseUnits(laneVerses: Record<string, VerseEntry>): VerseUnit[] {
     .sort((a, b) => a.start - b.start);
 }
 
+const laneHasVerses = (verses: Record<string, Record<string, VerseEntry>>, l: string) =>
+  verseUnits(verses[l] ?? {}).length > 0;
+
+// The lane a chapter is read from when the caller names none: ULT, else UST,
+// else the source text, else any lane with verses (bpt_chunks, bpt_get_verses).
+function defaultLane(verses: Record<string, Record<string, VerseEntry>>): string | undefined {
+  const has = (l: string) => laneHasVerses(verses, l);
+  return [...MARKER_LANES, ...SOURCE_LANES].find(has) ?? Object.keys(verses).find(has);
+}
+
 // Groups verse units into chunks: at each marker, or once a chunk spans at
 // least `by` verse numbers. The chunks cover verse 1 through `lastVerse` with
 // no gaps: each starts right after the previous one ends, so a verse missing
@@ -710,8 +722,7 @@ const chunkList: ToolDef = {
 
     const body = await apiGet(session, `/api/chapters/${book}/${chapter}`);
     const verses = (body.verses as Record<string, Record<string, VerseEntry>> | undefined) ?? {};
-    const hasVerses = (l: string) => verseUnits(verses[l] ?? {}).length > 0;
-    const lane = [...MARKER_LANES, ...SOURCE_LANES].find(hasVerses) ?? Object.keys(verses).find(hasVerses);
+    const lane = defaultLane(verses);
     if (!lane) {
       throw new ToolInputError(`${book} ${chapter} has no verses in this project. Call bpt_package_status for the chapters it has.`);
     }
@@ -757,6 +768,95 @@ const chunkList: ToolDef = {
       total_chunks: out.length,
       chunks: out,
       outside_chunks: { tn: tnVerses.length - tnIn, tq: tqVerses.length - tqIn },
+    };
+  },
+};
+
+// The project's own verse text (issue #783), so a reviewer can read a note
+// beside the verse it is about. Read-only. The plain text is derivePlainText
+// (alignmentCanonical.ts), the one the locked-lane save uses: \zaln-s
+// milestones unwrapped, the text of every node kept, including the quotes and
+// punctuation usfm-js parks on a marker's own text, and footnotes and cross
+// references (nodes that carry only content) left out. Paged by verse at
+// PAGE_BYTE_BUDGET, like bpt_chunk_work, so a long chapter is never cut off.
+const getVerses: ToolDef = {
+  name: "bpt_get_verses",
+  description:
+    "The verse text of one chapter of this project's translation, as plain text (USFM markers, word alignment and footnotes removed), to read a note or question beside the verse it is about. Reads ULT, the project's literal text, by default; if ULT is not available it reads UST, then the source text (UHB or UGNT), and the note says so. lane always names the text that was read; pass lane (e.g. UST) to read another. A bridged verse (\\v 9-10) comes back once, with verse_end. Results are paged: if next_verse_start is not null, call again with verse_start set to it (and the same verse_end) for the rest; never call a range complete until next_verse_start is null. A verse marked truncated had its text cut.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      book: { type: "string", description: "3-letter book code, e.g. TIT" },
+      chapter: { type: "integer", minimum: 1 },
+      verse_start: { type: "integer", minimum: 0, description: "First verse (default 1; 0 is the chapter's front matter)" },
+      verse_end: { type: "integer", minimum: 0, description: "Last verse, inclusive; omit for the rest of the chapter" },
+      lane: { type: "string", description: "The text to read: ULT (the default) or UST, or UHB/UGNT for the source text" },
+    },
+    required: ["session_token", "book", "chapter"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const session = await readerFrom(args, ctx);
+    const book = bookArg(args);
+    const chapter = intArg(args, "chapter", { min: 1, required: true })!;
+    const vs = intArg(args, "verse_start", { min: 0 }) ?? 1;
+    const ve = intArg(args, "verse_end", { min: 0 }) ?? Number.MAX_SAFE_INTEGER;
+    if (ve < vs) throw new ToolInputError("verse_end is before verse_start");
+    let asked: string | null = null;
+    if (args.lane !== undefined && args.lane !== null) {
+      asked = typeof args.lane === "string" ? args.lane.trim().toUpperCase() : "";
+      if (!asked) throw new ToolInputError('lane must be a lane name like "ULT" or "UST"');
+    }
+
+    const body = await apiGet(session, `/api/chapters/${book}/${chapter}`);
+    const verses = (body.verses as Record<string, Record<string, VerseEntry>> | undefined) ?? {};
+    const lane = asked ?? defaultLane(verses);
+    if (!lane) {
+      throw new ToolInputError(`${book} ${chapter} has no verses in this project. Call bpt_package_status for the chapters it has.`);
+    }
+    if (!laneHasVerses(verses, lane)) {
+      const have = Object.keys(verses).filter((l) => laneHasVerses(verses, l));
+      throw new ToolInputError(
+        `${book} ${chapter} has no ${lane} text in this project. Lanes with text here: ${have.length ? have.join(", ") : "none"}.`,
+      );
+    }
+
+    // Every verse (or bridged block) that overlaps the range, in order.
+    const units = Object.values(verses[lane])
+      .map((v) => {
+        const start = Number(v.verse);
+        return { v, start, end: Math.max(start, Number(v.verse_end ?? start)) };
+      })
+      .filter((u) => u.end >= vs && u.start <= ve)
+      .sort((a, b) => a.start - b.start);
+    const out: { verse: number; verse_end?: number; text: string; truncated?: true }[] = [];
+    let bytes = 0;
+    let i = 0;
+    for (; i < units.length; i++) {
+      const { v, start, end } = units[i];
+      const { text, cut } = capText(derivePlainText(v.content), ROW_TEXT_CAP);
+      const item = { verse: start, ...(end > start ? { verse_end: end } : {}), text, ...(cut ? { truncated: true as const } : {}) };
+      const size = byteLength(item);
+      // Always return at least one verse, or paging would never move.
+      if (out.length > 0 && bytes + size > PAGE_BYTE_BUDGET) break;
+      out.push(item);
+      bytes += size;
+    }
+    const notes: string[] = [];
+    if (!asked && lane !== "ULT") notes.push(`ULT is not available in this project, so the ${lane} text was used.`);
+    if (units.length === 0) notes.push(`${lane} has no verses in this range of ${book} ${chapter}.`);
+    return {
+      book,
+      chapter,
+      lane,
+      verse_start: vs,
+      verse_end: ve === Number.MAX_SAFE_INTEGER ? null : ve,
+      note: notes.length ? notes.join(" ") : null,
+      total: units.length,
+      returned: out.length,
+      next_verse_start: i < units.length ? units[i].start : null,
+      verses: out,
     };
   },
 };
@@ -2666,7 +2766,7 @@ const deleteTerm: ToolDef = {
 };
 
 export const TOOLS: ToolDef[] = [
-  whoami, linkAccount, listBooks, packageStatus, chunkWork, getRow, chunkList, editRow, approve,
+  whoami, linkAccount, listBooks, packageStatus, chunkWork, getRow, chunkList, getVerses, editRow, approve,
   templatesForRow, editTemplate, approveTemplate, getArticle, editArticle, approveArticle, bulkSetState, draft, jobStatus,
   getPreferences, editPreferences, listTerms, addTerm, editTerm, deleteTerm,
 ];
