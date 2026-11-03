@@ -267,13 +267,18 @@ type TermRow = TermImport & {
 const TERM_COLS = `id, concept_id, source_term, target_term, status, replacement, comment, tw_link,
                    source_status, version, created_at, updated_at, updated_by`;
 
-// GET /terms — list (optional status / q filters). Excludes soft-deleted.
-translationMemory.get("/terms", requireEditor, async (c) => {
-  const status = c.req.query("status");
-  const q = c.req.query("q");
+// The status / q filters shared by GET /terms and GET /terms/count, so a
+// filtered count always matches the filtered list. Excludes soft-deleted. An
+// empty status means no filter; an unknown one is `null` so the caller can
+// answer 400 rather than silently return every term.
+function termFilter(
+  status: string | undefined,
+  q: string | undefined,
+): { conds: string[]; binds: unknown[] } | null {
   const conds = ["deleted_at IS NULL"];
   const binds: unknown[] = [];
-  if (status && isTermStatus(status)) {
+  if (status) {
+    if (!isTermStatus(status)) return null;
     binds.push(status);
     conds.push(`status = ?${binds.length}`);
   }
@@ -284,6 +289,16 @@ translationMemory.get("/terms", requireEditor, async (c) => {
       `(source_term LIKE ?${binds.length - 2} ESCAPE '\\' OR target_term LIKE ?${binds.length - 1} ESCAPE '\\' OR concept_id LIKE ?${binds.length} ESCAPE '\\')`,
     );
   }
+  return { conds, binds };
+}
+
+const BAD_TERM_STATUS = { error: "bad_status", allowed: [...TERM_STATUSES] };
+
+// GET /terms — list (optional status / q filters). Excludes soft-deleted.
+translationMemory.get("/terms", requireEditor, async (c) => {
+  const filter = termFilter(c.req.query("status"), c.req.query("q"));
+  if (!filter) return c.json(BAD_TERM_STATUS, 400);
+  const { conds, binds } = filter;
   const limit = Math.min(Math.max(parseInt(c.req.query("limit") ?? "500", 10) || 500, 1), 2000);
   binds.push(limit);
   const rows = await c.env.DB.prepare(
@@ -479,17 +494,31 @@ translationMemory.patch("/terms/:id", requireEditor, async (c) => {
   return c.json(row);
 });
 
-// DELETE /terms/:id — soft delete.
+// DELETE /terms/:id — soft delete. If-Match is optional: with it, the delete
+// only happens if the term is still at that version (409 version_mismatch +
+// current, as PATCH answers); without it the delete is unpinned, as before.
 translationMemory.delete("/terms/:id", requireEditor, async (c) => {
   const id = parseInt(c.req.param("id"), 10);
   if (!Number.isFinite(id)) return c.json({ error: "bad_id" }, 400);
+  const header = c.req.header("If-Match");
+  const expected = parseIfMatch(header);
+  // A header that is present but unreadable must not quietly become an
+  // unpinned delete.
+  if (header != null && header.trim() !== "" && expected == null) return c.json({ error: "bad_if_match" }, 400);
   const now = Math.floor(Date.now() / 1000);
   const res = await c.env.DB.prepare(
-    `UPDATE terminology SET deleted_at = ?1, updated_at = ?1 WHERE id = ?2 AND deleted_at IS NULL`,
+    `UPDATE terminology SET deleted_at = ?1, updated_at = ?1
+      WHERE id = ?2 AND deleted_at IS NULL AND (?3 IS NULL OR version = ?3)`,
   )
-    .bind(now, id)
+    .bind(now, id, expected)
     .run();
-  if (!res.meta.changes) return c.json({ error: "not_found" }, 404);
+  if (!res.meta.changes) {
+    const cur = await c.env.DB.prepare(`SELECT ${TERM_COLS} FROM terminology WHERE id = ?1 AND deleted_at IS NULL`)
+      .bind(id)
+      .first<TermRow>();
+    if (!cur) return c.json({ error: "not_found" }, 404);
+    return c.json({ error: "version_mismatch", current: cur }, 409);
+  }
   queueContextExport(c);
   return c.json({ ok: true });
 });
@@ -660,11 +689,14 @@ translationMemory.post("/terms/import", requireEditor, async (c) => {
   });
 });
 
-// GET /terms/count — cheap count for the language-memory chip.
+// GET /terms/count — cheap count for the language-memory chip. Takes the same
+// status / q filters as GET /terms, and counts every match (no row limit).
 translationMemory.get("/terms/count", requireEditor, async (c) => {
-  const row = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM terminology WHERE deleted_at IS NULL`).first<{
-    n: number;
-  }>();
+  const filter = termFilter(c.req.query("status"), c.req.query("q"));
+  if (!filter) return c.json(BAD_TERM_STATUS, 400);
+  const row = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM terminology WHERE ${filter.conds.join(" AND ")}`)
+    .bind(...filter.binds)
+    .first<{ n: number }>();
   return c.json({ count: row?.n ?? 0 });
 });
 

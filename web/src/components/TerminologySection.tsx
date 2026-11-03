@@ -591,10 +591,17 @@ function TermRow({
   const del = async () => {
     setBusy(true);
     try {
-      await api.deleteTerm(term.id);
+      await api.deleteTerm(term.id, term.version);
       onChanged();
-    } catch {
-      onError(t("preferences.actionFailed"));
+    } catch (e) {
+      // Someone else changed this term after it was shown: nothing was
+      // deleted, so say so and refresh the row instead of a generic failure.
+      if (e instanceof ApiError && e.status === 409) {
+        onError(t("preferences.conflict"));
+        onChanged();
+      } else {
+        onError(t("preferences.actionFailed"));
+      }
     } finally {
       setBusy(false);
     }

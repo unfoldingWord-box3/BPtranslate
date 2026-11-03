@@ -2309,8 +2309,13 @@ export const api = {
       headers: { "Content-Type": "application/json", "If-Match": String(expectedVersion) },
       body: JSON.stringify(patch),
     }),
-  deleteTerm: (id: number) =>
-    request<{ ok: boolean }>(`/api/translation-memory/terms/${id}`, { method: "DELETE" }),
+  // expectedVersion pins the delete to the version the person saw: a stale
+  // one is a 409 `version_mismatch` and the term stays.
+  deleteTerm: (id: number, expectedVersion?: number) =>
+    request<{ ok: boolean }>(`/api/translation-memory/terms/${id}`, {
+      method: "DELETE",
+      ...(expectedVersion !== undefined ? { headers: { "If-Match": String(expectedVersion) } } : {}),
+    }),
   importTerms: (csvText: string, dryRun: boolean) =>
     request<TermImportResult>(`/api/translation-memory/terms/import${dryRun ? "?dryRun=1" : ""}`, {
       method: "POST",
