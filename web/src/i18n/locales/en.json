@@ -449,6 +449,7 @@
     "restoreDuplicate": "Not restored: “{{term}}” ({{concept}}) was added again after the delete. Nothing changed.",
     "restoreChanged": "Not restored: someone changed this term after you deleted it. Nothing changed.",
     "restoreGone": "Not restored: this term no longer exists.",
+    "restoreRetry": "Could not restore “{{term}}”. Try again.",
     "termComment": "Note (rationale)",
     "termCommentHelp": "Why this choice — for your team only. Not used for matching.",
     "useInstead": "use instead: {{term}}",

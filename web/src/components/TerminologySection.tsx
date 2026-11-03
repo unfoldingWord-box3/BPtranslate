@@ -138,12 +138,16 @@ export function TerminologySection({ direction }: { direction: "ltr" | "rtl" }) 
   // snackbar at a time: a new message replaces the offer, a new delete
   // replaces the message.
   const [undo, setUndo] = useState<Term | null>(null);
+  // True when the last Undo failed for a reason worth retrying (network, 5xx):
+  // the offer comes back saying so, instead of a message that ends it.
+  const [undoFailed, setUndoFailed] = useState(false);
   const showMsg = (msg: string) => {
     setUndo(null);
     save.setMsg(msg);
   };
   const onDeleted = (term: Term) => {
     save.clear();
+    setUndoFailed(false);
     setUndo(term);
   };
 
@@ -175,7 +179,10 @@ export function TerminologySection({ direction }: { direction: "ltr" | "rtl" }) 
       } else if (e instanceof ApiError && e.status === 404) {
         save.setMsg(t("preferences.restoreGone"));
       } else {
-        save.setMsg(t("preferences.actionFailed"));
+        // The term is still deleted and the same id and version can be sent
+        // again, so keep the offer open rather than end it with an error.
+        setUndoFailed(true);
+        setUndo(term);
       }
     }
   };
@@ -273,7 +280,11 @@ export function TerminologySection({ direction }: { direction: "ltr" | "rtl" }) 
         onClose={(_e, reason) => {
           if (reason !== "clickaway") setUndo(null);
         }}
-        message={undo ? t("preferences.termDeleted", { term: termLabel(undo) }) : ""}
+        message={
+          undo
+            ? t(undoFailed ? "preferences.restoreRetry" : "preferences.termDeleted", { term: termLabel(undo) })
+            : ""
+        }
         action={
           <>
             <Button color="inherit" size="small" onClick={onUndo}>
