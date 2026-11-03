@@ -700,7 +700,10 @@
             "خدمة الذكاء الاصطناعي",
             "تغيير مصدر النص الكتابي",
             "استبدال المصدر",
-            "مسار"
+            "مسار",
+            "سجل التغييرات",
+            "استعادة",
+            "تراجع"
           ],
           "headings": [
             "تغيير مصدر النص الكتابي",
@@ -1469,7 +1472,10 @@
             "ai service",
             "change scripture source",
             "replace source",
-            "lane"
+            "lane",
+            "history",
+            "restore",
+            "undo"
           ],
           "headings": [
             "Change the scripture source",

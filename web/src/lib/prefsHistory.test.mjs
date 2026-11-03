@@ -7,7 +7,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { rebuildPrefsVersion, restorableVersions } from "./prefsHistory.ts";
+import { isReadableChange, rebuildPrefsVersion, restorableVersions } from "./prefsHistory.ts";
 
 const EMPTY = {
   audience: null,
@@ -82,6 +82,14 @@ test("refuses to rebuild across an entry whose change could not be read", () => 
   // A field change without a usable `prev` is refused too, not restored as undefined.
   const badField = [HISTORY[0], { ...HISTORY[1], changed: { audience: "oops" } }, HISTORY[2], HISTORY[3]];
   assert.deepEqual(rebuildPrefsVersion(CURRENT, badField, 2), { ok: false, reason: "gap" });
+});
+
+test("isReadableChange accepts { prev, new } of strings or null only", () => {
+  assert.equal(isReadableChange({ prev: null, new: "x" }), true);
+  assert.equal(isReadableChange({ prev: "a", new: null }), true);
+  for (const bad of ["oops", null, undefined, 3, [], {}, { prev: "a" }, { prev: 1, new: "x" }, { prev: "a", new: {} }]) {
+    assert.equal(isReadableChange(bad), false, JSON.stringify(bad));
+  }
 });
 
 test("refuses a version the loaded entries don't reach", () => {

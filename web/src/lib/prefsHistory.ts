@@ -37,6 +37,14 @@ export interface PrefsHistoryEntry {
   changed: Partial<Record<PrefsHistoryField, { prev: string | null; new: string | null }>> | null;
 }
 
+/** A stored field change the UI can show and a restore can undo: { prev, new }, each a string or null. */
+export function isReadableChange(v: unknown): v is { prev: string | null; new: string | null } {
+  if (!v || typeof v !== "object") return false;
+  const c = v as { prev?: unknown; new?: unknown };
+  const ok = (x: unknown) => x === null || typeof x === "string";
+  return ok(c.prev) && ok(c.new);
+}
+
 export type RebuildResult =
   | { ok: true; fields: TranslationPrefsInput }
   | { ok: false; reason: "stale" | "gap" | "not_found" };
@@ -81,10 +89,9 @@ export function rebuildPrefsVersion(
     if (e.new_version !== at || !e.changed) return { ok: false, reason: "gap" };
     for (const [f, v] of Object.entries(e.changed)) {
       if (!(PREFS_HISTORY_FIELDS as readonly string[]).includes(f)) continue;
-      // A field change that isn't { prev: string | null } can't be undone safely.
-      const prev = v && typeof v === "object" ? (v as { prev?: unknown }).prev : undefined;
-      if (prev !== null && typeof prev !== "string") return { ok: false, reason: "gap" };
-      fields[f as PrefsHistoryField] = prev;
+      // A field change that isn't { prev, new } (strings or null) can't be undone safely.
+      if (!isReadableChange(v)) return { ok: false, reason: "gap" };
+      fields[f as PrefsHistoryField] = v.prev;
     }
     at = e.prev_version;
     if (at === target) return { ok: true, fields: fields as TranslationPrefsInput };

@@ -12,7 +12,7 @@
 // caller must remount them in `onRestored`, or their next Save would write the
 // pre-restore text back.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
@@ -30,9 +30,9 @@ import RestoreIcon from "@mui/icons-material/Restore";
 import { useTranslation } from "react-i18next";
 
 import { api, ApiError, type TranslationPrefs } from "../sync/api";
-import { currentPrefsFromConflict } from "../sync/prefsConflict";
 import {
   PREFS_HISTORY_FIELDS,
+  isReadableChange,
   rebuildPrefsVersion,
   restorableVersions,
   type PrefsHistoryEntry,
@@ -111,6 +111,7 @@ function PrefsHistoryDialog({ onClose, apply, onRestored }: Props & { onClose: (
   const loadOlder = async () => {
     if (!data || data.next == null) return;
     setLoading(true);
+    setError(false); // a retry clears the last failure
     try {
       const res = await api.getTranslationPrefsHistory({ before: data.next, limit: PAGE });
       // Keep the first page's `current`: older pages can't change it, and
@@ -123,15 +124,26 @@ function PrefsHistoryDialog({ onClose, apply, onRestored }: Props & { onClose: (
     }
   };
 
+  // Set synchronously so a double-click can't send a second PUT before the
+  // `restoring` state re-renders the button disabled.
+  const inFlight = useRef(false);
+
   const restore = async (target: number) => {
-    if (!data) return;
+    if (!data || inFlight.current) return;
     setConfirm(null);
     const rebuilt = rebuildPrefsVersion(data.current, data.entries, target);
     if (!rebuilt.ok) {
-      setMsg({ severity: "warning", text: t(rebuilt.reason === "stale" ? "prefsHistory.restoreStale" : "prefsHistory.restoreGap") });
+      const key =
+        rebuilt.reason === "stale"
+          ? "prefsHistory.restoreStale"
+          : rebuilt.reason === "not_found"
+            ? "prefsHistory.restoreNotFound"
+            : "prefsHistory.restoreGap";
+      setMsg({ severity: "warning", text: t(key) });
       reload();
       return;
     }
+    inFlight.current = true;
     setRestoring(true);
     try {
       const res = await api.putTranslationPrefs(data.current.version, rebuilt.fields);
@@ -143,8 +155,11 @@ function PrefsHistoryDialog({ onClose, apply, onRestored }: Props & { onClose: (
       });
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
-        const current = currentPrefsFromConflict(e.body);
-        if (current) apply(current);
+        // Deliberately NOT apply()-ing the newer row from the 409 body: the
+        // page editors still hold text from before that newer save, and
+        // advancing the shared version under them would let their next Save
+        // overwrite it with no conflict prompt. Left alone, their next Save
+        // gets its own 409 and the usual "someone saved first" handling.
         setMsg({ severity: "warning", text: t("prefsHistory.restoreStale") });
       } else if (e instanceof ApiError && e.status === 403) {
         setMsg({ severity: "error", text: t("preferences.saveForbidden") });
@@ -152,6 +167,7 @@ function PrefsHistoryDialog({ onClose, apply, onRestored }: Props & { onClose: (
         setMsg({ severity: "error", text: t("preferences.saveFailed") });
       }
     } finally {
+      inFlight.current = false;
       setRestoring(false);
       reload();
     }
@@ -232,7 +248,7 @@ function PrefsHistoryDialog({ onClose, apply, onRestored }: Props & { onClose: (
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setConfirm(null)}>{t("preferences.cancel")}</Button>
-          <Button variant="contained" onClick={() => confirm !== null && void restore(confirm)}>
+          <Button variant="contained" disabled={restoring} onClick={() => confirm !== null && void restore(confirm)}>
             {t("prefsHistory.restore")}
           </Button>
         </DialogActions>
@@ -299,7 +315,7 @@ function EntryCard({
       ) : (
         <Stack spacing={1.25}>
           {fields.map((f) => (
-            <FieldDiff key={f} field={f} change={entry.changed![f]!} />
+            <FieldDiff key={f} field={f} change={entry.changed![f]} />
           ))}
         </Stack>
       )}
@@ -307,11 +323,24 @@ function EntryCard({
   );
 }
 
-function FieldDiff({ field, change }: { field: PrefsHistoryField; change: { prev: string | null; new: string | null } }) {
+function FieldDiff({ field, change }: { field: PrefsHistoryField; change: unknown }) {
   const { t } = useTranslation();
   // Register is a fixed option; show its label, as the Brief editor does.
   const shown = (v: string | null) =>
     v && field === "register" ? t(`preferences.registerOption.${v}`, { defaultValue: v }) : v;
+  if (!isReadableChange(change)) {
+    // Malformed stored change: say so rather than showing it as "(empty)".
+    return (
+      <Box>
+        <Typography variant="caption" sx={{ fontWeight: 700 }}>
+          {t(`prefsHistory.field.${field}`)}
+        </Typography>
+        <Typography variant="body2" color="warning.main">
+          {t("prefsHistory.unreadable")}
+        </Typography>
+      </Box>
+    );
+  }
   return (
     <Box>
       <Typography variant="caption" sx={{ fontWeight: 700 }}>

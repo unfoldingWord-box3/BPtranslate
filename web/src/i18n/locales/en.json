@@ -591,7 +591,8 @@
       "notes": "Notes"
     },
     "restoreVersion": "Restore version {{version}}",
-    "unreadable": "This change could not be read. Versions older than it can't be restored."
+    "unreadable": "This change could not be read. Versions older than it can't be restored.",
+    "restoreNotFound": "This version isn't in the loaded list. Load older changes, then try again."
   },
   "export": {
     "noText": "No {{version}} text to export for {{target}}.",
