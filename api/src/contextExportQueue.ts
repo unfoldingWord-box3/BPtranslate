@@ -109,6 +109,21 @@ export async function sweepContextExportQueue(
   if (await contextExportNeedsRun(env.DB, env.WORKSPACE_SLUG ?? "default")) await startQueuedContextExport(env);
 }
 
+// Daily context export (#793). Validated tN/tQ rows queue no export, so on a
+// deployment without the nightly full export (the live dev worker has none)
+// the pack's examples only refreshed when someone saved prefs, terms or a
+// template — BSOJ's sat at 114 examples for two months while ~3,000 notes were
+// validated. Marking the workspace pending and starting a run when none holds
+// the lease is exactly what a save does, so a run already in flight picks this
+// up in its follow-up. Does nothing without a service token: no run, nothing
+// marked pending (any run would be a dry run).
+export async function requestDailyContextExport(
+  env: Pick<Env, "DB" | "EXPORT_WORKFLOW" | "WORKSPACE_SLUG" | "DCS_SERVICE_TOKEN">,
+): Promise<void> {
+  if (!env.DCS_SERVICE_TOKEN) return;
+  if (await markContextExportPending(env.DB, env.WORKSPACE_SLUG ?? "default")) await startQueuedContextExport(env);
+}
+
 // Holders are `<Workflow instance id>#<nonce>`, one per step attempt.
 const SAME_INSTANCE = `substr(holder, 1, length(?5) + 1) = ?5 || '#'`;
 

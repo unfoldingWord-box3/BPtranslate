@@ -723,7 +723,7 @@ export interface MeResponse {
   // an older/cached response.
   workspaceIsFallback?: boolean;
   // Whether this deployment registers the nightly export cron (prod does; the
-  // public dev worker does not — crons = []). Drives showing the 05:30 schedule
+  // public dev worker does not). Drives showing the 05:30 schedule
   // vs. a manual-exports notice (#240). Absent on older/cached responses →
   // treat as not enabled.
   nightlyExportsEnabled?: boolean;
