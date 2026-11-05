@@ -92,7 +92,7 @@ interface Props {
   onNoteSave: (
     id: string,
     patch: Partial<TnRow>,
-    opts?: { restoredFromVersion?: number; draftRef?: { chapter: number; verse: number } },
+    opts?: { restoredFromVersion?: number; draftRef?: { chapter: number; verse: number }; origin?: { version: number; values: Record<string, unknown> } },
   ) => void;
   // Resolves false when the trash request failed — NoteCard keeps the user's
   // unsaved text in that case (see NoteCard.handleDelete).

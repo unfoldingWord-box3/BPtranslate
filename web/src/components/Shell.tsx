@@ -1983,7 +1983,7 @@ export function Shell({
       kind: "tn" | "tq" | "twl",
       row: T,
       patch: Partial<T>,
-      opts?: { restoredFromVersion?: number; draftRef?: { chapter: number; verse: number } },
+      opts?: { restoredFromVersion?: number; draftRef?: { chapter: number; verse: number }; origin?: { version: number; values: Record<string, unknown> } },
     ) => {
       // Optimistic local apply mirrors what the server will do: any non-revert
       // patch clears the restored_from_version marker so the chip immediately
@@ -1999,9 +1999,16 @@ export function Shell({
       // value) from a genuine one and auto-heal the former (see
       // classifyRowPatchConflict). Read from `row`, which still holds the version
       // we branched from — applyLocalRowPatch produces a new cached object.
+      // `origin` (#754): the edit was typed against an older copy of the row
+      // than the cached one (a restored NoteCard draft after another person's
+      // save), so it goes out at that copy's version with that copy as the
+      // baseline, and a field changed since comes back as a conflict.
+      const { origin, ...rest } = opts ?? {};
       const rowRecord = row as unknown as Record<string, unknown>;
       const baseline: Record<string, unknown> = {};
-      for (const field of Object.keys(patch)) baseline[field] = rowRecord[field];
+      for (const field of Object.keys(patch)) {
+        baseline[field] = origin && field in origin.values ? origin.values[field] : rowRecord[field];
+      }
       applyLocalRowPatch(kind, row.id, localPatch);
       // draftRef: lets a refused save file its text as the row's draft (#647).
       // Not for tN: NoteCard keeps its own draft until the save confirms, and
@@ -2009,8 +2016,8 @@ export function Shell({
       // from a save it never held (find/replace, quote builder), leaving a
       // brief phantom "unsaved" (#647 review A8). NoteCard's own saves pass
       // one in `opts` (#724), so their refused text outlives an AI apply.
-      void outbox.enqueueRow(kind, row.id, row.version, patch as Record<string, unknown>, {
-        ...opts,
+      void outbox.enqueueRow(kind, row.id, origin?.version ?? row.version, patch as Record<string, unknown>, {
+        ...rest,
         book: row.book,
         baseline,
         ...(kind !== "tn" ? { draftRef: { chapter: row.chapter, verse: row.verse } } : {}),
