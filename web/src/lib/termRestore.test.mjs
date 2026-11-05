@@ -44,13 +44,29 @@ test("409 version_mismatch changes nothing", () => {
 
 test("404 is not_found; other errors are generic", () => {
   assert.equal(restoreFailure(404, { error: "not_found" }).kind, "not_found");
-  assert.equal(restoreFailure(500, null).kind, "failed");
   assert.equal(restoreFailure(409, null).kind, "failed");
   assert.equal(restoreMessage({ kind: "restored" }).refresh, true);
 });
 
+// #809: after a 5xx the term is still deleted and the same id and version can
+// be sent again, so the Undo offer comes back to retry. A 4xx other than
+// 404/409 would fail the same way on a resend, so it ends with the generic
+// message.
+test("5xx is retryable with the retry message; other 4xx are final", () => {
+  for (const status of [500, 502, 503, 504]) {
+    const o = restoreFailure(status, { error: "unavailable" });
+    assert.equal(o.kind, "retryable", `status ${status}`);
+    const m = restoreMessage(o);
+    assert.equal(m.key, "preferences.termRestoreRetry");
+    assert.equal(m.refresh, false);
+  }
+  for (const status of [400, 401, 403, 422]) {
+    assert.equal(restoreFailure(status, null).kind, "failed", `status ${status}`);
+  }
+});
+
 test("every outcome's message key has copy in en and ar", () => {
-  const kinds = ["restored", "not_deleted", "duplicate", "version_mismatch", "not_found", "failed"];
+  const kinds = ["restored", "not_deleted", "duplicate", "version_mismatch", "not_found", "failed", "retryable"];
   for (const kind of kinds) {
     const { key } = restoreMessage({ kind, source: "a", target: "b" });
     assert.equal(typeof lookup(en, key), "string", `en ${key}`);
