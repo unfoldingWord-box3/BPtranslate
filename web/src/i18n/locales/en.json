@@ -404,6 +404,7 @@
     "termRestoreDuplicate": "Could not bring the term back: the project now has the same term ({{source}} → {{target}}). Nothing was changed.",
     "termRestoreChanged": "Could not bring the term back: someone changed it since. Nothing was changed.",
     "termRestoreNotFound": "Could not bring the term back: it no longer exists.",
+    "termRestoreRetry": "Could not bring the term back. Try again.",
     "conflict": "Someone else changed this — reloaded the latest.",
     "conflictKeptEdits": "Someone else saved changes — your unsaved edits were kept. Review and save again.",
     "empty": "empty",

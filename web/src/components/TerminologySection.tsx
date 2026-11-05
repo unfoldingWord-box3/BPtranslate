@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Box,
@@ -125,9 +125,15 @@ export function TerminologySection({ direction }: { direction: "ltr" | "rtl" }) 
   const groups = useMemo(() => groupTerms(terms), [terms]);
   // The term just deleted, offered back through the Undo snackbar (#801).
   // version is the one it was deleted at: the restore sends it as If-Match.
-  const [undo, setUndo] = useState<{ id: number; version: number } | null>(null);
+  // retry is set when the offer came back after a restore that can be tried
+  // again (network error or 5xx, #809); the snackbar then says so.
+  const [undo, setUndo] = useState<{ id: number; version: number; retry?: boolean } | null>(null);
+  // Counts deletes, so a restore that fails after a newer delete does not
+  // replace that newer term's Undo offer with its own.
+  const deleteSeq = useRef(0);
 
   const onDeleted = (term: Term) => {
+    deleteSeq.current += 1;
     save.clear();
     setUndo({ id: term.id, version: term.version });
     refetch();
@@ -135,13 +141,21 @@ export function TerminologySection({ direction }: { direction: "ltr" | "rtl" }) 
   const onUndo = async () => {
     if (!undo) return;
     const { id, version } = undo;
+    const seq = deleteSeq.current;
     setUndo(null);
     let outcome: RestoreOutcome;
     try {
       await api.restoreTerm(id, version);
       outcome = { kind: "restored" };
     } catch (e) {
-      outcome = e instanceof ApiError ? restoreFailure(e.status, e.body) : { kind: "failed" };
+      outcome = e instanceof ApiError ? restoreFailure(e.status, e.body) : { kind: "retryable" };
+    }
+    if (outcome.kind === "retryable") {
+      // The term is still deleted and the same id and version can be sent
+      // again, so bring the offer back, unless another term was deleted
+      // meanwhile: its offer stays.
+      if (deleteSeq.current === seq) setUndo({ id, version, retry: true });
+      return;
     }
     const m = restoreMessage(outcome);
     save.setMsg(t(m.key, m.values));
@@ -239,7 +253,7 @@ export function TerminologySection({ direction }: { direction: "ltr" | "rtl" }) 
         onClose={(_e, reason) => {
           if (reason !== "clickaway") setUndo(null);
         }}
-        message={t("preferences.termDeleted")}
+        message={t(undo?.retry ? "preferences.termRestoreRetry" : "preferences.termDeleted")}
         action={
           <Button color="inherit" size="small" onClick={onUndo}>
             {t("common.undo")}
