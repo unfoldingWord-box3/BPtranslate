@@ -153,8 +153,10 @@ export function TerminologySection({ direction }: { direction: "ltr" | "rtl" }) 
     if (outcome.kind === "retryable") {
       // The term is still deleted and the same id and version can be sent
       // again, so bring the offer back, unless another term was deleted
-      // meanwhile: its offer stays.
+      // meanwhile: its offer stays, and the message says this restore
+      // failed (#811).
       if (deleteSeq.current === seq) setUndo({ id, version, retry: true });
+      else save.setMsg(t("preferences.actionFailed"));
       return;
     }
     const m = restoreMessage(outcome);
@@ -245,7 +247,16 @@ export function TerminologySection({ direction }: { direction: "ltr" | "rtl" }) 
           ))}
         </Stack>
       )}
-      <Snackbar open={!!save.msg} autoHideDuration={3000} onClose={save.clear} message={save.msg ?? ""} />
+      {/* Both snackbars share the bottom anchor; while the Undo offer is
+          open, lift the message above it so neither hides the other (#811).
+          The offsets add 64px to MUI's own (8px below sm, 24px from sm). */}
+      <Snackbar
+        open={!!save.msg}
+        autoHideDuration={3000}
+        onClose={save.clear}
+        message={save.msg ?? ""}
+        sx={undo ? { bottom: { xs: 72, sm: 88 } } : undefined}
+      />
       <Snackbar
         key={undo?.id}
         open={!!undo}
