@@ -9,16 +9,23 @@
 //   409 not_deleted         the term is already live: nothing to do
 //   409 version_mismatch    someone restored, changed and deleted it again
 //   404 not_found           the term is gone
+//
+// "retryable" (#809) is a 5xx, or a network error (the caller maps a non-HTTP
+// failure to it): the term is still deleted and the same id and version can
+// be sent again, so the page brings the Undo offer back. Any other 4xx is
+// "failed": a resend would get the same answer.
 export type RestoreOutcome =
   | { kind: "restored" }
   | { kind: "duplicate"; source: string; target: string }
   | { kind: "not_deleted" }
   | { kind: "version_mismatch" }
   | { kind: "not_found" }
+  | { kind: "retryable" }
   | { kind: "failed" };
 
 /** Classify a failed restore from its HTTP status and parsed JSON body. */
 export function restoreFailure(status: number, body: unknown): RestoreOutcome {
+  if (status >= 500) return { kind: "retryable" };
   if (status === 404) return { kind: "not_found" };
   if (status !== 409) return { kind: "failed" };
   const b = (body ?? {}) as { error?: unknown; current?: unknown };
@@ -56,6 +63,8 @@ export function restoreMessage(o: RestoreOutcome): {
       return { key: "preferences.termRestoreChanged", refresh: false };
     case "not_found":
       return { key: "preferences.termRestoreNotFound", refresh: false };
+    case "retryable":
+      return { key: "preferences.termRestoreRetry", refresh: false };
     case "failed":
       return { key: "preferences.actionFailed", refresh: false };
   }
