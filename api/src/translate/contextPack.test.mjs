@@ -179,7 +179,11 @@ test("loadContextPack enforces the byte cap via content-length and via measured 
 test("loadContextPack loads a validated.jsonl over the 2 MB general cap, up to the examples cap", async () => {
   const line = JSON.stringify({ resource: "tn", rowId: "x", source: "s", target: "ن".repeat(400) });
   const lines = [];
-  for (let i = 0; lines.join("\n").length * 2 < 2_413_747; i++) lines.push(line.replace('"x"', `"r${i}"`));
+  // ~800 UTF-8 bytes per line; build to the size of BSOJ's real file.
+  for (let i = 0, size = 0; size < 2_413_747; i++) {
+    lines.push(line.replace('"x"', `"r${i}"`));
+    size += new TextEncoder().encode(lines[i]).length + 1;
+  }
   const body = lines.join("\n");
   const bytes = new TextEncoder().encode(body).length;
   assert.ok(bytes > MAX_PACK_FILE_BYTES && bytes < MAX_EXAMPLES_FILE_BYTES);
