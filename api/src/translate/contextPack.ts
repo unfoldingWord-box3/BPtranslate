@@ -36,9 +36,10 @@ export const SUPPORTED_MANIFEST_FORMAT = 1;
 // examples/validated.jsonl is different: the daily context export writes one
 // line per human-validated row and the file only grows (BSOJ Arabic reached
 // 2.4 MB at 3,240 rows, ~745 bytes/row, on 2026-11-07, which failed every
-// translate run). 16 MB is ~21k rows. It stays well under the Worker's 128 MB
-// memory: the text is held as a string and once more as UTF-8 bytes for the
-// size check, then parsed.
+// translate run). 16 MB is ~21k rows. At the cap the step holds the string,
+// a UTF-8 copy for the size check, and the parsed rows at once, an estimated
+// 60-90 MB of the Worker's 128 MB; #813 tracks loading only what a run needs
+// before the file gets near that.
 export const MAX_PACK_FILE_BYTES = 2_000_000;
 export const MAX_EXAMPLES_FILE_BYTES = 16_000_000;
 
