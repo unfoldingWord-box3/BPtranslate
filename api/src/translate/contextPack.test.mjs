@@ -8,7 +8,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   loadContextPack, parseTermsCsv, parseExamplesJsonl, parseTemplatesTsv, parseManifestYaml,
-  parseRegisterFromBrief, parseCsvLine, parseContextRef, MAX_PACK_FILE_BYTES,
+  parseRegisterFromBrief, parseCsvLine, parseContextRef, MAX_PACK_FILE_BYTES, MAX_EXAMPLES_FILE_BYTES,
 } from "./contextPack.ts";
 import { fakeRawFetch, fixturePackFiles } from "./fixtures.mjs";
 
@@ -172,6 +172,41 @@ test("loadContextPack enforces the byte cap via content-length and via measured 
   const arabic = "ن".repeat(Math.ceil(MAX_PACK_FILE_BYTES / 2) + 1);
   const wide = async () => ({ status: 200, ok: true, headers: null, text: async () => arabic, json: async () => ({}) });
   await assert.rejects(loadContextPack(REF, { fetchImpl: wide }), /file too large/);
+});
+
+// 2026-11-07: BSOJ's exported validated.jsonl reached 2,413,747 bytes and the
+// shared 2 MB cap failed every Arabic translate run. Examples get their own cap.
+test("loadContextPack loads a validated.jsonl over the 2 MB general cap, up to the examples cap", async () => {
+  const line = JSON.stringify({ resource: "tn", rowId: "x", source: "s", target: "ن".repeat(400) });
+  const lines = [];
+  // ~800 UTF-8 bytes per line; build to the size of BSOJ's real file.
+  for (let i = 0, size = 0; size < 2_413_747; i++) {
+    lines.push(line.replace('"x"', `"r${i}"`));
+    size += new TextEncoder().encode(lines[i]).length + 1;
+  }
+  const body = lines.join("\n");
+  const bytes = new TextEncoder().encode(body).length;
+  assert.ok(bytes > MAX_PACK_FILE_BYTES && bytes < MAX_EXAMPLES_FILE_BYTES);
+  const files = { ...fixturePackFiles(), "examples/validated.jsonl": body };
+  const inner = fakeRawFetch(files);
+  const withLength = async (url) => {
+    const res = await inner(url);
+    if (!/validated\.jsonl$/.test(url)) return res;
+    return { ...res, headers: { get: (h) => (h === "content-length" ? String(bytes) : null) } };
+  };
+  const pack = await loadContextPack(REF, { fetchImpl: withLength });
+  assert.equal(pack.examples.length, lines.length);
+
+  const over = async (url) => {
+    const res = await inner(url);
+    if (!/validated\.jsonl$/.test(url)) return res;
+    return { ...res, headers: { get: (h) => (h === "content-length" ? String(MAX_EXAMPLES_FILE_BYTES + 1) : null) } };
+  };
+  await assert.rejects(loadContextPack(REF, { fetchImpl: over }), /file too large \(>16000000 bytes\)/);
+
+  // The 2 MB cap still applies to the hand-authored files.
+  const bigBrief = fakeRawFetch({ ...fixturePackFiles(), "brief.md": "x".repeat(MAX_PACK_FILE_BYTES + 1) });
+  await assert.rejects(loadContextPack(REF, { fetchImpl: bigBrief }), /file too large \(>2000000 bytes\).*brief\.md/);
 });
 
 test("loadContextPack surfaces a non-404 HTTP failure", async () => {

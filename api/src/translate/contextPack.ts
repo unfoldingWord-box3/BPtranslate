@@ -30,11 +30,18 @@ export type FetchLike = (url: string) => Promise<FetchLikeResponse>;
 
 const DCS_BASE = "https://git.door43.org";
 export const SUPPORTED_MANIFEST_FORMAT = 1;
-// Real pack files (manifest.yaml, brief.md, templates.tsv, terms.csv,
-// validated.jsonl) are KBs. This cap is a hardening bound, not a realistic
-// size — it protects the translate runner from an oversized/misconfigured or
-// malicious pack file.
+// Hardening bounds that protect the translate runner from an oversized,
+// misconfigured or malicious pack file. The hand-authored files (manifest,
+// brief, instructions, templates, terms) are KBs, so they keep a 2 MB cap.
+// examples/validated.jsonl is different: the daily context export writes one
+// line per human-validated row and the file only grows (BSOJ Arabic reached
+// 2.4 MB at 3,240 rows, ~745 bytes/row, on 2026-11-07, which failed every
+// translate run). 16 MB is ~21k rows. At the cap the step holds the string,
+// a UTF-8 copy for the size check, and the parsed rows at once, an estimated
+// 60-90 MB of the Worker's 128 MB; #813 tracks loading only what a run needs
+// before the file gets near that.
 export const MAX_PACK_FILE_BYTES = 2_000_000;
+export const MAX_EXAMPLES_FILE_BYTES = 16_000_000;
 
 export const PACK_FILES = {
   manifest: "manifest.yaml",
@@ -114,20 +121,20 @@ function rawUrl({ org, repo, ref }: ParsedRef, filePath: string): string {
   return `${DCS_BASE}/${org}/${repo}/raw/${kind}/${encodeURIComponent(ref)}/${filePath}`;
 }
 
-async function fetchText(url: string, fetchImpl: FetchLike | undefined): Promise<string | null> {
+async function fetchText(url: string, fetchImpl: FetchLike | undefined, maxBytes: number): Promise<string | null> {
   const res = await (fetchImpl || (fetch as unknown as FetchLike))(url);
   if (res.status === 404) return null;
   if (!res.ok) throw new Error(`fetch ${url} → HTTP ${res.status}`);
   const contentLength = Number(res.headers && typeof res.headers.get === "function" ? res.headers.get("content-length") : null);
-  if (Number.isFinite(contentLength) && contentLength > MAX_PACK_FILE_BYTES) {
-    throw new Error(`file too large (>${MAX_PACK_FILE_BYTES} bytes): ${url}`);
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    throw new Error(`file too large (>${maxBytes} bytes): ${url}`);
   }
   const text = await res.text();
   // Byte length, not string length: pack files are often Arabic/Hebrew, where
   // one character is 2-3 bytes, so a character count would let a file through
   // at several times the intended cap.
-  if (new TextEncoder().encode(text).length > MAX_PACK_FILE_BYTES) {
-    throw new Error(`file too large (>${MAX_PACK_FILE_BYTES} bytes): ${url}`);
+  if (new TextEncoder().encode(text).length > maxBytes) {
+    throw new Error(`file too large (>${maxBytes} bytes): ${url}`);
   }
   return text;
 }
@@ -373,7 +380,8 @@ export async function loadContextPack(
   const raw: Partial<Record<PackFileKey, string | null>> = {};
   const missing: string[] = [];
   const [contents, sha] = await Promise.all([
-    Promise.all(entries.map(([, rel]) => fetchText(rawUrl(parsed, rel), fetchImpl))),
+    Promise.all(entries.map(([key, rel]) =>
+      fetchText(rawUrl(parsed, rel), fetchImpl, key === "examples" ? MAX_EXAMPLES_FILE_BYTES : MAX_PACK_FILE_BYTES))),
     resolveContextSha(parsed, fetchImpl),
   ]);
   entries.forEach(([key, rel], i) => {
