@@ -88,6 +88,34 @@ test("parseExamplesJsonl applies tombstones last-line-wins", () => {
   assert.equal(examples[0].rowId, "y");
 });
 
+// Issue #822: tN/tQ row ids are unique only within a book, so the dedupe key
+// must include the book or two books' rows with the same id collapse into one.
+test("parseExamplesJsonl keeps same rowId in different books apart", () => {
+  const line = (o) => JSON.stringify(o) + "\n";
+  const examples = parseExamplesJsonl(
+    line({ resource: "tn", rowId: "abcd", book: "GEN", source: "g", target: "G", validated_at: 1 })
+    + line({ resource: "tn", rowId: "abcd", book: "EXO", source: "e", target: "E", validated_at: 2 }));
+  assert.deepEqual(examples.map((e) => [e.book, e.rowId, e.target]), [["GEN", "abcd", "G"], ["EXO", "abcd", "E"]]);
+});
+
+test("parseExamplesJsonl: a later line for the same book and rowId replaces the earlier one", () => {
+  const line = (o) => JSON.stringify(o) + "\n";
+  const examples = parseExamplesJsonl(
+    line({ resource: "tn", rowId: "abcd", book: "GEN", source: "g1", target: "G1", validated_at: 1 })
+    + line({ resource: "tn", rowId: "abcd", book: "EXO", source: "e", target: "E", validated_at: 2 })
+    + line({ resource: "tn", rowId: "abcd", book: "GEN", source: "g2", target: "G2", validated_at: 3 }));
+  assert.deepEqual(examples.map((e) => [e.book, e.target]), [["EXO", "E"], ["GEN", "G2"]]);
+});
+
+test("parseExamplesJsonl: a tombstone removes only its own book's example", () => {
+  const line = (o) => JSON.stringify(o) + "\n";
+  const examples = parseExamplesJsonl(
+    line({ resource: "tn", rowId: "abcd", book: "GEN", source: "g", target: "G", validated_at: 1 })
+    + line({ resource: "tn", rowId: "abcd", book: "EXO", source: "e", target: "E", validated_at: 2 })
+    + line({ resource: "tn", rowId: "abcd", book: "GEN", tombstone: true, validated_at: 3 }));
+  assert.deepEqual(examples.map((e) => [e.book, e.target]), [["EXO", "E"]]);
+});
+
 test("parseManifestYaml / parseRegisterFromBrief cover the scalar subset", () => {
   assert.deepEqual(parseManifestYaml('format: "2"\nlanguage: ar\n'), { format: 2, language: "ar" });
   assert.equal(parseManifestYaml("language: ar\n").format, 1);
