@@ -181,7 +181,8 @@ export default function AdminDraftScorecardScreen({ role, me }: FlowScreenContex
 
   const row = (c: DraftScorecardChapter) => {
     const total = c.chapter == null;
-    const cellSx = total ? { fontWeight: 700 } : undefined;
+    // Numbers never wrap: a wrapped "50.0% (1 of 2)" reorders badly in RTL.
+    const cellSx = { whiteSpace: "nowrap", ...(total ? { fontWeight: 700 } : {}) } as const;
     return (
       <TableRow key={c.chapter ?? "total"} sx={total ? { bgcolor: "action.hover" } : undefined}>
         <TableCell sx={cellSx}>{chapterLabel(c)}</TableCell>
