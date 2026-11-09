@@ -1,0 +1,11 @@
+-- Context-pack shrink guard: bytes of every pack file except
+-- examples/validated.jsonl (issue #813).
+--
+-- The export now writes a bounded selection of validated examples whose size
+-- moves day to day as the most recently approved chapters change, so comparing
+-- total_bytes between exports would refuse ordinary exports. guard_bytes is
+-- what contextShrinkRefused compares; total_bytes keeps recording the real size
+-- of everything written. NULL on rows written before this column existed, which
+-- makes the guard skip the bytes check once instead of comparing against a
+-- total that included the full examples file.
+ALTER TABLE context_export_results ADD COLUMN guard_bytes INTEGER;

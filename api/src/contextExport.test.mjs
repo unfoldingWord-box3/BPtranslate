@@ -571,10 +571,24 @@ console.log("contextExportLib — shrink + content count");
   assert(shrinkDetailCode(refused).startsWith("shrink_guard:terms_"), "shrink code shape");
 
   const bytes = contextShrinkRefused(
-    { terms: 10, examplesTn: 5, examplesTq: 0, templates: 40, contentFiles: 3, totalBytes: 100 },
-    { terms: 10, examplesTn: 5, examplesTq: 0, templates: 40, contentFiles: 3, totalBytes: 1000 },
+    { terms: 10, examplesTn: 5, examplesTq: 0, templates: 40, contentFiles: 3, totalBytes: 100, guardBytes: 100 },
+    { terms: 10, examplesTn: 5, examplesTq: 0, templates: 40, contentFiles: 3, totalBytes: 1000, guardBytes: 1000 },
   );
   assert(bytes && bytes.metric === "totalBytes", "bytes shrink refused");
+  assert(
+    !contextShrinkRefused(
+      { terms: 10, examplesTn: 5, examplesTq: 0, templates: 40, contentFiles: 3, totalBytes: 700_000, guardBytes: 4000 },
+      { terms: 10, examplesTn: 5, examplesTq: 0, templates: 40, contentFiles: 3, totalBytes: 2_400_000, guardBytes: 4000 },
+    ),
+    "a smaller examples file alone is not a byte shrink (guardBytes excludes it)",
+  );
+  assert(
+    !contextShrinkRefused(
+      { terms: 10, examplesTn: 5, examplesTq: 0, templates: 40, contentFiles: 3, totalBytes: 700_000, guardBytes: 4000 },
+      { terms: 10, examplesTn: 5, examplesTq: 0, templates: 40, contentFiles: 3, totalBytes: 2_400_000, guardBytes: null },
+    ),
+    "previous export without guard_bytes skips the byte check once",
+  );
 
   // Intentional clears (fewer content files) are allowed — the stale file is
   // deleted from the repo instead of the export being refused forever.
@@ -794,15 +808,32 @@ console.log("contextExport — examples/validated.jsonl is bounded (#813)");
   assert(idioms.length === EXAMPLES_PER_SLUG, "per-slug quota alone keeps the newest 8 of a slug");
   assert(idioms.every((l) => l.ref.startsWith("10:")), "the quota takes the newest rows");
 
-  // Ties on validated_at (bulk approval in one second) select by rowId, so the
-  // file does not depend on input order.
+  // A single touched row (reorder, hint toggle) in an old chapter bumps its
+  // timestamp but does not make that chapter "recently approved".
+  const touched = (ex.ok ? ex.lines : []).map((l) => (l.rowId === "t1-0" ? { ...l, validated_at: 99999 } : l));
+  const touchedPick = selectPackExamples(touched);
+  assert(
+    touchedPick.filter((l) => l.ref.startsWith("1:")).length === 1 && touchedPick.some((l) => l.ref.startsWith("7:")),
+    "one bumped row keeps its slot but does not pull in its whole chapter",
+  );
+
+  // Spelling variants of one SupportReference share a quota (readers match on the slug).
+  const variants = Array.from({ length: 12 }, (_, i) => ({
+    resource: "tn", rowId: `v${i}`, book: "OBA", ref: "1:1",
+    supportReference: i % 2 ? "rc://*/ta/man/translate/figs-irony" : "figs-irony", source: "s", target: "t", validated_at: i,
+  }));
+  assert(selectPackExamples(variants, 8, 0).length === 8, "rc:// and bare spellings of a slug share one quota of 8");
+
+  // Ties on validated_at (bulk approval in one second) select by book, resource
+  // and rowId, so the file does not depend on input order; ids repeat across books.
   const tied = Array.from({ length: 12 }, (_, i) => ({
     resource: "tn", rowId: `id${String(i).padStart(2, "0")}`, book: "OBA", ref: "1:1",
     supportReference: "x", source: "s", target: "t", validated_at: 5,
   }));
-  const a = selectPackExamples(tied, 8, 0).map((l) => l.rowId).sort().join(",");
-  const b = selectPackExamples([...tied].reverse(), 8, 0).map((l) => l.rowId).sort().join(",");
-  assert(a === b && a.split(",").length === 8, "tied timestamps select the same rows in any input order");
+  const crossBook = tied.map((l) => ({ ...l, book: "ZEC" }));
+  const a = JSON.stringify(selectPackExamples([...tied, ...crossBook], 8, 0));
+  const b = JSON.stringify(selectPackExamples([...crossBook, ...tied].reverse(), 8, 0));
+  assert(a === b && JSON.parse(a).length === 8, "tied timestamps give the same rows in the same order for any input order");
 
   const base = {
     cfg,
@@ -817,10 +848,11 @@ console.log("contextExport — examples/validated.jsonl is bounded (#813)");
   const file = r.ok ? r.files.find((f) => f.path === "examples/validated.jsonl") : null;
   assert(file && file.content.trim().split("\n").length === 88, "pack file holds the bounded selection");
   assert(r.ok && r.stats.examplesTn === 200 && r.stats.examplesTq === 10, "stats count the whole validated pool");
+  const bytesOf = (files) => files.reduce((n, f) => n + new TextEncoder().encode(f.content).byteLength, 0);
+  assert(r.ok && r.stats.totalBytes === bytesOf(r.files), "totalBytes is the size of everything written");
   assert(
-    r.ok && r.stats.totalBytes === r.files.filter((f) => f.path !== "examples/validated.jsonl")
-      .reduce((n, f) => n + new TextEncoder().encode(f.content).byteLength, 0),
-    "totalBytes leaves the examples file out",
+    r.ok && r.stats.guardBytes === bytesOf(r.files.filter((f) => f.path !== "examples/validated.jsonl")),
+    "guardBytes leaves the examples file out",
   );
 
   // Next day: two more chapters approved. The file shifts to chapters 9-12,

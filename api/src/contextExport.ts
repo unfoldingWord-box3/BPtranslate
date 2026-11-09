@@ -4,6 +4,7 @@
 
 import { exportOwnerFor, type ProjectConfig } from "./projectConfig.ts";
 import { serializeTermsCsv, type TermImport } from "./translationMemoryLib.ts";
+import { slugFromSupportReference } from "./translate/core.ts";
 import {
   contentFileCount,
   hasMinimumContent,
@@ -312,35 +313,50 @@ export function buildValidatedExamples(
 
 const EXAMPLES_PATH = "examples/validated.jsonl";
 
-/** Most recent validated examples kept per (resource, SupportReference). */
+/** Most recent validated examples kept per (resource, SupportReference slug). */
 export const EXAMPLES_PER_SLUG = 8;
-/** Chapters (across all books) whose validated rows are all kept, newest approvals first. */
+/** Chapters (across all books) whose validated rows are all kept, most recently approved first. */
 export const EXAMPLE_RECENT_CHAPTERS = 4;
+/**
+ * A chapter's recency is the validated_at of its 5th-newest row. Reordering a
+ * note, toggling a hint, or acknowledging a review flag bumps updated_at
+ * (= validated_at) on an already-validated row, so a single touched row in an
+ * old chapter must not count that chapter as "just approved".
+ */
+const CHAPTER_RECENCY_ROWS = 5;
+
+/** Total order, newest first: same input rows give the same selection and file. */
+function newerFirst(a: JsonlExample, b: JsonlExample): number {
+  if (a.validated_at !== b.validated_at) return b.validated_at - a.validated_at;
+  for (const k of ["book", "resource", "rowId"] as const) {
+    if (a[k] !== b[k]) return a[k] < b[k] ? -1 : 1;
+  }
+  return 0;
+}
 
 /**
  * Bound examples/validated.jsonl (issue #813). Writing every validated row made
  * the file grow with the Bible (2.4 MB at 3,270 Arabic rows) while each runner
  * uses at most 15 per batch. Keep the newest EXAMPLES_PER_SLUG rows of every
- * (resource, SupportReference) group, plus every row of the
- * EXAMPLE_RECENT_CHAPTERS chapters with the newest approvals — teams work in
- * chapter order, so these are the chapters just before the one being drafted.
- * The runners' existing "same slug first, then most recent" pick then lands on
- * the previous chapter without any reader change. Ties on validated_at (bulk
- * approvals share a second) break on rowId so the selection, and therefore the
- * commit, is deterministic. Input order is preserved.
+ * (resource, slug) group, plus every row of the EXAMPLE_RECENT_CHAPTERS most
+ * recently approved chapters. Teams work in chapter order, so these are the
+ * chapters just before the one being drafted, and the runners' existing "same
+ * slug first, then most recent" pick lands on them without any reader change.
+ * Groups use the slug the readers match on (slugFromSupportReference), so
+ * spelling variants of one SupportReference share a quota. Output is oldest
+ * first (contract §3.4) in a total order, so the commit is deterministic.
  */
 export function selectPackExamples(
   lines: readonly JsonlExample[],
   perSlug = EXAMPLES_PER_SLUG,
   recentChapters = EXAMPLE_RECENT_CHAPTERS,
 ): JsonlExample[] {
-  const newestFirst = lines.slice().sort((a, b) =>
-    (b.validated_at - a.validated_at) || (a.rowId < b.rowId ? -1 : a.rowId > b.rowId ? 1 : 0));
+  const newestFirst = lines.slice().sort(newerFirst);
   const keep = new Set<JsonlExample>();
 
   const perGroup = new Map<string, number>();
   for (const l of newestFirst) {
-    const group = `${l.resource}\u0000${l.supportReference ?? ""}`;
+    const group = `${l.resource}\u0000${slugFromSupportReference(l.supportReference) ?? ""}`;
     const n = perGroup.get(group) ?? 0;
     if (n < perSlug) {
       keep.add(l);
@@ -349,16 +365,21 @@ export function selectPackExamples(
   }
 
   const chapterOf = (l: JsonlExample) => `${l.book}\u0000${l.ref.split(":")[0]}`;
-  const chapters: string[] = [];
+  const chapterRows = new Map<string, JsonlExample[]>();
   for (const l of newestFirst) {
-    if (chapters.length >= recentChapters) break;
     const ch = chapterOf(l);
-    if (!chapters.includes(ch)) chapters.push(ch);
+    const rows = chapterRows.get(ch);
+    if (rows) rows.push(l);
+    else chapterRows.set(ch, [l]);
   }
-  const recent = new Set(chapters);
-  for (const l of lines) if (recent.has(chapterOf(l))) keep.add(l);
+  const score = (rows: JsonlExample[]) => rows[Math.min(CHAPTER_RECENCY_ROWS, rows.length) - 1].validated_at;
+  const recent = [...chapterRows.entries()]
+    .map(([ch, rows]) => ({ ch, rows, at: score(rows) }))
+    .sort((a, b) => (b.at - a.at) || (a.ch < b.ch ? -1 : a.ch > b.ch ? 1 : 0))
+    .slice(0, recentChapters);
+  for (const { rows } of recent) for (const l of rows) keep.add(l);
 
-  return lines.filter((l) => keep.has(l));
+  return newestFirst.filter((l) => keep.has(l)).reverse();
 }
 
 export function renderValidatedJsonl(lines: readonly JsonlExample[]): string {
@@ -462,18 +483,18 @@ export function renderContextPack(input: {
     files.push({ path: "templates/templates.tsv", content: templatesTsv });
   }
 
-  // The shrink guard compares these with the previous export, so they measure
-  // the D1 data, not the bounded file: examples count every validated row (the
-  // pool the file is selected from), and totalBytes leaves the examples file
-  // out — its size moves day to day as the recent chapters change, which would
-  // trip the 10% byte check on ordinary exports.
+  // The shrink guard compares these with the previous export, so the example
+  // counts measure the D1 pool the file is selected from (every validated row),
+  // not the bounded file. The byte check uses guardBytes, which leaves the
+  // examples file out: its size moves day to day as the recent chapters change.
   const stats: ContextPackStats = {
     terms: input.terms.length,
     examplesTn: examples.lines.filter((l) => l.resource === "tn").length,
     examplesTq: examples.lines.filter((l) => l.resource === "tq").length,
     templates: templatesRowCount,
     contentFiles: contentFileCount(files),
-    totalBytes: totalBytes(files.filter((f) => f.path !== EXAMPLES_PATH)),
+    totalBytes: totalBytes(files),
+    guardBytes: totalBytes(files.filter((f) => f.path !== EXAMPLES_PATH)),
   };
 
   return { ok: true, files, stats };

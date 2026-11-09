@@ -16,6 +16,12 @@ export type ContextPackStats = {
   templates: number;
   contentFiles: number;
   totalBytes: number;
+  /**
+   * Bytes the shrink guard compares: every pack file except
+   * examples/validated.jsonl, a bounded selection whose size moves as recent
+   * chapters change (#813). Null on exports recorded before guard_bytes existed.
+   */
+  guardBytes?: number | null;
 };
 
 export type SuccessfulContextExport = {
@@ -27,6 +33,7 @@ export type SuccessfulContextExport = {
   templates: number;
   contentFiles: number;
   totalBytes: number;
+  guardBytes: number | null;
   owner: string;
 };
 
@@ -101,11 +108,10 @@ export type ShrinkDetail = {
  * Refuse a substantial reduction unless shrinkOverride is set.
  * Thresholds from the plan: terms >5% AND >5; examples >5% AND >3; templates
  * >5% AND >3 (mirrors examples); bytes >10%. Since #813 `examples` counts the
- * validated pool in D1 and `totalBytes` excludes examples/validated.jsonl, which
- * now holds a bounded selection whose size moves as recent chapters change
- * (see renderContextPack). The first export after that change compares against
- * a byte count that still included the old full examples file, so it trips the
- * bytes metric once and needs one shrinkOverride re-export.
+ * validated pool in D1, and the bytes metric compares `guardBytes` (every file
+ * except examples/validated.jsonl, a bounded selection whose size moves as
+ * recent chapters change). A previous export recorded before guard_bytes
+ * existed has no comparable number, so the bytes check is skipped that once.
  * There is deliberately NO contentFiles metric: the renderer omits a pack file
  * iff its D1 source is empty, so a file-count drop is always an intentional
  * clear (e.g. instructions_md emptied) that must be allowed to land — the
@@ -137,10 +143,12 @@ export function contextShrinkRefused(
       return { metric: "templates", previous: previous.templates, next: next.templates };
     }
   }
-  if (previous.totalBytes > 0) {
-    const lost = previous.totalBytes - next.totalBytes;
-    if (lost / previous.totalBytes > 0.1) {
-      return { metric: "totalBytes", previous: previous.totalBytes, next: next.totalBytes };
+  const prevBytes = previous.guardBytes;
+  const nextBytes = next.guardBytes ?? next.totalBytes;
+  if (prevBytes != null && prevBytes > 0) {
+    const lost = prevBytes - nextBytes;
+    if (lost / prevBytes > 0.1) {
+      return { metric: "totalBytes", previous: prevBytes, next: nextBytes };
     }
   }
   return null;

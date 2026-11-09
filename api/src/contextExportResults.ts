@@ -33,7 +33,7 @@ export async function getLatestSuccessfulContextExport(
 ): Promise<SuccessfulContextExport | null> {
   const row = await env.DB.prepare(
     `SELECT commit_sha, completed_at, owner, terms_count, examples_tn, examples_tq,
-            templates_count, content_files, total_bytes
+            templates_count, content_files, total_bytes, guard_bytes
        FROM context_export_results
       WHERE status = 'success' AND commit_sha IS NOT NULL AND completed_at IS NOT NULL
       ORDER BY completed_at DESC, id DESC
@@ -48,6 +48,7 @@ export async function getLatestSuccessfulContextExport(
     templates_count: number | null;
     content_files: number | null;
     total_bytes: number | null;
+    guard_bytes: number | null;
   }>();
   if (!row?.commit_sha || row.completed_at == null) return null;
   return {
@@ -60,6 +61,7 @@ export async function getLatestSuccessfulContextExport(
     templates: row.templates_count ?? 0,
     contentFiles: row.content_files ?? 0,
     totalBytes: row.total_bytes ?? 0,
+    guardBytes: row.guard_bytes,
   };
 }
 
@@ -73,6 +75,7 @@ export async function getLatestContextExportStats(env: Env): Promise<ContextPack
     templates: latest.templates,
     contentFiles: latest.contentFiles,
     totalBytes: latest.totalBytes,
+    guardBytes: latest.guardBytes,
   };
 }
 
@@ -117,7 +120,8 @@ export async function finalizeContextExport(
             total_bytes = ?9,
             failure_reason = ?10,
             r2_key = COALESCE(?11, r2_key),
-            templates_count = ?12
+            templates_count = ?12,
+            guard_bytes = ?14
       WHERE id = ?13`,
   )
     .bind(
@@ -134,6 +138,7 @@ export async function finalizeContextExport(
       patch.r2Key ?? null,
       patch.stats?.templates ?? null,
       id,
+      patch.stats?.guardBytes ?? null,
     )
     .run();
 }
