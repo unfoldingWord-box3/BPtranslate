@@ -231,3 +231,42 @@ export function useShowSourceUltAlignment(): [boolean, (next: boolean) => void] 
   }, []);
   return [on, setShowSourceUltAlignment];
 }
+
+// ── Rapid check layout in the flows notes screen ────────────────────────────
+//
+// Whether TranslateNotesScreen shows the dense, keyboard-driven "rapid check"
+// list (every note of the current verse, or of the current type filter, as
+// rows with the editor inline) instead of the card view. Laptop-and-up only:
+// the screen ignores it below the md breakpoint. Defaults OFF so the card
+// view stays the default for everyone.
+const NOTES_RAPID_CHECK_KEY = "be:notesRapidCheck";
+
+export function getNotesRapidCheck(): boolean {
+  try {
+    return localStorage.getItem(NOTES_RAPID_CHECK_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+const notesRapidCheckListeners = new Set<(on: boolean) => void>();
+
+export function setNotesRapidCheck(next: boolean): void {
+  try {
+    localStorage.setItem(NOTES_RAPID_CHECK_KEY, String(next));
+  } catch {
+    /* quota or private mode — soft fail, still notify so the UI stays live */
+  }
+  for (const listener of notesRapidCheckListeners) listener(next);
+}
+
+export function useNotesRapidCheck(): [boolean, (next: boolean) => void] {
+  const [on, setOnState] = useState<boolean>(getNotesRapidCheck);
+  useEffect(() => {
+    notesRapidCheckListeners.add(setOnState);
+    return () => {
+      notesRapidCheckListeners.delete(setOnState);
+    };
+  }, []);
+  return [on, setNotesRapidCheck];
+}

@@ -1706,6 +1706,25 @@
     }
   },
   "flowTranslate": {
+    "rapid": {
+      "toggle": "مراجعة سريعة",
+      "toggleTitle": "التبديل إلى قائمة مضغوطة لمراجعة ملاحظات كثيرة بسرعة باستخدام لوحة المفاتيح",
+      "listAria": "قائمة الملاحظات. استخدم J وK للتنقل، وEnter للتحرير، وA للاعتماد.",
+      "keyMove": "تنقل",
+      "keyEdit": "تحرير",
+      "keyApprove": "اعتماد",
+      "keySaveApprove": "حفظ واعتماد",
+      "keyClose": "إغلاق المحرر",
+      "colNote": "الحالة · النوع",
+      "colTarget": "ملاحظة {{target}} · انقر للتحرير",
+      "approveNote": "اعتماد الملاحظة {{ref}}",
+      "nothingToApprove": "لا يوجد ما يُعتمد بعد",
+      "makeCurrent": "تحديد الملاحظة {{ref}}",
+      "editNote": "تحرير الملاحظة {{ref}}",
+      "noEnglish": "لا توجد ملاحظة إنجليزية",
+      "openToSave": "في هذه الملاحظة كتابة غير محفوظة. افتحها واستخدم «حفظ واعتماد».",
+      "savePending": "لا يزال في هذه الملاحظة تغيير بانتظار الحفظ. حاول مرة أخرى بعد لحظة."
+    },
     "title": "ملاحظات الترجمة",
     "subtitle": "{{book}} {{chapter}} · {{target}}",
     "subtitleTranslation": "{{book}} {{chapter}} · من {{source}} إلى {{target}}",

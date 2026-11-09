@@ -1721,7 +1721,26 @@
     "markNotesToKeep": "Mark notes to keep",
     "aiDraftsReady_one": "1 AI draft ready",
     "aiDraftsReady_other": "{{count}} AI drafts ready",
-    "review": "Review"
+    "review": "Review",
+    "rapid": {
+      "toggle": "Rapid check",
+      "toggleTitle": "Switch to a compact list for checking many notes quickly with the keyboard",
+      "listAria": "Notes list. Use J and K to move, Enter to edit, A to approve.",
+      "keyMove": "move",
+      "keyEdit": "edit",
+      "keyApprove": "approve",
+      "keySaveApprove": "save & approve",
+      "keyClose": "close editor",
+      "colNote": "Status · type",
+      "colTarget": "{{target}} note · click to edit",
+      "approveNote": "Approve note {{ref}}",
+      "nothingToApprove": "Nothing to approve yet",
+      "makeCurrent": "Select note {{ref}}",
+      "editNote": "Edit note {{ref}}",
+      "noEnglish": "No English note",
+      "openToSave": "This note has unsaved typing. Open it and use Save & Approve.",
+      "savePending": "This note still has a change waiting to save. Try again in a moment."
+    }
   },
   "flowBooks": {
     "title": "Books",

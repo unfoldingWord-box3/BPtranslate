@@ -157,7 +157,10 @@ export default async function globalSetup() {
       `AND verse = ${RTL_FIXTURE.verse} AND bible_version = 'ULT';\n` +
       // ...and ONE tn note with Arabic for the note surfaces (#486).
       `UPDATE tn_rows SET note = '${sq(RTL_FIXTURE.arabicNote)}' ` +
-      `WHERE book = '${RTL_FIXTURE.book}' AND id = '${RTL_FIXTURE.noteId}';\n`,
+      `WHERE book = '${RTL_FIXTURE.book}' AND id = '${RTL_FIXTURE.noteId}';\n` +
+      // ZEC 3's notes as AI drafts, so notes-rapid-check.spec can approve them
+      // (/validate refuses a note with no draft state). No other spec opens ZEC 3.
+      `UPDATE tn_rows SET translation_state = 'ai_draft' WHERE book = 'ZEC' AND chapter = 3;\n`,
   );
   const seed = spawnSync(
     "npx",
