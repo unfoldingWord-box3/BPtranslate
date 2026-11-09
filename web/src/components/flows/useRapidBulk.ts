@@ -27,6 +27,7 @@ import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from 
 import type { TFunction } from "i18next";
 import { api, ApiError, isChapterLockedBody, type TnRow } from "../../sync/api";
 import { outbox } from "../../sync/outbox";
+import { drafts, rowKey } from "../../sync/drafts";
 import { pipelineStore, getSessionKey } from "../../sync/pipelineStore";
 import { isApprovableRow } from "../../lib/reviewApproval";
 import { isAiProviderNotConfigured } from "../../lib/aiProviderErrors";
@@ -112,10 +113,39 @@ export function useRapidBulk(a: RapidBulkArgs) {
     return s;
   }
 
-  // The open note's draft can still be loading from the store right after
-  // the cursor moves (hasDiff false for a moment), so check both.
-  function unsaved(id: string): boolean {
-    return (id === a.currentId && a.hasDiff) || a.draftRowIds.has(id);
+  // Rows with a draft in the store, read now rather than from the screen's
+  // subscription, whose first snapshot lands a moment after the screen opens.
+  // A failed read counts as a draft (fail closed).
+  async function storedDraftIds(ids: string[]): Promise<Set<string>> {
+    const found = await Promise.all(
+      ids.map((id) =>
+        drafts.get(rowKey("tn", book, id)).then(
+          (rec) => rec != null,
+          () => true,
+        ),
+      ),
+    );
+    return new Set(ids.filter((_, i) => found[i]));
+  }
+
+  // The open note's live diff, the screen's draft set, or a stored draft. The
+  // open note's draft can still be loading right after the cursor moves
+  // (hasDiff false for a moment), so all three are checked.
+  function unsaved(id: string, stored: ReadonlySet<string>): boolean {
+    return (id === a.currentId && a.hasDiff) || a.draftRowIds.has(id) || stored.has(id);
+  }
+
+  // Not needed and Redo send no version, so a peer's edit since this screen
+  // loaded would be set aside or redrafted unseen. Read the chapter fresh
+  // once and skip any row whose version moved. Null when the read fails.
+  async function changedSinceShown(ids: string[]): Promise<Set<string> | null> {
+    try {
+      const fresh = await api.getChapter(book, chapter);
+      const byId = new Map(fresh.tn.map((r) => [r.id, r]));
+      return new Set(ids.filter((id) => byId.get(id)?.version !== a.rowById.get(id)?.version));
+    } catch {
+      return null;
+    }
   }
 
   // The open note's editor closes while a bulk action works on it, so no new
@@ -164,6 +194,7 @@ export function useRapidBulk(a: RapidBulkArgs) {
       a.setBusy(true);
       closeOpenEditor(others);
       const pending = await pendingRowIds();
+      const stored = await storedDraftIds(others);
       for (const [i, id] of others.entries()) {
         const r = a.rowById.get(id);
         if (!r) {
@@ -171,7 +202,7 @@ export function useRapidBulk(a: RapidBulkArgs) {
           left.push(id);
           continue;
         }
-        if (unsaved(id)) {
+        if (unsaved(id, stored)) {
           skipped.unsaved++;
           left.push(id);
           continue;
@@ -238,9 +269,12 @@ export function useRapidBulk(a: RapidBulkArgs) {
     const done: string[] = [];
     const prev: Record<string, CardStatus | undefined> = {};
     let stopped = false;
+    let refetchNeeded = false;
     try {
       closeOpenEditor(ids);
       const pending = await pendingRowIds();
+      const stored = await storedDraftIds(ids);
+      const changed = await changedSinceShown(ids);
       for (const [i, id] of ids.entries()) {
         const r = a.rowById.get(id);
         if (!r) {
@@ -250,7 +284,7 @@ export function useRapidBulk(a: RapidBulkArgs) {
         }
         // Unsaved typing would be lost: set-aside clears a note's draft, and
         // Undo (restore) cannot bring the typing back.
-        if (unsaved(id)) {
+        if (unsaved(id, stored)) {
           skipped.unsaved++;
           left.push(id);
           continue;
@@ -258,6 +292,12 @@ export function useRapidBulk(a: RapidBulkArgs) {
         if (a.statuses[id] === "skipped" || r.trashed_at != null) continue; // already set aside
         if (!pending || pending.has(id)) {
           skipped.pending++;
+          left.push(id);
+          continue;
+        }
+        if (!changed || changed.has(id)) {
+          skipped[changed ? "changed" : "failed"]++;
+          if (changed) refetchNeeded = true;
           left.push(id);
           continue;
         }
@@ -283,6 +323,7 @@ export function useRapidBulk(a: RapidBulkArgs) {
       a.setBusy(false);
       setRunning(false);
     }
+    if (refetchNeeded) void a.refetch();
     if (done.length > 0) setUndoable({ scope, ids: done, prev });
     show(summarize(t("flowTranslate.rapid.bulk.notNeededDone", { count: done.length }), skipped, stopped));
     return left;
@@ -353,6 +394,7 @@ export function useRapidBulk(a: RapidBulkArgs) {
     const eligible: string[] = [];
     let startedCount = 0;
     let failure: string | null = null;
+    let refetchNeeded = false;
     const alreadyOver: Parameters<typeof settleRedo>[0][] = [];
     const batchId = ++nextBatchRef.current;
     const batch = { open: 0, drafted: 0, kept: 0, failed: null as string | null };
@@ -360,12 +402,14 @@ export function useRapidBulk(a: RapidBulkArgs) {
     redoBatchesRef.current.set(batchId, batch);
     try {
       const pending = await pendingRowIds();
+      const stored = await storedDraftIds(ids);
+      const changed = await changedSinceShown(ids);
       for (const id of ids) {
         const r = a.rowById.get(id);
         if (!r) {
           skipped.failed++;
           left.push(id);
-        } else if (unsaved(id)) {
+        } else if (unsaved(id, stored)) {
           // The new draft would land under the typing, which would then hide it.
           skipped.unsaved++;
           left.push(id);
@@ -378,6 +422,11 @@ export function useRapidBulk(a: RapidBulkArgs) {
           left.push(id);
         } else if (!pending || pending.has(id)) {
           skipped.pending++;
+          left.push(id);
+        } else if (!changed || changed.has(id)) {
+          // A peer's edit since this screen loaded would be redrafted unseen.
+          skipped[changed ? "changed" : "failed"]++;
+          if (changed) refetchNeeded = true;
           left.push(id);
         } else eligible.push(id);
       }
@@ -419,6 +468,7 @@ export function useRapidBulk(a: RapidBulkArgs) {
       a.setBusy(false);
       setRunning(false);
     }
+    if (refetchNeeded) void a.refetch();
     const lead = t("flowTranslate.rapid.bulk.redoStarted", { count: startedCount });
     const r = summarize(lead, skipped, false);
     show(failure ? { text: `${r.text} ${failure}`, severity: "warning" } : { ...r, severity: r.severity === "success" ? "info" : r.severity });
