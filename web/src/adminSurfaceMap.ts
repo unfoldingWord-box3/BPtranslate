@@ -152,6 +152,18 @@ export const ADMIN_SURFACES: AdminSurfaceEntry[] = [
       "Desk-only by design (#296): new admin features land on the desk, and classic #/preferences is slated to retire (#173), so no classic port is planned. Calls POST /api/books/:book/review-state — dry run first, then an explicit confirm.",
   },
   {
+    id: "draftScorecard",
+    label: "Draft quality scorecard (per-chapter AI draft vs approved note, context pack)",
+    classic: null,
+    desk: {
+      page: "scorecard",
+      file: "src/components/flows/AdminDraftScorecardScreen.tsx",
+      anchor: "function AdminDraftScorecardScreen",
+    },
+    notes:
+      "Desk-only by design (#816), like Review state: new admin features land on the desk and classic #/preferences is slated to retire (#173). Read-only; calls GET /api/books/:book/draft-scorecard.",
+  },
+  {
     id: "aiPipelines",
     label: "AI studio (run AI pipelines)",
     classic: null,

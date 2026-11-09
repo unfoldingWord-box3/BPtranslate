@@ -1487,7 +1487,8 @@
       "style": "Style",
       "templates": "Templates",
       "observe": "Observe",
-      "review": "Review state"
+      "review": "Review state",
+      "scorecard": "Draft scorecard"
     },
     "groups": {
       "admin": "Admin",
@@ -2813,6 +2814,40 @@
       "errForbidden": "Only admins can change review state in bulk.",
       "errLockedByTranslate": "An AI translation is rewriting notes in this range, so they can't be approved yet. Try again after it finishes.",
       "errMaybeApplied": "The change could not be confirmed ({{detail}}). It may have been partly or fully applied, so check the counts below before trying again."
+    },
+    "scorecard": {
+      "title": "Draft quality scorecard",
+      "subtitle": "How close the AI's translation-note drafts came to the notes people approved, chapter by chapter. Read-only: nothing here changes a note.",
+      "adminOnlyBody": "The draft quality scorecard is for admins only.",
+      "errForbidden": "Only an admin can see the draft quality scorecard.",
+      "noBooks": "No books have been added to this workspace yet.",
+      "bookLabel": "Book",
+      "loading": "Loading the scorecard…",
+      "englishUnchecked": "The English source notes could not be read, so no draft was left out as untranslated English. Counts marked * were not checked.",
+      "noValidated": "No translation notes in this book have been approved yet.",
+      "bookTotal": "Whole book",
+      "intro": "Intro",
+      "colChapter": "Chapter",
+      "colValidated": "Approved notes",
+      "colNoDraft": "No draft logged",
+      "colEnglish": "Draft was English",
+      "colCompared": "Compared",
+      "colUnchanged": "Approved unchanged",
+      "colSimilarity": "Median similarity",
+      "colClosingPeriod": "Period added after ]",
+      "colContextPack": "Context pack",
+      "pctCount": "{{pct}}% ({{n}})",
+      "pctOf": "{{pct}}% ({{made}} of {{eligible}})",
+      "noContextPack": "No context pack · {{n}}",
+      "runNotOnRecord": "Run not on record · {{n}}",
+      "howTitle": "How these numbers work",
+      "howScope": "Only translation notes a person has approved are counted. Each one is compared with the last AI draft written to it.",
+      "howNoDraft": "No draft logged: the note has no AI draft on record. Edit history older than 180 days can be cleared, so older chapters may show many of these.",
+      "howEnglish": "Draft was English: the AI draft was the English source note, not translated. These notes are left out of every column to the right.",
+      "howUnchanged": "Approved unchanged: the approved note is exactly the AI draft, character for character.",
+      "howSimilarity": "Median similarity: how much of the draft was kept, from 0 (all rewritten) to 1 (unchanged), counted in characters. Half the notes score above this number and half below.",
+      "howClosingPeriod": "Period added after ]: of the drafts that end with ] and no period, the share where the editor still had to add the period.",
+      "howContextPack": "Context pack: the version (commit) of the guidance the AI was given for these drafts, with how many notes used it. Finished AI runs can be cleared after 7 days; drafts from a cleared run show as Run not on record."
     }
   },
   "widgets": {
