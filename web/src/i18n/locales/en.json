@@ -1740,7 +1740,30 @@
       "noEnglish": "No English note",
       "openToSave": "This note has unsaved typing. Open it and use Save & Approve.",
       "savePending": "This note still has a change waiting to save. Try again in a moment.",
-      "changedElsewhere": "Someone changed this note since it was shown. It has been reloaded; check it before approving."
+      "changedElsewhere": "Someone changed this note since it was shown. It has been reloaded; check it before approving.",
+      "nav": {
+        "prevVerse": "Previous verse",
+        "prevVerseTitle": "Previous verse ([)",
+        "nextVerse": "Next verse",
+        "nextVerseTitle": "Next verse (])",
+        "picker": "Go to verse",
+        "option": "{{ref}} ({{count}})",
+        "keyVerse": "previous / next verse"
+      },
+      "cols": {
+        "hide": "Hide the {{name}} column",
+        "show": "Show the {{name}} column",
+        "laneToggle": "{{label}} lane: show or hide",
+        "laneEmpty": "No {{label}} text for this verse",
+        "keys": "Keyboard shortcuts",
+        "keyEnglish": "show or hide the English column",
+        "keySourceUlt": "show or hide the source text lane"
+      },
+      "editor": {
+        "close": "Close",
+        "closeTitle": "Close the editor and keep what you typed as an unsaved draft (Esc)",
+        "discard": "Discard changes"
+      }
     }
   },
   "flowBooks": {
