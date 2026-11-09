@@ -123,6 +123,7 @@ import EditOutlinedIcon from "@mui/icons-material/EditOutlined";
 
 import { LockBanner } from "./FlowBanners";
 import { NotesRapidCheck, type RapidCheckRow } from "./NotesRapidCheck";
+import { RapidVerseBlock, type RapidLane, type RapidVerseStop } from "./RapidVerseBlock";
 import { FlowStatusChip, type FlowStatusKind } from "./FlowStatusChip";
 import { escapeNewlines, isAquiferDraftRow, unescapeNewlines, waitForOp } from "./translateShared";
 import { useSwipeNav } from "./useSwipeNav";
@@ -143,7 +144,13 @@ import { useLexicon } from "../../hooks/useLexicon";
 import { buildQuoteFromSelection, quotePickUnchanged, selectionFromQuote } from "../../lib/quoteBuilder";
 import type { HighlightKey } from "../../lib/highlight";
 import { useUnsavedGuard } from "../../hooks/useUnsavedGuard";
-import { useNotesRapidCheck, useShowSourceUlt, useShowSourceUltAlignment } from "../../lib/editorPrefs";
+import {
+  useNotesRapidCheck,
+  useRapidHiddenColumns,
+  useRapidHiddenLanes,
+  useShowSourceUlt,
+  useShowSourceUltAlignment,
+} from "../../lib/editorPrefs";
 import { isApprovableRow } from "../../lib/reviewApproval";
 import { resolveSourceRef } from "../../lib/sourceRef";
 import {
@@ -880,7 +887,10 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
   const rapidRoom = useMediaQuery(theme.breakpoints.up("lg"));
   const [rapidPref, setRapidPref] = useNotesRapidCheck();
   const rapid = rapidPref && rapidRoom;
-  const [rapidShowEnglish, setRapidShowEnglish] = useState(true);
+  // Columns and lanes the translator hid, remembered per browser (#830 and
+  // the declutter round): see RapidColumnHeader and RapidVerseBlock.
+  const [rapidHiddenCols, setRapidHiddenCol] = useRapidHiddenColumns();
+  const [rapidHiddenLanes, setRapidHiddenLane] = useRapidHiddenLanes();
   // Clicking another row's note text moves the cursor AND opens its editor.
   // The hydration effect closes the editor when the row changes, so the open
   // waits until that row has settled (its draft is loaded), then applies.
@@ -2767,6 +2777,160 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
         ];
       });
 
+  // Verse navigation in rapid check: every verse of the chapter that has
+  // notes (only matching notes under a type filter), in queue order. Moving
+  // lands on the verse's first note through the same cursor the rows use, so
+  // drafts stash and hydrate exactly as they do on J/K. Not through the URL:
+  // a hash change clears the type filter and seeks by verse number.
+  const rapidStops: (RapidVerseStop & { idx: number })[] = [];
+  if (rapidReady && queueIds) {
+    for (const i of typeFilter ? visibleIdx : queueIds.map((_, n) => n)) {
+      const r = rowById.get(queueIds[i]);
+      if (!r) continue;
+      const key = `${r.chapter}:${r.verse}`;
+      const last = rapidStops[rapidStops.length - 1];
+      if (last?.key === key) {
+        last.count += 1;
+        continue;
+      }
+      rapidStops.push({
+        key,
+        idx: i,
+        count: 1,
+        label: r.verse === 0 ? t("flowTranslate.introRef", { chapter: r.chapter }) : `${r.chapter}:${r.verse}`,
+      });
+    }
+  }
+  const rapidStopKey = row ? `${row.chapter}:${row.verse}` : null;
+  const rapidStopAt = rapidStops.findIndex((s) => s.key === rapidStopKey);
+  const rapidGoStop = (key: string) => {
+    const stop = rapidStops.find((s) => s.key === key);
+    if (!stop) return;
+    setCursor(stop.idx);
+    setView("cards");
+  };
+  const rapidPrevStop = rapidStopAt > 0 ? rapidStops[rapidStopAt - 1] : null;
+  const rapidNextStop = rapidStopAt >= 0 && rapidStopAt < rapidStops.length - 1 ? rapidStops[rapidStopAt + 1] : null;
+
+  // The lanes of rapid check's compact verse block. Each project lane hides
+  // on its own, keyed by its repo so the choice holds across books. The
+  // source ULT lane keeps its own toggle (be:showSourceUlt, the U key), so the
+  // chip and U always agree.
+  const laneId = (role: "lit" | "sim", label: string) =>
+    (projectConfig?.repos?.[role] || `${role}:${label}`).toLowerCase();
+  const litLaneId = laneId("lit", litLabel);
+  const simLaneId = laneId("sim", simLabel);
+  const rapidLanes: RapidLane[] = !rapidReady
+    ? []
+    : [
+        ...(sourceUltAvailable
+          ? [
+              {
+                id: "source-ult",
+                label: sourceUltLabel,
+                shown: showSourceUlt,
+                onToggle: () => setShowSourceUlt(!showSourceUlt),
+                toggleLabel: t("flowTranslate.toggleSourceUlt", { label: sourceUltLabel }),
+                text: sourceUltText,
+                segments: sourceUltSegments,
+                // The same states the card view's source lane shows.
+                body:
+                  sourceUlt.status === "ready" && sourceUltText ? (
+                    ultAlignmentOn && sourceUltStrip && sourceUltStrip.length > 0 && row ? (
+                      <UltAlignmentStrip
+                        key={row.id}
+                        label={sourceUltLabel}
+                        slices={sourceUltStrip}
+                        originalLabel={sourceLabel}
+                        originalDir={sourceDir}
+                        labelFontFamily={theme.typography.fontFamily}
+                        quoteBg={HL}
+                      />
+                    ) : undefined
+                  ) : (
+                    <Typography variant="caption" sx={{ color: "text.secondary", fontStyle: "italic" }}>
+                      {sourceUlt.status === "error"
+                        ? t("flowTranslate.sourceLaneUnavailable", { label: sourceUltLabel })
+                        : sourceUlt.status === "ready"
+                          ? t("flowTranslate.sourceLaneNoVerse", { label: sourceUltLabel })
+                          : t("flowTranslate.sourceLaneLoading", { label: sourceUltLabel })}
+                    </Typography>
+                  ),
+                caption:
+                  ultAlignmentOn && sourceUltStrip === null ? (
+                    <Typography
+                      variant="caption"
+                      data-align-bridged=""
+                      sx={{ display: "block", color: "text.secondary", fontStyle: "italic" }}
+                    >
+                      {t("flowTranslate.alignmentBridged", { label: sourceUltLabel })}
+                    </Typography>
+                  ) : undefined,
+              },
+            ]
+          : []),
+        {
+          id: litLaneId,
+          label: litLabel,
+          shown: !rapidHiddenLanes.has(litLaneId),
+          onToggle: () => setRapidHiddenLane(litLaneId, !rapidHiddenLanes.has(litLaneId)),
+          toggleLabel: t("flowTranslate.rapid.cols.laneToggle", { label: litLabel }),
+          text: ultText,
+          segments: ultSegments,
+        },
+        {
+          id: simLaneId,
+          label: simLabel,
+          shown: !rapidHiddenLanes.has(simLaneId),
+          onToggle: () => setRapidHiddenLane(simLaneId, !rapidHiddenLanes.has(simLaneId)),
+          toggleLabel: t("flowTranslate.rapid.cols.laneToggle", { label: simLabel }),
+          text: ustText,
+          segments: ustSegments,
+        },
+      ];
+  const rapidVerseBlock =
+    rapidReady && row ? (
+      <RapidVerseBlock
+        reference={
+          row.verse === 0 ? t("flowTranslate.introRefLong", { book, chapter: row.chapter }) : `${book} ${noteRefLabel(row)}`
+        }
+        stops={rapidStops}
+        currentKey={rapidStopKey}
+        onGoTo={rapidGoStop}
+        lanes={rapidLanes}
+        mark={mark}
+        controls={
+          <>
+            {typeFilterControl && (
+              <Box sx={{ width: 220, "& .MuiSelect-select": { paddingBlock: "4px" } }}>{typeFilterControl}</Box>
+            )}
+            {sourceUltOn && (
+              // The card view's alignment-strip toggle (#431), offered while
+              // the source lane shows.
+              <Chip
+                size="small"
+                clickable
+                variant={showUltAlignment ? "filled" : "outlined"}
+                color={showUltAlignment ? "primary" : "default"}
+                label={t("flowTranslate.alignmentChip")}
+                aria-pressed={showUltAlignment}
+                title={t("flowTranslate.toggleSourceUltAlignment", { label: sourceUltLabel })}
+                onClick={() => setShowUltAlignment(!showUltAlignment)}
+                sx={{ flex: "none", fontWeight: 700 }}
+              />
+            )}
+          </>
+        }
+        footnote={
+          renderCovered.clamped ? (
+            <Typography variant="caption" sx={{ display: "block", mt: 0.25, color: "text.secondary", fontStyle: "italic" }}>
+              {t("flowTranslate.laneClampHint", { shown: renderCovered.verses.length, total: renderCovered.total })}
+            </Typography>
+          ) : undefined
+        }
+      />
+    ) : null;
+
   return (
     <Box
       sx={{
@@ -2786,7 +2950,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
       {aiRun.action}
       {!focusMode && (
       <FlowHeader>
-        <Box sx={{ maxWidth: wide ? 1440 : COLUMN_PX, mx: "auto", paddingInline: isTabletUp ? 2 : 1, paddingBlock: 1.5 }}>
+        <Box sx={{ maxWidth: wide ? 1440 : COLUMN_PX, mx: "auto", paddingInline: isTabletUp ? 2 : 1, paddingBlock: rapidReady ? 1 : 1.5 }}>
           <Stack direction="row" alignItems="center" spacing={isTabletUp ? 1.25 : 0.5}>
             <IconButton
               aria-label={t("flowTranslate.backToPackage", { book })}
@@ -2907,16 +3071,19 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
           sourceDir={sourceDir}
           targetLabel={targetLabel}
           englishAvailable={translationMode}
-          showEnglish={rapidShowEnglish}
-          onToggleEnglish={() => setRapidShowEnglish((v) => !v)}
+          showEnglish={!rapidHiddenCols.has("english")}
+          onToggleEnglish={() => setRapidHiddenCol("english", !rapidHiddenCols.has("english"))}
+          showQuote={!rapidHiddenCols.has("quote")}
+          onToggleQuote={() => setRapidHiddenCol("quote", !rapidHiddenCols.has("quote"))}
           onToggleSourceUlt={sourceUltAvailable ? () => setShowSourceUlt(!showSourceUlt) : null}
           header={
             <Stack spacing={1}>
               {statusAlerts}
-              <Box sx={{ maxHeight: "30vh", overflowY: "auto", borderRadius: "14px" }}>{scriptureCard}</Box>
+              {rapidVerseBlock}
             </Stack>
           }
-          filterControl={typeFilterControl ? <Box sx={{ width: 280 }}>{typeFilterControl}</Box> : null}
+          // The type filter sits on the verse block's control line instead.
+          filterControl={null}
           editor={editorField}
           editing={editing}
           editorContainerRef={editorContainerRef}
@@ -2939,6 +3106,8 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
           onApprove={(id) => void (id === currentId ? handleApprove() : approveOtherRow(id))}
           onNext={goNext}
           onPrev={goPrev}
+          onPrevVerse={rapidPrevStop ? () => rapidGoStop(rapidPrevStop.key) : null}
+          onNextVerse={rapidNextStop ? () => rapidGoStop(rapidNextStop.key) : null}
           onApproveCurrent={() => void handleApprove()}
           onStartEdit={() => {
             if (!editLocked) setEditing(true);

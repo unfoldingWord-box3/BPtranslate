@@ -270,3 +270,54 @@ export function useNotesRapidCheck(): [boolean, (next: boolean) => void] {
   }, []);
   return [on, setNotesRapidCheck];
 }
+
+// ── Hidden lanes and columns in rapid check ─────────────────────────────────
+//
+// Rapid check lets a translator hide parts of the screen to make room for more
+// note rows. Both prefs hold the ids of what is HIDDEN, so the default (empty)
+// shows everything and anything new appears until someone hides it.
+//   - Lanes are keyed by resource (the project repo, e.g. "ar_avd"), not by
+//     book, so hiding a lane holds across books. The source ULT lane is not in
+//     here: it keeps its own toggle (be:showSourceUlt above, the U key).
+//   - Columns: "quote" (the original-language quote) and "english" (the
+//     English note). The target note column cannot be hidden.
+// Stored as a JSON array of strings.
+export type RapidColumn = "quote" | "english";
+
+function makeHiddenSetPref(key: string) {
+  const read = (): string[] => {
+    try {
+      const parsed: unknown = JSON.parse(localStorage.getItem(key) ?? "[]");
+      return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string") : [];
+    } catch {
+      return [];
+    }
+  };
+  const listeners = new Set<(ids: string[]) => void>();
+  const write = (ids: string[]): void => {
+    try {
+      localStorage.setItem(key, JSON.stringify(ids));
+    } catch {
+      /* quota or private mode — soft fail, still notify so the UI stays live */
+    }
+    for (const listener of listeners) listener(ids);
+  };
+  const setHidden = (id: string, hidden: boolean): void => {
+    const rest = read().filter((v) => v !== id);
+    write(hidden ? [...rest, id] : rest);
+  };
+  return function useHiddenSet(): [ReadonlySet<string>, (id: string, hidden: boolean) => void] {
+    const [ids, setIds] = useState<string[]>(read);
+    useEffect(() => {
+      listeners.add(setIds);
+      return () => {
+        listeners.delete(setIds);
+      };
+    }, []);
+    // A new Set each render is fine: callers only call .has().
+    return [new Set(ids), setHidden];
+  };
+}
+
+export const useRapidHiddenLanes = makeHiddenSetPref("be:rapidHiddenLanes");
+export const useRapidHiddenColumns = makeHiddenSetPref("be:rapidHiddenColumns");

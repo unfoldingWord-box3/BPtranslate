@@ -12,10 +12,10 @@ import { Fragment, useEffect, useRef, useState, type KeyboardEvent, type ReactNo
 import Box from "@mui/material/Box";
 import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
-import Chip from "@mui/material/Chip";
 import { alpha, useTheme } from "@mui/material/styles";
 import { useTranslation } from "react-i18next";
 import { FlowStatusChip, type FlowStatusKind } from "./FlowStatusChip";
+import { RapidColumnHeader } from "./RapidColumnHeader";
 import { SCRIPTURE_FONT_STACK } from "../../theme";
 
 export interface RapidCheckRow {
@@ -52,6 +52,9 @@ export interface NotesRapidCheckProps {
   englishAvailable: boolean;
   showEnglish: boolean;
   onToggleEnglish: () => void;
+  /** The original-language quote column is shown (hidden from its header). */
+  showQuote: boolean;
+  onToggleQuote: () => void;
   /** Toggles the source ULT lane in the verse block; null when not offered. */
   onToggleSourceUlt: (() => void) | null;
   /** Alerts and the verse block, pinned above the list. */
@@ -71,6 +74,9 @@ export interface NotesRapidCheckProps {
   onApprove: (id: string) => void;
   onNext: () => void;
   onPrev: () => void;
+  /** Previous / next verse with notes ([ and ]); null at either end. */
+  onPrevVerse: (() => void) | null;
+  onNextVerse: (() => void) | null;
   onApproveCurrent: () => void;
   onStartEdit: () => void;
   onStopEdit: () => void;
@@ -99,6 +105,8 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
     englishAvailable,
     showEnglish,
     onToggleEnglish,
+    showQuote,
+    onToggleQuote,
     onToggleSourceUlt,
     header,
     filterControl,
@@ -113,6 +121,8 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
     onApprove,
     onNext,
     onPrev,
+    onPrevVerse,
+    onNextVerse,
     onApproveCurrent,
     onStartEdit,
     onStopEdit,
@@ -122,9 +132,16 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
   const dark = theme.palette.mode === "dark";
   const { ok, skip } = theme.palette.flows;
   const englishCol = englishAvailable && showEnglish;
-  const cols = englishCol
-    ? "36px minmax(120px, 160px) minmax(110px, 0.7fr) minmax(0, 1.2fr) minmax(0, 1.5fr)"
-    : "36px minmax(120px, 160px) minmax(110px, 0.8fr) minmax(0, 2fr)";
+  // Narrower status and quote columns than the first version, so the two
+  // note columns wrap less and rows stay shorter (#830).
+  const cols = [
+    "36px minmax(104px, 132px)",
+    showQuote ? (englishCol ? "minmax(96px, 0.55fr)" : "minmax(110px, 0.7fr)") : null,
+    englishCol ? "minmax(0, 1.2fr)" : null,
+    "minmax(0, 1.5fr)",
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickyRef = useRef<HTMLDivElement>(null);
@@ -154,7 +171,7 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
     if (!active || active === document.body || !active.isConnected) {
       scrollRef.current?.focus({ preventScroll: true });
     }
-  }, [currentId, editing, rows]);
+  }, [currentId, editing, rows, showQuote, showEnglish]);
 
   const currentApprovable = rows.find((r) => r.isCurrent)?.approvable ?? false;
 
@@ -201,25 +218,13 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
     } else if (code === "KeyU" && !e.shiftKey && onToggleSourceUlt) {
       e.preventDefault();
       onToggleSourceUlt();
+    } else if (code === "BracketLeft" && !e.shiftKey) {
+      e.preventDefault();
+      onPrevVerse?.();
+    } else if (code === "BracketRight" && !e.shiftKey) {
+      e.preventDefault();
+      onNextVerse?.();
     }
-  };
-
-  const headSx = {
-    fontSize: "0.625rem",
-    fontWeight: 700,
-    letterSpacing: "0.06em",
-    textTransform: "uppercase" as const,
-    color: "text.secondary",
-  };
-
-  const kbdSx = {
-    fontFamily: "ui-monospace, Menlo, monospace",
-    fontSize: "0.6875rem",
-    border: "1px solid",
-    borderColor: "divider",
-    borderBottomWidth: 2,
-    borderRadius: "4px",
-    paddingInline: "4px",
   };
 
   return (
@@ -246,73 +251,25 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
             breaks position: sticky. */}
         <Box
           ref={stickyRef}
-          sx={{ position: "sticky", top: 0, zIndex: 3, bgcolor: "background.default", paddingBlockStart: 1.5 }}
+          sx={{ position: "sticky", top: 0, zIndex: 3, bgcolor: "background.default", paddingBlockStart: 1 }}
         >
           {header}
-          <Stack
-            direction="row"
-            alignItems="center"
-            spacing={1}
-            sx={{ mt: 1, flexWrap: "wrap", rowGap: 0.5 }}
-          >
-            {filterControl}
-            {englishAvailable && (
-              <Chip
-                size="small"
-                clickable
-                variant={showEnglish ? "filled" : "outlined"}
-                color={showEnglish ? "primary" : "default"}
-                label={t("flowTranslate.englishNote")}
-                aria-pressed={showEnglish}
-                onClick={onToggleEnglish}
-                sx={{ fontWeight: 700 }}
-              />
-            )}
-            <Typography
-              component="p"
-              variant="caption"
-              color="text.secondary"
-              sx={{ m: 0, marginInlineStart: "auto !important", display: "flex", gap: 0.75, alignItems: "center", flexWrap: "wrap" }}
-            >
-              <Box component="kbd" sx={kbdSx}>J</Box>
-              <Box component="kbd" sx={kbdSx}>K</Box>
-              {t("flowTranslate.rapid.keyMove")}
-              {" · "}
-              <Box component="kbd" sx={kbdSx}>Enter</Box>
-              {t("flowTranslate.rapid.keyEdit")}
-              {" · "}
-              <Box component="kbd" sx={kbdSx}>A</Box>
-              {t("flowTranslate.rapid.keyApprove")}
-              {" · "}
-              <Box component="kbd" sx={kbdSx}>Ctrl</Box>
-              <Box component="kbd" sx={kbdSx}>Enter</Box>
-              {t("flowTranslate.rapid.keySaveApprove")}
-              {" · "}
-              <Box component="kbd" sx={kbdSx}>Esc</Box>
-              {t("flowTranslate.rapid.keyClose")}
-            </Typography>
-          </Stack>
-          <Box
-            sx={{
-              mt: 1,
-              display: "grid",
-              gridTemplateColumns: cols,
-              gap: 1.5,
-              paddingBlock: 0.75,
-              paddingInlineEnd: 1,
-              bgcolor: "background.paper",
-              border: "1px solid",
-              borderColor: "divider",
-              borderBottomWidth: 0,
-              borderRadius: "10px 10px 0 0",
-            }}
-          >
-            <span />
-            <Box component="span" sx={headSx}>{t("flowTranslate.rapid.colNote")}</Box>
-            <Box component="span" sx={headSx}>{sourceLabel}</Box>
-            {englishCol && <Box component="span" sx={headSx}>{t("flowTranslate.englishNote")}</Box>}
-            <Box component="span" sx={headSx}>{t("flowTranslate.rapid.colTarget", { target: targetLabel })}</Box>
-          </Box>
+          {filterControl && (
+            <Stack direction="row" alignItems="center" spacing={1} sx={{ mt: 0.75, flexWrap: "wrap", rowGap: 0.5 }}>
+              {filterControl}
+            </Stack>
+          )}
+          <RapidColumnHeader
+            cols={cols}
+            sourceLabel={sourceLabel}
+            targetLabel={targetLabel}
+            showQuote={showQuote}
+            onToggleQuote={onToggleQuote}
+            englishAvailable={englishAvailable}
+            showEnglish={showEnglish}
+            onToggleEnglish={onToggleEnglish}
+            sourceUltKey={onToggleSourceUlt != null}
+          />
         </Box>
 
         <Box
@@ -363,7 +320,7 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
                     gridTemplateColumns: cols,
                     gap: 1.5,
                     alignItems: "start",
-                    paddingBlock: 0.75,
+                    paddingBlock: 0.5,
                     paddingInlineEnd: 1,
                     borderBottom: "1px solid",
                     borderColor: "divider",
@@ -446,22 +403,28 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
                       minWidth: 0,
                     }}
                   >
-                    <FlowStatusChip kind={r.chip.kind} label={r.chip.label} />
+                    {/* chip and reference share a line, to keep short rows short (#830) */}
+                    <Box component="span" sx={{ display: "flex", alignItems: "center", gap: 0.75, flexWrap: "wrap" }}>
+                      <FlowStatusChip kind={r.chip.kind} label={r.chip.label} />
+                      <Typography component="span" sx={{ fontSize: "0.6875rem", color: "text.secondary" }}>
+                        {r.refLabel}
+                      </Typography>
+                    </Box>
                     <Typography component="span" title={r.typeSlug ?? undefined} sx={{ fontSize: "0.75rem", fontWeight: 600, lineHeight: 1.25 }}>
                       {r.typeLabel ?? "—"}
                     </Typography>
-                    <Typography component="span" sx={{ fontSize: "0.6875rem", color: "text.secondary" }}>
-                      {r.refLabel}
-                    </Typography>
                   </Box>
 
-                  <Typography
-                    component="p"
-                    dir={sourceDir}
-                    sx={{ m: 0, paddingBlockStart: 0.5, fontFamily: SCRIPTURE_FONT_STACK, fontSize: "1rem", lineHeight: 1.55, textAlign: "start", minWidth: 0 }}
-                  >
-                    {r.quote || "—"}
-                  </Typography>
+                  {showQuote && (
+                    <Typography
+                      component="p"
+                      dir={sourceDir}
+                      data-rapid-quote=""
+                      sx={{ m: 0, paddingBlockStart: 0.5, fontFamily: SCRIPTURE_FONT_STACK, fontSize: "1rem", lineHeight: 1.55, textAlign: "start", minWidth: 0 }}
+                    >
+                      {r.quote || "—"}
+                    </Typography>
+                  )}
 
                   {englishCol && (
                     <Typography
@@ -501,7 +464,7 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
                           "&:hover": { borderColor: "divider", bgcolor: "action.hover" },
                         }}
                       >
-                        <Box component="span" dir="auto" sx={{ display: "block", fontSize: "0.9375rem", lineHeight: 1.6, whiteSpace: "pre-wrap", textAlign: "start" }}>
+                        <Box component="span" dir="auto" sx={{ display: "block", fontSize: "0.9375rem", lineHeight: 1.5, whiteSpace: "pre-wrap", textAlign: "start" }}>
                           {r.targetText.trim().length > 0 ? (
                             r.targetText
                           ) : (
