@@ -212,6 +212,7 @@ const DETERMINISTIC_FAILURES = [
   "missing_en_source:",
   "empty_en_source:",
   "empty_target:",
+  "examples_selection_empty",
 ];
 export function contextExportFailureIsTransient(r: { status: string; failureReason: string | null }): boolean {
   if (r.status !== "failed") return false;

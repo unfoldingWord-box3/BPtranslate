@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   CONTEXT_EXPORT_DEFERRED,
+  contextExportFailureIsTransient,
   CONTEXT_EXPORT_LEASE_SECONDS,
   SHRINK_OVERRIDE_MAX_AGE_SECONDS,
   contextExportNeedsRun,
@@ -550,4 +551,9 @@ test("the daily context export does nothing without a service token", async () =
   const h2 = harness({ token: null });
   await requestDailyContextExport(h2.env);
   assert.equal(h2.created.length, 0);
+});
+
+test("an all-oversized examples selection is not retried (#813)", () => {
+  assert.equal(contextExportFailureIsTransient({ status: "failed", failureReason: "examples_selection_empty" }), false);
+  assert.equal(contextExportFailureIsTransient({ status: "failed", failureReason: "dcs_batch_commit_failed: POST 502" }), true);
 });

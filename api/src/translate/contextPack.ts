@@ -33,13 +33,15 @@ export const SUPPORTED_MANIFEST_FORMAT = 1;
 // Hardening bounds that protect the translate runner from an oversized,
 // misconfigured or malicious pack file. The hand-authored files (manifest,
 // brief, instructions, templates, terms) are KBs, so they keep a 2 MB cap.
-// examples/validated.jsonl is different: the daily context export writes one
-// line per human-validated row and the file only grows (BSOJ Arabic reached
-// 2.4 MB at 3,240 rows, ~745 bytes/row, on 2026-11-07, which failed every
-// translate run). 16 MB is ~21k rows. At the cap the step holds the string,
-// a UTF-8 copy for the size check, and the parsed rows at once, an estimated
-// 60-90 MB of the Worker's 128 MB; #813 tracks loading only what a run needs
-// before the file gets near that.
+// examples/validated.jsonl is different: the daily context export used to write
+// one line per human-validated row, so the file grew without bound (BSOJ Arabic
+// reached 2.4 MB at 3,240 rows, ~745 bytes/row, on 2026-11-07, which failed
+// every translate run). Since #813 the export writes a bounded selection
+// (contextExport.ts selectPackExamples; ~0.7 MB for that same data). The 16 MB
+// cap (~21k rows) stays for packs exported before that and still reachable by
+// a pinned contextRef. At the cap the step holds the string, a UTF-8 copy for
+// the size check, and the parsed rows at once, an estimated 60-90 MB of the
+// Worker's 128 MB.
 export const MAX_PACK_FILE_BYTES = 2_000_000;
 export const MAX_EXAMPLES_FILE_BYTES = 16_000_000;
 

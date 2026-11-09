@@ -8,6 +8,9 @@ import {
   renderInstructionsMd,
   buildValidatedExamples,
   renderValidatedJsonl,
+  selectPackExamples,
+  EXAMPLES_PER_SLUG,
+  EXAMPLE_RECENT_CHAPTERS,
   renderTemplatesTsv,
   tsvField,
   hasMinimumContent,
@@ -568,10 +571,24 @@ console.log("contextExportLib — shrink + content count");
   assert(shrinkDetailCode(refused).startsWith("shrink_guard:terms_"), "shrink code shape");
 
   const bytes = contextShrinkRefused(
-    { terms: 10, examplesTn: 5, examplesTq: 0, templates: 40, contentFiles: 3, totalBytes: 100 },
-    { terms: 10, examplesTn: 5, examplesTq: 0, templates: 40, contentFiles: 3, totalBytes: 1000 },
+    { terms: 10, examplesTn: 5, examplesTq: 0, templates: 40, contentFiles: 3, totalBytes: 100, guardBytes: 100 },
+    { terms: 10, examplesTn: 5, examplesTq: 0, templates: 40, contentFiles: 3, totalBytes: 1000, guardBytes: 1000 },
   );
-  assert(bytes && bytes.metric === "totalBytes", "bytes shrink refused");
+  assert(bytes && bytes.metric === "guardBytes", "bytes shrink refused");
+  assert(
+    !contextShrinkRefused(
+      { terms: 10, examplesTn: 5, examplesTq: 0, templates: 40, contentFiles: 3, totalBytes: 700_000, guardBytes: 4000 },
+      { terms: 10, examplesTn: 5, examplesTq: 0, templates: 40, contentFiles: 3, totalBytes: 2_400_000, guardBytes: 4000 },
+    ),
+    "a smaller examples file alone is not a byte shrink (guardBytes excludes it)",
+  );
+  assert(
+    !contextShrinkRefused(
+      { terms: 10, examplesTn: 5, examplesTq: 0, templates: 40, contentFiles: 3, totalBytes: 700_000, guardBytes: 4000 },
+      { terms: 10, examplesTn: 5, examplesTq: 0, templates: 40, contentFiles: 3, totalBytes: 2_400_000, guardBytes: null },
+    ),
+    "previous export without guard_bytes skips the byte check once",
+  );
 
   // Intentional clears (fewer content files) are allowed — the stale file is
   // deleted from the repo instead of the export being refused forever.
@@ -737,6 +754,153 @@ console.log("contextExport — D1 inputs re-read sees a newer approval");
   const swapped = { ...afterApprove, terms: [{ concept_id: "c", source_term: "s", target_term: "b" }, { concept_id: "c", source_term: "s", target_term: "a" }] };
   const swappedBack = { ...afterApprove, terms: [...swapped.terms].reverse() };
   assert(sameQueuedContextInputs(swapped, swappedBack), "terms tied on their sort keys compare equal in either order");
+}
+
+console.log("contextExport — examples/validated.jsonl is bounded (#813)");
+{
+  // 10 chapters x 20 rows of OBA-like data across two slugs, approved in
+  // chapter order (chapter c at time c*100 + i), plus one tq row per chapter.
+  const tnRows = [];
+  const tqRows = [];
+  const tnSrc = new Map();
+  const tqSrc = new Map();
+  for (let c = 1; c <= 10; c++) {
+    for (let i = 0; i < 20; i++) {
+      const id = `t${c}-${i}`;
+      tnRows.push({
+        id, book: "LUK", ref_raw: `${c}:${i + 1}`,
+        support_reference: i % 2 ? "rc://*/ta/man/translate/figs-metaphor" : "rc://*/ta/man/translate/figs-idiom",
+        quote: null, note: `target ${id}`, updated_at: c * 100 + i,
+      });
+      tnSrc.set(sourceRowKey("LUK", id), { note: `source ${id}`, quote: null });
+    }
+    const qid = `q${c}`;
+    tqRows.push({ id: qid, book: "LUK", ref_raw: `${c}:1`, question: "q", response: "r", updated_at: c * 100 + 50 });
+    tqSrc.set(sourceRowKey("LUK", qid), { question: "Q", response: "R" });
+  }
+  const ex = buildValidatedExamples(tnRows, tqRows, { tn: tnSrc, tq: tqSrc });
+  assert(ex.ok && ex.lines.length === 210, "pool holds all 210 validated rows");
+  const picked = selectPackExamples(ex.ok ? ex.lines : []);
+  const tnPicked = picked.filter((l) => l.resource === "tn");
+  const chapters = new Set(tnPicked.map((l) => l.ref.split(":")[0]));
+  assert(
+    [7, 8, 9, 10].every((c) => picked.filter((l) => l.ref.startsWith(`${c}:`)).length === 21),
+    `every row of the ${EXAMPLE_RECENT_CHAPTERS} most recently approved chapters is kept`,
+  );
+  assert(!chapters.has("1") && !chapters.has("6"), "older chapters contribute nothing beyond the per-slug quota");
+  const olderTq = picked.filter((l) => l.resource === "tq" && !["7", "8", "9", "10"].includes(l.ref.split(":")[0]));
+  assert(olderTq.length === EXAMPLES_PER_SLUG - 4, "tq rows (one group, no slug) reach back to fill their quota of 8");
+  assert(picked.length === 88, "selection is 4 chapters x 21 rows + 4 older tq rows");
+  assert(
+    picked.every((l, i) => i === 0 || picked[i - 1].validated_at <= l.validated_at),
+    "selection keeps the contract's oldest-first order",
+  );
+
+  // Per-slug quota reaches back for a slug the recent chapters lack.
+  const rare = {
+    resource: "tn", rowId: "rare1", book: "MRK", ref: "1:1",
+    supportReference: "rc://*/ta/man/translate/figs-hendiadys", source: "s", target: "t", validated_at: 1,
+  };
+  const withRare = selectPackExamples([rare, ...(ex.ok ? ex.lines : [])]);
+  assert(withRare.includes(rare), "an old row of a slug absent from recent chapters is kept");
+  const idioms = selectPackExamples(ex.ok ? ex.lines : [], 8, 0)
+    .filter((l) => l.supportReference?.endsWith("figs-idiom"));
+  assert(idioms.length === EXAMPLES_PER_SLUG, "per-slug quota alone keeps the newest 8 of a slug");
+  assert(idioms.every((l) => l.ref.startsWith("10:")), "the quota takes the newest rows");
+
+  // A single touched row (reorder, hint toggle) in an old chapter bumps its
+  // timestamp but does not make that chapter "recently approved".
+  const touched = (ex.ok ? ex.lines : []).map((l) => (l.rowId === "t1-0" ? { ...l, validated_at: 99999 } : l));
+  const touchedPick = selectPackExamples(touched);
+  assert(
+    touchedPick.filter((l) => l.ref.startsWith("1:")).length === 1 && touchedPick.some((l) => l.ref.startsWith("7:")),
+    "one bumped row keeps its slot but does not pull in its whole chapter",
+  );
+
+  // A one-row chapter (e.g. a book intro) whose row was touched does not take a slot.
+  const intro = { resource: "tn", rowId: "intro", book: "LUK", ref: "front:intro", supportReference: null, source: "s", target: "t", validated_at: 99999 };
+  const introPick = selectPackExamples([intro, ...(ex.ok ? ex.lines : [])]);
+  assert(introPick.filter((l) => l.ref.startsWith("7:")).length === 21, "a touched one-row chapter does not push out a full recent chapter");
+
+  // Byte ceiling: newest rows survive, the file stays under the cap.
+  const all = ex.ok ? ex.lines : [];
+  const capped = selectPackExamples(all, 8, 4, 2000);
+  const cappedBytes = capped.reduce((n, l) => n + new TextEncoder().encode(JSON.stringify(l)).byteLength + 1, 0);
+  assert(capped.length > 0 && cappedBytes <= 2000, "selection respects the byte ceiling");
+  const newest = Math.max(...all.map((l) => l.validated_at));
+  assert(capped.some((l) => l.validated_at === newest), "the ceiling keeps the newest rows");
+  assert(capped.length < selectPackExamples(all).length, "the ceiling drops rows");
+
+  const huge = { resource: "tn", rowId: "huge", book: "LUK", ref: "10:99", supportReference: null, source: "x".repeat(3000), target: "t", validated_at: 1015 };
+  const withHuge = selectPackExamples([huge, ...all], 8, 4, 2000);
+  assert(!withHuge.includes(huge) && withHuge.length > 0, "a row bigger than the ceiling is skipped, smaller rows still fit");
+  assert(selectPackExamples([{ ...huge, validated_at: 99999 }, ...all], 8, 4, 2000).every((l) => l.rowId !== "huge"), "an oversized newest row is skipped too");
+
+  // Spelling variants of one SupportReference share a quota (readers match on the slug).
+  const variants = Array.from({ length: 12 }, (_, i) => ({
+    resource: "tn", rowId: `v${i}`, book: "OBA", ref: "1:1",
+    supportReference: i % 2 ? "rc://*/ta/man/translate/figs-irony" : "figs-irony", source: "s", target: "t", validated_at: i,
+  }));
+  assert(selectPackExamples(variants, 8, 0).length === 8, "rc:// and bare spellings of a slug share one quota of 8");
+
+  // Ties on validated_at (bulk approval in one second) select by book, resource
+  // and rowId, so the file does not depend on input order; ids repeat across books.
+  const tied = Array.from({ length: 12 }, (_, i) => ({
+    resource: "tn", rowId: `id${String(i).padStart(2, "0")}`, book: "OBA", ref: "1:1",
+    supportReference: "x", source: "s", target: "t", validated_at: 5,
+  }));
+  const crossBook = tied.map((l) => ({ ...l, book: "ZEC" }));
+  const a = JSON.stringify(selectPackExamples([...tied, ...crossBook], 8, 0));
+  const b = JSON.stringify(selectPackExamples([...crossBook, ...tied].reverse(), 8, 0));
+  assert(a === b && JSON.parse(a).length === 8, "tied timestamps give the same rows in the same order for any input order");
+
+  const base = {
+    cfg,
+    prefs: { audience: "a", purpose: "p", register: "default", script_notes: null, instructions_md: "Be careful.", common_issues_md: null },
+    terms: [],
+    tqRows,
+    sources: { tn: tnSrc, tq: tqSrc },
+    templates: [],
+    exportedAt: new Date("2026-11-09T05:30:00Z"),
+  };
+  const r = renderContextPack({ ...base, tnRows });
+  const file = r.ok ? r.files.find((f) => f.path === "examples/validated.jsonl") : null;
+  assert(file && file.content.trim().split("\n").length === 88, "pack file holds the bounded selection");
+  assert(r.ok && r.stats.examplesTn === 200 && r.stats.examplesTq === 10, "stats count the whole validated pool");
+  const bytesOf = (files) => files.reduce((n, f) => n + new TextEncoder().encode(f.content).byteLength, 0);
+  assert(r.ok && r.stats.totalBytes === bytesOf(r.files), "totalBytes is the size of everything written");
+  assert(
+    r.ok && r.stats.guardBytes === bytesOf(r.files.filter((f) => f.path !== "examples/validated.jsonl")),
+    "guardBytes leaves the examples file out",
+  );
+
+  // Next day: two more chapters approved. The file shifts to chapters 9-12,
+  // which must not read as a shrink even though fewer rows are written.
+  const more = [...tnRows];
+  for (let c = 11; c <= 12; c++) {
+    for (let i = 0; i < 5; i++) {
+      const id = `t${c}-${i}`;
+      more.push({ id, book: "LUK", ref_raw: `${c}:${i + 1}`, support_reference: null, quote: null, note: `target ${id}`, updated_at: c * 100 + i });
+      tnSrc.set(sourceRowKey("LUK", id), { note: `source ${id}`, quote: null });
+    }
+  }
+  const r2 = renderContextPack({ ...base, tnRows: more });
+  const file2 = r2.ok ? r2.files.find((f) => f.path === "examples/validated.jsonl") : null;
+  const chaptersIn = (f) => new Set(f.content.trim().split("\n").map((l) => JSON.parse(l)).filter((l) => l.resource === "tn" && l.supportReference !== null).map((l) => l.ref.split(":")[0]));
+  assert(file && file2 && !chaptersIn(file2).has("7") && chaptersIn(file).has("7"), "the recent chapters roll forward (chapter 7 drops out)");
+  assert(file2.content.length < file.content.length, "the rolled-forward file is smaller");
+
+  // Only rows each over the 4 MB ceiling: fail closed instead of deleting the file.
+  const bigId = "big1";
+  const bigSrc = new Map([[sourceRowKey("LUK", bigId), { note: "x".repeat(4_100_000), quote: null }]]);
+  const bigPack = renderContextPack({
+    ...base,
+    tqRows: [],
+    tnRows: [{ id: bigId, book: "LUK", ref_raw: "1:1", support_reference: null, quote: null, note: "t", updated_at: 1 }],
+    sources: { tn: bigSrc, tq: new Map() },
+  });
+  assert(!bigPack.ok && bigPack.reason === "examples_selection_empty", "an all-oversized pool fails the export instead of dropping the file");
+  assert(r.ok && r2.ok && contextShrinkRefused(r2.stats, r.stats) === null, "a shifting selection does not trip the shrink guard");
 }
 
 console.log("ALL contextExport tests passed");
