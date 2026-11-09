@@ -40,7 +40,7 @@ The other two buttons at the bottom:
 An icon next to the verse opens the verse view. See [Verse view](#help:verse-view).
 
 ## Rapid check
-On a laptop or a larger screen, the **Rapid check** button in the top bar switches to a compact list for checking many notes quickly. Select it again to go back to the cards. The app remembers your choice in this browser. On a phone or a narrow window you always see the cards.
+On a screen at least 1200 pixels wide, such as most laptops, the **Rapid check** button in the top bar switches to a compact list for checking many notes quickly. Select it again to go back to the cards. The app remembers your choice in this browser. On a smaller screen or a narrow window you always see the cards, and the button is hidden.
 
 ![Rapid check at Obadiah 1:3: the verse at the top and its notes as rows](../screenshots/en/notes-rapid.png)
 
@@ -50,7 +50,7 @@ The verse stays at the top while you scroll. Below it, each note of the verse is
 - The circle at the start of a row approves that note. It fills in when the note is approved. A note with unsaved typing has to be opened and saved first.
 - **English note** above the list shows or hides the English column.
 
-Keys work once you click in the list:
+Keys work once you click a blank part of the list or a note's type:
 - **J** and **K** (or the arrow keys) move to the next and previous note.
 - **Enter** opens the editor. Inside it, **Ctrl+Enter** saves and approves, and **Esc** closes it. What you typed is kept.
 - **A** approves the current note, saving it first if you changed it, and moves on.

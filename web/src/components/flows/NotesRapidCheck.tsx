@@ -167,8 +167,13 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
     } else if (k === "k" || k === "K" || k === "ArrowUp") {
       e.preventDefault();
       onPrev();
-    } else if (k === "Enter" && target === e.currentTarget) {
-      // Only on the list itself: Enter on a focused button keeps its own action.
+    } else if (
+      k === "Enter" &&
+      (target === e.currentTarget || (currentId != null && target.dataset.rapidSelect === currentId))
+    ) {
+      // On the list itself, or on the current row's select button (where
+      // focus sits after clicking a row). Enter on any other button keeps
+      // that button's own action.
       e.preventDefault();
       if (!editLocked) onStartEdit();
     } else if ((k === "a" || k === "A") && !e.shiftKey) {
@@ -401,6 +406,7 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
                     component="button"
                     type="button"
                     onClick={() => onSelect(r.idx)}
+                    data-rapid-select={r.id}
                     aria-label={t("flowTranslate.rapid.makeCurrent", { ref: r.refLabel })}
                     sx={{
                       border: 0,

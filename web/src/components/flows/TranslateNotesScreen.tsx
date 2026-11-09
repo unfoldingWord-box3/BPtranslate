@@ -874,9 +874,12 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
 
   // ── rapid check layout (laptop and up) ───────────────────────────────────
   // A dense, keyboard-driven rendering of the SAME queue, cursor and editor
-  // (NotesRapidCheck.tsx). Below md the card view always shows.
+  // (NotesRapidCheck.tsx). Offered only from lg (1200px): its five columns
+  // were designed at 1366 and crowd below that. Smaller screens always get
+  // the card view, and the toggle is hidden there.
+  const rapidRoom = useMediaQuery(theme.breakpoints.up("lg"));
   const [rapidPref, setRapidPref] = useNotesRapidCheck();
-  const rapid = rapidPref && wide;
+  const rapid = rapidPref && rapidRoom;
   const [rapidShowEnglish, setRapidShowEnglish] = useState(true);
   // Clicking another row's note text moves the cursor AND opens its editor.
   // The hydration effect closes the editor when the row changes, so the open
@@ -1797,6 +1800,10 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
   }
 
   const done = view === "done";
+  // Rapid check draws only while there is an open note to show; the done view,
+  // an empty chapter or an empty type filter fall back to the card layout.
+  const rapidReady =
+    rapid && !done && total > 0 && row != null && !(typeFilter != null && visibleIdx.length === 0);
   const approvedCount = queueIds.filter(
     (id) => statuses[id] === "approved" && !editedIds.has(id),
   ).length;
@@ -2628,8 +2635,8 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
               maxWidth: wide ? "none" : COLUMN_PX,
               mx: "auto",
               paddingInline: wide ? 2.5 : 2,
-              paddingBlockStart: rapid ? 1 : 1.5,
-              paddingBlockEnd: rapid ? 1 : wide ? 1.5 : "calc(12px + env(safe-area-inset-bottom))",
+              paddingBlockStart: rapidReady ? 1 : 1.5,
+              paddingBlockEnd: rapidReady ? 1 : wide ? 1.5 : "calc(12px + env(safe-area-inset-bottom))",
             }}
           >
             <Button
@@ -2648,7 +2655,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
               }
               sx={{
                 flex: 1,
-                minHeight: rapid ? 36 : 50,
+                minHeight: rapidReady ? 36 : 50,
                 borderRadius: "12px",
                 fontWeight: 700,
                 color: ACCENT,
@@ -2666,7 +2673,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
               onClick={() => void handleNotNeeded()}
               sx={{
                 flex: 1,
-                minHeight: rapid ? 36 : 50,
+                minHeight: rapidReady ? 36 : 50,
                 borderRadius: "12px",
                 fontWeight: 700,
                 bgcolor: skip.soft,
@@ -2688,7 +2695,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
               startIcon={<CheckIcon />}
               sx={{
                 flex: 1.4,
-                minHeight: rapid ? 36 : 50,
+                minHeight: rapidReady ? 36 : 50,
                 borderRadius: "12px",
                 fontWeight: 700,
                 bgcolor: ok.main,
@@ -2705,8 +2712,6 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
   // Rapid check rows: the open note's verse, or with a type filter every
   // matching note in the chapter (grouped by verse in the list). Both come
   // from the frozen queue, so order and counts match the card view.
-  const rapidReady =
-    rapid && !done && total > 0 && row != null && !(typeFilter != null && visibleIdx.length === 0);
   const rapidRows: RapidCheckRow[] = !rapidReady
     ? []
     : (typeFilter ? visibleIdx : queueIds.map((_, i) => i)).flatMap((i) => {
@@ -2810,8 +2815,8 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
                 <ViewColumnIcon fontSize="small" />
               </IconButton>
             )}
-            {wide && (
-              // Rapid check (laptop and up): the dense, keyboard-driven list.
+            {rapidRoom && (
+              // Rapid check (1200px and up): the dense, keyboard-driven list.
               // Remembered per browser (editorPrefs).
               <Chip
                 size="small"

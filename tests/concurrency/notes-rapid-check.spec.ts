@@ -78,6 +78,14 @@ test("rapid check: toggle, J/K, edit, Ctrl+Enter approve, circle approve", async
   await page.keyboard.press("k");
   await expect(current).toHaveAttribute("data-rapid-row", ids[0]!);
 
+  // Clicking a row's type/ref button makes it current and leaves focus on
+  // that button; J still moves, and Enter there opens the editor.
+  await list.locator(`[data-rapid-select="${ids[1]}"]`).click();
+  await expect(current).toHaveAttribute("data-rapid-row", ids[1]!);
+  await page.keyboard.press("k");
+  await expect(current).toHaveAttribute("data-rapid-row", ids[0]!);
+  await list.locator(`[data-rapid-select="${ids[0]}"]`).focus();
+
   // Enter opens the editor; letters typed there are text, not shortcuts.
   await page.keyboard.press("Enter");
   const editor = list.locator('textarea:not([aria-hidden="true"])');
@@ -119,4 +127,10 @@ test("rapid check: toggle, J/K, edit, Ctrl+Enter approve, circle approve", async
   await page.screenshot({ path: test.info().outputPath("rapid-check-1366x768.png") });
   // The choice is remembered for the next visit.
   expect(await page.evaluate(() => localStorage.getItem("be:notesRapidCheck"))).toBe("true");
+
+  // Below 1200px the toggle is hidden and the card view returns, even with
+  // the choice saved.
+  await page.setViewportSize({ width: 1100, height: 768 });
+  await expect(page.getByRole("button", { name: "Rapid check", exact: true })).toBeHidden();
+  await expect(list).toBeHidden();
 });
