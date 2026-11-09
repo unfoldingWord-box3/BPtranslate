@@ -192,6 +192,7 @@ import { onOutboxDrop, onOutboxResult, outbox, type OutboxOp } from "../../sync/
 import { pipelineStore, getSessionKey, type PipelineJob } from "../../sync/pipelineStore";
 import { jobLocksChapterNotes, jobLocksNote, lockJobReleased } from "../../lib/chapterLock";
 import { redoOutcome } from "../../lib/applySkipped";
+import { useRapidBulk } from "./useRapidBulk";
 import {
   api,
   ApiError,
@@ -1470,22 +1471,28 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
     );
   }
 
-  async function handleApprove() {
-    if (!row || busy) return;
+  // Resolves true when the note was approved (the bulk Approve counts it).
+  // `stay` (bulk Approve) keeps the cursor and skips the toast: moving to the
+  // next open note mid-run would replace the rows the bulk action is on.
+  async function handleApprove(opts?: { stay?: boolean }): Promise<boolean> {
+    if (!row || busy) return false;
     setBusy(true);
     setNotice(null);
     try {
       if (await quoteOpPending(row.id)) {
         say(t("flowTranslate.quotePendingApprove"));
-        return;
+        return false;
       }
-      if (hasDiff && !(await saveDraft(row))) return;
+      if (hasDiff && !(await saveDraft(row))) return false;
       const updated = await api.validateNote(row.id, book, true);
       applyLocalRowReplacement("tn", updated);
       setStatuses((prev) => ({ ...prev, [row.id]: "approved" }));
       setEditing(false);
-      setToast(t("flowTranslate.toastApproved"));
-      advanceAfter(row.id, "approved");
+      if (!opts?.stay) {
+        setToast(t("flowTranslate.toastApproved"));
+        advanceAfter(row.id, "approved");
+      }
+      return true;
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) {
         say(t("flowTranslate.approveNeedsDraft"));
@@ -1503,6 +1510,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
     } finally {
       setBusy(false);
     }
+    return false;
   }
 
   // Rapid check's status circle on a row that is NOT the open one. Only the
@@ -1916,6 +1924,27 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
     role,
     phone: !isTabletUp,
     onImported: () => void refetch().then(() => setReloadNonce((n) => n + 1)),
+  });
+
+  // Rapid check's checkbox bulk actions (#829).
+  const rapidBulk = useRapidBulk({
+    book,
+    chapter,
+    currentId: row?.id ?? null,
+    hasDiff,
+    draftRowIds,
+    rowById,
+    statuses,
+    setStatuses,
+    applyLocalRowReplacement,
+    refetch,
+    reload: () => void refetch().then(() => setReloadNonce((n) => n + 1)),
+    busy: busy || redoing,
+    setBusy,
+    setEditing,
+    handleApprove,
+    aiUnavailable,
+    t,
   });
 
   // ── render gates (every hook above this line, unconditionally) ───────────
@@ -3277,6 +3306,18 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
             if (!editLocked) setEditing(true);
           }}
           onStopEdit={() => setEditing(false)}
+          bulk={{
+            onApprove: rapidBulk.approve,
+            onRedo: rapidBulk.redo,
+            onNotNeeded: rapidBulk.notNeeded,
+            running: rapidBulk.running,
+            // The translate job redrafts from the English notes, which only a
+            // translation workspace has.
+            redoBlocked: aiUnavailable ?? (translationMode ? null : t("flowTranslate.rapid.bulk.redoNeedsTranslation")),
+            result: rapidBulk.result,
+            onUndo: rapidBulk.undo,
+            onDismiss: rapidBulk.dismiss,
+          }}
         />
       ) : wide ? (
         /* desk (the words screen's md+ pattern): 1440px centred grid — the

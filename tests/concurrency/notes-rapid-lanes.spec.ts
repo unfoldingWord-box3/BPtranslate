@@ -160,6 +160,20 @@ test("rapid check: clicking an approved circle takes the approval back", async (
   await expect
     .poll(async () => (await serverRow(page, auth.token, other.id))?.translation_state, { timeout: 20_000 })
     .toBe("validated");
+
+  // With a row checked (the bulk bar replaces the footer, #829), the circle
+  // still takes the approval back and Q still opens the quote picker.
+  await list.locator(`[data-rapid-checkbox="${openRow.id}"]`).click();
+  await expect(page.locator("[data-rapid-bulk-bar]")).toBeVisible();
+  await circle.click();
+  await expect
+    .poll(async () => (await serverRow(page, auth.token, other.id))?.translation_state, { timeout: 20_000 })
+    .toBe("edited");
+  await expect(page.locator("[data-rapid-bulk-bar]")).toBeVisible();
+  await list.focus();
+  await page.keyboard.press("q");
+  await expect(page.getByRole("dialog", { name: new RegExp(`${BOOK} ${CHAPTER}:${verse}`) })).toBeVisible();
+  await page.keyboard.press("Escape");
 });
 
 test("rapid check: type-filter mode draws lanes above every verse group", async ({ browser }) => {

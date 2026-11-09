@@ -14,7 +14,7 @@
 // button when it is restored. Without that, focus would fall to <body> and the
 // list's keyboard shortcuts would stop working.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import Box from "@mui/material/Box";
 import Chip from "@mui/material/Chip";
 import IconButton from "@mui/material/IconButton";
@@ -41,6 +41,8 @@ export interface RapidColumnHeaderProps {
   sourceUltKey: boolean;
   /** Q opens the quote picker (Rapid check, #831). */
   quoteKey?: boolean;
+  /** A cell ahead of the others: the bulk select-all checkbox (#829). */
+  leadingCell?: ReactNode;
 }
 
 const headSx = {
@@ -72,6 +74,7 @@ export function RapidColumnHeader({
   onToggleEnglish,
   sourceUltKey,
   quoteKey = false,
+  leadingCell,
 }: RapidColumnHeaderProps) {
   const { t } = useTranslation();
   // Popover origins are physical; open toward the inline end in both directions.
@@ -132,6 +135,9 @@ export function RapidColumnHeader({
     [["A"], t("flowTranslate.rapid.keyApprove")],
     [["Ctrl", "Enter"], t("flowTranslate.rapid.keySaveApprove")],
     [["Esc"], t("flowTranslate.rapid.keyClose")],
+    [["Space", "X"], t("flowTranslate.rapid.bulk.keyCheck")],
+    [["Shift", "J", "K"], t("flowTranslate.rapid.bulk.keyExtend")],
+    [["Ctrl", "Z"], t("flowTranslate.rapid.bulk.keyUndo")],
     ...(englishAvailable ? [[["E"], t("flowTranslate.rapid.cols.keyEnglish")] as [string[], string]] : []),
     ...(sourceUltKey ? [[["U"], t("flowTranslate.rapid.cols.keySourceUlt")] as [string[], string]] : []),
     ...(quoteKey ? [[["Q"], t("flowTranslate.rapid.quote.key")] as [string[], string]] : []),
@@ -155,6 +161,7 @@ export function RapidColumnHeader({
         borderRadius: "10px 10px 0 0",
       }}
     >
+      {leadingCell}
       <Box sx={{ display: "flex", justifyContent: "center" }}>
         <IconButton
           size="small"

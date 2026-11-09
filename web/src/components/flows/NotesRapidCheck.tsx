@@ -8,7 +8,7 @@
 // store, conflict and lock handling) and its Save / Save & approve handlers.
 // The "current" row here is the screen's cursor; only it can hold the editor.
 
-import { Fragment, useEffect, useRef, useState, type KeyboardEvent, type ReactNode, type Ref } from "react";
+import { Fragment, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode, type Ref } from "react";
 import Box from "@mui/material/Box";
 import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
@@ -19,6 +19,7 @@ import { useTranslation } from "react-i18next";
 import { FlowStatusChip, type FlowStatusKind } from "./FlowStatusChip";
 import { RapidColumnHeader } from "./RapidColumnHeader";
 import { SCRIPTURE_FONT_STACK } from "../../theme";
+import { RapidBulkBar, RapidBulkResultLine, type RapidBulkProps } from "./RapidBulkBar";
 
 export interface RapidCheckRow {
   id: string;
@@ -92,9 +93,13 @@ export interface NotesRapidCheckProps {
   onApproveCurrent: () => void;
   onStartEdit: () => void;
   onStopEdit: () => void;
+  /** Checkbox multi-select and its bulk verbs (#829). */
+  bulk: RapidBulkProps;
 }
 
 const INSPIRE = "#31ADE3";
+// The leading checkbox column (#829), ahead of the approve circle's.
+const CHECK_COL = "28px";
 
 // Keys typed into a text field, or inside the type filter's Select and its
 // menu, are never shortcuts: "a" in the editor must type an "a", not approve.
@@ -143,6 +148,7 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
     onApproveCurrent,
     onStartEdit,
     onStopEdit,
+    bulk,
   } = props;
   const { t } = useTranslation();
   const theme = useTheme();
@@ -196,6 +202,49 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
 
   const currentApprovable = rows.find((r) => r.isCurrent)?.approvable ?? false;
 
+  // Checked notes (#829): visual state only, and only for the rows on screen.
+  // The selection is tagged with the row set it was made on, so moving to
+  // another verse or filter clears it instead of acting on hidden notes.
+  const idsKey = rows.map((r) => r.id).join(",");
+  const [sel, setSel] = useState<{ key: string; ids: ReadonlySet<string>; anchor: string | null }>({
+    key: "",
+    ids: new Set(),
+    anchor: null,
+  });
+  const selected = sel.key === idsKey ? sel.ids : new Set<string>();
+  const anchor = sel.key === idsKey ? sel.anchor : null;
+  const selectedIds = rows.filter((r) => selected.has(r.id)).map((r) => r.id);
+  const setSelected = (ids: Iterable<string>, nextAnchor: string | null = anchor) =>
+    setSel({ key: idsKey, ids: new Set(ids), anchor: nextAnchor });
+  const toggleRow = (id: string) => {
+    const next = new Set(selected);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    setSelected(next, id);
+  };
+  // Shift+click: check every row from the range start to this one.
+  const extendTo = (id: string) => {
+    const from = rows.findIndex((r) => r.id === (anchor ?? currentId));
+    const to = rows.findIndex((r) => r.id === id);
+    if (to < 0) return;
+    const next = new Set(selected);
+    const [lo, hi] = from < 0 ? [to, to] : [Math.min(from, to), Math.max(from, to)];
+    for (let i = lo; i <= hi; i++) next.add(rows[i].id);
+    setSelected(next, anchor ?? currentId);
+  };
+  const allChecked = rows.length > 0 && selectedIds.length === rows.length;
+  // While a bulk action runs the checkboxes are frozen, so its outcome (the
+  // skipped rows) cannot overwrite a selection made in the meantime.
+  const selLocked = busy || bulk.running;
+  const runBulk = (action: (ids: string[]) => Promise<string[]>) => {
+    const key = idsKey;
+    void action(selectedIds).then((left) => {
+      // Rows the action skipped stay checked, so they are easy to find.
+      setSel((prev) => (prev.key === key ? { key, ids: new Set(left), anchor: null } : prev));
+    });
+    scrollRef.current?.focus({ preventScroll: true });
+  };
+
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (e.defaultPrevented) return;
     const target = e.target as HTMLElement;
@@ -213,11 +262,44 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
       return;
     }
     if (isInFormControl(target)) return;
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.code === "KeyZ" && bulk.onUndo) {
+      e.preventDefault();
+      if (!e.repeat && !busy) bulk.onUndo();
+      return;
+    }
     if (e.altKey || e.ctrlKey || e.metaKey) return;
     // Letters match the physical key (e.code), so they also work while an
     // Arabic or other keyboard layout is active.
     const code = e.code;
-    if (code === "KeyJ" || e.key === "ArrowDown") {
+    const down = code === "KeyJ" || e.key === "ArrowDown";
+    if (e.shiftKey && (down || code === "KeyK" || e.key === "ArrowUp")) {
+      // Shift+J/K extends the checked range by one row, within the rows shown.
+      e.preventDefault();
+      // The selection is fixed while a bulk action runs: its outcome replaces it.
+      if (selLocked) return;
+      const p = rows.findIndex((r) => r.isCurrent);
+      const n = p + (down ? 1 : -1);
+      if (p < 0 || n < 0 || n >= rows.length) return;
+      setSelected([...selected, rows[p].id, rows[n].id], anchor ?? rows[p].id);
+      onSelect(rows[n].idx);
+      return;
+    }
+    // Space or X checks a row: the row whose checkbox or type/ref button has
+    // focus, else the current row. Space on a checkbox is left to the button's
+    // own click (handling it here too would toggle twice), and keeps its own
+    // meaning on every other button.
+    const boxId = target.dataset.rapidCheckbox ?? target.dataset.rapidSelect;
+    if (
+      code === "KeyX" ||
+      (e.key === " " && target.dataset.rapidCheckbox == null && (boxId != null || target === e.currentTarget))
+    ) {
+      e.preventDefault();
+      if (e.repeat || selLocked) return;
+      const id = boxId ?? currentId;
+      if (id) toggleRow(id);
+      return;
+    }
+    if (down) {
       e.preventDefault();
       onNext();
     } else if (code === "KeyK" || e.key === "ArrowUp") {
@@ -286,7 +368,15 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
             </Stack>
           )}
           <RapidColumnHeader
-            cols={cols}
+            cols={`${CHECK_COL} ${cols}`}
+            leadingCell={
+              <CheckBox
+                checked={allChecked ? true : selectedIds.length > 0 ? "mixed" : false}
+                label={t("flowTranslate.rapid.bulk.selectAll")}
+                disabled={selLocked}
+                onClick={() => setSelected(allChecked ? [] : rows.map((r) => r.id), null)}
+              />
+            }
             sourceLabel={sourceLabel}
             targetLabel={targetLabel}
             showQuote={showQuote}
@@ -331,11 +421,11 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
                     scrollMarginTop: `${stickyH + 4}px`,
                     ...(groupLanes
                       ? {
-                          // The rows' first two columns (and their 3px
-                          // current-row bar), so the lanes start where the
-                          // rows' quote column does.
+                          // The rows' first three columns (checkbox, circle,
+                          // status/type) and their 3px current-row bar, so the
+                          // lanes start where the rows' quote column does.
                           display: "grid",
-                          gridTemplateColumns: "36px minmax(104px, 132px) minmax(0, 1fr)",
+                          gridTemplateColumns: `${CHECK_COL} 36px minmax(104px, 132px) minmax(0, 1fr)`,
                           columnGap: 1.5,
                           alignItems: "baseline",
                           paddingInlineStart: 0,
@@ -345,7 +435,7 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
                       : {}),
                   }}
                 >
-                  <Box component="span" sx={groupLanes ? { gridColumn: "1 / 3", paddingInlineStart: 1.5 } : undefined}>
+                  <Box component="span" sx={groupLanes ? { gridColumn: "1 / 4", paddingInlineStart: 1.5 } : undefined}>
                     {book} {r.refLabel}
                   </Box>
                   {groupLanes}
@@ -380,7 +470,7 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
                     cursor: r.isCurrent ? "default" : "pointer",
                     "&:hover": r.isCurrent ? undefined : { bgcolor: "action.hover" },
                     display: "grid",
-                    gridTemplateColumns: cols,
+                    gridTemplateColumns: `${CHECK_COL} ${cols}`,
                     gap: 1.5,
                     alignItems: "start",
                     paddingBlock: 0.5,
@@ -394,6 +484,13 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
                     scrollMarginBottom: "8px",
                   }}
                 >
+                  <CheckBox
+                    checked={selected.has(r.id)}
+                    label={t("flowTranslate.rapid.bulk.selectNote", { ref: r.refLabel })}
+                    rowId={r.id}
+                    disabled={selLocked}
+                    onClick={(shift) => (shift ? extendTo(r.id) : toggleRow(r.id))}
+                  />
                   {/* approve circle: empty ring until approved, then filled with a check */}
                   <Box
                     component="button"
@@ -570,7 +667,104 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
           })}
         </Box>
       </Box>
-      {footer}
+      {bulk.result && (
+        <RapidBulkResultLine
+          result={bulk.result}
+          onUndo={bulk.onUndo}
+          onDismiss={bulk.onDismiss}
+          disabled={busy || bulk.running}
+        />
+      )}
+      {selectedIds.length > 0 ? (
+        <RapidBulkBar
+          count={selectedIds.length}
+          disabled={busy || bulk.running}
+          redoBlocked={bulk.redoBlocked}
+          onApprove={() => runBulk(bulk.onApprove)}
+          onRedo={() => runBulk(bulk.onRedo)}
+          onNotNeeded={() => runBulk(bulk.onNotNeeded)}
+          onClear={() => {
+            setSelected([], null);
+            scrollRef.current?.focus({ preventScroll: true });
+          }}
+        />
+      ) : (
+        footer
+      )}
+    </Box>
+  );
+}
+
+// A row's (or the header's select-all) checkbox: a button with the checkbox
+// role, not an <input>, so the list's J/K/A shortcuts keep working while it
+// has focus (the key handler ignores keys typed into form inputs).
+function CheckBox({
+  checked,
+  label,
+  rowId,
+  disabled,
+  onClick,
+}: {
+  checked: boolean | "mixed";
+  label: string;
+  rowId?: string;
+  disabled: boolean;
+  onClick: (shift: boolean) => void;
+}) {
+  const on = checked !== false;
+  return (
+    <Box
+      component="button"
+      type="button"
+      role="checkbox"
+      aria-checked={checked}
+      aria-label={label}
+      title={label}
+      data-rapid-checkbox={rowId}
+      disabled={disabled}
+      onMouseDown={(e: MouseEvent) => {
+        // Shift+click picks a range; don't let it select text too.
+        if (e.shiftKey) e.preventDefault();
+      }}
+      onClick={(e: MouseEvent) => onClick(e.shiftKey)}
+      sx={{
+        width: 28,
+        height: 32,
+        border: 0,
+        background: "transparent",
+        padding: 0,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        cursor: disabled ? "default" : "pointer",
+      }}
+    >
+      <Box
+        component="span"
+        sx={{
+          width: 16,
+          height: 16,
+          boxSizing: "border-box",
+          borderRadius: "4px",
+          border: "2px solid",
+          borderColor: on ? INSPIRE : "text.secondary",
+          bgcolor: on ? INSPIRE : "transparent",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        {checked === true && (
+          <svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true">
+            <path d="M2.5 6.2l2.3 2.3 4.7-5" fill="none" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        )}
+        {checked === "mixed" && (
+          <svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true">
+            <path d="M3 6h6" fill="none" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" />
+          </svg>
+        )}
+      </Box>
     </Box>
   );
 }
