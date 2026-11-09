@@ -116,6 +116,24 @@ test("parseExamplesJsonl: a tombstone removes only its own book's example", () =
   assert.deepEqual(examples.map((e) => [e.book, e.target]), [["EXO", "E"]]);
 });
 
+test("parseExamplesJsonl: a tombstone without book revokes the rowId in every book", () => {
+  const line = (o) => JSON.stringify(o) + "\n";
+  const examples = parseExamplesJsonl(
+    line({ resource: "tn", rowId: "abcd", book: "GEN", source: "g", target: "G", validated_at: 1 })
+    + line({ resource: "tn", rowId: "abcd", book: "EXO", source: "e", target: "E", validated_at: 2 })
+    + line({ resource: "tn", rowId: "other", book: "EXO", source: "o", target: "O", validated_at: 3 })
+    + line({ resource: "tq", rowId: "abcd", book: "EXO", source: "q", target: "Q", validated_at: 4 })
+    + line({ resource: "tn", rowId: "abcd", tombstone: true, validated_at: 5 }));
+  assert.deepEqual(examples.map((e) => [e.resource, e.rowId, e.target]), [["tn", "other", "O"], ["tq", "abcd", "Q"]]);
+});
+
+test("parseExamplesJsonl: the contract's example pair (booked line, bookless tombstone) revokes", () => {
+  const examples = parseExamplesJsonl(
+    '{"resource":"tn","rowId":"abcd","book":"OBA","ref":"1:1","supportReference":"figs-metaphor","source":"s","target":"t","validated_at":1752470000}\n'
+    + '{"resource":"tn","rowId":"abcd","tombstone":true,"validated_at":1752480000}\n');
+  assert.equal(examples.length, 0);
+});
+
 test("parseManifestYaml / parseRegisterFromBrief cover the scalar subset", () => {
   assert.deepEqual(parseManifestYaml('format: "2"\nlanguage: ar\n'), { format: 2, language: "ar" });
   assert.equal(parseManifestYaml("language: ar\n").format, 1);

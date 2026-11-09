@@ -324,8 +324,9 @@ export function parseTermsCsv(text: unknown): PackTerm[] {
 
 /**
  * Parse validated.jsonl with tombstone last-line-wins on (resource, book, rowId).
- * Row ids are unique only within a book (#822); a line without `book` keys on an
- * empty book, so packs written before the writer emitted `book` dedupe as before.
+ * Row ids are unique only within a book (#822). A live line without `book` keys
+ * on an empty book. A tombstone with `book` revokes only that book's row; a
+ * tombstone without `book` revokes that (resource, rowId) in every book.
  */
 export function parseExamplesJsonl(text: unknown): PackExample[] {
   const byKey = new Map<string, PackExample>();
@@ -347,7 +348,13 @@ export function parseExamplesJsonl(text: unknown): PackExample[] {
     const book = o.book ? String(o.book) : null;
     const key = `${resource}\0${book ?? ""}\0${rowId}`;
     if (o.tombstone) {
-      byKey.delete(key);
+      if (book !== null) {
+        byKey.delete(key);
+      } else {
+        for (const [k, ex] of byKey) {
+          if (ex.resource === resource && ex.rowId === rowId) byKey.delete(k);
+        }
+      }
       continue;
     }
     if (!o.source || !o.target) continue;
