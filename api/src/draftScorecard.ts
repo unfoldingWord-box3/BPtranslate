@@ -12,18 +12,22 @@
 //   draft      the note in the payload of the row's LATEST edit_log entry with
 //              source 'ai_pipeline' (kind 'tn', action create/update). That is
 //              what the translate apply wrote (pipelineImport.ts,
-//              applyTranslateTnRow). No such entry → "no draft logged". The
-//              prod cron prunes edit_log after 180 days, so old chapters lose
-//              their drafts; they are counted, never treated as unchanged.
+//              applyTranslateTnRow). No such entry, or one whose payload has
+//              no string note → "no draft logged". The prod cron prunes
+//              edit_log after 180 days, so old chapters lose their drafts;
+//              they are counted, never treated as unchanged.
 //   final      the row's current note.
 //   English    the draft equals (both trimmed, non-empty) the row's English
 //   source     source note, read by id from the project's English tN on Door43
 //              exactly as the chat tools and the Source panel read it
-//              (readSourceNotes, sourceNotes.ts — the English is not stored in
-//              D1). Such a row is a run that applied untranslated text; it is
-//              excluded from every metric and counted on its own. When the
-//              English could not be read for a chapter, nothing in it is
-//              excluded and the chapter says so (englishChecked = false).
+//              (readBookSourceNotes, sourceNotes.ts — the English is not
+//              stored in D1). Such a row is a run that applied untranslated
+//              text; it is excluded from every metric and counted on its own.
+//              A note that is legitimately identical to the English (links
+//              only) is excluded the same way. When the English could not be
+//              read for a chapter, nothing in it is excluded and the chapter
+//              says so (englishCheck "none"; the total says "some" when only
+//              part of the book was checked).
 //   compared   validated − no draft logged − English source.
 //   unchanged  final === draft, exactly. Share = unchanged / compared.
 //   similarity 1 − levenshtein(draft, final) / max(length), counted in Unicode
@@ -32,25 +36,32 @@
 //   period     (so there is no period after it). Made: the final, trimmed the
 //              same way, ends with "].". Share = made / eligible.
 //   context    the contextRef ("org/repo@sha") in the options_json of the
-//   pack       translate job that wrote the draft. The job is the latest
-//              tN translate job for the book that covers the row's chapter
-//              (chapter 0 rides with a job starting at 1), was enqueued before
-//              the draft (edit_log id > the job's edit_log_watermark; created_at
-//              when the job has no watermark), and had not finished before it
-//              (drafted_at <= updated_at). The prod cron deletes done jobs after
-//              7 days, so older drafts count as "run no longer on record"
-//              (untracedDrafts) rather than a guess.
+//   pack       translate job that wrote the draft. Neither the edit_log row nor
+//              its payload records the job id, so the job is inferred. The
+//              candidates are tN translate jobs for the book that cover the
+//              row's chapter (chapter 0 rides with a job starting at 1), were
+//              enqueued before the draft (edit_log id > the job's
+//              edit_log_watermark; created_at when the job has no watermark),
+//              and had not finished before it (drafted_at <= updated_at). The
+//              applying job stamps updated_at right after its apply, so the
+//              writer is the candidate whose updated_at is EARLIEST; ties go to
+//              the latest created_at. A job with no contextRef (no successful
+//              export yet, or a chain/follow-up child) still ran, on the
+//              unpinned latest pack (translate/params.ts); the page says "not
+//              pinned". The prod cron deletes done jobs after 7 days, so older
+//              drafts count as "run no longer on record" (untracedDrafts)
+//              rather than a guess.
 //
 // Bounded: one book per request. Two D1 reads of our own (rows with their
-// draft, the book's translate jobs), then readSourceNotes once per drafted
-// chapter: each call does its own project-config and source-override lookups,
-// and the Door43 TSV itself is cached per isolate, so a book costs about one
-// Door43 fetch per source repo. No new tables, no writes.
+// draft, the book's translate jobs), then readBookSourceNotes: one config and
+// override lookup, and at most one Door43 read per distinct source repo, all
+// concurrent (cached per isolate), so a hanging Door43 costs one timeout. No
+// new tables, no writes.
 
 import type { Context } from "hono";
 import type { Env } from "./index";
 import { BOOK_NUMBERS } from "./dcsSources.ts";
-import { readSourceNotes } from "./sourceNotes.ts";
+import { readBookSourceNotes } from "./sourceNotes.ts";
 
 // ── Data shapes ─────────────────────────────────────────────────────────────
 
@@ -76,7 +87,7 @@ export interface ScorecardJob {
   resourceType: string | null;
 }
 
-/** A context pack the chapter's compared drafts were made with. ref null = the run had no context pack. */
+/** A context pack the chapter's compared drafts were made with. ref null = the run was not pinned (latest pack at run time). */
 export interface ContextPackCount {
   ref: string | null;
   count: number;
@@ -98,14 +109,22 @@ export interface ScorecardChapter {
   contextPacks: ContextPackCount[];
   /** Compared drafts whose translate job is no longer on record. */
   untracedDrafts: number;
-  /** false when the English source could not be read, so no row was excluded as English. */
-  englishChecked: boolean;
+  /**
+   * Whether drafts were checked against the English source: "all", "none"
+   * (the English could not be read, so no row was excluded as English), or,
+   * on the book total only, "some" (part of the book was checked).
+   */
+  englishCheck: EnglishCheck;
 }
+
+export type EnglishCheck = "all" | "some" | "none";
 
 export interface DraftScorecardResponse {
   book: string;
   chapters: ScorecardChapter[];
   total: ScorecardChapter;
+  /** Chapters whose English source could not be read (ascending). */
+  englishUncheckedChapters: number[];
   /** Why the English source could not be read (first failure), or null. */
   englishSourceProblem: string | null;
 }
@@ -175,7 +194,12 @@ export function isEnglishSourceDraft(draft: string, english: string | undefined)
   return e !== "" && draft.trim() === e;
 }
 
-/** The translate job that wrote a draft, or null when none on record fits. */
+/**
+ * The translate job that wrote a draft, or null when none on record fits.
+ * Among the jobs whose window brackets the draft, the writer is the one that
+ * finished first after it (earliest updated_at): a job queued meanwhile, or a
+ * chain child carrying its parent's older watermark, finishes later.
+ */
 export function matchDraftJob(
   draft: { chapter: number; draftLogId: number; draftedAt: number },
   jobs: ScorecardJob[],
@@ -192,8 +216,10 @@ export function matchDraftJob(
     if (!enqueuedBefore || draft.draftedAt > j.updatedAt) continue;
     if (
       !best ||
-      j.createdAt > best.createdAt ||
-      (j.createdAt === best.createdAt && (j.editLogWatermark ?? -1) > (best.editLogWatermark ?? -1))
+      j.updatedAt < best.updatedAt ||
+      (j.updatedAt === best.updatedAt &&
+        (j.createdAt > best.createdAt ||
+          (j.createdAt === best.createdAt && (j.editLogWatermark ?? -1) > (best.editLogWatermark ?? -1))))
     ) {
       best = j;
     }
@@ -211,7 +237,7 @@ interface Tally {
   made: number;
   packs: Map<string | null, number>;
   untraced: number;
-  englishChecked: boolean;
+  englishCheck: EnglishCheck;
 }
 
 const emptyTally = (): Tally => ({
@@ -224,7 +250,7 @@ const emptyTally = (): Tally => ({
   made: 0,
   packs: new Map(),
   untraced: 0,
-  englishChecked: true,
+  englishCheck: "all",
 });
 
 function finish(chapter: number | null, t: Tally): ScorecardChapter {
@@ -243,7 +269,7 @@ function finish(chapter: number | null, t: Tally): ScorecardChapter {
       .map(([ref, count]) => ({ ref, count }))
       .sort((p, q) => q.count - p.count || String(p.ref).localeCompare(String(q.ref))),
     untracedDrafts: t.untraced,
-    englishChecked: t.englishChecked,
+    englishCheck: t.englishCheck,
   };
 }
 
@@ -263,16 +289,16 @@ export function buildScorecard(
     let t = byChapter.get(r.chapter);
     if (!t) {
       t = emptyTally();
-      t.englishChecked = englishByChapter.has(r.chapter);
-      if (!t.englishChecked) total.englishChecked = false;
+      t.englishCheck = englishByChapter.has(r.chapter) ? "all" : "none";
       byChapter.set(r.chapter, t);
     }
     for (const s of [t, total]) s.validated++;
-    if (r.draftLogId == null) {
+    // An audit row whose payload carries no string note is not a usable draft.
+    if (r.draftLogId == null || r.draftNote == null) {
       for (const s of [t, total]) s.noDraft++;
       continue;
     }
-    const draft = r.draftNote ?? "";
+    const draft = r.draftNote;
     const final = r.finalNote ?? "";
     if (isEnglishSourceDraft(draft, englishByChapter.get(r.chapter)?.get(r.id))) {
       for (const s of [t, total]) s.englishSource++;
@@ -290,6 +316,9 @@ export function buildScorecard(
       else s.untraced++;
     }
   }
+  const tallies = [...byChapter.values()];
+  const unchecked = tallies.filter((t) => t.englishCheck === "none").length;
+  total.englishCheck = unchecked === 0 ? "all" : unchecked === tallies.length ? "none" : "some";
   const chapters = [...byChapter.entries()].sort(([p], [q]) => p - q).map(([ch, t]) => finish(ch, t));
   return { chapters, total: finish(null, total) };
 }
@@ -376,21 +405,25 @@ export async function draftScorecard(c: Context<{ Bindings: Env }>) {
 
   const { rows, jobs } = await loadScorecardInputs(c.env.DB, book);
 
-  // The English source, for the chapters that have a draft to compare. One
-  // Door43 read per source repo (sourceNotes.ts caches it per isolate); a
-  // failure leaves that chapter unchecked rather than failing the scorecard.
+  // The English source, for the chapters that have a draft to compare: at most
+  // one Door43 read per distinct source repo, all concurrent (sourceNotes.ts).
+  // A failed source leaves its chapters unchecked rather than failing the
+  // scorecard, and is not retried.
   const englishByChapter = new Map<number, Map<string, string>>();
   let englishSourceProblem: string | null = null;
-  const draftedChapters = [...new Set(rows.filter((r) => r.draftLogId != null).map((r) => r.chapter))];
-  for (const ch of draftedChapters) {
-    const src = await readSourceNotes(c.env, book, ch);
+  const draftedChapters = new Set(rows.filter((r) => r.draftLogId != null && r.draftNote != null).map((r) => r.chapter));
+  const sources = await readBookSourceNotes(c.env, book, [...draftedChapters]);
+  for (const [ch, src] of sources) {
     if (src.ok) englishByChapter.set(ch, src.notes);
     else englishSourceProblem ??= src.reason;
   }
   // A chapter with no draft at all has nothing to exclude, so it is not "unchecked".
-  for (const r of rows) if (!draftedChapters.includes(r.chapter)) englishByChapter.set(r.chapter, new Map());
+  for (const r of rows) if (!draftedChapters.has(r.chapter)) englishByChapter.set(r.chapter, new Map());
 
   const { chapters, total } = buildScorecard(rows, jobs, englishByChapter);
-  const body: DraftScorecardResponse = { book, chapters, total, englishSourceProblem };
+  const englishUncheckedChapters = chapters
+    .filter((s) => s.englishCheck === "none")
+    .map((s) => s.chapter as number);
+  const body: DraftScorecardResponse = { book, chapters, total, englishUncheckedChapters, englishSourceProblem };
   return c.json(body);
 }

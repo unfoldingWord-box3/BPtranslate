@@ -34,6 +34,8 @@ import {
   loadScorecardInputs,
   draftScorecard,
 } from "./draftScorecard.ts";
+import { readBookSourceNotes, clearSourceNotesCache } from "./sourceNotes.ts";
+import { clearProjectConfigCache } from "./projectConfig.ts";
 
 // ── 1. Pure metrics ─────────────────────────────────────────────────────────
 
@@ -59,20 +61,18 @@ test("editSimilarity counts code points, not UTF-16 units", () => {
   assert.equal(editSimilarity("𝔸b", "𝔸c"), 0.5);
 });
 
-test("editSimilarity stays fast at book scale (worst case: every note fully rewritten)", () => {
-  // A real book is ~3,000 validated notes, mostly small edits, which cost far
-  // less because the shared prefix and suffix are stripped first. The worst
-  // case is every 400-character note rewritten end to end; 600 such pairs
-  // (a fifth of a book) keep the suite quick and extrapolate linearly.
-  const a = "ب".repeat(200) + "ت".repeat(200);
-  const b = "ت".repeat(200) + "ب".repeat(200);
-  const t0 = performance.now();
-  for (let i = 0; i < 600; i++) editSimilarity(a + i, b + i);
-  const ms = performance.now() - t0;
-  // A coarse guard against an accidental blow-up (a cubic loop, no prefix
-  // strip), not a benchmark: ~1s locally under the full parallel suite, so the
-  // limit leaves room for a slow CI runner. A Worker request's CPU budget is 30s.
-  assert.ok(ms < 8_000, `600 worst-case pairs took ${Math.round(ms)}ms`);
+test("editSimilarity on long strings: shared prefix/suffix stripped, full rewrite scored", () => {
+  // One change in the middle of a 10,001-character note: the prefix and suffix
+  // strip leaves a 1x1 problem, distance 1.
+  const pre = "ب".repeat(5000);
+  const suf = "ت".repeat(5000);
+  assert.equal(editSimilarity(pre + "x" + suf, pre + "y" + suf), 1 - 1 / 10001);
+  // A pure insertion inside a long note (nothing left on one side after the strip).
+  assert.equal(editSimilarity(pre + suf, pre + "zz" + suf), 1 - 2 / 10002);
+  // A full rewrite of a 2,000-character note runs the whole DP: distance 2,000.
+  assert.equal(editSimilarity("a".repeat(2000), "b".repeat(2000)), 0);
+  // Different lengths, nothing shared: distance is the longer length.
+  assert.equal(editSimilarity("a".repeat(300), "b".repeat(500)), 0);
 });
 
 test("median: odd, even, empty", () => {
@@ -114,7 +114,31 @@ const job = (o) => ({
   resourceType: o.resourceType ?? null,
 });
 
-test("matchDraftJob: picks the latest translate job that covers the chapter and brackets the draft", () => {
+test("matchDraftJob: a job queued while another was running is not credited with its draft", () => {
+  // "running" applied the draft at 500 and stamped updated_at 510. "queued" was
+  // enqueued at 450 (watermark below the draft) and finished later, at 900.
+  const jobs = [
+    job({ jobId: "running", createdAt: 100, updatedAt: 510, watermark: 5, contextRef: "o/c@run" }),
+    job({ jobId: "queued", createdAt: 450, updatedAt: 900, watermark: 40, contextRef: "o/c@queued" }),
+  ];
+  assert.equal(matchDraftJob({ chapter: 1, draftLogId: 50, draftedAt: 500 }, jobs)?.jobId, "running");
+  // The queued job's own draft, written after "running" finished, is its own.
+  assert.equal(matchDraftJob({ chapter: 1, draftLogId: 80, draftedAt: 880 }, jobs)?.jobId, "queued");
+  // A chain child inheriting its parent's older watermark does not steal the parent's draft.
+  const chain = [
+    job({ jobId: "parent", createdAt: 100, updatedAt: 300, watermark: 5 }),
+    job({ jobId: "child", createdAt: 200, updatedAt: 700, watermark: 5, contextRef: null }),
+  ];
+  assert.equal(matchDraftJob({ chapter: 1, draftLogId: 20, draftedAt: 290 }, chain)?.jobId, "parent");
+  // Same updated_at: the later-created job wins the tie.
+  const tie = [
+    job({ jobId: "a", createdAt: 100, updatedAt: 500, watermark: 1 }),
+    job({ jobId: "b", createdAt: 200, updatedAt: 500, watermark: 1 }),
+  ];
+  assert.equal(matchDraftJob({ chapter: 1, draftLogId: 20, draftedAt: 400 }, tie)?.jobId, "b");
+});
+
+test("matchDraftJob: only jobs that cover the chapter and bracket the draft are candidates", () => {
   const jobs = [
     job({ jobId: "old", start: 1, end: 3, createdAt: 100, updatedAt: 200, watermark: 10, contextRef: "o/c@old" }),
     job({ jobId: "new", start: 2, end: 2, createdAt: 300, updatedAt: 400, watermark: 50, contextRef: "o/c@new" }),
@@ -177,7 +201,8 @@ test("buildScorecard: per-chapter counts reconcile and metrics follow the rules"
   assert.equal(ch1.englishSource, 0);
   assert.equal(ch1.compared, 4);
   assert.equal(ch1.unchanged, 2);
-  assert.equal(ch1.englishChecked, true);
+  assert.equal(ch1.englishCheck, "all");
+  assert.equal(sc.total.englishCheck, "all");
   // Similarities: 1, 1, 1 − 5/9 ("نص ج" → "نص ج معدل" adds 5 chars), 1 − 1/12.
   const sims = [1, 1, 1 - 5 / 9, 1 - 1 / 12].sort((x, y) => x - y);
   assert.equal(ch1.medianSimilarity, (sims[1] + sims[2]) / 2);
@@ -211,8 +236,36 @@ test("buildScorecard: a chapter whose English source was not read excludes nothi
   const rows = [row({ id: "x", chapter: 3, draft: "Same text", final: "Same text" })];
   const sc = buildScorecard(rows, [], new Map());
   const ch = sc.chapters[0];
-  assert.equal(ch.englishChecked, false);
+  assert.equal(ch.englishCheck, "none");
+  assert.equal(sc.total.englishCheck, "none");
   assert.equal(ch.englishSource, 0);
+  assert.equal(ch.compared, 1);
+  assert.equal(ch.unchanged, 1);
+});
+
+test("buildScorecard: some chapters checked, some not → the total is partial", () => {
+  const rows = [
+    row({ id: "e1", chapter: 1, draft: "English one.", final: "عربي" }),
+    row({ id: "e2", chapter: 2, draft: "English two.", final: "عربي" }),
+  ];
+  // Only chapter 1's English could be read.
+  const sc = buildScorecard(rows, [], new Map([[1, new Map([["e1", "English one."]])]]));
+  assert.equal(sc.chapters[0].englishCheck, "all");
+  assert.equal(sc.chapters[0].englishSource, 1);
+  assert.equal(sc.chapters[1].englishCheck, "none");
+  assert.equal(sc.chapters[1].englishSource, 0);
+  assert.equal(sc.total.englishCheck, "some");
+  assert.equal(sc.total.englishSource, 1);
+});
+
+test("buildScorecard: an audit row with no string note counts as no draft logged", () => {
+  const sc = buildScorecard(
+    [row({ id: "nn", chapter: 1, draft: null, final: "عربي" }), row({ id: "ok", chapter: 1, draft: "عربي", final: "عربي" })],
+    [],
+    new Map([[1, new Map()]]),
+  );
+  const ch = sc.chapters[0];
+  assert.equal(ch.noDraft, 1);
   assert.equal(ch.compared, 1);
   assert.equal(ch.unchanged, 1);
 });
@@ -306,6 +359,9 @@ test("loadScorecardInputs reads validated live rows with their LATEST ai_pipelin
   seedTn(sqlite, { id: "eeee", chapter: 1, note: "x", deleted: 5 });
   seedTn(sqlite, { id: "ffff", chapter: 1, note: "x", trashed: 5 });
   seedTn(sqlite, { id: "gggg", chapter: 1, note: "x", book: "MRK" });
+  // An ai_pipeline audit row whose payload has no note: logged, but no usable draft.
+  seedTn(sqlite, { id: "hhhh", chapter: 1, note: "final h" });
+  seedLog(sqlite, { id: "hhhh", source: "ai_pipeline", note: undefined });
   sqlite
     .prepare(
       `INSERT INTO pipeline_jobs (job_id, user_id, pipeline_type, book, start_chapter, end_chapter, session_key, state,
@@ -318,16 +374,66 @@ test("loadScorecardInputs reads validated live rows with their LATEST ai_pipelin
 
   const { rows, jobs } = await loadScorecardInputs(makeDb(sqlite), BOOK);
   const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
-  assert.deepEqual(Object.keys(byId).sort(), ["aaaa", "bbbb", "cccc"]);
+  assert.deepEqual(Object.keys(byId).sort(), ["aaaa", "bbbb", "cccc", "hhhh"]);
   assert.equal(byId.aaaa.draftNote, "new draft");
   assert.equal(byId.aaaa.finalNote, "final a");
   assert.equal(byId.aaaa.draftedAt, 200);
   assert.equal(byId.bbbb.draftNote, "draft b");
   assert.equal(byId.cccc.draftLogId, null, "another book's or another kind's audit row is not this row's draft");
+  assert.notEqual(byId.hhhh.draftLogId, null);
+  assert.equal(byId.hhhh.draftNote, null, "a payload with no note yields no draft text");
   assert.deepEqual(
     jobs.map((j) => [j.jobId, j.contextRef, j.resourceType]).sort(),
     [["j1", "BSOJ/ctx@abc123", "tn"], ["j3", null, null]],
   );
+});
+
+test("readBookSourceNotes: one concurrent read per distinct source; a failed source fails its chapters, no retry", async () => {
+  const sqlite = freshDb();
+  // A translation project (English source = unfoldingWord en_tn) whose LUK
+  // chapters 3+ take their English from another org's repo.
+  sqlite.prepare(`INSERT INTO project_config (id, preset, overrides_json, updated_at) VALUES (1, 'ar-bsoj', NULL, 0)`).run();
+  sqlite
+    .prepare(
+      `INSERT INTO book_source_overrides (book, resource, chapter_start, chapter_end, kind, org, repo)
+       VALUES ('LUK', 'tn', 3, 999, 'dcs', 'OtherOrg', 'en_tn')`,
+    )
+    .run();
+  const env = { DB: makeDb(sqlite), DCS_BASE_URL: "https://git.door43.org" };
+  const tsv =
+    "Reference\tID\tTags\tSupportReference\tQuote\tOccurrence\tNote\n" +
+    "1:1\tab12\t\t\t\t\tEnglish one\n" +
+    "2:1\tcd34\t\t\t\t\tEnglish two\n";
+  const calls = [];
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    inFlight++;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    await new Promise((r) => setTimeout(r, 20));
+    inFlight--;
+    return String(url).includes("/OtherOrg/") ? new Response("", { status: 404 }) : new Response(tsv, { status: 200 });
+  };
+  clearProjectConfigCache();
+  clearSourceNotesCache();
+  try {
+    const res = await readBookSourceNotes(env, "LUK", [1, 2, 3, 4, 5]);
+    assert.equal(calls.length, 2, `one read per source, got ${calls.join(", ")}`);
+    assert.equal(maxInFlight, 2, "the two sources are read concurrently");
+    assert.equal(res.get(1).ok, true);
+    assert.equal(res.get(1).notes.get("ab12"), "English one");
+    assert.equal(res.get(2).notes.get("cd34"), "English two");
+    for (const ch of [3, 4, 5]) {
+      assert.equal(res.get(ch).ok, false, `chapter ${ch} uses the failed source`);
+      assert.match(res.get(ch).reason, /OtherOrg/);
+    }
+  } finally {
+    globalThis.fetch = realFetch;
+    clearProjectConfigCache();
+    clearSourceNotesCache();
+  }
 });
 
 // ── 3. Route: admin only ────────────────────────────────────────────────────
@@ -388,6 +494,9 @@ test("GET /api/books/:book/draft-scorecard is admin-only and returns the scoreca
     assert.equal(body.chapters[0].compared, 1);
     assert.equal(body.chapters[0].unchanged, 1);
     assert.equal(body.chapters[0].unchangedPct, 100);
+    // The test project has no English source, so the one drafted chapter is unchecked.
+    assert.deepEqual(body.englishUncheckedChapters, [1]);
+    assert.equal(body.total.englishCheck, "none");
 
     const bad = await app.request(
       "/api/books/XYZ/draft-scorecard",
