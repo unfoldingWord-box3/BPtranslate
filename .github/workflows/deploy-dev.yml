@@ -28,7 +28,9 @@ name: Deploy to dev
 # Limit of this rule: it confines the token to code that is on `main`, not to
 # trusted people. The "Protect main" ruleset requires a PR but 0 approvals and
 # every collaborator is an admin, so anyone with push access can still
-# self-merge an edited copy of this file and dispatch it from `main`. Don't add
+# self-merge an edited copy of this file and dispatch it from `main`, or change
+# the environment's branch rule and secrets in Settings (nothing in the repo
+# would show it; re-check with the commands above). Don't add
 # `environment: dev` to a workflow triggered by pull_request_target,
 # workflow_run or schedule: those run with the default branch's ref, so they
 # pass the branch rule even when the code comes from elsewhere.
