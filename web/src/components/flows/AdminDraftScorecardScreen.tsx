@@ -131,6 +131,8 @@ export default function AdminDraftScorecardScreen({ role, me }: FlowScreenContex
 
   const dash = "—";
   const pct = (n: number) => n.toFixed(1);
+  const chapterList = (chs: number[]) =>
+    chs.map((ch) => (ch === 0 ? t("adminPages.scorecard.intro") : String(ch))).join(", ");
 
   const chapterLabel = (c: DraftScorecardChapter) =>
     c.chapter == null
@@ -248,15 +250,15 @@ export default function AdminDraftScorecardScreen({ role, me }: FlowScreenContex
             <Alert severity="warning" sx={{ mb: 2 }}>
               {data.total.englishCheck === "none"
                 ? t("adminPages.scorecard.englishUncheckedAll")
-                : t("adminPages.scorecard.englishUncheckedSome", {
-                    chapters: data.englishUncheckedChapters
-                      .map((ch) => (ch === 0 ? t("adminPages.scorecard.intro") : String(ch)))
-                      .join(", "),
-                  })}
-              {/* The server's detail is English; dir="auto" keeps its full stop on the right end in the Arabic UI. */}
-              <Typography variant="body2" color="text.secondary" dir="auto" sx={{ mt: 0.5 }}>
-                {data.englishSourceProblem}
-              </Typography>
+                : t("adminPages.scorecard.englishUncheckedSome", { chapters: chapterList(data.englishUncheckedChapters) })}
+              {/* One line per distinct reason. The server's reason is English; <bdi> isolates it so its full
+                  stop stays on the right end in the Arabic UI. */}
+              {data.englishProblems.map((p) => (
+                <Typography key={p.reason} variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                  {t("adminPages.scorecard.problemChapters", { chapters: chapterList(p.chapters) })}{" "}
+                  <bdi>{p.reason}</bdi>
+                </Typography>
+              ))}
             </Alert>
           )}
           {data && data.chapters.length === 0 && (

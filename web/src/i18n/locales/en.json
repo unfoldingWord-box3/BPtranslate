@@ -2839,16 +2839,17 @@
       "colContextPack": "Context pack",
       "pctCount": "{{pct}}% ({{n}})",
       "pctOf": "{{pct}}% ({{made}} of {{eligible}})",
-      "notPinned": "Not pinned (latest pack at run time) · {{n}}",
+      "notPinned": "Not pinned (latest pack at run time, if any) · {{n}}",
+      "problemChapters": "Chapters {{chapters}}:",
       "runNotOnRecord": "Run not on record · {{n}}",
       "howTitle": "How these numbers work",
       "howScope": "Only translation notes a person has approved are counted. Each one is compared with the last AI draft written to it.",
       "howNoDraft": "No draft logged: the note has no AI draft on record. Edit history older than 180 days can be cleared, so older chapters may show many of these.",
       "howEnglish": "Draft was English: the AI draft was the English source note, not translated. These notes are left out of every column to the right. A note that is the same as the English for a good reason, such as one that holds only links, is counted here too.",
       "howUnchanged": "Approved unchanged: the approved note is exactly the AI draft, character for character.",
-      "howSimilarity": "Median similarity: how much of the draft was kept, from 0 (all rewritten) to 1 (unchanged), counted in characters. Half the notes score above this number and half below.",
+      "howSimilarity": "Median similarity: how much of the draft was kept, from 0 (all rewritten) to 1 (unchanged), counted in characters. Half the notes score above this number and half below. A very long note that was rewritten end to end gets an approximate similarity, to keep the page fast.",
       "howClosingPeriod": "Period added after ]: of the drafts that end with ] and no period, the share where the editor still had to add the period.",
-      "howContextPack": "Context pack: the version (commit) of the guidance the AI was given for these drafts, with how many notes used it. Not pinned means the run was not tied to one version and used the latest pack when it ran. Finished AI runs can be cleared after 7 days; drafts from a cleared run show as Run not on record."
+      "howContextPack": "Context pack: the version (commit) of the guidance the AI was given for these drafts, with how many notes used it. Not pinned means the run was not tied to one version: it used the latest pack when it ran, or none if no guidance had been exported yet. Each draft is matched to its AI run by time, so in rare cases where runs overlapped a draft can be credited to the wrong run. Finished AI runs can be cleared after 7 days; drafts from a cleared run show as Run not on record."
     }
   },
   "widgets": {

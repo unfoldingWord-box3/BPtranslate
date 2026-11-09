@@ -1022,8 +1022,10 @@ export interface DraftScorecardChapter {
   unchangedPct: number | null;
   /** 0–1, null when nothing was compared. */
   medianSimilarity: number | null;
+  /** Compared rows whose similarity is approximate (very long rewritten notes). */
+  approximateSimilarity: number;
   closingPeriod: { eligible: number; made: number };
-  /** ref null = the run was not pinned (it used the latest pack at run time). */
+  /** ref null = the run was not pinned (latest pack at run time, if any). */
   contextPacks: { ref: string | null; count: number }[];
   /** Compared drafts whose translate run is no longer on record. */
   untracedDrafts: number;
@@ -1037,7 +1039,8 @@ export interface DraftScorecardResponse {
   total: DraftScorecardChapter;
   /** Chapters whose English source could not be read. */
   englishUncheckedChapters: number[];
-  englishSourceProblem: string | null;
+  /** Each distinct reason the English source could not be read, with its chapters. */
+  englishProblems: { reason: string; chapters: number[] }[];
 }
 
 // Responses of POST /api/books/:book/review-state (api/src/reviewState.ts).
