@@ -1394,6 +1394,24 @@ export interface TemplateUnitMeta {
   stale_source: 0 | 1;
 }
 
+// GET /api/templates/draft-missing (#818). `reason` is set when it cannot run.
+export interface DraftMissingPreview {
+  available: boolean;
+  reason?: string;
+  provider: string | null;
+  qualifying: { slug: string; approvedNotes: number; units: number }[];
+  minApprovedNotes: number;
+  batchSize: number;
+}
+
+// POST /api/templates/draft-missing (#818).
+export interface DraftMissingResult {
+  drafted: { slug: string; approvedNotes: number; units: number }[];
+  failed: { slug: string; code: string }[];
+  remaining: number;
+  estimatedCostUsd: number | null;
+}
+
 // One English-source revision (newest first).
 export interface TemplateSourceRevision {
   source_hash: string;
@@ -2299,6 +2317,19 @@ export const api = {
   // Source revisions + word-diff-ready target history for the history dialog.
   getTemplateHistory: (id: string) =>
     request<TemplateHistory>(`/api/templates/unit/history?id=${encodeURIComponent(id)}`),
+
+  // "Draft missing templates from approved notes" (#818, admin only). The GET
+  // says whether it can run and which slugs qualify; the POST drafts one
+  // bounded batch on the org's own key. A run makes several model calls, so
+  // the timeout is long.
+  getDraftMissingTemplates: () => request<DraftMissingPreview>(`/api/templates/draft-missing`),
+  draftMissingTemplates: (skipSlugs: string[]) =>
+    request<DraftMissingResult>(`/api/templates/draft-missing`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ skipSlugs }),
+      timeoutMs: 600_000,
+    }),
 
   // ── UI localization overrides (migration 0052) ──
   // No workspace claim: overrides live in the shared DB, the same for every

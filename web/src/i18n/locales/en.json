@@ -85,7 +85,21 @@
     "draftAllCancelled": "Stopped. Drafted {{n}} template(s).",
     "draftAllFailed": "Stopped after repeated failures ({{code}}). Drafted {{n}} template(s).",
     "draftAllDisabled": "AI isn't set up on this server. Whoever runs the server needs to connect the AI service.",
-    "draftDisabledValidated": "Un-approve first to draft over an approved translation."
+    "draftDisabledValidated": "Un-approve first to draft over an approved translation.",
+    "draftMissing": {
+      "button": "Draft missing templates from approved notes",
+      "running": "Drafting templates…",
+      "ready": "Note types ready to draft: {{n}}. Each has at least {{min}} approved notes and no approved template. One press drafts up to {{batch}} of them.",
+      "none": "No note type is ready to draft. A note type needs at least {{min}} approved notes, no approved template, and a template nobody has started.",
+      "notConfigured": "No AI key is set for this organization. An admin can add one under AI service.",
+      "unsupported": "Drafting templates from notes does not work with this AI provider ({{provider}}). It works with Claude and Gemini.",
+      "unavailable": "Drafting templates from notes is not available right now ({{reason}}).",
+      "failed": "Drafting stopped because of an error. Nothing more was changed. Try again later.",
+      "done": "Note types drafted: {{n}}. Still to draft: {{remaining}}. Review each AI draft and approve it.",
+      "cost": "Estimated cost: ${{cost}}.",
+      "notDrafted": "Not drafted: {{list}}.",
+      "builtFrom": "AI draft written from approved notes: {{n}}"
+    }
   },
   "import": {
     "searchPlaceholder": "Search books",

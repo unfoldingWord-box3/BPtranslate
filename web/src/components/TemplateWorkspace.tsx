@@ -34,6 +34,7 @@ import { AI_NEEDS_ORG_KEY, QUICK_DRAFTS_NEED_ORG_KEY } from "../lib/aiProviderEr
 import { MarkdownView } from "./MarkdownView";
 import { TemplateHistoryDialog } from "./TemplateHistoryDialog";
 import { HelpButton } from "../help/HelpButton";
+import { DraftMissingTemplatesButton, draftNoteCount } from "./DraftMissingTemplatesButton";
 
 type TemplateState = "ai_draft" | "edited" | "validated" | null;
 
@@ -219,6 +220,8 @@ export function TemplateWorkspace({ templateId, onNavigate, onBack }: Props) {
           <Typography variant="caption" color="text.secondary">
             {t("templates.approved", { n: validatedCount, total })}
           </Typography>
+          {/* #818: admin-only; renders nothing for editors. */}
+          <DraftMissingTemplatesButton onDrafted={refetch} />
           {bulkRunning ? (
             <Stack direction="row" alignItems="center" spacing={1}>
               <CircularProgress size={14} />
@@ -636,6 +639,11 @@ function TemplateEditor({ templateId, direction, onServerChange }: EditorProps) 
           sx={{ height: 20, fontFamily: "monospace" }}
         />
         <StateChip state={state} />
+        {state === "ai_draft" && draftNoteCount(unit.draft_meta_json) != null ? (
+          <Typography variant="caption" color="text.secondary">
+            {t("templates.draftMissing.builtFrom", { n: draftNoteCount(unit.draft_meta_json) })}
+          </Typography>
+        ) : null}
         <Box sx={{ flexGrow: 1 }} />
         <Tooltip title={t("templates.history")}>
           <IconButton size="small" onClick={() => setHistoryOpen(true)} sx={{ color: "text.secondary" }}>
