@@ -169,7 +169,7 @@ test("rapid check: type-filter mode draws lanes above every verse group", async 
   // No filter: no group heads, no group lanes.
   await expect(list.locator("[data-rapid-lanes]")).toHaveCount(0);
 
-  await page.getByRole("combobox", { name: /type/i }).click();
+  await page.locator('[aria-label="Filter notes by type"] [role="combobox"]').click();
   await page.locator(`li[role="option"][title="${slug}"]`).click();
 
   const groups = list.locator("[data-rapid-lanes]");

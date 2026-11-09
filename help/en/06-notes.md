@@ -44,10 +44,12 @@ On a screen at least 1200 pixels wide, such as most laptops, the **Rapid check**
 
 ![Rapid check at Obadiah 1:3: the verse at the top and its notes as rows](../screenshots/en/notes-rapid.png)
 
-The verse stays at the top while you scroll. Below it, each note of the verse is one row: its status, its tA type, the original-language quote, the **English note**, and your note. Choose a type under **All types** to list every note of that type in the chapter instead, grouped by verse.
+The verse stays at the top while you scroll. Below it, each note of the verse is one row: its status, its tA type, the original-language quote, the **English note**, and your note. Choose a type under **All types** to list every note of that type in the chapter instead, grouped by verse. Each verse group then starts with that verse's literal text (and the English ULT, when it is shown), with the quotes of the listed notes highlighted.
 
 - Click your note in any row to edit it. Select **Save** to keep it, or **Save & Approve** at the bottom to save and approve it.
 - The circle at the start of a row approves that note. It fills in when the note is approved. A note with unsaved typing has to be opened and saved first.
+- Click a filled circle to take the approval back. The note shows **Pending** again and a message says **Approval removed**. Click the circle again to approve it.
+- The pencil next to the current note's quote opens the quote picker, where you choose which original-language words the note is about.
 - **English note** above the list shows or hides the English column.
 
 Keys work once you click a blank part of the list or a note's type:
@@ -55,6 +57,7 @@ Keys work once you click a blank part of the list or a note's type:
 - **Enter** opens the editor. Inside it, **Ctrl+Enter** saves and approves, and **Esc** closes it. What you typed is kept.
 - **A** approves the current note, saving it first if you changed it, and moves on.
 - **E** shows or hides the English column. **U** shows or hides the English ULT, when the screen offers it.
+- **Q** opens the quote picker for the current note. **Esc** closes it.
 
 ## When you finish a chapter
 You see **OBA 1 notes complete** with a count of approved, edited and not-needed notes. Select **Continue to chapter 2** or **Review again**.
