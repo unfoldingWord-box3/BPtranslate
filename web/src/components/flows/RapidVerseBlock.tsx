@@ -44,6 +44,8 @@ export interface RapidLane {
   body?: ReactNode;
   /** A note above the text line. */
   caption?: ReactNode;
+  /** The chip can't be used yet (the lane's pref key isn't known). */
+  disabled?: boolean;
   /** The body draws its own label (the alignment strip): leave the label cell empty. */
   bodyHasLabel?: boolean;
 }
@@ -131,9 +133,12 @@ export function RapidVerseBlock({
           // After a pick (or Esc) the keyboard goes back to the list, so the
           // shortcuts work at once; MUI would otherwise refocus the combobox.
           onClose={() => {
-            requestAnimationFrame(() =>
-              document.querySelector<HTMLElement>("[data-rapid-check]")?.focus({ preventScroll: true }),
-            );
+            requestAnimationFrame(() => {
+              // Only when nothing else has taken focus meanwhile.
+              const a = document.activeElement;
+              if (a && a !== document.body && a.getAttribute("role") !== "combobox") return;
+              document.querySelector<HTMLElement>("[data-rapid-check]")?.focus({ preventScroll: true });
+            });
           }}
           sx={{
             fontSize: "0.875rem",
@@ -173,6 +178,7 @@ export function RapidVerseBlock({
             aria-label={l.toggleLabel}
             title={l.toggleLabel}
             onClick={l.onToggle}
+            disabled={l.disabled}
             data-rapid-lane-toggle={l.id}
             sx={{ flex: "none", fontWeight: 700, letterSpacing: "0.04em" }}
           />
