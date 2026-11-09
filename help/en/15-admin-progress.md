@@ -1,15 +1,15 @@
 ---
 id: admin-progress
-title: Progress and review state (admin)
-routes: [admin/progress, admin/review]
+title: Progress, review state and draft scorecard (admin)
+routes: [admin/progress, admin/review, admin/scorecard]
 roles: [admin]
-keywords: [progress, review state, approve, approved, validated, bulk, sweep, reopen, needs review, chapter, book, notes, questions, dashboard, percent]
+keywords: [progress, review state, approve, approved, validated, bulk, sweep, reopen, needs review, chapter, book, notes, questions, dashboard, percent, scorecard, draft quality, AI draft, unchanged, similarity, context pack, closing period]
 screenshots:
   - admin-progress-1 #/admin/progress
   - admin-progress-2 #/admin/review
 ---
 
-Two admin pages show and set how far the review has come. **Progress** shows the numbers. **Review state** changes the review state of many notes or questions at once. Only an admin can open them.
+Three admin pages show and set how far the review has come. **Progress** shows the numbers. **Review state** changes the review state of many notes or questions at once. **Draft scorecard** shows how good the AI drafts of approved notes were. Only an admin can open them.
 
 ![The Progress page with totals and the book package board](../screenshots/en/admin-progress-1.png)
 
@@ -41,3 +41,20 @@ Good to know:
 - The text of the notes does not change. The change is recorded in the history as an admin action.
 - These rows are not used as AI examples.
 - If the app says the change could not be confirmed, it may be partly or fully applied. Check the counts in the table before you try again.
+
+## Check the quality of AI drafts
+**Draft scorecard** compares each approved translation note with the last AI draft of it, chapter by chapter. Use it to see whether a change to the AI's guidance makes drafts better. It changes nothing.
+
+1. Open **Draft scorecard** in the admin menu.
+2. Choose the **Book**. The table shows one row per chapter, and **Whole book** at the bottom.
+3. Read the columns:
+   - **Approved notes**: approved translation notes in the chapter.
+   - **No draft logged**: notes with no AI draft on record. Edit history older than 180 days can be cleared.
+   - **Draft was English**: the AI draft was the English note, not translated. These notes are left out of the columns to the right.
+   - **Compared**: the notes the other columns are about.
+   - **Approved unchanged**: the share approved exactly as the AI wrote them.
+   - **Median similarity**: how much of a draft was kept, from 0 (all rewritten) to 1 (unchanged).
+   - **Period added after ]**: of the drafts that end with ] and no period, the share where the editor had to add the period.
+   - **Context pack**: the version of the guidance the AI was given, with how many notes used it. Hover over it to see the full name. **Run not on record** means the AI run has been cleared.
+
+If the English notes cannot be read, a message says so, and no draft is left out as English.
