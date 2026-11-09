@@ -294,7 +294,12 @@ function makeHiddenSetPref(key: string) {
     }
   };
   const listeners = new Set<(ids: string[]) => void>();
+  // In memory, so a storage that throws (private mode, quota) still keeps
+  // every toggle of this page view, not only the last one.
+  let current: string[] | null = null;
+  const get = (): string[] => (current ??= read());
   const write = (ids: string[]): void => {
+    current = ids;
     try {
       localStorage.setItem(key, JSON.stringify(ids));
     } catch {
@@ -303,11 +308,11 @@ function makeHiddenSetPref(key: string) {
     for (const listener of listeners) listener(ids);
   };
   const setHidden = (id: string, hidden: boolean): void => {
-    const rest = read().filter((v) => v !== id);
+    const rest = get().filter((v) => v !== id);
     write(hidden ? [...rest, id] : rest);
   };
   return function useHiddenSet(): [ReadonlySet<string>, (id: string, hidden: boolean) => void] {
-    const [ids, setIds] = useState<string[]>(read);
+    const [ids, setIds] = useState<string[]>(get);
     useEffect(() => {
       listeners.add(setIds);
       return () => {

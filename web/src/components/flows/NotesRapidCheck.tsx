@@ -168,7 +168,7 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
   // editor. When that drops focus to <body>, take it back to the list.
   useEffect(() => {
     const active = document.activeElement;
-    if (!active || active === document.body || !active.isConnected) {
+    if (!active || active === document.body || !active.isConnected || (active as HTMLButtonElement).disabled) {
       scrollRef.current?.focus({ preventScroll: true });
     }
   }, [currentId, editing, rows, showQuote, showEnglish]);
@@ -218,10 +218,10 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
     } else if (code === "KeyU" && !e.shiftKey && onToggleSourceUlt) {
       e.preventDefault();
       onToggleSourceUlt();
-    } else if (code === "BracketLeft" && !e.shiftKey) {
+    } else if (e.key === "[" || (code === "BracketLeft" && e.key !== "]")) {
       e.preventDefault();
       onPrevVerse?.();
-    } else if (code === "BracketRight" && !e.shiftKey) {
+    } else if (e.key === "]" || (code === "BracketRight" && e.key !== "[")) {
       e.preventDefault();
       onNextVerse?.();
     }

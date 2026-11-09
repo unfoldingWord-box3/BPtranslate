@@ -42,15 +42,17 @@ test("rapid check: hide lanes and the quote column, verse navigation, prefs pers
     }
   });
 
-  // Verses with notes, in queue order; start on the second so both
-  // directions have somewhere to go.
+  // Verses with notes, in queue order. The chapter intro (verse 0) is a stop
+  // too, the first one. Start on a real verse with a stop on either side.
   const chap = await fetchChapter(context.request, auth.token, BOOK, CHAPTER);
-  const live = (chap.tn as Row[]).filter((r) => r.trashed_at == null && r.verse > 0);
+  const live = (chap.tn as Row[]).filter((r) => r.trashed_at == null && r.chapter === CHAPTER);
   const byVerse = new Map<number, string[]>();
   for (const r of live) byVerse.set(r.verse, [...(byVerse.get(r.verse) ?? []), r.id]);
   const verses = [...byVerse.keys()].sort((a, b) => a - b);
-  expect(verses.length, `ZEC ${CHAPTER} needs 3+ verses with notes`).toBeGreaterThanOrEqual(3);
-  const [v1, v2, v3] = verses;
+  const startAt = verses.findIndex((v, i) => v > 0 && i > 0);
+  expect(startAt, `ZEC ${CHAPTER} needs a verse with stops on both sides`).toBeGreaterThan(0);
+  expect(verses.length).toBeGreaterThan(startAt + 1);
+  const [v1, v2, v3] = verses.slice(startAt - 1, startAt + 2);
 
   const page = await context.newPage();
   await page.setViewportSize({ width: 1366, height: 768 });
@@ -72,8 +74,8 @@ test("rapid check: hide lanes and the quote column, verse navigation, prefs pers
   await expect.poll(rowIds).toEqual(idsOf(v2));
   await page.keyboard.press("BracketLeft");
   await expect.poll(rowIds).toEqual(idsOf(v1));
-  // The first verse has no previous verse.
-  await expect(page.getByRole("button", { name: "Previous verse" })).toBeDisabled();
+  // The first stop has no previous one.
+  if (startAt === 1) await expect(page.getByRole("button", { name: "Previous verse" })).toBeDisabled();
   // The arrow button, from the keyboard.
   await page.getByRole("button", { name: "Next verse" }).focus();
   await page.keyboard.press("Enter");
@@ -140,7 +142,7 @@ test("rapid check: hide lanes and the quote column, verse navigation, prefs pers
   await page.screenshot({ path: test.info().outputPath("rapid-columns-1366x768.png") });
 
   // ── a click anywhere on a row selects it; Close and Discard ───────────
-  const vMulti = verses.find((v) => byVerse.get(v)!.length >= 2);
+  const vMulti = verses.find((v) => v > 0 && byVerse.get(v)!.length >= 2);
   expect(vMulti, `ZEC ${CHAPTER} needs a verse with 2+ notes`).toBeDefined();
   await page.goto(`/#/notes/${BOOK}/${CHAPTER}/${vMulti}`);
   await expect.poll(rowIds).toEqual(idsOf(vMulti!));

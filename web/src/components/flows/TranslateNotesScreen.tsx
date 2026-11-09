@@ -2873,6 +2873,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
                 shown: showSourceUlt,
                 onToggle: () => setShowSourceUlt(!showSourceUlt),
                 toggleLabel: t("flowTranslate.toggleSourceUlt", { label: sourceUltLabel }),
+                bodyHasLabel: ultAlignmentOn && sourceUltStrip != null && sourceUltStrip.length > 0,
                 text: sourceUltText,
                 segments: sourceUltSegments,
                 // The same states the card view's source lane shows.
@@ -2915,7 +2916,9 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
           id: litLaneId,
           label: litLabel,
           shown: !rapidHiddenLanes.has(litLaneId),
-          onToggle: () => setRapidHiddenLane(litLaneId, !rapidHiddenLanes.has(litLaneId)),
+          // Until the project config arrives the id is a placeholder: a
+          // toggle then would be saved under the wrong key.
+          onToggle: () => projectConfig && setRapidHiddenLane(litLaneId, !rapidHiddenLanes.has(litLaneId)),
           toggleLabel: t("flowTranslate.rapid.cols.laneToggle", { label: litLabel }),
           text: ultText,
           segments: ultSegments,
@@ -2924,7 +2927,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
           id: simLaneId,
           label: simLabel,
           shown: !rapidHiddenLanes.has(simLaneId),
-          onToggle: () => setRapidHiddenLane(simLaneId, !rapidHiddenLanes.has(simLaneId)),
+          onToggle: () => projectConfig && setRapidHiddenLane(simLaneId, !rapidHiddenLanes.has(simLaneId)),
           toggleLabel: t("flowTranslate.rapid.cols.laneToggle", { label: simLabel }),
           text: ustText,
           segments: ustSegments,

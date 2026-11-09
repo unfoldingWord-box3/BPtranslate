@@ -101,7 +101,7 @@ export function RapidColumnHeader({
       title={t("flowTranslate.rapid.cols.hide", { name })}
       data-rapid-col-hide={col}
       onClick={() => toggle(col, true)}
-      sx={{ padding: "2px", color: "text.secondary", opacity: 0.75, "&:hover, &:focus-visible": { opacity: 1 } }}
+      sx={{ padding: "5px", margin: "-3px", color: "text.secondary", opacity: 0.75, "&:hover, &:focus-visible": { opacity: 1 } }}
     >
       <VisibilityOffOutlinedIcon sx={{ fontSize: 14 }} />
     </IconButton>
@@ -168,20 +168,25 @@ export function RapidColumnHeader({
           open={keysAnchor != null}
           anchorEl={keysAnchor}
           onClose={() => setKeysAnchor(null)}
+          // Keys typed while the list is open must not act on the notes
+          // behind it (React bubbles portal events to the list's handler).
+          onKeyDown={(e) => e.stopPropagation()}
           anchorOrigin={{ vertical: "bottom", horizontal: side }}
           transformOrigin={{ vertical: "top", horizontal: side }}
-          slotProps={{ paper: { sx: { p: 1.5, maxWidth: 360 } } }}
+          slotProps={{
+            paper: { role: "dialog", "aria-label": t("flowTranslate.rapid.cols.keys"), sx: { p: 1.5, maxWidth: 360 } },
+          }}
         >
           <Box
             component="dl"
-            aria-label={t("flowTranslate.rapid.cols.keys")}
             sx={{ m: 0, display: "grid", gridTemplateColumns: "auto 1fr", columnGap: 1.5, rowGap: 0.75, fontSize: "0.8125rem" }}
           >
             {keys.map(([ks, what]) => (
               <Box key={ks.join("+")} sx={{ display: "contents" }}>
                 <Box component="dt" sx={{ display: "flex", gap: 0.5 }}>
                   {ks.map((k) => (
-                    <Box key={k} component="kbd" sx={kbdSx}>{k}</Box>
+                    // dir="ltr": "[" and "]" would be drawn mirrored in Arabic.
+                    <Box key={k} component="kbd" dir="ltr" sx={kbdSx}>{k}</Box>
                   ))}
                 </Box>
                 <Box component="dd" sx={{ m: 0 }}>{what}</Box>

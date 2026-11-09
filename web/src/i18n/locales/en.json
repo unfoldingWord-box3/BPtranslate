@@ -1743,9 +1743,9 @@
       "changedElsewhere": "Someone changed this note since it was shown. It has been reloaded; check it before approving.",
       "nav": {
         "prevVerse": "Previous verse",
-        "prevVerseTitle": "Previous verse ( [ )",
+        "prevVerseTitle": "Previous verse ([)",
         "nextVerse": "Next verse",
-        "nextVerseTitle": "Next verse ( ] )",
+        "nextVerseTitle": "Next verse (])",
         "picker": "Go to verse",
         "option": "{{ref}} ({{count}})",
         "keyVerse": "previous / next verse"

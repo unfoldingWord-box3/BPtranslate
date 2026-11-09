@@ -44,6 +44,8 @@ export interface RapidLane {
   body?: ReactNode;
   /** A note above the text line. */
   caption?: ReactNode;
+  /** The body draws its own label (the alignment strip): leave the label cell empty. */
+  bodyHasLabel?: boolean;
 }
 
 /** One verse of the chapter that has notes, as the picker lists it. */
@@ -124,15 +126,22 @@ export function RapidVerseBlock({
           }}
           renderValue={() => reference}
           displayEmpty
-          aria-label={t("flowTranslate.rapid.nav.picker")}
-          inputProps={{ "data-rapid-verse-picker": "" }}
+          // On the combobox itself (Select's own aria-label lands on a wrapper).
+          inputProps={{ "aria-label": t("flowTranslate.rapid.nav.picker"), "data-rapid-verse-picker": "" }}
+          // After a pick (or Esc) the keyboard goes back to the list, so the
+          // shortcuts work at once; MUI would otherwise refocus the combobox.
+          onClose={() => {
+            requestAnimationFrame(() =>
+              document.querySelector<HTMLElement>("[data-rapid-check]")?.focus({ preventScroll: true }),
+            );
+          }}
           sx={{
             fontSize: "0.875rem",
             fontWeight: 700,
             color: refColor,
             "& .MuiSelect-select": { paddingBlock: 0.25 },
           }}
-          MenuProps={{ slotProps: { paper: { sx: { maxHeight: 360 } } } }}
+          MenuProps={{ disableRestoreFocus: true, slotProps: { paper: { sx: { maxHeight: 360 } } } }}
         >
           {stops.map((s) => (
             <MenuItem key={s.key} value={s.key} dense>
@@ -190,7 +199,7 @@ export function RapidVerseBlock({
                 data-rapid-lane={l.id}
                 sx={{ fontSize: "0.656rem", fontWeight: 700, letterSpacing: "0.08em", color: "text.secondary" }}
               >
-                {l.label}
+                {l.bodyHasLabel ? null : l.label}
               </Box>
               <Box sx={{ minWidth: 0 }}>
                 {l.caption}
