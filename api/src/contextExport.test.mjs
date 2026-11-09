@@ -834,7 +834,7 @@ console.log("contextExport — examples/validated.jsonl is bounded (#813)");
   const huge = { resource: "tn", rowId: "huge", book: "LUK", ref: "10:99", supportReference: null, source: "x".repeat(3000), target: "t", validated_at: 1015 };
   const withHuge = selectPackExamples([huge, ...all], 8, 4, 2000);
   assert(!withHuge.includes(huge) && withHuge.length > 0, "a row bigger than the ceiling is skipped, smaller rows still fit");
-  assert(selectPackExamples([huge], 8, 4, 2000).length === 1, "the ceiling never empties a non-empty selection");
+  assert(selectPackExamples([{ ...huge, validated_at: 99999 }, ...all], 8, 4, 2000).every((l) => l.rowId !== "huge"), "an oversized newest row is skipped too");
 
   // Spelling variants of one SupportReference share a quota (readers match on the slug).
   const variants = Array.from({ length: 12 }, (_, i) => ({

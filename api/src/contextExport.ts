@@ -328,7 +328,9 @@ const CHAPTER_RECENCY_ROWS = 5;
 /**
  * Hard ceiling on the file, whatever the data: many distinct SupportReference
  * values or very long chapters could otherwise grow it again. Rows are added
- * newest first and any row that no longer fits is skipped.
+ * newest first and any row that no longer fits is skipped. Only a set of rows
+ * each larger than the ceiling (a note over 4 MB) could leave nothing, and then
+ * the pack simply has no examples file, which the runners treat as optional.
  * Well under the runners' 16 MB examples-file cap (contextPack.ts).
  */
 export const EXAMPLES_MAX_BYTES = 4_000_000;
@@ -398,9 +400,7 @@ export function selectPackExamples(
   for (const l of newestFirst) {
     if (!keep.has(l)) continue;
     const size = enc.encode(JSON.stringify(l)).byteLength + 1;
-    // Never let the ceiling empty a non-empty selection: an empty file would
-    // delete the previous one from the repo and runners would lose every example.
-    if (bytes + size > maxBytes && out.length > 0) continue;
+    if (bytes + size > maxBytes) continue;
     bytes += size;
     out.push(l);
   }
