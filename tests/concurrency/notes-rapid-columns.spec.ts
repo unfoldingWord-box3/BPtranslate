@@ -5,11 +5,13 @@ import { fetchChapter, newUserContext, type TnRow } from "./helpers";
 // hiding the original-language quote column from its own header and bringing
 // it back from the restore chip, both choices surviving a reload, and moving
 // between verses with the [ and ] keys, the arrow buttons and the verse
-// picker. Everything is driven from the keyboard except the picker.
+// picker. Everything is driven from the keyboard except the picker. Then a
+// click on a row's quote selects that row, and the editor's Close (keeps the
+// typing as a draft) and Discard changes (back to the saved text).
 //
-// READ-ONLY: lane and column choices are browser prefs and verse moves only
-// move the cursor, so it opens ZEC 3 (the rapid check chapter) without
-// writing to it.
+// READ-ONLY on the server: lane and column choices are browser prefs, verse
+// moves only move the cursor, and Close / Discard only touch this browser's
+// drafts store. So it opens ZEC 3 (the rapid check chapter) without writing.
 
 const BOOK = "ZEC";
 const CHAPTER = 3;
@@ -136,4 +138,49 @@ test("rapid check: hide lanes and the quote column, verse navigation, prefs pers
   await page.keyboard.press("Escape");
 
   await page.screenshot({ path: test.info().outputPath("rapid-columns-1366x768.png") });
+
+  // ── a click anywhere on a row selects it; Close and Discard ───────────
+  const vMulti = verses.find((v) => byVerse.get(v)!.length >= 2);
+  expect(vMulti, `ZEC ${CHAPTER} needs a verse with 2+ notes`).toBeDefined();
+  await page.goto(`/#/notes/${BOOK}/${CHAPTER}/${vMulti}`);
+  await expect.poll(rowIds).toEqual(idsOf(vMulti!));
+  const current = list.locator('[data-rapid-row][aria-current="true"]');
+  const other = list.locator('[data-rapid-row]:not([aria-current="true"])').first();
+  const otherId = (await other.getAttribute("data-rapid-row"))!;
+  await other.locator("[data-rapid-quote]").click();
+  await expect(current).toHaveAttribute("data-rapid-row", otherId);
+  await expect(list).toBeFocused();
+
+  // Close keeps the typing as an unsaved draft (what Esc does).
+  const editor = list.locator('textarea:not([aria-hidden="true"])');
+  await page.keyboard.press("Enter");
+  await expect(editor).toBeVisible();
+  const saved = await editor.inputValue();
+  const typed = `Close keeps this draft ${Date.now()}`;
+  await editor.fill(typed);
+  await list.getByRole("button", { name: "Close" }).click();
+  await expect(editor).toBeHidden();
+  await expect(current).toContainText(typed);
+  await page.goto(`/#/notes/${BOOK}/${CHAPTER}/${vMulti}?row=${otherId}`);
+  await page.reload();
+  await expect(current).toHaveAttribute("data-rapid-row", otherId, { timeout: 20_000 });
+  await expect(current).toContainText(typed);
+
+  // Discard puts the saved text back, leaves the server alone, and no draft
+  // returns after a reload.
+  await list.focus();
+  await page.keyboard.press("Enter");
+  await expect(editor).toHaveValue(typed);
+  await list.getByRole("button", { name: "Discard changes" }).click();
+  await expect(editor).toBeHidden();
+  await expect(current).not.toContainText(typed);
+  const after = await fetchChapter(context.request, auth.token, BOOK, CHAPTER);
+  const serverNote = (after.tn as Row[]).find((r) => r.id === otherId)?.note ?? "";
+  expect(serverNote).not.toContain("Close keeps this draft");
+  await page.reload();
+  await expect(current).toHaveAttribute("data-rapid-row", otherId, { timeout: 20_000 });
+  await list.focus();
+  await page.keyboard.press("Enter");
+  await expect(editor).toHaveValue(saved);
+  await expect(list.getByRole("button", { name: "Discard changes" })).toHaveCount(0);
 });

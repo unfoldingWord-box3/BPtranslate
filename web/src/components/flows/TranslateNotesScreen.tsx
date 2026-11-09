@@ -2213,7 +2213,49 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
           },
         }}
       />
-      <Stack direction="row" justifyContent="flex-end" sx={{ mt: 1 }}>
+      <Stack direction="row" justifyContent="flex-end" spacing={0.5} sx={{ mt: 1 }}>
+        {rapidReady && hasDiff && (
+          // Rapid check only: put the note back to its saved text. The
+          // persist effect then clears this row's stored draft (draftValue
+          // equals the baseline again), the same path a type-back takes, so
+          // nothing comes back after a reload. The server is not touched.
+          <Button
+            disabled={busy || redoing}
+            onClick={() => {
+              setDraftValue(baseline);
+              setEditing(false);
+            }}
+            sx={{ minHeight: 44, color: "text.secondary", fontWeight: 700 }}
+          >
+            {t("flowTranslate.rapid.editor.discard")}
+          </Button>
+        )}
+        {rapidReady && (
+          // Rapid check only: close the editor and keep the typing as an
+          // unsaved draft, exactly what Esc does.
+          <Button
+            onClick={() => setEditing(false)}
+            title={t("flowTranslate.rapid.editor.closeTitle")}
+            sx={{ minHeight: 44, color: "text.secondary", fontWeight: 700, gap: 0.75 }}
+          >
+            {t("flowTranslate.rapid.editor.close")}
+            <Box
+              component="kbd"
+              sx={{
+                fontFamily: "ui-monospace, Menlo, monospace",
+                fontSize: "0.6875rem",
+                fontWeight: 400,
+                border: "1px solid",
+                borderColor: "divider",
+                borderBottomWidth: 2,
+                borderRadius: "4px",
+                paddingInline: "4px",
+              }}
+            >
+              Esc
+            </Box>
+          </Button>
+        )}
         <Button
           // editLocked: a lock that arrived mid-edit (a translate run
           // now holds this note) disables Save too, not just entering

@@ -315,7 +315,20 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
                   role="listitem"
                   data-rapid-row={r.id}
                   aria-current={r.isCurrent ? "true" : undefined}
+                  // A click anywhere on the row makes it current (the type/ref
+                  // button stays the keyboard way in). Controls keep their own
+                  // click, and a click that ends a text selection selects text.
+                  onClick={(e) => {
+                    if (r.isCurrent) return;
+                    const el = e.target as HTMLElement;
+                    if (el.closest('button, a, input, textarea, label, [role="button"], [role="checkbox"]')) return;
+                    const sel = window.getSelection();
+                    if (sel && !sel.isCollapsed && sel.anchorNode && e.currentTarget.contains(sel.anchorNode)) return;
+                    onSelect(r.idx);
+                  }}
                   sx={{
+                    cursor: r.isCurrent ? "default" : "pointer",
+                    "&:hover": r.isCurrent ? undefined : { bgcolor: "action.hover" },
                     display: "grid",
                     gridTemplateColumns: cols,
                     gap: 1.5,

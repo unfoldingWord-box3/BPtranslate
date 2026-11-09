@@ -1758,6 +1758,11 @@
         "keys": "Keyboard shortcuts",
         "keyEnglish": "show or hide the English column",
         "keySourceUlt": "show or hide the source text lane"
+      },
+      "editor": {
+        "close": "Close",
+        "closeTitle": "Close the editor and keep what you typed as an unsaved draft (Esc)",
+        "discard": "Discard changes"
       }
     }
   },

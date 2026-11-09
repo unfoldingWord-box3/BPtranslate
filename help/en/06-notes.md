@@ -46,7 +46,8 @@ On a screen at least 1200 pixels wide, such as most laptops, the **Rapid check**
 
 The verse stays at the top while you scroll, one short line per scripture text. Below it, each note of the verse is one row: its status, its tA type, the original-language quote, the **English note**, and your note. Choose a type under **All types**, on the verse's top line, to list every note of that type in the chapter instead, grouped by verse.
 
-- Click your note in any row to edit it. Select **Save** to keep it, or **Save & Approve** at the bottom to save and approve it.
+- Click your note in any row to edit it. Select **Save** to keep it, or **Save & Approve** at the bottom to save and approve it. Click anywhere else in a row to make it the current note without editing.
+- In the editor, **Close** (or **Esc**) closes it and keeps what you typed as an unsaved draft. **Discard changes**, shown once you have changed the note, puts back the saved text and closes the editor.
 - The circle at the start of a row approves that note. It fills in when the note is approved. A note with unsaved typing has to be opened and saved first.
 - To move to another verse, use the arrows on either side of the reference at the top, or select the reference to pick a verse from the list. The list shows only verses that have notes, with how many each has.
 - The short names at the end of the verse's top line, such as **ULT** and **UST**, show or hide each scripture text. A name stays there while its text is hidden, so you can always bring it back.
