@@ -494,8 +494,9 @@ export function renderContextPack(input: {
     files.push({ path: "terminology/terms.csv", content: serializeTermsCsv([...input.terms]) });
   }
 
-  if (examples.lines.length > 0) {
-    files.push({ path: EXAMPLES_PATH, content: renderValidatedJsonl(selectPackExamples(examples.lines)) });
+  const selectedExamples = selectPackExamples(examples.lines);
+  if (selectedExamples.length > 0) {
+    files.push({ path: EXAMPLES_PATH, content: renderValidatedJsonl(selectedExamples) });
   }
 
   const templatesTsv = renderTemplatesTsv(input.templates);

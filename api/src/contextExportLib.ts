@@ -144,8 +144,8 @@ export function contextShrinkRefused(
     }
   }
   const prevBytes = previous.guardBytes;
-  const nextBytes = next.guardBytes ?? next.totalBytes;
-  if (prevBytes != null && prevBytes > 0) {
+  const nextBytes = next.guardBytes;
+  if (prevBytes != null && prevBytes > 0 && nextBytes != null) {
     const lost = prevBytes - nextBytes;
     if (lost / prevBytes > 0.1) {
       return { metric: "totalBytes", previous: prevBytes, next: nextBytes };
