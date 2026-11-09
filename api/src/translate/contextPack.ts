@@ -323,7 +323,9 @@ export function parseTermsCsv(text: unknown): PackTerm[] {
 }
 
 /**
- * Parse validated.jsonl with tombstone last-line-wins on (resource, rowId).
+ * Parse validated.jsonl with tombstone last-line-wins on (resource, book, rowId).
+ * Row ids are unique only within a book (#822); a line without `book` keys on an
+ * empty book, so packs written before the writer emitted `book` dedupe as before.
  */
 export function parseExamplesJsonl(text: unknown): PackExample[] {
   const byKey = new Map<string, PackExample>();
@@ -342,7 +344,8 @@ export function parseExamplesJsonl(text: unknown): PackExample[] {
     seq += 1;
     const resource = o.resource ? String(o.resource) : "tn";
     const rowId = o.rowId != null ? String(o.rowId) : `anon-${seq}`;
-    const key = `${resource}\0${rowId}`;
+    const book = o.book ? String(o.book) : null;
+    const key = `${resource}\0${book ?? ""}\0${rowId}`;
     if (o.tombstone) {
       byKey.delete(key);
       continue;
@@ -351,7 +354,7 @@ export function parseExamplesJsonl(text: unknown): PackExample[] {
     byKey.set(key, {
       resource,
       rowId,
-      book: o.book ? String(o.book) : null,
+      book,
       ref: o.ref ? String(o.ref) : null,
       supportReference: o.supportReference ? String(o.supportReference) : null,
       source: nfc(String(o.source)),
