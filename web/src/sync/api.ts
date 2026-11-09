@@ -2100,11 +2100,27 @@ export const api = {
   // `bulk`: set by Approve-all loops. A one-at-a-time approval clears a bulk
   // approval stamp (the row becomes an AI example again); Approve-all is itself
   // a bulk approval and keeps it (#414).
-  validateNote: (id: string, book: string, value: boolean, opts?: { bulk?: boolean }) =>
+  // expectedVersion / expectedState: approve only if the row is still at the
+  // version and translation_state the caller showed (If-Match + expected_state;
+  // 409 otherwise, and a trashed row is refused). Rapid check's circle sends
+  // both for a note the user never opened.
+  validateNote: (
+    id: string,
+    book: string,
+    value: boolean,
+    opts?: { bulk?: boolean; expectedVersion?: number; expectedState?: "ai_draft" | "edited" },
+  ) =>
     request<TnRow>(`/api/rows/tn/${encodeURIComponent(id)}/validate?book=${encodeURIComponent(book)}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ value: value ? 1 : 0, ...(opts?.bulk ? { bulk: true } : {}) }),
+      headers: {
+        "Content-Type": "application/json",
+        ...(opts?.expectedVersion != null ? { "If-Match": String(opts.expectedVersion) } : {}),
+      },
+      body: JSON.stringify({
+        value: value ? 1 : 0,
+        ...(opts?.bulk ? { bulk: true } : {}),
+        ...(opts?.expectedState ? { expected_state: opts.expectedState } : {}),
+      }),
     }),
 
   // Translation-mode "Approve" for translationQuestions — the tQ analogue of

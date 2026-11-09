@@ -60,16 +60,19 @@ export function parseArticle(text, file) {
     const parts = item.split(/\s+/);
     let phone = false;
     let top = false;
-    // Trailing flags, any order: `phone`, `top`.
+    let rapid = false;
+    // Trailing flags, any order: `phone`, `top`, `rapid` (the notes screen's
+    // rapid check layout, switched on before the page loads).
     for (;;) {
       const last = parts[parts.length - 1];
       if (last === "phone") phone = true;
       else if (last === "top") top = true;
+      else if (last === "rapid") rapid = true;
       else break;
       parts.pop();
     }
-    if (parts.length !== 2) fail(`malformed screenshot line "${item}" (want: <name> <hash> [phone] [top])`);
-    return { name: parts[0], hash: parts[1], phone, top };
+    if (parts.length !== 2) fail(`malformed screenshot line "${item}" (want: <name> <hash> [phone] [top] [rapid])`);
+    return { name: parts[0], hash: parts[1], phone, top, rapid };
   });
   const body = lines.slice(end + 1).join("\n").replace(/^\n+/, "");
   const headings = [];

@@ -53,7 +53,7 @@ Front-matter fields (a small fixed subset of YAML: `key: value`,
 | `routes` | Route keys this article explains. A route key is a `view` from `Location` in `web/src/App.tsx`, or `admin/<section>` for the admin desk. The Help panel opens to the article that lists the current screen's key. Each key belongs to exactly one article. |
 | `roles` | Who the article is for: any of `editor`, `admin`, `viewer`. |
 | `keywords` | Extra words for search, including words a user might type that the text doesn't use. |
-| `screenshots` | English articles only. One line per picture: `<name> <hash> [phone] [top]` (flags in any order). The capture run opens `<hash>` on the seeded test data (book OBA) in each language and saves `screenshots/<lang>/<name>.png`. `phone` captures at phone width instead of desktop. `top` scrolls the page and every scrollable area back to the top before the picture, for screens that open part-way down. |
+| `screenshots` | English articles only. One line per picture: `<name> <hash> [phone] [top]` (flags in any order). The capture run opens `<hash>` on the seeded test data (book OBA) in each language and saves `screenshots/<lang>/<name>.png`. `phone` captures at phone width instead of desktop. `top` scrolls the page and every scrollable area back to the top before the picture, for screens that open part-way down. `rapid` turns on the notes screen's **Rapid check** layout first. |
 
 Body rules:
 
