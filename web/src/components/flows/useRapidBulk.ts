@@ -1,0 +1,453 @@
+// Rapid check bulk actions (issue #829): Approve, Redo with AI and Not needed
+// on the notes the translator has checked in NotesRapidCheck. Kept out of
+// TranslateNotesScreen so that file only wires it up.
+//
+// Every bulk action applies the per-row safety rules of the status circle
+// (approveOtherRow, #828) to each row: a note with unsaved typing (a draft in
+// the store, or the open note's live diff) or any write still in the outbox is
+// skipped and reported, never acted on. Rows run one at a time, a failure
+// skips that row, and 401/403 stop the run (ReviewQueue.handleApproveAll).
+//
+// Decisions (see the PR for #829):
+// - Approve sends `bulk: true`. A checked range is not a one-at-a-time read of
+//   each note, so it keeps any admin_bulk_state stamp (api/src/rows.ts,
+//   HAND_APPROVAL_CLAUSE): a stamped row stays out of the AI examples until a
+//   person approves it on its own. The open note with an unsaved edit goes
+//   through the screen's handleApprove (save, then approve), which is a hand
+//   approval like Ctrl+Enter.
+// - Approve has no Undo: un-approving sets 'edited', not the state the note
+//   had before (validateNote(id, book, false)), so an "Undo" would not undo.
+// - Not needed has Undo: trash only sets trashed_at, and restore clears it.
+// - Redo with AI starts ONE row-scoped translate job for the checked notes
+//   (pipelineStore.start with translate.rowIds, the path the intro Redo and
+//   the classic note card's re-run use), not one AI call per note. The server
+//   takes at most 50 row ids per job, so larger selections go in chunks.
+
+import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import type { TFunction } from "i18next";
+import { api, ApiError, isChapterLockedBody, type TnRow } from "../../sync/api";
+import { outbox } from "../../sync/outbox";
+import { pipelineStore, getSessionKey } from "../../sync/pipelineStore";
+import { isApprovableRow } from "../../lib/reviewApproval";
+import { isAiProviderNotConfigured } from "../../lib/aiProviderErrors";
+import { redoOutcome } from "../../lib/applySkipped";
+
+type CardStatus = "approved" | "skipped";
+
+// The server's cap on translate.rowIds (api/src/pipelines.ts TranslateOptions).
+const MAX_ROWS_PER_JOB = 50;
+
+type SkipReason = "unsaved" | "pending" | "changed" | "locked" | "noDraft" | "approved" | "notNeeded" | "failed";
+const REASONS: SkipReason[] = ["unsaved", "pending", "changed", "locked", "noDraft", "approved", "notNeeded", "failed"];
+
+export interface RapidBulkResult {
+  text: string;
+  severity: "success" | "info" | "warning";
+}
+
+export interface RapidBulkArgs {
+  book: string;
+  chapter: number;
+  /** The open note (the screen's cursor row). */
+  currentId: string | null;
+  /** The open note has typing that differs from its saved text. */
+  hasDiff: boolean;
+  /** Other notes with unsaved typing in the drafts store. */
+  draftRowIds: ReadonlySet<string>;
+  rowById: ReadonlyMap<string, TnRow>;
+  statuses: Record<string, CardStatus>;
+  setStatuses: Dispatch<SetStateAction<Record<string, CardStatus>>>;
+  applyLocalRowReplacement: (kind: "tn", row: TnRow) => void;
+  refetch: () => Promise<unknown>;
+  /** Refetch and re-seed the open note from the new data. */
+  reload: () => void;
+  busy: boolean;
+  setBusy: (b: boolean) => void;
+  setEditing: (b: boolean) => void;
+  /** The screen's Save & approve for the open note; true when it approved. */
+  handleApprove: () => Promise<boolean>;
+  aiUnavailable: string | null;
+  t: TFunction;
+}
+
+export function useRapidBulk(a: RapidBulkArgs) {
+  const { book, chapter, t } = a;
+  const scope = `${book}:${chapter}`;
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState<(RapidBulkResult & { scope: string }) | null>(null);
+  // The rows the last Not needed set aside, and the status each had before,
+  // so Undo puts back exactly what that action changed.
+  const [undoable, setUndoable] = useState<{ scope: string; ids: string[]; prev: Record<string, CardStatus | undefined> } | null>(null);
+  // Redo jobs this screen started: job id → the row ids it covers.
+  const redoJobsRef = useRef(new Map<string, string[]>());
+
+  function summarize(lead: string, skipped: Record<SkipReason, number>, stopped: boolean): RapidBulkResult {
+    const parts = REASONS.filter((r) => skipped[r] > 0).map((r) => t(`flowTranslate.rapid.bulk.why.${r}`, { count: skipped[r] }));
+    const total = REASONS.reduce((n, r) => n + skipped[r], 0);
+    let text = lead;
+    if (total > 0) {
+      text += " " + t("flowTranslate.rapid.bulk.skipped", { count: total, reasons: parts.join(t("flowTranslate.rapid.bulk.listSep")) });
+    }
+    if (stopped) text += " " + t("flowTranslate.rapid.bulk.stopped");
+    return { text, severity: total > 0 || stopped ? "warning" : "success" };
+  }
+
+  const emptySkips = (): Record<SkipReason, number> =>
+    Object.fromEntries(REASONS.map((r) => [r, 0])) as Record<SkipReason, number>;
+
+  // Rows the server would reject for an edit still waiting in this browser.
+  // An unreadable outbox counts as pending for every row (fail closed).
+  async function pendingRowIds(): Promise<Set<string> | null> {
+    const ops = await outbox.listWithUncommitted().catch(() => null);
+    if (!ops) return null;
+    const s = new Set<string>();
+    for (const o of ops) {
+      if (o.target.kind === "row" && o.target.rowKind === "tn" && o.target.book === book) s.add(o.target.id);
+    }
+    return s;
+  }
+
+  function unsaved(id: string): boolean {
+    return id === a.currentId ? a.hasDiff : a.draftRowIds.has(id);
+  }
+
+  function show(r: RapidBulkResult) {
+    setResult({ ...r, scope });
+  }
+
+  function failureKind(err: unknown): "stop" | "locked" | "changed" | "noDraft" | "failed" {
+    if (!(err instanceof ApiError)) return "failed";
+    if (err.status === 401 || err.status === 403) return "stop";
+    if (isChapterLockedBody(err.body)) return "locked";
+    if (err.status === 409) return "changed";
+    if (err.status === 404) return "noDraft";
+    return "failed";
+  }
+
+  /** Approve the checked notes. Returns the ids left unapproved. */
+  async function approve(ids: string[]): Promise<string[]> {
+    if (running || a.busy || ids.length === 0) return ids;
+    setRunning(true);
+    setResult(null);
+    setUndoable(null);
+    const skipped = emptySkips();
+    const left: string[] = [];
+    let approved = 0;
+    let stopped = false;
+    let refetchNeeded = false;
+    try {
+      let others = ids;
+      // The open note with an unsaved edit: Save & approve, as Ctrl+Enter
+      // does (D2 in the design record). It runs first, while the screen's
+      // handler still holds the text the user is looking at.
+      if (a.currentId && a.hasDiff && ids.includes(a.currentId)) {
+        others = ids.filter((id) => id !== a.currentId);
+        if (await a.handleApprove()) approved++;
+        else {
+          skipped.failed++;
+          left.push(a.currentId);
+        }
+      }
+      a.setBusy(true);
+      const pending = await pendingRowIds();
+      for (const id of others) {
+        const r = a.rowById.get(id);
+        if (!r) {
+          skipped.failed++;
+          left.push(id);
+          continue;
+        }
+        if (unsaved(id)) {
+          skipped.unsaved++;
+          left.push(id);
+          continue;
+        }
+        if (a.statuses[id] === "approved") continue; // already approved: nothing to do
+        if (a.statuses[id] === "skipped" || r.trashed_at != null) {
+          skipped.notNeeded++;
+          left.push(id);
+          continue;
+        }
+        if (!isApprovableRow(r)) {
+          skipped.noDraft++;
+          left.push(id);
+          continue;
+        }
+        if (!pending || pending.has(id)) {
+          skipped.pending++;
+          left.push(id);
+          continue;
+        }
+        try {
+          // Approve exactly what is on screen: a peer's edit or set-aside
+          // since then comes back 409 instead of being approved unseen.
+          const updated = await api.validateNote(id, book, true, {
+            bulk: true,
+            expectedVersion: r.version,
+            expectedState: r.translation_state === "ai_draft" || r.translation_state === "edited" ? r.translation_state : undefined,
+          });
+          a.applyLocalRowReplacement("tn", updated);
+          a.setStatuses((prev) => ({ ...prev, [id]: "approved" }));
+          approved++;
+        } catch (err) {
+          const kind = failureKind(err);
+          left.push(id);
+          if (kind === "stop") {
+            stopped = true;
+            break;
+          }
+          skipped[kind]++;
+          if (kind === "changed") refetchNeeded = true;
+        }
+      }
+    } finally {
+      a.setBusy(false);
+      setRunning(false);
+    }
+    // One refetch for the whole run, not one per 409.
+    if (refetchNeeded) void a.refetch();
+    show(summarize(t("flowTranslate.rapid.bulk.approved", { count: approved }), skipped, stopped));
+    return left;
+  }
+
+  /** Mark the checked notes Not needed. Returns the ids left untouched. */
+  async function notNeeded(ids: string[]): Promise<string[]> {
+    if (running || a.busy || ids.length === 0) return ids;
+    setRunning(true);
+    setResult(null);
+    setUndoable(null);
+    a.setBusy(true);
+    const skipped = emptySkips();
+    const left: string[] = [];
+    const done: string[] = [];
+    const prev: Record<string, CardStatus | undefined> = {};
+    let stopped = false;
+    try {
+      const pending = await pendingRowIds();
+      for (const id of ids) {
+        const r = a.rowById.get(id);
+        if (!r) {
+          skipped.failed++;
+          left.push(id);
+          continue;
+        }
+        // Unsaved typing would be lost: set-aside clears a note's draft, and
+        // Undo (restore) cannot bring the typing back.
+        if (unsaved(id)) {
+          skipped.unsaved++;
+          left.push(id);
+          continue;
+        }
+        if (a.statuses[id] === "skipped" || r.trashed_at != null) continue; // already set aside
+        if (!pending || pending.has(id)) {
+          skipped.pending++;
+          left.push(id);
+          continue;
+        }
+        try {
+          const updated = await api.trashNote(id, book);
+          prev[id] = a.statuses[id];
+          a.applyLocalRowReplacement("tn", updated);
+          a.setStatuses((p) => ({ ...p, [id]: "skipped" }));
+          if (id === a.currentId) a.setEditing(false);
+          done.push(id);
+        } catch (err) {
+          const kind = failureKind(err);
+          left.push(id);
+          if (kind === "stop") {
+            stopped = true;
+            break;
+          }
+          skipped[kind === "changed" || kind === "noDraft" ? "failed" : kind]++;
+        }
+      }
+    } finally {
+      a.setBusy(false);
+      setRunning(false);
+    }
+    if (done.length > 0) setUndoable({ scope, ids: done, prev });
+    show(summarize(t("flowTranslate.rapid.bulk.notNeededDone", { count: done.length }), skipped, stopped));
+    return left;
+  }
+
+  /** Bring back the notes the last bulk Not needed set aside. */
+  async function undo() {
+    const u = undoable;
+    if (!u || u.scope !== scope || running || a.busy) return;
+    setRunning(true);
+    setResult(null);
+    setUndoable(null);
+    a.setBusy(true);
+    const skipped = emptySkips();
+    const restoredIds = new Set<string>();
+    let restored = 0;
+    let stopped = false;
+    try {
+      for (const id of u.ids) {
+        try {
+          const updated = await api.restoreNote(id, book);
+          a.applyLocalRowReplacement("tn", updated);
+          a.setStatuses((p) => {
+            const next = { ...p };
+            const before = u.prev[id];
+            if (before === undefined) delete next[id];
+            else next[id] = before;
+            return next;
+          });
+          restored++;
+          restoredIds.add(id);
+        } catch (err) {
+          const kind = failureKind(err);
+          if (kind === "stop") {
+            stopped = true;
+            break;
+          }
+          skipped[kind === "locked" ? "locked" : "failed"]++;
+        }
+      }
+    } finally {
+      a.setBusy(false);
+      setRunning(false);
+    }
+    // Rows Undo could not reach (refused, or never tried after a stop) stay
+    // undoable, so pressing Undo again retries exactly those.
+    const rest = u.ids.filter((id) => !restoredIds.has(id));
+    if (rest.length > 0) setUndoable({ scope, ids: rest, prev: u.prev });
+    show(summarize(t("flowTranslate.rapid.bulk.restored", { count: restored }), skipped, stopped));
+  }
+
+  /** Start one AI redraft for the checked notes. Returns the ids not sent. */
+  async function redo(ids: string[]): Promise<string[]> {
+    if (running || a.busy || ids.length === 0) return ids;
+    if (a.aiUnavailable) {
+      show({ text: a.aiUnavailable, severity: "warning" });
+      return ids;
+    }
+    setRunning(true);
+    setResult(null);
+    setUndoable(null);
+    a.setBusy(true);
+    const skipped = emptySkips();
+    const left: string[] = [];
+    const eligible: string[] = [];
+    let startedCount = 0;
+    let failure: string | null = null;
+    const alreadyOver: Parameters<typeof settleRedo>[0][] = [];
+    try {
+      const pending = await pendingRowIds();
+      for (const id of ids) {
+        const r = a.rowById.get(id);
+        if (!r) {
+          skipped.failed++;
+          left.push(id);
+        } else if (unsaved(id)) {
+          // The new draft would land under the typing, which would then hide it.
+          skipped.unsaved++;
+          left.push(id);
+        } else if (a.statuses[id] === "approved") {
+          // A redraft replaces approved text and cannot be undone.
+          skipped.approved++;
+          left.push(id);
+        } else if (a.statuses[id] === "skipped" || r.trashed_at != null) {
+          skipped.notNeeded++;
+          left.push(id);
+        } else if (!pending || pending.has(id)) {
+          skipped.pending++;
+          left.push(id);
+        } else eligible.push(id);
+      }
+      for (let i = 0; i < eligible.length; i += MAX_ROWS_PER_JOB) {
+        const chunk = eligible.slice(i, i + MAX_ROWS_PER_JOB);
+        try {
+          const started = await pipelineStore.start({
+            pipelineType: "translate",
+            book,
+            startChapter: chapter,
+            endChapter: chapter,
+            sessionKey: getSessionKey(),
+            translate: { rowIds: chunk },
+          });
+          redoJobsRef.current.set(started.jobId, chunk);
+          startedCount += chunk.length;
+          if (a.currentId && chunk.includes(a.currentId)) a.setEditing(false);
+          // The job may already be over (a covering job answered for it).
+          const existing = pipelineStore.get(started.jobId);
+          if (existing && (existing.state === "done" || existing.state === "failed" || existing.state === "cancelled")) {
+            alreadyOver.push(existing);
+          }
+        } catch (err) {
+          left.push(...eligible.slice(i));
+          failure = isAiProviderNotConfigured(err)
+            ? t("pipeline.aiKeyNotConfigured")
+            : t("flowTranslate.rapid.bulk.redoFailed", {
+                status: err instanceof ApiError ? err.status : t("flowTranslate.genericError"),
+              });
+          break;
+        }
+      }
+    } finally {
+      a.setBusy(false);
+      setRunning(false);
+    }
+    const lead = t("flowTranslate.rapid.bulk.redoStarted", { count: startedCount });
+    const r = summarize(lead, skipped, false);
+    show(failure ? { text: `${r.text} ${failure}`, severity: "warning" } : { ...r, severity: r.severity === "success" ? "info" : r.severity });
+    for (const job of alreadyOver) settleRedo(job);
+    return left;
+  }
+
+  function settleRedo(job: { job_id: string; state: string; apply_skipped_json?: string | null; error_message?: string | null }) {
+    const rowIds = redoJobsRef.current.get(job.job_id);
+    if (!rowIds) return;
+    redoJobsRef.current.delete(job.job_id);
+    if (job.state !== "done") {
+      show({ text: t("flowTranslate.rapid.bulk.redoFailed", { status: job.error_message ?? job.state }), severity: "warning" });
+      return;
+    }
+    const kept = rowIds.filter((id) => redoOutcome(job, id) === "kept").length;
+    a.reload();
+    show({
+      text: t("flowTranslate.rapid.bulk.redoDone", { drafted: rowIds.length - kept, kept }),
+      severity: kept > 0 ? "info" : "success",
+    });
+  }
+  // The store listeners below subscribe once; they call the latest render's
+  // settleRedo through this ref.
+  const settleRef = useRef(settleRedo);
+  useEffect(() => {
+    settleRef.current = settleRedo;
+  });
+
+  useEffect(
+    () =>
+      pipelineStore.onComplete((job) => {
+        if (job.pipeline_type !== "translate") return;
+        settleRef.current(job);
+      }),
+    [],
+  );
+  // A cancelled or dismissed job leaves the store without a completion event.
+  useEffect(
+    () =>
+      pipelineStore.subscribe((list) => {
+        for (const jobId of [...redoJobsRef.current.keys()]) {
+          const job = list.find((j) => j.job_id === jobId);
+          if (!job || job.state === "cancelled") settleRef.current({ job_id: jobId, state: "cancelled" });
+        }
+      }),
+    [],
+  );
+
+  return {
+    running,
+    result: result && result.scope === scope ? { text: result.text, severity: result.severity } : null,
+    dismiss: () => {
+      setResult(null);
+      setUndoable(null);
+    },
+    approve,
+    redo,
+    notNeeded,
+    undo: undoable && undoable.scope === scope ? () => void undo() : null,
+  };
+}
