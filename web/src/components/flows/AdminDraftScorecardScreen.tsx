@@ -163,7 +163,7 @@ export default function AdminDraftScorecardScreen({ role, me }: FlowScreenContex
               key="none"
               size="small"
               variant="outlined"
-              label={t("adminPages.scorecard.noContextPack", { n: p.count })}
+              label={t("adminPages.scorecard.notPinned", { n: p.count })}
             />
           ),
         )}
@@ -188,7 +188,7 @@ export default function AdminDraftScorecardScreen({ role, me }: FlowScreenContex
         <TableCell sx={cellSx}>{chapterLabel(c)}</TableCell>
         <TableCell sx={cellSx}>{c.validated}</TableCell>
         <TableCell sx={cellSx}>{c.noDraft}</TableCell>
-        <TableCell sx={cellSx}>{c.englishChecked ? c.englishSource : `${c.englishSource}*`}</TableCell>
+        <TableCell sx={cellSx}>{c.englishCheck === "all" ? c.englishSource : `${c.englishSource}*`}</TableCell>
         <TableCell sx={cellSx}>{c.compared}</TableCell>
         <TableCell sx={cellSx}>
           {c.unchangedPct == null
@@ -244,9 +244,15 @@ export default function AdminDraftScorecardScreen({ role, me }: FlowScreenContex
               {t("adminPages.scorecard.loading")}
             </Typography>
           )}
-          {data && data.englishSourceProblem && (
+          {data && data.englishUncheckedChapters.length > 0 && (
             <Alert severity="warning" sx={{ mb: 2 }}>
-              {t("adminPages.scorecard.englishUnchecked")}
+              {data.total.englishCheck === "none"
+                ? t("adminPages.scorecard.englishUncheckedAll")
+                : t("adminPages.scorecard.englishUncheckedSome", {
+                    chapters: data.englishUncheckedChapters
+                      .map((ch) => (ch === 0 ? t("adminPages.scorecard.intro") : String(ch)))
+                      .join(", "),
+                  })}
               <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
                 {data.englishSourceProblem}
               </Typography>

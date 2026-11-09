@@ -1023,18 +1023,20 @@ export interface DraftScorecardChapter {
   /** 0–1, null when nothing was compared. */
   medianSimilarity: number | null;
   closingPeriod: { eligible: number; made: number };
-  /** ref null = the run had no context pack. */
+  /** ref null = the run was not pinned (it used the latest pack at run time). */
   contextPacks: { ref: string | null; count: number }[];
   /** Compared drafts whose translate run is no longer on record. */
   untracedDrafts: number;
-  /** false when the English source could not be read for this chapter. */
-  englishChecked: boolean;
+  /** "none" when the English source could not be read; "some" only on the book total. */
+  englishCheck: "all" | "some" | "none";
 }
 
 export interface DraftScorecardResponse {
   book: string;
   chapters: DraftScorecardChapter[];
   total: DraftScorecardChapter;
+  /** Chapters whose English source could not be read. */
+  englishUncheckedChapters: number[];
   englishSourceProblem: string | null;
 }
 

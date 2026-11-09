@@ -50,11 +50,11 @@ Good to know:
 3. Read the columns:
    - **Approved notes**: approved translation notes in the chapter.
    - **No draft logged**: notes with no AI draft on record. Edit history older than 180 days can be cleared.
-   - **Draft was English**: the AI draft was the English note, not translated. These notes are left out of the columns to the right.
+   - **Draft was English**: the AI draft was the English note, not translated. These notes are left out of the columns to the right. A note that is the same as the English for a good reason, such as one that holds only links, is counted here too.
    - **Compared**: the notes the other columns are about.
    - **Approved unchanged**: the share approved exactly as the AI wrote them.
    - **Median similarity**: how much of a draft was kept, from 0 (all rewritten) to 1 (unchanged).
    - **Period added after ]**: of the drafts that end with ] and no period, the share where the editor had to add the period.
-   - **Context pack**: the version of the guidance the AI was given, with how many notes used it. Hover over it to see the full name. **Run not on record** means the AI run has been cleared.
+   - **Context pack**: the version of the guidance the AI was given, with how many notes used it. Hover over it to see the full name. **Not pinned (latest pack at run time)** means the run was not tied to one version and used the latest guidance when it ran. **Run not on record** means the AI run has been cleared.
 
-If the English notes cannot be read, a message says so, and no draft is left out as English.
+If the English notes cannot be read for some chapters, a message names those chapters. No draft in them is left out as English, and their counts are marked with *. On the **Whole book** row, * means only part of the book was checked.
