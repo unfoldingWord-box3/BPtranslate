@@ -236,8 +236,8 @@ export function useShowSourceUltAlignment(): [boolean, (next: boolean) => void] 
 //
 // Whether TranslateNotesScreen shows the dense, keyboard-driven "rapid check"
 // list (every note of the current verse, or of the current type filter, as
-// rows with the editor inline) instead of the card view. Laptop-and-up only:
-// the screen ignores it below the md breakpoint. Defaults OFF so the card
+// rows with the editor inline) instead of the card view. Only at the lg
+// breakpoint (1200px) and up: the screen ignores it below that. Defaults OFF so the card
 // view stays the default for everyone.
 const NOTES_RAPID_CHECK_KEY = "be:notesRapidCheck";
 

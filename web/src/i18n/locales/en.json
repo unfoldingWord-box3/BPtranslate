@@ -1739,7 +1739,8 @@
       "editNote": "Edit note {{ref}}",
       "noEnglish": "No English note",
       "openToSave": "This note has unsaved typing. Open it and use Save & Approve.",
-      "savePending": "This note still has a change waiting to save. Try again in a moment."
+      "savePending": "This note still has a change waiting to save. Try again in a moment.",
+      "changedElsewhere": "Someone changed this note since it was shown. It has been reloaded; check it before approving."
     }
   },
   "flowBooks": {

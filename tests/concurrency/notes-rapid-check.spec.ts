@@ -71,6 +71,10 @@ test("rapid check: toggle, J/K, edit, Ctrl+Enter approve, circle approve", async
   const current = list.locator('[data-rapid-row][aria-current="true"]');
   await expect(current).toHaveAttribute("data-rapid-row", rows[0].id);
 
+  // Start from the verse's first row (the deep link's row need not be first).
+  await list.locator(`[data-rapid-select="${ids[0]}"]`).click();
+  await expect(current).toHaveAttribute("data-rapid-row", ids[0]!);
+
   // J and K move the cursor once the list has focus.
   await list.focus();
   await page.keyboard.press("j");
@@ -79,12 +83,12 @@ test("rapid check: toggle, J/K, edit, Ctrl+Enter approve, circle approve", async
   await expect(current).toHaveAttribute("data-rapid-row", ids[0]!);
 
   // Clicking a row's type/ref button makes it current and leaves focus on
-  // that button; J still moves, and Enter there opens the editor.
+  // that button. K still moves, and Enter, with focus still on the OTHER
+  // row's button, edits the current note (not a click on that button).
   await list.locator(`[data-rapid-select="${ids[1]}"]`).click();
   await expect(current).toHaveAttribute("data-rapid-row", ids[1]!);
   await page.keyboard.press("k");
   await expect(current).toHaveAttribute("data-rapid-row", ids[0]!);
-  await list.locator(`[data-rapid-select="${ids[0]}"]`).focus();
 
   // Enter opens the editor; letters typed there are text, not shortcuts.
   await page.keyboard.press("Enter");
@@ -108,9 +112,20 @@ test("rapid check: toggle, J/K, edit, Ctrl+Enter approve, circle approve", async
       { timeout: 20_000 },
     )
     .toBe(`validated|${edited}`);
+  // The editor closed; the keyboard is back in the list.
+  await expect(editor).toBeHidden();
+  await expect(list).toBeFocused();
+
+  // Letters match the physical key: J under an Arabic layout (key "ت") moves.
+  const before = await current.getAttribute("data-rapid-row");
+  const beforeIdx = ids.indexOf(before);
+  await list.dispatchEvent("keydown", { key: "ت", code: "KeyJ", bubbles: true });
+  if (beforeIdx < ids.length - 1) {
+    await expect(current).toHaveAttribute("data-rapid-row", ids[beforeIdx + 1]!);
+  }
 
   // The status circle approves a note that is not the open one.
-  const circle = list.locator(`[data-rapid-row="${circleRow.id}"] button[aria-pressed]`);
+  const circle = list.locator(`[data-rapid-approve="${circleRow.id}"]`);
   await expect(circle).toBeEnabled();
   await circle.click();
   await expect
@@ -122,7 +137,9 @@ test("rapid check: toggle, J/K, edit, Ctrl+Enter approve, circle approve", async
       { timeout: 20_000 },
     )
     .toBe("validated");
-  await expect(circle).toHaveAttribute("aria-pressed", "true");
+  await expect(circle).toBeDisabled();
+  await expect(circle).toHaveAttribute("aria-label", "Approved");
+  await expect(list).toBeFocused();
 
   await page.screenshot({ path: test.info().outputPath("rapid-check-1366x768.png") });
   // The choice is remembered for the next visit.

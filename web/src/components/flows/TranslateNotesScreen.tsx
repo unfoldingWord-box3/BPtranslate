@@ -886,9 +886,15 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
   // waits until that row has settled (its draft is loaded), then applies.
   const [editRequest, setEditRequest] = useState<string | null>(null);
   useEffect(() => {
-    if (!editRequest || !row || row.id !== editRequest) return;
+    if (!editRequest || !row) return;
+    if (row.id !== editRequest) {
+      // The cursor moved on (J/K) before that row settled: drop the request
+      // so a later visit does not open the editor unasked.
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- the open must wait for the hydration effect above to settle the row (rendering it would be undone by that effect's setEditing(false)); clearing a stale request belongs to the same post-commit step.
+      setEditRequest(null);
+      return;
+    }
     if (settledKey !== `${rowKey("tn", book, row.id)}#${reloadNonce}`) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- opens the editor only after the hydration effect above has settled this row; doing it during render would be undone by that effect's setEditing(false).
     setEditRequest(null);
     if (!editLocked) setEditing(true);
   }, [editRequest, row, settledKey, book, reloadNonce, editLocked]);
@@ -1469,12 +1475,26 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
         say(t("flowTranslate.rapid.savePending"));
         return;
       }
-      const updated = await api.validateNote(id, book, true);
+      // This row was never opened, so approve exactly what is on screen: the
+      // version and state shown. A peer's edit (or a set-aside) since then is
+      // refused with a 409 instead of being approved unseen.
+      const shown = rowById.get(id);
+      const shownState =
+        shown?.translation_state === "ai_draft" || shown?.translation_state === "edited"
+          ? shown.translation_state
+          : undefined;
+      const updated = await api.validateNote(id, book, true, {
+        expectedVersion: shown?.version,
+        expectedState: shownState,
+      });
       applyLocalRowReplacement("tn", updated);
       setStatuses((prev) => ({ ...prev, [id]: "approved" }));
       setToast(t("flowTranslate.toastApproved"));
     } catch (err) {
-      if (err instanceof ApiError && err.status === 404) {
+      if (err instanceof ApiError && err.status === 409 && !isChapterLockedBody(err.body)) {
+        say(t("flowTranslate.rapid.changedElsewhere"));
+        void refetch();
+      } else if (err instanceof ApiError && err.status === 404) {
         say(t("flowTranslate.approveNeedsDraft"));
       } else if (err instanceof ApiError && isChapterLockedBody(err.body)) {
         setChapterLock({ body: err.body, rowId: id });
@@ -2722,7 +2742,9 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
         const isCurrent = id === currentId;
         const st = statuses[id];
         const liveEdit = (isCurrent && hasDiff) || (!isCurrent && draftRowIds.has(id));
-        const approved = (st === "approved" || r.translation_state === "validated") && !liveEdit;
+        // Same source as the status chip (noteChip), so circle and chip agree.
+        const approved = st === "approved" && !liveEdit;
+        const blocked = !isCurrent && draftRowIds.has(id);
         const slug = typeSlugOf(r.support_reference);
         const english = sourceNotes.get(id)?.note;
         return [
@@ -2739,8 +2761,8 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
             targetText: isCurrent ? draftValue : unescapeNewlines(r.note),
             isCurrent,
             approved,
-            approvable:
-              !approved && st !== "skipped" && (isApprovableRow(r) || (isCurrent && hasDiff) || liveEdit),
+            approvable: !approved && !blocked && st !== "skipped" && (isApprovableRow(r) || (isCurrent && hasDiff)),
+            blocked,
           },
         ];
       });

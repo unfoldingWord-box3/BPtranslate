@@ -36,6 +36,8 @@ export interface RapidCheckRow {
   approved: boolean;
   /** The status circle can approve this row right now. */
   approvable: boolean;
+  /** Not the open row, and it holds unsaved typing: open it to save first. */
+  blocked: boolean;
 }
 
 export interface NotesRapidCheckProps {
@@ -143,6 +145,19 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
     el?.scrollIntoView({ block: "nearest" });
   }, [currentId]);
 
+  // Keyboard focus must stay inside the list for the shortcuts to work. The
+  // element that held it can disappear: J past a verse's last note replaces
+  // every row, an approved circle turns disabled, Save or Esc closes the
+  // editor. When that drops focus to <body>, take it back to the list.
+  useEffect(() => {
+    const active = document.activeElement;
+    if (!active || active === document.body || !active.isConnected) {
+      scrollRef.current?.focus({ preventScroll: true });
+    }
+  }, [currentId, editing, rows]);
+
+  const currentApprovable = rows.find((r) => r.isCurrent)?.approvable ?? false;
+
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (e.defaultPrevented) return;
     const target = e.target as HTMLElement;
@@ -150,39 +165,40 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
       if (e.key === "Escape") {
         e.preventDefault();
         onStopEdit();
-        scrollRef.current?.focus({ preventScroll: true });
-      } else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+      } else if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !e.repeat) {
+        // Focus stays in the editor: if the save fails, the editor stays open
+        // and the next letters typed are still text, not shortcuts. When the
+        // approve closes the editor, the effect above moves focus to the list.
         e.preventDefault();
-        onApproveCurrent();
-        scrollRef.current?.focus({ preventScroll: true });
+        if (!busy && !editLocked) onApproveCurrent();
       }
       return;
     }
     if (isInFormControl(target)) return;
     if (e.altKey || e.ctrlKey || e.metaKey) return;
-    const k = e.key;
-    if (k === "j" || k === "J" || k === "ArrowDown") {
+    // Letters match the physical key (e.code), so they also work while an
+    // Arabic or other keyboard layout is active.
+    const code = e.code;
+    if (code === "KeyJ" || e.key === "ArrowDown") {
       e.preventDefault();
       onNext();
-    } else if (k === "k" || k === "K" || k === "ArrowUp") {
+    } else if (code === "KeyK" || e.key === "ArrowUp") {
       e.preventDefault();
       onPrev();
-    } else if (
-      k === "Enter" &&
-      (target === e.currentTarget || (currentId != null && target.dataset.rapidSelect === currentId))
-    ) {
-      // On the list itself, or on the current row's select button (where
-      // focus sits after clicking a row). Enter on any other button keeps
-      // that button's own action.
+    } else if (e.key === "Enter" && (target === e.currentTarget || target.dataset.rapidSelect != null)) {
+      // On the list itself or on any row's select button (where focus sits
+      // after clicking a row; J/K may have moved the cursor since), Enter
+      // edits the CURRENT note. Enter on any other button keeps its own action.
       e.preventDefault();
-      if (!editLocked) onStartEdit();
-    } else if ((k === "a" || k === "A") && !e.shiftKey) {
+      if (!e.repeat && !editLocked) onStartEdit();
+    } else if (code === "KeyA" && !e.shiftKey) {
       e.preventDefault();
-      if (!busy && !editLocked) onApproveCurrent();
-    } else if ((k === "e" || k === "E") && !e.shiftKey && englishAvailable) {
+      // No auto-repeat: holding A must not approve note after note unread.
+      if (!e.repeat && !busy && !editLocked && currentApprovable) onApproveCurrent();
+    } else if (code === "KeyE" && !e.shiftKey && englishAvailable) {
       e.preventDefault();
       onToggleEnglish();
-    } else if ((k === "u" || k === "U") && !e.shiftKey && onToggleSourceUlt) {
+    } else if (code === "KeyU" && !e.shiftKey && onToggleSourceUlt) {
       e.preventDefault();
       onToggleSourceUlt();
     }
@@ -313,7 +329,7 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
               groupByVerse && (i === 0 || rows[i - 1].verse !== r.verse) ? (
                 <Box
                   key={`v-${r.id}`}
-                  role="presentation"
+                  role="listitem"
                   sx={{
                     paddingInline: 1.5,
                     paddingBlock: 0.5,
@@ -330,7 +346,9 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
               ) : null;
             const circleLabel = r.approved
               ? t("flowTranslate.status.approved")
-              : r.approvable
+              : r.blocked
+                ? t("flowTranslate.rapid.openToSave")
+                : r.approvable
                 ? t("flowTranslate.rapid.approveNote", { ref: r.refLabel })
                 : t("flowTranslate.rapid.nothingToApprove");
             return (
@@ -360,11 +378,16 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
                   <Box
                     component="button"
                     type="button"
-                    aria-pressed={r.approved}
+                    data-rapid-approve={r.id}
                     aria-label={circleLabel}
                     title={circleLabel}
                     disabled={r.approved || !r.approvable || busy || editLocked}
-                    onClick={() => onApprove(r.id)}
+                    onClick={() => {
+                      onApprove(r.id);
+                      // This button turns disabled once approved; keep the
+                      // keyboard in the list.
+                      scrollRef.current?.focus({ preventScroll: true });
+                    }}
                     sx={{
                       width: 32,
                       height: 32,
@@ -407,7 +430,6 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
                     type="button"
                     onClick={() => onSelect(r.idx)}
                     data-rapid-select={r.id}
-                    aria-label={t("flowTranslate.rapid.makeCurrent", { ref: r.refLabel })}
                     sx={{
                       border: 0,
                       background: "transparent",
@@ -464,7 +486,6 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
                         type="button"
                         disabled={r.isCurrent && editLocked}
                         onClick={() => onEdit(r.idx)}
-                        aria-label={t("flowTranslate.rapid.editNote", { ref: r.refLabel })}
                         sx={{
                           display: "block",
                           width: "100%",
