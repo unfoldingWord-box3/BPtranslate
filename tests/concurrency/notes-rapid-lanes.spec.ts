@@ -63,8 +63,8 @@ test("rapid check: Q opens the quote picker and the new quote reaches the server
   await expect(current).toHaveAttribute("data-rapid-row", target.id);
 
   // The pencil sits in the open row's quote cell only.
-  await expect(list.locator("[data-rapid-quote]")).toHaveCount(1);
-  await expect(list.locator(`[data-rapid-quote="${target.id}"]`)).toBeVisible();
+  await expect(list.locator("[data-rapid-quote-pick]")).toHaveCount(1);
+  await expect(list.locator(`[data-rapid-quote-pick="${target.id}"]`)).toBeVisible();
 
   // Q (by physical key) opens the picker and moves focus into it.
   await list.focus();
@@ -91,6 +91,19 @@ test("rapid check: Q opens the quote picker and the new quote reaches the server
   await expect(current).toContainText(saved!.quote!);
   // A quote change is an edit: the AI draft is now 'edited'.
   expect(saved!.translation_state).toBe("edited");
+
+  // With the original-language column hidden (no pencil), Q still opens the
+  // picker, anchored to the open row's type button.
+  await page.getByRole("button", { name: "Hide the Hebrew column" }).click();
+  await expect(list.locator("[data-rapid-quote-pick]")).toHaveCount(0);
+  await list.focus();
+  await page.keyboard.press("q");
+  await expect(picker).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(picker).toBeHidden();
+  await page.getByRole("button", { name: "Show the Hebrew column" }).click();
+  await expect(list.locator("[data-rapid-quote-pick]")).toHaveCount(1);
+  await list.focus();
 
   // Focus came back to the list's keyboard handling.
   const ids = await list
@@ -176,7 +189,7 @@ test("rapid check: type-filter mode draws lanes above every verse group", async 
   await expect(groups).toHaveCount(verses.size);
   for (const v of verses) {
     const lanes = list.locator(`[data-rapid-lanes="${v}"]`);
-    const lit = lanes.locator('[data-rapid-lane="lit"] p');
+    const lit = lanes.locator('[data-rapid-group-lane-text="lit"]');
     await expect(lit).toBeVisible();
     await expect(lit).not.toBeEmpty();
     // The lanes sit in the group head, right above the group's first row.
@@ -188,6 +201,15 @@ test("rapid check: type-filter mode draws lanes above every verse group", async 
   // Each listed note's quote is marked in its verse's lanes (where the
   // alignment resolves it; the sample ULT is aligned, so most do).
   expect(await groups.locator("mark").count()).toBeGreaterThan(0);
+
+  // Hiding a lane with its chip in the pinned block hides it in every group
+  // too (the same be:rapidHiddenLanes pref); showing it brings it back.
+  const litChip = page.locator("[data-rapid-verse-block] [data-rapid-lane-toggle]", { hasText: "ULT" });
+  await litChip.click();
+  await expect(groups.locator('[data-rapid-group-lane-text="lit"]')).toHaveCount(0);
+  await expect(groups.locator('[data-rapid-group-lane="sim"]')).toHaveCount(verses.size);
+  await litChip.click();
+  await expect(groups.locator('[data-rapid-group-lane-text="lit"]')).toHaveCount(verses.size);
 
   await page.screenshot({ path: test.info().outputPath("rapid-lanes-1366x768.png") });
 });

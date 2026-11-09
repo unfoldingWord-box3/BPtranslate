@@ -9,7 +9,7 @@
 // Memoized: the screen re-renders on every keystroke in the editor, and the
 // highlight walk should run only when a verse's lanes or quotes change.
 
-import { memo, useMemo, type ReactNode } from "react";
+import { Fragment, memo, useMemo, type ReactNode } from "react";
 import Box from "@mui/material/Box";
 import { useTranslation } from "react-i18next";
 import type { VerseDto } from "../../sync/api";
@@ -58,63 +58,58 @@ export const RapidVerseLanes = memo(function RapidVerseLanes({
     [lanes, sourceIndex, verse, quotes],
   );
   if (drawn.length === 0) return null;
+  // The pinned verse block's lane styling (RapidVerseBlock), so the two
+  // look alike: a small label at the inline start, the text beside it.
   return (
     <Box
       role="group"
       aria-label={t("flowTranslate.rapid.lanes.groupAria", { ref: refLabel })}
       data-rapid-lanes={verse}
-      sx={{ display: "flex", flexDirection: "column", gap: 0.25, minWidth: 0 }}
+      sx={{
+        display: "grid",
+        gridTemplateColumns: "auto minmax(0, 1fr)",
+        columnGap: 1.25,
+        rowGap: 0.25,
+        alignItems: "baseline",
+        minWidth: 0,
+        fontWeight: 400,
+        color: "text.primary",
+      }}
     >
       {drawn.map((lane) => (
-        <Box
-          key={lane.key}
-          data-rapid-lane={lane.key}
-          sx={{
-            display: "grid",
-            gridTemplateColumns: "72px minmax(0, 1fr)",
-            columnGap: 1.5,
-            alignItems: "baseline",
-          }}
-        >
+        <Fragment key={lane.key}>
           <Box
             component="span"
-            sx={{
-              fontSize: "0.625rem",
-              fontWeight: 700,
-              letterSpacing: "0.06em",
-              textTransform: "uppercase",
-              color: "text.secondary",
-              overflowWrap: "anywhere",
-            }}
+            data-rapid-group-lane={lane.key}
+            sx={{ fontSize: "0.656rem", fontWeight: 700, letterSpacing: "0.08em", color: "text.secondary" }}
           >
             {lane.label}
           </Box>
           {lane.text ? (
-            // dir="auto" follows the content, as the pinned block's lanes do:
-            // an Arabic literal lays out RTL with its punctuation on the
+            // dir="auto" follows the content, as in the pinned block: an
+            // Arabic literal lays out RTL with its punctuation on the
             // correct side, the English ULT stays LTR.
             <Box
               component="p"
               dir="auto"
+              data-rapid-group-lane-text={lane.key}
               sx={{
                 m: 0,
+                textAlign: "start",
                 fontFamily: SCRIPTURE_FONT_STACK,
                 fontSize: "0.9375rem",
-                fontWeight: 400,
                 lineHeight: 1.5,
-                color: "text.primary",
-                textAlign: "start",
                 minWidth: 0,
               }}
             >
               {mark(lane.segments)}
             </Box>
           ) : (
-            <Box component="em" sx={{ fontSize: "0.75rem", fontWeight: 400, color: "text.secondary" }}>
-              {t("flowTranslate.rapid.lanes.noText", { label: lane.label })}
+            <Box component="em" sx={{ color: "text.secondary", fontSize: "0.8125rem" }}>
+              {t("flowTranslate.rapid.cols.laneEmpty", { label: lane.label })}
             </Box>
           )}
-        </Box>
+        </Fragment>
       ))}
     </Box>
   );
