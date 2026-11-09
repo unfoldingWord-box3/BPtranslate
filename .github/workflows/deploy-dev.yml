@@ -14,15 +14,24 @@ name: Deploy to dev
 # workflow_dispatch for workflow files that exist on the default branch, and
 # deploy.yml no longer does, so those copies cannot be run.
 #
-# CLOUDFLARE_API_TOKEN is a secret of the `dev` GitHub Environment, not a repo
-# secret, and that environment only allows deployments from `main` (Settings ->
-# Environments -> dev -> Deployment branches). Repo secrets reach any workflow
-# run on a same-repo branch, so as a repo secret the token was usable by anyone
-# who pushed a branch with an edited copy of this file. Now a job on any other
-# ref is refused before it starts, and a copy with `environment:` removed gets
-# no token at all. Keep the `environment: dev` line below, and never re-add the
-# token as a repo secret. CLOUDFLARE_ACCOUNT_ID is not sensitive and stays a
-# repo secret.
+# The deploy job declares `environment: dev`. That GitHub Environment's only
+# rule is Deployment branches = Selected branches, `main` only (Settings ->
+# Environments -> dev); a dispatch from any other ref is refused before a step
+# runs (checked 2026-11-09, run 42679233486). CLOUDFLARE_API_TOKEN must be a
+# `dev` ENVIRONMENT secret and must NOT also exist as a repo secret: repo
+# secrets reach every workflow run on any same-repo branch, including older
+# branch copies of this file that lack the `environment:` line. Check with
+#   gh secret list --repo unfoldingWord-box3/BPtranslate            (no token)
+#   gh secret list --repo unfoldingWord-box3/BPtranslate --env dev  (token)
+# CLOUDFLARE_ACCOUNT_ID is not sensitive and stays a repo secret.
+#
+# Limit of this rule: it confines the token to code that is on `main`, not to
+# trusted people. The "Protect main" ruleset requires a PR but 0 approvals and
+# every collaborator is an admin, so anyone with push access can still
+# self-merge an edited copy of this file and dispatch it from `main`. Don't add
+# `environment: dev` to a workflow triggered by pull_request_target,
+# workflow_run or schedule: those run with the default branch's ref, so they
+# pass the branch rule even when the code comes from elsewhere.
 #
 # The token set on 2026-11-09 (#823) is a user API token with account-level
 # Workers Scripts:Edit + D1:Edit, so it can deploy the prod Worker name
