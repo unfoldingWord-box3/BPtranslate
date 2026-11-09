@@ -64,7 +64,7 @@ Each row starts with a checkbox. Checked notes get a bar at the bottom in place 
 - **Redo with AI** asks the AI for new drafts of the checked notes in one run. Those notes are read-only until it finishes.
 - **Not needed** sets the checked notes aside. Select **Undo** in the message that appears, or press **Ctrl+Z**, to bring them back.
 
-The app skips a note, and tells you how many it skipped and why, when it has unsaved typing, a change still saving, or someone else changed it since you loaded it. **Redo with AI** also skips approved notes. Skipped notes stay checked. Approving has no Undo.
+The app skips a note, and tells you how many it skipped and why, when it has unsaved typing or a change still saving. **Approve** also skips a note someone else changed since you loaded it, and **Redo with AI** skips approved notes. Skipped notes stay checked. Approving has no Undo.
 
 ## When you finish a chapter
 You see **OBA 1 notes complete** with a count of approved, edited and not-needed notes. Select **Continue to chapter 2** or **Review again**.

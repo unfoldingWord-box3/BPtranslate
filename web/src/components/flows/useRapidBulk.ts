@@ -78,8 +78,12 @@ export function useRapidBulk(a: RapidBulkArgs) {
   // The rows the last Not needed set aside, and the status each had before,
   // so Undo puts back exactly what that action changed.
   const [undoable, setUndoable] = useState<{ scope: string; ids: string[]; prev: Record<string, CardStatus | undefined> } | null>(null);
-  // Redo jobs this screen started: job id → the row ids it covers.
-  const redoJobsRef = useRef(new Map<string, string[]>());
+  // Redo jobs this screen started: job id → the row ids it covers and the
+  // bulk Redo they belong to. A selection over 50 notes is several jobs; the
+  // result line reports once, when the last of them settles.
+  const redoJobsRef = useRef(new Map<string, { batch: number; rowIds: string[] }>());
+  const redoBatchesRef = useRef(new Map<number, { open: number; drafted: number; kept: number; failed: string | null }>());
+  const nextBatchRef = useRef(0);
 
   function summarize(lead: string, skipped: Record<SkipReason, number>, stopped: boolean): RapidBulkResult {
     const parts = REASONS.filter((r) => skipped[r] > 0).map((r) => t(`flowTranslate.rapid.bulk.why.${r}`, { count: skipped[r] }));
@@ -150,7 +154,7 @@ export function useRapidBulk(a: RapidBulkArgs) {
       }
       a.setBusy(true);
       const pending = await pendingRowIds();
-      for (const id of others) {
+      for (const [i, id] of others.entries()) {
         const r = a.rowById.get(id);
         if (!r) {
           skipped.failed++;
@@ -194,6 +198,8 @@ export function useRapidBulk(a: RapidBulkArgs) {
           left.push(id);
           if (kind === "stop") {
             stopped = true;
+            // Never tried: still unapproved, so it stays checked.
+            left.push(...others.slice(i + 1));
             break;
           }
           skipped[kind]++;
@@ -224,7 +230,7 @@ export function useRapidBulk(a: RapidBulkArgs) {
     let stopped = false;
     try {
       const pending = await pendingRowIds();
-      for (const id of ids) {
+      for (const [i, id] of ids.entries()) {
         const r = a.rowById.get(id);
         if (!r) {
           skipped.failed++;
@@ -256,6 +262,7 @@ export function useRapidBulk(a: RapidBulkArgs) {
           left.push(id);
           if (kind === "stop") {
             stopped = true;
+            left.push(...ids.slice(i + 1));
             break;
           }
           skipped[kind === "changed" || kind === "noDraft" ? "failed" : kind]++;
@@ -333,6 +340,8 @@ export function useRapidBulk(a: RapidBulkArgs) {
     let startedCount = 0;
     let failure: string | null = null;
     const alreadyOver: Parameters<typeof settleRedo>[0][] = [];
+    const batchId = ++nextBatchRef.current;
+    const batch = { open: 0, drafted: 0, kept: 0, failed: null as string | null };
     try {
       const pending = await pendingRowIds();
       for (const id of ids) {
@@ -367,7 +376,8 @@ export function useRapidBulk(a: RapidBulkArgs) {
             sessionKey: getSessionKey(),
             translate: { rowIds: chunk },
           });
-          redoJobsRef.current.set(started.jobId, chunk);
+          if (!redoJobsRef.current.has(started.jobId)) batch.open++;
+          redoJobsRef.current.set(started.jobId, { batch: batchId, rowIds: chunk });
           startedCount += chunk.length;
           if (a.currentId && chunk.includes(a.currentId)) a.setEditing(false);
           // The job may already be over (a covering job answered for it).
@@ -392,24 +402,33 @@ export function useRapidBulk(a: RapidBulkArgs) {
     const lead = t("flowTranslate.rapid.bulk.redoStarted", { count: startedCount });
     const r = summarize(lead, skipped, false);
     show(failure ? { text: `${r.text} ${failure}`, severity: "warning" } : { ...r, severity: r.severity === "success" ? "info" : r.severity });
+    if (batch.open > 0) redoBatchesRef.current.set(batchId, batch);
     for (const job of alreadyOver) settleRedo(job);
     return left;
   }
 
   function settleRedo(job: { job_id: string; state: string; apply_skipped_json?: string | null; error_message?: string | null }) {
-    const rowIds = redoJobsRef.current.get(job.job_id);
-    if (!rowIds) return;
+    const entry = redoJobsRef.current.get(job.job_id);
+    if (!entry) return;
     redoJobsRef.current.delete(job.job_id);
-    if (job.state !== "done") {
-      show({ text: t("flowTranslate.rapid.bulk.redoFailed", { status: job.error_message ?? job.state }), severity: "warning" });
-      return;
+    const batch = redoBatchesRef.current.get(entry.batch);
+    if (!batch) return;
+    batch.open--;
+    if (job.state !== "done") batch.failed = job.error_message ?? job.state;
+    else {
+      const kept = entry.rowIds.filter((id) => redoOutcome(job, id) === "kept").length;
+      batch.kept += kept;
+      batch.drafted += entry.rowIds.length - kept;
+      a.reload();
     }
-    const kept = rowIds.filter((id) => redoOutcome(job, id) === "kept").length;
-    a.reload();
-    show({
-      text: t("flowTranslate.rapid.bulk.redoDone", { drafted: rowIds.length - kept, kept }),
-      severity: kept > 0 ? "info" : "success",
-    });
+    if (batch.open > 0) return;
+    redoBatchesRef.current.delete(entry.batch);
+    const parts: string[] = [];
+    if (batch.drafted + batch.kept > 0) {
+      parts.push(t("flowTranslate.rapid.bulk.redoDone", { drafted: batch.drafted, kept: batch.kept }));
+    }
+    if (batch.failed) parts.push(t("flowTranslate.rapid.bulk.redoFailed", { status: batch.failed }));
+    show({ text: parts.join(" "), severity: batch.failed ? "warning" : batch.kept > 0 ? "info" : "success" });
   }
   // The store listeners below subscribe once; they call the latest render's
   // settleRedo through this ref.

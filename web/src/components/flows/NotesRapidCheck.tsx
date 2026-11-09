@@ -195,6 +195,9 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
     setSelected(next, anchor ?? currentId);
   };
   const allChecked = rows.length > 0 && selectedIds.length === rows.length;
+  // While a bulk action runs the checkboxes are frozen, so its outcome (the
+  // skipped rows) cannot overwrite a selection made in the meantime.
+  const selLocked = busy || bulk.running;
   const runBulk = (action: (ids: string[]) => Promise<string[]>) => {
     const key = idsKey;
     void action(selectedIds).then((left) => {
@@ -234,6 +237,8 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
     if (e.shiftKey && (down || code === "KeyK" || e.key === "ArrowUp")) {
       // Shift+J/K extends the checked range by one row, within the rows shown.
       e.preventDefault();
+      // The selection is fixed while a bulk action runs: its outcome replaces it.
+      if (selLocked) return;
       const p = rows.findIndex((r) => r.isCurrent);
       const n = p + (down ? 1 : -1);
       if (p < 0 || n < 0 || n >= rows.length) return;
@@ -249,7 +254,7 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
       (e.key === " " && (boxId != null || target === e.currentTarget || target.dataset.rapidSelect != null))
     ) {
       e.preventDefault();
-      if (e.repeat) return;
+      if (e.repeat || selLocked) return;
       const id = boxId ?? currentId;
       if (id) toggleRow(id);
       return;
@@ -385,6 +390,7 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
             <CheckBox
               checked={allChecked ? true : selectedIds.length > 0 ? "mixed" : false}
               label={t("flowTranslate.rapid.bulk.selectAll")}
+              disabled={selLocked}
               onClick={() => setSelected(allChecked ? [] : rows.map((r) => r.id), null)}
             />
             <span />
@@ -458,6 +464,7 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
                     checked={selected.has(r.id)}
                     label={t("flowTranslate.rapid.bulk.selectNote", { ref: r.refLabel })}
                     rowId={r.id}
+                    disabled={selLocked}
                     onClick={(shift) => (shift ? extendTo(r.id) : toggleRow(r.id))}
                   />
                   {/* approve circle: empty ring until approved, then filled with a check */}
@@ -616,7 +623,7 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
       {selectedIds.length > 0 ? (
         <RapidBulkBar
           count={selectedIds.length}
-          disabled={busy || bulk.running || editLocked}
+          disabled={busy || bulk.running}
           redoBlocked={bulk.redoBlocked}
           onApprove={() => runBulk(bulk.onApprove)}
           onRedo={() => runBulk(bulk.onRedo)}
@@ -640,11 +647,13 @@ function CheckBox({
   checked,
   label,
   rowId,
+  disabled,
   onClick,
 }: {
   checked: boolean | "mixed";
   label: string;
   rowId?: string;
+  disabled: boolean;
   onClick: (shift: boolean) => void;
 }) {
   const on = checked !== false;
@@ -657,6 +666,7 @@ function CheckBox({
       aria-label={label}
       title={label}
       data-rapid-checkbox={rowId}
+      disabled={disabled}
       onMouseDown={(e: MouseEvent) => {
         // Shift+click picks a range; don't let it select text too.
         if (e.shiftKey) e.preventDefault();
@@ -671,7 +681,7 @@ function CheckBox({
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        cursor: "pointer",
+        cursor: disabled ? "default" : "pointer",
       }}
     >
       <Box
