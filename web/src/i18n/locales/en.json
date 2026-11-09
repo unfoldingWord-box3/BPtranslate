@@ -1747,6 +1747,7 @@
         "selected": "Checked: {{count}}",
         "approve": "Approve",
         "redo": "Redo with AI",
+        "redoNeedsTranslation": "Redo with AI redrafts from the English notes, so it works only in a translation workspace.",
         "redoTitle": "Start one AI redraft for the checked notes. They stay read-only until it finishes.",
         "clear": "Clear",
         "undo": "Undo",

@@ -247,12 +247,13 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
       return;
     }
     // Space or X checks a row: the row whose checkbox or type/ref button has
-    // focus, else the current row. Space keeps its own meaning on every other
-    // button.
+    // focus, else the current row. Space on a checkbox is left to the button's
+    // own click (handling it here too would toggle twice), and keeps its own
+    // meaning on every other button.
     const boxId = target.dataset.rapidCheckbox ?? target.dataset.rapidSelect;
     if (
       code === "KeyX" ||
-      (e.key === " " && (boxId != null || target === e.currentTarget))
+      (e.key === " " && target.dataset.rapidCheckbox == null && (boxId != null || target === e.currentTarget))
     ) {
       e.preventDefault();
       if (e.repeat || selLocked) return;

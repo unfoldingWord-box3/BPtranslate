@@ -6,11 +6,11 @@ import { fetchChapter, newUserContext, type TnRow } from "./helpers";
 // Approve and Not needed verbs with Undo for Not needed.
 //
 // It WRITES (approves, sets notes aside, restores them), so it works on
-// ZEC 11, a chapter no other spec in this suite opens. global-setup seeds
-// ZEC 11's notes as AI drafts so they can be approved.
+// ZEC 4, a chapter no other spec in this suite opens. global-setup seeds
+// ZEC 4's notes as AI drafts so they can be approved.
 
 const BOOK = "ZEC";
-const CHAPTER = 11;
+const CHAPTER = 4;
 
 test.describe.configure({ timeout: 120_000 });
 
@@ -117,8 +117,19 @@ test("rapid check bulk: Shift+click approve skips a stored draft; Not needed the
   await expect(result.getByRole("button", { name: "Undo" })).toHaveCount(0);
   await page.screenshot({ path: test.info().outputPath("rapid-bulk-approved-1366x768.png") });
 
+  // This is not a translation workspace, so bulk Redo is off, with the reason.
+  const redoBtn = bar.getByRole("button", { name: "Redo with AI" });
+  await expect(redoBtn).toBeDisabled();
+  await expect(redoBtn).toHaveAttribute("title", /only in a translation workspace/);
+
   // Keyboard: Clear, then Space checks the current note and Shift+J extends.
   await bar.getByRole("button", { name: "Clear" }).click();
+  await expect(bar).toHaveCount(0);
+  // Space on a focused checkbox toggles it exactly once (click, then Space).
+  await box(ids[1]).click();
+  await expect(box(ids[1])).toHaveAttribute("aria-checked", "true");
+  await page.keyboard.press("Space");
+  await expect(box(ids[1])).toHaveAttribute("aria-checked", "false");
   await expect(bar).toHaveCount(0);
   await list.focus();
   await page.keyboard.press("Space");

@@ -2978,7 +2978,9 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
             onRedo: rapidBulk.redo,
             onNotNeeded: rapidBulk.notNeeded,
             running: rapidBulk.running,
-            redoBlocked: aiUnavailable,
+            // The translate job redrafts from the English notes, which only a
+            // translation workspace has.
+            redoBlocked: aiUnavailable ?? (translationMode ? null : t("flowTranslate.rapid.bulk.redoNeedsTranslation")),
             result: rapidBulk.result,
             onUndo: rapidBulk.undo,
             onDismiss: rapidBulk.dismiss,

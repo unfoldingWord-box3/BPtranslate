@@ -161,8 +161,8 @@ export default async function globalSetup() {
       // ZEC 3's notes as AI drafts, so notes-rapid-check.spec can approve them
       // (/validate refuses a note with no draft state). No other spec opens ZEC 3.
       `UPDATE tn_rows SET translation_state = 'ai_draft' WHERE book = 'ZEC' AND chapter = 3;\n` +
-      // ZEC 11 for notes-rapid-bulk.spec (bulk approve / Not needed / Undo).
-      `UPDATE tn_rows SET translation_state = 'ai_draft' WHERE book = 'ZEC' AND chapter = 11;\n`,
+      // ZEC 4 for notes-rapid-bulk.spec (bulk approve / Not needed / Undo); no other spec opens ZEC 4.
+      `UPDATE tn_rows SET translation_state = 'ai_draft' WHERE book = 'ZEC' AND chapter = 4;\n`,
   );
   const seed = spawnSync(
     "npx",
