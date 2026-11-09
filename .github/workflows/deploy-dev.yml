@@ -14,10 +14,26 @@ name: Deploy to dev
 # workflow_dispatch for workflow files that exist on the default branch, and
 # deploy.yml no longer does, so those copies cannot be run.
 #
-# What remains: repo secrets reach any workflow run on a same-repo branch, so
-# anyone with push access can edit THIS file on a branch (say, to add
-# `--env production`) and dispatch it, or use the secret from any other
-# workflow they push. Only the token's own scope stops that.
+# The deploy job declares `environment: dev`. That GitHub Environment's only
+# rule is Deployment branches = Selected branches, `main` only (Settings ->
+# Environments -> dev); a dispatch from any other ref is refused before a step
+# runs (checked 2026-11-09, run 42679233486). CLOUDFLARE_API_TOKEN must be a
+# `dev` ENVIRONMENT secret and must NOT also exist as a repo secret: repo
+# secrets reach every workflow run on any same-repo branch, including older
+# branch copies of this file that lack the `environment:` line. Check with
+#   gh secret list --repo unfoldingWord-box3/BPtranslate            (no token)
+#   gh secret list --repo unfoldingWord-box3/BPtranslate --env dev  (token)
+# CLOUDFLARE_ACCOUNT_ID is not sensitive and stays a repo secret.
+#
+# Limit of this rule: it confines the token to code that is on `main`, not to
+# trusted people. The "Protect main" ruleset requires a PR but 0 approvals and
+# every collaborator is an admin, so anyone with push access can still
+# self-merge an edited copy of this file and dispatch it from `main`, or change
+# the environment's branch rule and secrets in Settings (nothing in the repo
+# would show it; re-check with the commands above). Don't add
+# `environment: dev` to a workflow triggered by pull_request_target,
+# workflow_run or schedule: those run with the default branch's ref, so they
+# pass the branch rule even when the code comes from elsewhere.
 #
 # The token set on 2026-11-09 (#823) is a user API token with account-level
 # Workers Scripts:Edit + D1:Edit, so it can deploy the prod Worker name
@@ -37,6 +53,9 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # Gives this job the `dev` environment's secrets and enforces its
+    # main-only branch rule. See the header.
+    environment: dev
     steps:
       - uses: actions/checkout@v5
 
