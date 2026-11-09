@@ -117,8 +117,13 @@ export function QuoteBuilderPopper({
   // from the keyboard (Rapid check's Q) can be used and closed (Esc) without
   // the mouse. Closing hands focus back to the button that opened it, if
   // nothing else took it. The dialog below md does both on its own.
+  // The opener is remembered at open time: Shell clears anchorEl on close.
+  const openerRef = useRef<HTMLElement | null>(null);
   const paperRef = useCallback((el: HTMLDivElement | null) => {
-    el?.focus({ preventScroll: true });
+    if (!el) return;
+    const active = document.activeElement;
+    openerRef.current = active instanceof HTMLElement && active !== document.body ? active : null;
+    el.focus({ preventScroll: true });
   }, []);
   const wasOpen = useRef(open);
   useEffect(() => {
@@ -126,9 +131,9 @@ export function QuoteBuilderPopper({
     wasOpen.current = open;
     if (!was || open || !wide) return;
     const active = document.activeElement;
-    if ((!active || active === document.body || !active.isConnected) && anchorEl?.isConnected) {
-      anchorEl.focus({ preventScroll: true });
-    }
+    if (active && active !== document.body && active.isConnected) return;
+    const back = [openerRef.current, anchorEl].find((el) => el?.isConnected);
+    back?.focus({ preventScroll: true });
   }, [open, wide, anchorEl]);
   const uhbTokens = useMemo(() => collectUhbWords(uhbVerseObjects), [uhbVerseObjects]);
   const ultTokens = useMemo(() => collectTargetTokens(ultVerseObjects), [ultVerseObjects]);
@@ -428,7 +433,8 @@ export function QuoteBuilderPopper({
           role="dialog"
           aria-label={t("dialogs.quoteBuilder.header", { book, chapter, verse })}
           onKeyDown={(e) => {
-            if (e.key === "Escape") {
+            // A child that handled Esc itself (a hover card) keeps the picker open.
+            if (e.key === "Escape" && !e.defaultPrevented) {
               e.stopPropagation();
               onCancel();
             }

@@ -224,7 +224,8 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
       onToggleSourceUlt();
     } else if (code === "KeyQ" && !e.shiftKey && onOpenQuote) {
       e.preventDefault();
-      if (!e.repeat && !busy && !editLocked) onOpenQuote();
+      // Only while the open row is drawn: its pencil is the picker's anchor.
+      if (!e.repeat && !busy && !editLocked && currentId) onOpenQuote();
     }
   };
 

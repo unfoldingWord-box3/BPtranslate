@@ -1747,7 +1747,7 @@
       "unapprove": {
         "circle": "Approved. Click to remove the approval",
         "done": "Approval removed",
-        "changedElsewhere": "This approval changed since it was shown. The note has been reloaded.",
+        "changedElsewhere": "This note changed since it was shown, so its approval was not removed. The note has been reloaded; check it and try again.",
         "failed": "Could not remove the approval ({{status}})."
       },
       "lanes": {
