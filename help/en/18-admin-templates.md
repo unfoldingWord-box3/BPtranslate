@@ -30,13 +30,13 @@ To undo an approval, press **Un-approve**. An approved template cannot be re-dra
 - If the page says AI is not configured, drafting is not available. Editing and approving still work.
 
 ## Draft missing templates from approved notes
-Admins see the button **Draft missing templates from approved notes** under the template list, on both template pages. It writes templates from notes your editors have already approved, so the template uses the wording they prefer.
+Admins see the button **Draft missing templates from approved notes** above the template list, on both template pages. It writes templates from notes your editors have already approved, so the template uses the wording they prefer.
 
-- It works on note types (SupportReference) that have at least 20 approved notes, no approved template yet, and a template nobody has started. The line under the button says how many note types are ready.
+- It works on note types (SupportReference) that have at least 20 approved notes, no approved template yet, and a template that is not started or holds an older AI draft. The line under the button says how many note types are ready.
 - Each press drafts up to 6 note types and says how many are still to draft. Press it again to continue.
 - It uses your organization's own AI key (see **AI service**), with Claude or Gemini. With no key, or with another provider, the line under the button says so and nothing is sent.
-- It never changes a template that is approved, that someone has edited, or that already has an AI draft.
-- Each draft shows how many approved notes it was written from. A draft is not used to guide the AI until an editor approves it.
+- It never changes a template that is approved or that someone has edited. It replaces an older AI draft nobody has worked on, but not a draft it wrote itself.
+- The AI reads the 30 most recent approved notes of each type. Each draft shows how many it was written from, out of how many the type has. A draft is not used to guide the AI until an editor approves it.
 
 ## Other things to know
 - A template marked **Stale source** has an English source that changed after the draft. Review its translation again.

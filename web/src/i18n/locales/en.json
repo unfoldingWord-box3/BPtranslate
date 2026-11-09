@@ -90,7 +90,7 @@
       "button": "Draft missing templates from approved notes",
       "running": "Drafting templates…",
       "ready": "Note types ready to draft: {{n}}. Each has at least {{min}} approved notes and no approved template. One press drafts up to {{batch}} of them.",
-      "none": "No note type is ready to draft. A note type needs at least {{min}} approved notes, no approved template, and a template nobody has started.",
+      "none": "No note type is ready to draft. A note type needs at least {{min}} approved notes, no approved template, and a template that is not started or holds an older AI draft.",
       "notConfigured": "No AI key is set for this organization. An admin can add one under AI service.",
       "unsupported": "Drafting templates from notes does not work with this AI provider ({{provider}}). It works with Claude and Gemini.",
       "unavailable": "Drafting templates from notes is not available right now ({{reason}}).",
@@ -98,7 +98,7 @@
       "done": "Note types drafted: {{n}}. Still to draft: {{remaining}}. Review each AI draft and approve it.",
       "cost": "Estimated cost: ${{cost}}.",
       "notDrafted": "Not drafted: {{list}}.",
-      "builtFrom": "AI draft written from approved notes: {{n}}"
+      "builtFrom": "AI draft written from {{used}} of the {{total}} approved notes"
     }
   },
   "import": {

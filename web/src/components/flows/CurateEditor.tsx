@@ -312,7 +312,7 @@ export function CurateEditor({
             </Typography>
             {state === "ai_draft" && draftNoteCount(unit.draft_meta_json) != null ? (
               <Typography variant="caption" color="text.secondary">
-                {t("templates.draftMissing.builtFrom", { n: draftNoteCount(unit.draft_meta_json) })}
+                {t("templates.draftMissing.builtFrom", draftNoteCount(unit.draft_meta_json)!)}
               </Typography>
             ) : null}
           </Stack>

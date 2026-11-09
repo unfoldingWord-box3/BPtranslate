@@ -79,12 +79,33 @@ export type Availability =
   | { available: true; provider: string; model: string }
   | { available: false; reason: UnavailableReason; provider: string | null };
 
-/** A slug that qualifies, with the units this run may write (state NULL only). */
+/** One unit this run may write, with the state and version it was read at. */
+export type OpenUnit = {
+  template_id: string;
+  type: string | null;
+  source_md: string;
+  target_md: string | null;
+  translation_state: null | "ai_draft";
+  pre_draft_json: string | null;
+  version: number;
+};
+
+/** A slug that qualifies, with the units this run may write. */
 export type CandidateSlug = {
   slug: string;
   approvedNotes: number;
-  units: { template_id: string; type: string | null; source_md: string; target_md: string | null; version: number }[];
+  units: OpenUnit[];
 };
+
+/** True when draft_meta_json says the draft was written by this feature. */
+export function isApprovedNotesDraft(draftMetaJson: string | null): boolean {
+  if (!draftMetaJson) return false;
+  try {
+    return (JSON.parse(draftMetaJson) as { source?: unknown } | null)?.source === DRAFT_SOURCE;
+  } catch {
+    return false;
+  }
+}
 
 export type ExampleNote = {
   ref: string;
@@ -111,10 +132,12 @@ type Db = Env["DB"];
 /**
  * Slugs that qualify, busiest first: at least MIN_APPROVED_NOTES approved
  * notes, at least one live sheet template unit, no approved unit, and at least
- * one unit nobody has started (translation_state NULL). Units already
- * 'ai_draft', 'edited' or 'validated' are never written here: an edited unit is
- * a person's work in progress, and redrafting an existing AI draft would charge
- * the org again for every press without the list ever getting shorter.
+ * one open unit. A unit is open when nobody has started it (state NULL) or it
+ * holds an older AI draft (for example from the bot's "Draft all with AI"
+ * before #551) that this feature did not write. Edited and validated units are
+ * never written: an edited unit is a person's work in progress. A draft this
+ * feature wrote is not redrafted either, or every press would charge the org
+ * again without the list ever getting shorter.
  */
 export async function findCandidateSlugs(db: Db): Promise<CandidateSlug[]> {
   const counts = await db
@@ -133,7 +156,8 @@ export async function findCandidateSlugs(db: Db): Promise<CandidateSlug[]> {
 
   const unitRs = await db
     .prepare(
-      `SELECT template_id, TRIM(support_ref) AS slug, type, source_md, target_md, translation_state, version
+      `SELECT template_id, TRIM(support_ref) AS slug, type, source_md, target_md, translation_state,
+              draft_meta_json, pre_draft_json, version
          FROM template_units
         WHERE deleted_at IS NULL AND origin = 'sheet'
         ORDER BY support_ref, sheet_order, template_id`,
@@ -145,14 +169,25 @@ export async function findCandidateSlugs(db: Db): Promise<CandidateSlug[]> {
       source_md: string;
       target_md: string | null;
       translation_state: string | null;
+      draft_meta_json: string | null;
+      pre_draft_json: string | null;
       version: number;
     }>();
   const bySlug = new Map<string, { validated: boolean; open: CandidateSlug["units"] }>();
   for (const u of unitRs.results ?? []) {
     const entry = bySlug.get(u.slug) ?? { validated: false, open: [] };
     if (u.translation_state === "validated") entry.validated = true;
-    if (u.translation_state == null) {
-      entry.open.push({ template_id: u.template_id, type: u.type, source_md: u.source_md, target_md: u.target_md, version: u.version });
+    const state = u.translation_state;
+    if (state == null || (state === "ai_draft" && !isApprovedNotesDraft(u.draft_meta_json))) {
+      entry.open.push({
+        template_id: u.template_id,
+        type: u.type,
+        source_md: u.source_md,
+        target_md: u.target_md,
+        translation_state: state,
+        pre_draft_json: u.pre_draft_json,
+        version: u.version,
+      });
     }
     bySlug.set(u.slug, entry);
   }
@@ -321,21 +356,22 @@ async function resolveProvider(env: Env, decrypt: boolean): Promise<Resolved> {
 // ---------------------------------------------------------------------------
 
 /**
- * Store one unit's draft. The CAS on version plus the `translation_state IS
- * NULL` guard mean a person who started the unit while the model was writing
- * wins: the draft is dropped, not written over their text. The edit_log row is
- * gated on the update having landed and carries target_md so the history view
- * can replay it.
+ * Store one unit's draft. The UPDATE is pinned to the version AND the state
+ * the unit was read at: an edit bumps the version, but Approve flips the state
+ * without one, so pinning only the version would let a draft land on a
+ * template someone approved while the model was writing. Either way the
+ * person wins and the draft is dropped. The edit_log row is gated on the
+ * update having landed and carries target_md so the history view can replay it.
  */
 async function writeDraft(
   db: Db,
-  unit: CandidateSlug["units"][number],
+  unit: OpenUnit,
   targetMd: string,
   meta: Record<string, unknown>,
   userId: number | null,
 ): Promise<boolean> {
   const now = Math.floor(Date.now() / 1000);
-  const preDraftJson = nextPreDraftJson(null, null, { target_md: unit.target_md });
+  const preDraftJson = nextPreDraftJson(unit.translation_state, unit.pre_draft_json, { target_md: unit.target_md });
   const [res] = await db.batch([
     db
       .prepare(
@@ -348,9 +384,9 @@ async function writeDraft(
                 updated_at = ?4,
                 updated_by = ?5
           WHERE template_id = ?6 AND deleted_at IS NULL AND version = ?7
-            AND translation_state IS NULL`,
+            AND translation_state IS ?8`,
       )
-      .bind(targetMd, JSON.stringify(meta), preDraftJson, now, userId, unit.template_id, unit.version),
+      .bind(targetMd, JSON.stringify(meta), preDraftJson, now, userId, unit.template_id, unit.version, unit.translation_state),
     db
       .prepare(
         `INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action, source, payload_json)

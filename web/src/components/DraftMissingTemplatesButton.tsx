@@ -15,14 +15,18 @@ import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { api, ApiError, isAdmin, type DraftMissingPreview, type DraftMissingResult } from "../sync/api";
 
-/** The approved-note count a draft from this feature was built from, or null. */
-export function draftNoteCount(draftMetaJson: string | null | undefined): number | null {
+/**
+ * For a draft this feature wrote: how many approved notes the model was shown
+ * (`used`, at most 30) out of how many the note type has (`total`). Null for
+ * any other draft.
+ */
+export function draftNoteCount(draftMetaJson: string | null | undefined): { used: number; total: number } | null {
   if (!draftMetaJson) return null;
   try {
-    const meta = JSON.parse(draftMetaJson) as { source?: unknown; approved_note_count?: unknown };
-    return meta.source === "approved_notes" && typeof meta.approved_note_count === "number"
-      ? meta.approved_note_count
-      : null;
+    const meta = JSON.parse(draftMetaJson) as { source?: unknown; approved_note_count?: unknown; example_count?: unknown };
+    if (meta.source !== "approved_notes" || typeof meta.approved_note_count !== "number") return null;
+    const used = typeof meta.example_count === "number" ? meta.example_count : meta.approved_note_count;
+    return { used, total: meta.approved_note_count };
   } catch {
     return null;
   }

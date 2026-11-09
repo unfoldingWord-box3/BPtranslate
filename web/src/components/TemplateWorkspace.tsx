@@ -641,7 +641,7 @@ function TemplateEditor({ templateId, direction, onServerChange }: EditorProps) 
         <StateChip state={state} />
         {state === "ai_draft" && draftNoteCount(unit.draft_meta_json) != null ? (
           <Typography variant="caption" color="text.secondary">
-            {t("templates.draftMissing.builtFrom", { n: draftNoteCount(unit.draft_meta_json) })}
+            {t("templates.draftMissing.builtFrom", draftNoteCount(unit.draft_meta_json)!)}
           </Typography>
         ) : null}
         <Box sx={{ flexGrow: 1 }} />

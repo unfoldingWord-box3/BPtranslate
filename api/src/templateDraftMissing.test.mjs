@@ -58,7 +58,7 @@ function makeDb(sqlite) {
   };
 }
 
-// slug -> { approved, form, units: [[id, state, target_md]] }
+// slug -> { approved, form, units: [[id, state, target_md, draft_meta_json, pre_draft_json]] }
 const SLUGS = {
   // 35 approved, rc:// form: qualifies; the example cap (30) applies.
   "figs-metaphor": { approved: 35, form: "rc", units: [["figs-metaphor-01", null], ["figs-metaphor-02", null]] },
@@ -70,8 +70,18 @@ const SLUGS = {
   "figs-simile": { approved: 30, form: "rc", units: [["figs-simile-01", "validated", "تشبيه معتمد"], ["figs-simile-02", null]] },
   // One unit a person is editing: only the untouched one is drafted.
   "writing-newevent": { approved: 22, form: "rc", units: [["writing-newevent-01", "edited", "عمل بشري جار"], ["writing-newevent-02", null]] },
-  // Only an older AI draft: nothing left to start, so not a candidate.
-  "grammar-connect-logic-result": { approved: 40, form: "rc", units: [["grammar-connect-logic-result-01", "ai_draft", "مسودة قديمة"]] },
+  // Only an older AI draft (the bot's "Draft all", before #551): redrafted from the notes.
+  "grammar-connect-logic-result": {
+    approved: 40,
+    form: "rc",
+    units: [["grammar-connect-logic-result-01", "ai_draft", "مسودة قديمة", null, JSON.stringify({ target_md: "منشور سابقًا" })]],
+  },
+  // A draft this feature already wrote: not redrafted, so not a candidate.
+  "figs-hyperbole": {
+    approved: 25,
+    form: "rc",
+    units: [["figs-hyperbole-01", "ai_draft", "مسودة من الملاحظات", JSON.stringify({ source: "approved_notes", approved_note_count: 25 }), null]],
+  },
 };
 
 async function fresh({ provider = "claude", model = "claude-sonnet-5", withKey = true, extraSlugs = 0 } = {}) {
@@ -84,8 +94,8 @@ async function fresh({ provider = "claude", model = "claude-sonnet-5", withKey =
   sqlite.prepare(`INSERT INTO project_config (id, preset, overrides_json, updated_at) VALUES (1, 'ar-bsoj', NULL, unixepoch())`).run();
 
   const unit = sqlite.prepare(
-    `INSERT INTO template_units (template_id, support_ref, sheet_order, type, source_md, source_hash, origin, target_md, translation_state, version)
-     VALUES (?, ?, ?, 'note', ?, 'h', 'sheet', ?, ?, 1)`,
+    `INSERT INTO template_units (template_id, support_ref, sheet_order, type, source_md, source_hash, origin, target_md, translation_state, draft_meta_json, pre_draft_json, version)
+     VALUES (?, ?, ?, 'note', ?, 'h', 'sheet', ?, ?, ?, ?, 1)`,
   );
   const tn = sqlite.prepare(
     `INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, support_reference, quote, note, sort_order, version, translation_state, updated_at, admin_bulk_state, trashed_at)
@@ -98,8 +108,8 @@ async function fresh({ provider = "claude", model = "claude-sonnet-5", withKey =
   let order = 0;
   let idn = 0;
   const seedSlug = (slug, spec) => {
-    for (const [id, state, target] of spec.units) {
-      unit.run(id, slug, ++order, `English template for ${slug} [ALT]`, target ?? null, state);
+    for (const [id, state, target, meta, pre] of spec.units) {
+      unit.run(id, slug, ++order, `English template for ${slug} [ALT]`, target ?? null, state, meta ?? null, pre ?? null);
     }
     const ref = spec.form === "rc" ? `rc://*/ta/man/translate/${slug}` : slug;
     for (let i = 0; i < spec.approved; i++) {
@@ -167,7 +177,14 @@ async function fresh({ provider = "claude", model = "claude-sonnet-5", withKey =
   return { sqlite, env, req, post, unitRow, snapshot, calls, setBehaviour: (b) => (behaviour = b) };
 }
 
-const DRAFTED = ["figs-metaphor-01", "figs-metaphor-02", "translate-names-01", "writing-newevent-02"];
+const DRAFTED = ["figs-metaphor-01", "figs-metaphor-02", "grammar-connect-logic-result-01", "translate-names-01", "writing-newevent-02"];
+const COUNTS = {
+  "figs-metaphor-01": 35,
+  "figs-metaphor-02": 35,
+  "grammar-connect-logic-result-01": 40,
+  "translate-names-01": 20,
+  "writing-newevent-02": 22,
+};
 
 test("preview lists only qualifying slugs, busiest first, through the real templates router", async () => {
   const { req, calls } = await fresh();
@@ -179,6 +196,7 @@ test("preview lists only qualifying slugs, busiest first, through the real templ
   assert.deepEqual(
     body.qualifying,
     [
+      { slug: "grammar-connect-logic-result", approvedNotes: 40, units: 1 },
       { slug: "figs-metaphor", approvedNotes: 35, units: 2 },
       { slug: "writing-newevent", approvedNotes: 22, units: 1 },
       { slug: "translate-names", approvedNotes: 20, units: 1 },
@@ -188,20 +206,20 @@ test("preview lists only qualifying slugs, busiest first, through the real templ
   assert.equal(calls.length, 0, "the preview makes no model call");
 });
 
-test("a run drafts only qualifying slugs' untouched units as ai_draft, with the note count", async () => {
+test("a run drafts qualifying slugs' untouched and older-AI-draft units as ai_draft, with the note count", async () => {
   const { post, unitRow, sqlite, calls } = await fresh();
   const res = await post();
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.deepEqual(
     body.drafted.map((d) => [d.slug, d.approvedNotes, d.units]).sort(),
-    [["figs-metaphor", 35, 2], ["translate-names", 20, 1], ["writing-newevent", 22, 1]],
+    [["figs-metaphor", 35, 2], ["grammar-connect-logic-result", 40, 1], ["translate-names", 20, 1], ["writing-newevent", 22, 1]],
   );
   assert.deepEqual(body.failed, []);
   assert.equal(body.remaining, 0);
   assert.equal(typeof body.estimatedCostUsd, "number");
 
-  assert.equal(calls.length, 3, "one call per slug");
+  assert.equal(calls.length, 4, "one call per slug");
   for (const c of calls) {
     assert.equal(c.apiKey, PLAINTEXT_KEY, "the org's own decrypted key");
     assert.equal(c.provider, "claude");
@@ -218,18 +236,21 @@ test("a run drafts only qualifying slugs' untouched units as ai_draft, with the 
     assert.equal(u.updated_by, ADMIN);
     const meta = JSON.parse(u.draft_meta_json);
     assert.equal(meta.source, "approved_notes");
-    assert.equal(meta.approved_note_count, { "figs-metaphor-01": 35, "figs-metaphor-02": 35, "translate-names-01": 20, "writing-newevent-02": 22 }[id]);
-    assert.equal(JSON.parse(u.pre_draft_json).target_md, null, "last-published snapshot is the empty translation");
+    assert.equal(meta.approved_note_count, COUNTS[id]);
+    assert.equal(meta.example_count, Math.min(COUNTS[id], 30));
+    const published = id === "grammar-connect-logic-result-01" ? "منشور سابقًا" : null;
+    assert.equal(JSON.parse(u.pre_draft_json).target_md, published, "the last-published snapshot is kept (draft over draft) or taken fresh");
   }
 
-  // Left alone: an approved unit, its untouched sibling, a person's edit, an
-  // older AI draft, and a slug below the bar.
+  // Left alone: an approved unit, its untouched sibling, a person's edit, a
+  // draft this feature already wrote, and a slug below the bar.
   assert.equal(unitRow("figs-simile-01").translation_state, "validated");
   assert.equal(unitRow("figs-simile-02").translation_state, null);
   assert.equal(unitRow("writing-newevent-01").translation_state, "edited");
   assert.equal(unitRow("writing-newevent-01").target_md, "عمل بشري جار");
   assert.equal(unitRow("writing-newevent-01").version, 1);
-  assert.equal(unitRow("grammar-connect-logic-result-01").target_md, "مسودة قديمة");
+  assert.equal(unitRow("figs-hyperbole-01").target_md, "مسودة من الملاحظات");
+  assert.equal(unitRow("figs-hyperbole-01").version, 1);
   assert.equal(unitRow("figs-idiom-01").translation_state, null);
 
   const log = sqlite
@@ -268,6 +289,7 @@ test("the prompt carries the English templates, at most 30 recent approved notes
   assert.ok(!metaphor.user.includes("WRONG BOOK"), "edit_log is matched on book as well as id");
   assert.ok(!calls.some((c) => c.user.includes("SupportReference: figs-idiom")));
   assert.ok(!calls.some((c) => c.user.includes("SupportReference: figs-simile")));
+  assert.ok(!calls.some((c) => c.user.includes("SupportReference: figs-hyperbole")), "a draft this feature wrote is not redrafted");
 });
 
 test("a second press makes no calls once every qualifying slug has a draft", async () => {
@@ -300,7 +322,7 @@ test("no key configured: a clear refusal and no call", async () => {
   const preview = await (await req("/api/templates/draft-missing", { method: "GET" })).json();
   assert.equal(preview.available, false);
   assert.equal(preview.reason, "ai_provider_not_configured");
-  assert.equal(preview.qualifying.length, 3, "the preview still counts what would be drafted");
+  assert.equal(preview.qualifying.length, 4, "the preview still counts what would be drafted");
   assert.equal(calls.length, 0);
   assert.deepEqual(snapshot(), before);
 });
@@ -349,6 +371,24 @@ test("a person who starts a unit while the model is writing keeps their text", a
   assert.deepEqual(body.failed, [{ slug: "translate-names", code: "not_written" }]);
 });
 
+test("a template approved while the model is writing is not overwritten", async () => {
+  const { post, unitRow, setBehaviour } = await fresh();
+  // Approve flips the state without a version bump (POST /unit/validate).
+  setBehaviour(async (r, sqlite) => {
+    if (r.user.includes("SupportReference: grammar-connect-logic-result")) {
+      sqlite
+        .prepare(`UPDATE template_units SET translation_state = 'validated' WHERE template_id = 'grammar-connect-logic-result-01'`)
+        .run();
+    }
+    return null;
+  });
+  const body = await (await post()).json();
+  const u = unitRow("grammar-connect-logic-result-01");
+  assert.equal(u.translation_state, "validated");
+  assert.equal(u.target_md, "مسودة قديمة");
+  assert.deepEqual(body.failed, [{ slug: "grammar-connect-logic-result", code: "not_written" }]);
+});
+
 test("an invalid key stops the run without writing anything", async () => {
   const { post, snapshot, setBehaviour, calls } = await fresh();
   const before = snapshot();
@@ -358,8 +398,8 @@ test("an invalid key stops the run without writing anything", async () => {
   const body = await (await post()).json();
   assert.ok(body.failed.some((f) => f.code === "invalid_key"));
   assert.deepEqual(body.drafted, []);
-  assert.equal(body.remaining, 3);
-  assert.ok(calls.length <= 3);
+  assert.equal(body.remaining, 4);
+  assert.ok(calls.length <= 3, "at most the calls already in flight");
   assert.deepEqual(snapshot(), before);
 });
 
@@ -381,7 +421,7 @@ test("a press handles a bounded batch and reports how many remain; skipSlugs mov
   const first = await (await post()).json();
   assert.equal(calls.length, MAX_SLUGS_PER_RUN);
   assert.equal(first.drafted.length, MAX_SLUGS_PER_RUN);
-  assert.equal(first.remaining, 9 - MAX_SLUGS_PER_RUN);
+  assert.equal(first.remaining, 10 - MAX_SLUGS_PER_RUN);
 
   const second = await (await post({ skipSlugs: ["extra-5"] })).json();
   assert.ok(!second.drafted.some((d) => d.slug === "extra-5"));
