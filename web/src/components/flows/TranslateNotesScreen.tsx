@@ -1542,8 +1542,10 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
   // Rapid check: clicking an approved row's circle takes the approval back.
   // The row goes to 'edited', not its earlier 'ai_draft': a person has
   // reviewed it, which is what /validate value=0 records. Pinned to the
-  // version and state on screen, so an approval that already changed
-  // elsewhere is reported, not overwritten. Nothing to confirm: clicking the
+  // version, state and updated_at on screen, so an approval that already
+  // changed elsewhere is reported, not overwritten. A state flip does not
+  // bump the version, so only updated_at catches a peer's un-approve plus
+  // re-approve since this row was shown. Nothing to confirm: clicking the
   // circle again re-approves, and the toast says what happened.
   async function unapproveRow(id: string) {
     if (busy) return;
@@ -1555,6 +1557,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
       const updated = await api.validateNote(id, book, false, {
         expectedVersion: shown.version,
         expectedState: "validated",
+        expectedUpdatedAt: shown.updated_at,
       });
       applyLocalRowReplacement("tn", updated);
       setStatuses((prev) => {

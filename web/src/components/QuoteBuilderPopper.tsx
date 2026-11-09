@@ -435,6 +435,7 @@ export function QuoteBuilderPopper({
           onKeyDown={(e) => {
             // A child that handled Esc itself (a hover card) keeps the picker open.
             if (e.key === "Escape" && !e.defaultPrevented) {
+              e.preventDefault();
               e.stopPropagation();
               onCancel();
             }
