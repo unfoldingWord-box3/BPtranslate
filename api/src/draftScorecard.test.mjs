@@ -26,6 +26,8 @@ import { SignJWT } from "jose";
 import { attachAuth, requireAdmin } from "./auth.ts";
 import {
   editSimilarity,
+  similarity,
+  SIMILARITY_SEGMENT_CAP,
   median,
   closingPeriodOutcome,
   isEnglishSourceDraft,
@@ -73,6 +75,46 @@ test("editSimilarity on long strings: shared prefix/suffix stripped, full rewrit
   assert.equal(editSimilarity("a".repeat(2000), "b".repeat(2000)), 0);
   // Different lengths, nothing shared: distance is the longer length.
   assert.equal(editSimilarity("a".repeat(300), "b".repeat(500)), 0);
+});
+
+test("similarity: a middle over the segment cap is scored on capped segments, approximate and clamped", () => {
+  const len = SIMILARITY_SEGMENT_CAP + 1000;
+  // Fully different: the capped rate is 1, scaled to the full length → 0.
+  const full = similarity("a".repeat(len), "b".repeat(len));
+  assert.deepEqual(full, { value: 0, approximate: true });
+  // "abab…" vs "baba…": the exact distance is 2; the capped segments give
+  // 2 / CAP, scaled to the full length → 3 / len. Approximate, close, and the
+  // cap kept the DP to CAP×CAP cells.
+  const a = "ab".repeat(len / 2);
+  const b = "ba".repeat(len / 2);
+  const budget = { cells: SIMILARITY_SEGMENT_CAP ** 2 };
+  const r = similarity(a, b, budget);
+  assert.equal(r.approximate, true);
+  assert.equal(budget.cells, 0, "exactly CAP×CAP cells spent");
+  assert.ok(Math.abs(r.value - (1 - 3 / len)) < 1e-12, `got ${r.value}`);
+  // Normal-size notes stay exact.
+  assert.deepEqual(similarity("kitten", "sitting"), { value: 1 - 3 / 7, approximate: false });
+});
+
+test("similarity: the request budget is spent per DP cell, then rows fall back to the cheap bound", () => {
+  const budget = { cells: 10 };
+  // 4×4 = 16 cells > 10: no DP. Cheap bound: max(4, 4) − shared characters (0) = 4.
+  assert.deepEqual(similarity("abcd", "wxyz", budget), { value: 0, approximate: true });
+  assert.equal(budget.cells, 10, "the cheap bound costs no cells");
+  // 2×2 = 4 cells fit: exact, and the budget drops to 6.
+  assert.deepEqual(similarity("ab", "xy", budget), { value: 0, approximate: false });
+  assert.equal(budget.cells, 6);
+  // "abc" vs "cab": 9 cells > 6 → cheap bound shares all 3 characters → 1
+  // (an upper bound on the true 1 − 2/3).
+  assert.deepEqual(similarity("abc", "cab", budget), { value: 1, approximate: true });
+  // buildScorecard counts the approximate rows when its budget runs out.
+  const rows = [
+    { id: "p", chapter: 1, finalNote: "ab", draftLogId: 1, draftedAt: 1, draftNote: "xy" },
+    { id: "q", chapter: 1, finalNote: "abcd", draftLogId: 2, draftedAt: 1, draftNote: "wxyz" },
+  ];
+  const ch = buildScorecard(rows, [], new Map([[1, new Map()]]), { cells: 4 }).chapters[0];
+  assert.equal(ch.compared, 2);
+  assert.equal(ch.approximateSimilarity, 1);
 });
 
 test("median: odd, even, empty", () => {
@@ -388,6 +430,22 @@ test("loadScorecardInputs reads validated live rows with their LATEST ai_pipelin
   );
 });
 
+test("loadScorecardInputs prefers this book's own audit row over a newer NULL-book one", async () => {
+  const sqlite = freshDb();
+  seedTn(sqlite, { id: "shar", chapter: 1, note: "final" });
+  // Older, book-matched draft (this book's), then a NEWER pre-0017 NULL-book
+  // row for the same id (could be another book's).
+  seedLog(sqlite, { id: "shar", source: "ai_pipeline", note: "this book's draft", at: 100 });
+  seedLog(sqlite, { id: "shar", book: null, source: "ai_pipeline", note: "null-book draft", at: 200 });
+  // A row with only a NULL-book draft still gets it.
+  seedTn(sqlite, { id: "only", chapter: 1, note: "final" });
+  seedLog(sqlite, { id: "only", book: null, source: "ai_pipeline", note: "legacy draft" });
+  const { rows } = await loadScorecardInputs(makeDb(sqlite), BOOK);
+  const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
+  assert.equal(byId.shar.draftNote, "this book's draft");
+  assert.equal(byId.only.draftNote, "legacy draft");
+});
+
 test("readBookSourceNotes: one concurrent read per distinct source; a failed source fails its chapters, no retry", async () => {
   const sqlite = freshDb();
   // A translation project (English source = unfoldingWord en_tn) whose LUK
@@ -496,6 +554,9 @@ test("GET /api/books/:book/draft-scorecard is admin-only and returns the scoreca
     assert.equal(body.chapters[0].unchangedPct, 100);
     // The test project has no English source, so the one drafted chapter is unchecked.
     assert.deepEqual(body.englishUncheckedChapters, [1]);
+    assert.equal(body.englishProblems.length, 1);
+    assert.deepEqual(body.englishProblems[0].chapters, [1]);
+    assert.equal(typeof body.englishProblems[0].reason, "string");
     assert.equal(body.total.englishCheck, "none");
 
     const bad = await app.request(

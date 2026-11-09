@@ -32,6 +32,13 @@
 //   unchanged  final === draft, exactly. Share = unchanged / compared.
 //   similarity 1 − levenshtein(draft, final) / max(length), counted in Unicode
 //              code points; two empty strings are 1. Median over compared rows.
+//              Exact for normal notes. CPU is bounded (similarity()): after the
+//              shared prefix/suffix is stripped, a middle longer than
+//              SIMILARITY_SEGMENT_CAP is scored on its first CAP code points
+//              and scaled, and once the request has spent
+//              SIMILARITY_CELL_BUDGET DP cells the remaining rows use a cheap
+//              character-count bound. Both are approximate (counted in
+//              approximateSimilarity).
 //   closing    eligible: the draft, trailing whitespace trimmed, ends with "]"
 //   period     (so there is no period after it). Made: the final, trimmed the
 //              same way, ends with "].". Share = made / eligible.
@@ -45,12 +52,15 @@
 //              and had not finished before it (drafted_at <= updated_at). The
 //              applying job stamps updated_at right after its apply, so the
 //              writer is the candidate whose updated_at is EARLIEST; ties go to
-//              the latest created_at. A job with no contextRef (no successful
-//              export yet, or a chain/follow-up child) still ran, on the
-//              unpinned latest pack (translate/params.ts); the page says "not
-//              pinned". The prod cron deletes done jobs after 7 days, so older
-//              drafts count as "run no longer on record" (untracedDrafts)
-//              rather than a guess.
+//              the latest created_at. This is a time match, not a stored link:
+//              rare overlapping runs (a failed writer whose updated_at a later
+//              status read re-stamped; a parent and child in the same second)
+//              can be credited to the wrong run. A job with no contextRef (no
+//              successful export yet, or a chain/follow-up child) still ran,
+//              on the unpinned latest pack if one existed
+//              (translate/params.ts); the page says "not pinned". The prod
+//              cron deletes done jobs after 7 days, so older drafts count as
+//              "run no longer on record" (untracedDrafts) rather than a guess.
 //
 // Bounded: one book per request. Two D1 reads of our own (rows with their
 // draft, the book's translate jobs), then readBookSourceNotes: one config and
@@ -87,7 +97,7 @@ export interface ScorecardJob {
   resourceType: string | null;
 }
 
-/** A context pack the chapter's compared drafts were made with. ref null = the run was not pinned (latest pack at run time). */
+/** A context pack the chapter's compared drafts were made with. ref null = the run was not pinned (latest pack at run time, if any). */
 export interface ContextPackCount {
   ref: string | null;
   count: number;
@@ -105,6 +115,8 @@ export interface ScorecardChapter {
   unchangedPct: number | null;
   /** 0–1, null when nothing was compared. */
   medianSimilarity: number | null;
+  /** Compared rows whose similarity is approximate (see similarity()). */
+  approximateSimilarity: number;
   closingPeriod: { eligible: number; made: number };
   contextPacks: ContextPackCount[];
   /** Compared drafts whose translate job is no longer on record. */
@@ -125,23 +137,71 @@ export interface DraftScorecardResponse {
   total: ScorecardChapter;
   /** Chapters whose English source could not be read (ascending). */
   englishUncheckedChapters: number[];
-  /** Why the English source could not be read (first failure), or null. */
-  englishSourceProblem: string | null;
+  /** Each distinct reason the English source could not be read, with its chapters (ascending). */
+  englishProblems: { reason: string; chapters: number[] }[];
 }
 
 // ── Pure metrics ────────────────────────────────────────────────────────────
 
+/** Longest middle segment (after the shared prefix/suffix strip) scored exactly. */
+export const SIMILARITY_SEGMENT_CAP = 2_000;
 /**
- * 1 − levenshtein(a, b) / max(len) over Unicode code points. Equal strings
- * short-circuit; the shared prefix and suffix are stripped before the two-row
- * dynamic program, so a small edit in a long note stays cheap.
+ * DP cells one request may spend on similarity. ~100M cells/s in V8 here, so
+ * this keeps a 3,000-row book to roughly a second of CPU; normal notes use a
+ * few thousand cells each, so only a book full of long rewrites reaches it.
  */
-export function editSimilarity(a: string, b: string): number {
-  if (a === b) return 1;
+export const SIMILARITY_CELL_BUDGET = 100_000_000;
+
+/** Remaining DP cells for one request; similarity() spends from it. */
+export interface CellBudget {
+  cells: number;
+}
+
+// Levenshtein distance of x[xs, xe) and y[ys, ye), two-row DP.
+function levenshtein(x: string[], xs: number, xe: number, y: string[], ys: number, ye: number): number {
+  const n = xe - xs;
+  const m = ye - ys;
+  let prev = new Int32Array(m + 1);
+  let cur = new Int32Array(m + 1);
+  for (let j = 0; j <= m; j++) prev[j] = j;
+  for (let i = 1; i <= n; i++) {
+    cur[0] = i;
+    const xi = x[xs + i - 1];
+    for (let j = 1; j <= m; j++) {
+      const sub = prev[j - 1] + (xi === y[ys + j - 1] ? 0 : 1);
+      const del = prev[j] + 1;
+      const ins = cur[j - 1] + 1;
+      cur[j] = sub < del ? (sub < ins ? sub : ins) : del < ins ? del : ins;
+    }
+    const t = prev;
+    prev = cur;
+    cur = t;
+  }
+  return prev[m];
+}
+
+/**
+ * 1 − levenshtein(a, b) / max(len) over Unicode code points, with bounded
+ * CPU. Equal strings short-circuit; the shared prefix and suffix are stripped
+ * first, so a small edit in a long note stays cheap. Then:
+ *   - both middles ≤ SIMILARITY_SEGMENT_CAP and the budget covers n×m cells:
+ *     exact;
+ *   - otherwise, if the budget covers the capped segments (the first CAP code
+ *     points of each middle): their edit rate, scaled to the full middle and
+ *     clamped to the true bounds [|n−m|, max(n, m)] — approximate;
+ *   - otherwise a cheap O(n+m) bound: max(n, m) minus the characters the two
+ *     middles share (a lower bound on the distance) — approximate.
+ */
+export function similarity(
+  a: string,
+  b: string,
+  budget: CellBudget = { cells: Infinity },
+): { value: number; approximate: boolean } {
+  if (a === b) return { value: 1, approximate: false };
   const x = Array.from(a);
   const y = Array.from(b);
   const longest = Math.max(x.length, y.length);
-  if (longest === 0) return 1;
+  if (longest === 0) return { value: 1, approximate: false };
   let start = 0;
   while (start < x.length && start < y.length && x[start] === y[start]) start++;
   let endX = x.length;
@@ -152,24 +212,39 @@ export function editSimilarity(a: string, b: string): number {
   }
   const n = endX - start;
   const m = endY - start;
-  if (n === 0 || m === 0) return 1 - Math.max(n, m) / longest;
-  let prev = new Int32Array(m + 1);
-  let cur = new Int32Array(m + 1);
-  for (let j = 0; j <= m; j++) prev[j] = j;
-  for (let i = 1; i <= n; i++) {
-    cur[0] = i;
-    const xi = x[start + i - 1];
-    for (let j = 1; j <= m; j++) {
-      const sub = prev[j - 1] + (xi === y[start + j - 1] ? 0 : 1);
-      const del = prev[j] + 1;
-      const ins = cur[j - 1] + 1;
-      cur[j] = sub < del ? (sub < ins ? sub : ins) : del < ins ? del : ins;
-    }
-    const t = prev;
-    prev = cur;
-    cur = t;
+  if (n === 0 || m === 0) return { value: 1 - Math.max(n, m) / longest, approximate: false };
+
+  if (n <= SIMILARITY_SEGMENT_CAP && m <= SIMILARITY_SEGMENT_CAP && n * m <= budget.cells) {
+    budget.cells -= n * m;
+    return { value: 1 - levenshtein(x, start, endX, y, start, endY) / longest, approximate: false };
   }
-  return 1 - prev[m] / longest;
+
+  const cn = Math.min(n, SIMILARITY_SEGMENT_CAP);
+  const cm = Math.min(m, SIMILARITY_SEGMENT_CAP);
+  let distance: number;
+  if (cn * cm <= budget.cells) {
+    budget.cells -= cn * cm;
+    const rate = levenshtein(x, start, start + cn, y, start, start + cm) / Math.max(cn, cm);
+    distance = Math.min(Math.max(rate * Math.max(n, m), Math.abs(n - m)), Math.max(n, m));
+  } else {
+    const counts = new Map<string, number>();
+    for (let i = start; i < endX; i++) counts.set(x[i], (counts.get(x[i]) ?? 0) + 1);
+    let shared = 0;
+    for (let j = start; j < endY; j++) {
+      const c = counts.get(y[j]) ?? 0;
+      if (c > 0) {
+        shared++;
+        counts.set(y[j], c - 1);
+      }
+    }
+    distance = Math.max(n, m) - shared;
+  }
+  return { value: 1 - distance / longest, approximate: true };
+}
+
+/** similarity() without a request budget; a middle over the segment cap is still approximate. */
+export function editSimilarity(a: string, b: string): number {
+  return similarity(a, b).value;
 }
 
 export function median(values: number[]): number | null {
@@ -233,6 +308,7 @@ interface Tally {
   englishSource: number;
   unchanged: number;
   similarities: number[];
+  approximate: number;
   eligible: number;
   made: number;
   packs: Map<string | null, number>;
@@ -246,6 +322,7 @@ const emptyTally = (): Tally => ({
   englishSource: 0,
   unchanged: 0,
   similarities: [],
+  approximate: 0,
   eligible: 0,
   made: 0,
   packs: new Map(),
@@ -264,6 +341,7 @@ function finish(chapter: number | null, t: Tally): ScorecardChapter {
     unchanged: t.unchanged,
     unchangedPct: compared ? (t.unchanged / compared) * 100 : null,
     medianSimilarity: median(t.similarities),
+    approximateSimilarity: t.approximate,
     closingPeriod: { eligible: t.eligible, made: t.made },
     contextPacks: [...t.packs]
       .map(([ref, count]) => ({ ref, count }))
@@ -282,6 +360,7 @@ export function buildScorecard(
   rows: ScorecardRow[],
   jobs: ScorecardJob[],
   englishByChapter: Map<number, Map<string, string>>,
+  budget: CellBudget = { cells: SIMILARITY_CELL_BUDGET },
 ): { chapters: ScorecardChapter[]; total: ScorecardChapter } {
   const byChapter = new Map<number, Tally>();
   const total = emptyTally();
@@ -304,11 +383,12 @@ export function buildScorecard(
       for (const s of [t, total]) s.englishSource++;
       continue;
     }
-    const sim = editSimilarity(draft, final);
+    const sim = similarity(draft, final, budget);
     const outcome = closingPeriodOutcome(draft, final);
     const job = matchDraftJob({ chapter: r.chapter, draftLogId: r.draftLogId, draftedAt: r.draftedAt ?? 0 }, jobs);
     for (const s of [t, total]) {
-      s.similarities.push(sim);
+      s.similarities.push(sim.value);
+      if (sim.approximate) s.approximate++;
       if (draft === final) s.unchanged++;
       if (outcome !== "ineligible") s.eligible++;
       if (outcome === "made") s.made++;
@@ -326,9 +406,11 @@ export function buildScorecard(
 // ── D1 loader ───────────────────────────────────────────────────────────────
 
 // The latest ai_pipeline audit row per validated, live tN row of the book.
-// Book-scoped on edit_log.book with the pre-0017 NULL fallback, the same rule
-// as the AI chip's latest_source in chapters.ts; the (kind, row_key) index
-// keeps the correlated subquery cheap.
+// Book-scoped on edit_log.book. A pre-0017 audit row has a NULL book, so it is
+// accepted only when the row has no book-matched one: `e.book IS NULL` sorts
+// after 0 (book-matched) first, so another book's NULL-book row for a shared
+// id can never outrank this book's own draft. The (kind, row_key) index keeps
+// the correlated subquery cheap.
 export const SCORECARD_ROWS_SQL = `
   SELECT t.id AS id, t.chapter AS chapter, t.note AS final_note,
          d.id AS draft_log_id, d.created_at AS drafted_at,
@@ -339,7 +421,7 @@ export const SCORECARD_ROWS_SQL = `
        WHERE e.kind = 'tn' AND e.row_key = t.id
          AND (e.book = t.book OR e.book IS NULL)
          AND e.source = 'ai_pipeline' AND e.action IN ('create', 'update')
-       ORDER BY e.id DESC LIMIT 1
+       ORDER BY (e.book IS NULL), e.id DESC LIMIT 1
     )
    WHERE t.book = ?1 AND t.deleted_at IS NULL AND t.trashed_at IS NULL
      AND t.translation_state = 'validated'
@@ -410,13 +492,16 @@ export async function draftScorecard(c: Context<{ Bindings: Env }>) {
   // A failed source leaves its chapters unchecked rather than failing the
   // scorecard, and is not retried.
   const englishByChapter = new Map<number, Map<string, string>>();
-  let englishSourceProblem: string | null = null;
+  const problems = new Map<string, number[]>();
   const draftedChapters = new Set(rows.filter((r) => r.draftLogId != null && r.draftNote != null).map((r) => r.chapter));
   const sources = await readBookSourceNotes(c.env, book, [...draftedChapters]);
   for (const [ch, src] of sources) {
     if (src.ok) englishByChapter.set(ch, src.notes);
-    else englishSourceProblem ??= src.reason;
+    else problems.set(src.reason, [...(problems.get(src.reason) ?? []), ch]);
   }
+  const englishProblems = [...problems]
+    .map(([reason, chs]) => ({ reason, chapters: chs.sort((p, q) => p - q) }))
+    .sort((p, q) => p.chapters[0] - q.chapters[0]);
   // A chapter with no draft at all has nothing to exclude, so it is not "unchecked".
   for (const r of rows) if (!draftedChapters.has(r.chapter)) englishByChapter.set(r.chapter, new Map());
 
@@ -424,6 +509,6 @@ export async function draftScorecard(c: Context<{ Bindings: Env }>) {
   const englishUncheckedChapters = chapters
     .filter((s) => s.englishCheck === "none")
     .map((s) => s.chapter as number);
-  const body: DraftScorecardResponse = { book, chapters, total, englishUncheckedChapters, englishSourceProblem };
+  const body: DraftScorecardResponse = { book, chapters, total, englishUncheckedChapters, englishProblems };
   return c.json(body);
 }
