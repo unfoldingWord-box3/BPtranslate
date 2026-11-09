@@ -1751,6 +1751,9 @@
         "redoTitle": "Start one AI redraft for the checked notes. They stay read-only until it finishes.",
         "clear": "Clear",
         "undo": "Undo",
+        "keyCheck": "check or uncheck a note",
+        "keyExtend": "check the next or previous note too",
+        "keyUndo": "undo Not needed",
         "hint": "Space or X checks a note · Shift+click or Shift+J/K checks a range · Approve saves the open note first if it is checked",
         "approved": "Approved: {{count}}.",
         "notNeededDone": "Marked not needed: {{count}}.",
@@ -1771,6 +1774,29 @@
           "notNeeded": "marked not needed: {{count}}",
           "failed": "error: {{count}}"
         }
+        },
+      "nav": {
+        "prevVerse": "Previous verse",
+        "prevVerseTitle": "Previous verse ([)",
+        "nextVerse": "Next verse",
+        "nextVerseTitle": "Next verse (])",
+        "picker": "Go to verse",
+        "option": "{{ref}} ({{count}})",
+        "keyVerse": "previous / next verse"
+      },
+      "cols": {
+        "hide": "Hide the {{name}} column",
+        "show": "Show the {{name}} column",
+        "laneToggle": "{{label}} lane: show or hide",
+        "laneEmpty": "No {{label}} text for this verse",
+        "keys": "Keyboard shortcuts",
+        "keyEnglish": "show or hide the English column",
+        "keySourceUlt": "show or hide the source text lane"
+      },
+      "editor": {
+        "close": "Close",
+        "closeTitle": "Close the editor and keep what you typed as an unsaved draft (Esc)",
+        "discard": "Discard changes"
       }
     }
   },
