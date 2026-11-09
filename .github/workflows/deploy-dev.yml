@@ -14,12 +14,18 @@ name: Deploy to dev
 # workflow_dispatch for workflow files that exist on the default branch, and
 # deploy.yml no longer does, so those copies cannot be run.
 #
-# What remains: anyone with push access can edit THIS file on a branch (say, to
-# add `--env production`) and dispatch it from that branch. The token cannot
-# stop that. Cloudflare only scopes Workers Scripts:Edit at the account level
-# (confirmed in the dashboard 2026-11-09, issue #823), so CLOUDFLARE_API_TOKEN
-# can deploy any Worker on the unfoldingWord account, including the prod name
-# `bptranslate`. Treat the token as prod-capable.
+# What remains: repo secrets reach any workflow run on a same-repo branch, so
+# anyone with push access can edit THIS file on a branch (say, to add
+# `--env production`) and dispatch it, or use the secret from any other
+# workflow they push. Only the token's own scope stops that.
+#
+# The token set on 2026-11-09 (#823) is a user API token with account-level
+# Workers Scripts:Edit + D1:Edit, so it can deploy the prod Worker name
+# `bptranslate` too. Treat it as prod-capable. Cloudflare documents a narrower
+# option (developers.cloudflare.com/workers/authorization/): an ACCOUNT-OWNED
+# API token whose Workers policy is the Editor role on the single Worker
+# `bptranslate-dev`. D1 has no per-database scope, so that token still needs
+# account-wide D1:Edit for the migration step. Rotating to it: issue #824.
 on:
   workflow_dispatch:
 
@@ -58,8 +64,8 @@ jobs:
       # bptranslate --remote` WOULD reach the prod DB. Never put the prod
       # name here. Also: Cloudflare's D1 token permission is account-wide
       # (no per-database scoping), so the token this step needs can write
-      # prod D1 too. Its Workers Scripts permission is account-wide as well
-      # (see the header), so treat the token itself as prod-capable.
+      # prod D1 too. The current token's Workers permission is account-wide as
+      # well (see the header), so treat the token itself as prod-capable.
       - name: Apply D1 migrations (dev databases)
         working-directory: api
         run: |
