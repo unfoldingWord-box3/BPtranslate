@@ -3185,6 +3185,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
           }
           onCancel={() => setQuoteOpenRowId(null)}
           onCommit={() => void commitQuote()}
+          manageFocus
         />
       )}
       <Snackbar
