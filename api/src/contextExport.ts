@@ -327,7 +327,8 @@ export const EXAMPLE_RECENT_CHAPTERS = 4;
 const CHAPTER_RECENCY_ROWS = 5;
 /**
  * Hard ceiling on the file, whatever the data: many distinct SupportReference
- * values or very long chapters could otherwise grow it again. Newest rows win.
+ * values or very long chapters could otherwise grow it again. Rows are added
+ * newest first and any row that no longer fits is skipped.
  * Well under the runners' 16 MB examples-file cap (contextPack.ts).
  */
 export const EXAMPLES_MAX_BYTES = 4_000_000;
@@ -396,8 +397,9 @@ export function selectPackExamples(
   let bytes = 0;
   for (const l of newestFirst) {
     if (!keep.has(l)) continue;
-    bytes += enc.encode(JSON.stringify(l)).byteLength + 1;
-    if (bytes > maxBytes) break;
+    const size = enc.encode(JSON.stringify(l)).byteLength + 1;
+    if (bytes + size > maxBytes) continue;
+    bytes += size;
     out.push(l);
   }
   return out.reverse();

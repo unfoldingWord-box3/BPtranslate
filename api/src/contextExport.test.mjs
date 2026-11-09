@@ -827,7 +827,13 @@ console.log("contextExport — examples/validated.jsonl is bounded (#813)");
   const capped = selectPackExamples(all, 8, 4, 2000);
   const cappedBytes = capped.reduce((n, l) => n + new TextEncoder().encode(JSON.stringify(l)).byteLength + 1, 0);
   assert(capped.length > 0 && cappedBytes <= 2000, "selection respects the byte ceiling");
-  assert(capped.every((l) => l.validated_at >= 1000), "the ceiling drops the oldest rows first");
+  const newest = Math.max(...all.map((l) => l.validated_at));
+  assert(capped.some((l) => l.validated_at === newest), "the ceiling keeps the newest rows");
+  assert(capped.length < selectPackExamples(all).length, "the ceiling drops rows");
+
+  const huge = { resource: "tn", rowId: "huge", book: "LUK", ref: "10:99", supportReference: null, source: "x".repeat(3000), target: "t", validated_at: 5000 };
+  const withHuge = selectPackExamples([huge, ...all], 8, 4, 2000);
+  assert(!withHuge.includes(huge) && withHuge.length > 0, "a row bigger than the ceiling is skipped, smaller rows still fit");
 
   // Spelling variants of one SupportReference share a quota (readers match on the slug).
   const variants = Array.from({ length: 12 }, (_, i) => ({
