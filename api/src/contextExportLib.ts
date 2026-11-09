@@ -100,7 +100,12 @@ export type ShrinkDetail = {
  * Semantic shrink guard vs the prior successful pack.
  * Refuse a substantial reduction unless shrinkOverride is set.
  * Thresholds from the plan: terms >5% AND >5; examples >5% AND >3; templates
- * >5% AND >3 (mirrors examples); bytes >10%.
+ * >5% AND >3 (mirrors examples); bytes >10%. Since #813 `examples` counts the
+ * validated pool in D1 and `totalBytes` excludes examples/validated.jsonl, which
+ * now holds a bounded selection whose size moves as recent chapters change
+ * (see renderContextPack). The first export after that change compares against
+ * a byte count that still included the old full examples file, so it trips the
+ * bytes metric once and needs one shrinkOverride re-export.
  * There is deliberately NO contentFiles metric: the renderer omits a pack file
  * iff its D1 source is empty, so a file-count drop is always an intentional
  * clear (e.g. instructions_md emptied) that must be allowed to land — the

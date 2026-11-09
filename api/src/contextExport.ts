@@ -310,6 +310,57 @@ export function buildValidatedExamples(
   return { ok: true, lines };
 }
 
+const EXAMPLES_PATH = "examples/validated.jsonl";
+
+/** Most recent validated examples kept per (resource, SupportReference). */
+export const EXAMPLES_PER_SLUG = 8;
+/** Chapters (across all books) whose validated rows are all kept, newest approvals first. */
+export const EXAMPLE_RECENT_CHAPTERS = 4;
+
+/**
+ * Bound examples/validated.jsonl (issue #813). Writing every validated row made
+ * the file grow with the Bible (2.4 MB at 3,270 Arabic rows) while each runner
+ * uses at most 15 per batch. Keep the newest EXAMPLES_PER_SLUG rows of every
+ * (resource, SupportReference) group, plus every row of the
+ * EXAMPLE_RECENT_CHAPTERS chapters with the newest approvals — teams work in
+ * chapter order, so these are the chapters just before the one being drafted.
+ * The runners' existing "same slug first, then most recent" pick then lands on
+ * the previous chapter without any reader change. Ties on validated_at (bulk
+ * approvals share a second) break on rowId so the selection, and therefore the
+ * commit, is deterministic. Input order is preserved.
+ */
+export function selectPackExamples(
+  lines: readonly JsonlExample[],
+  perSlug = EXAMPLES_PER_SLUG,
+  recentChapters = EXAMPLE_RECENT_CHAPTERS,
+): JsonlExample[] {
+  const newestFirst = lines.slice().sort((a, b) =>
+    (b.validated_at - a.validated_at) || (a.rowId < b.rowId ? -1 : a.rowId > b.rowId ? 1 : 0));
+  const keep = new Set<JsonlExample>();
+
+  const perGroup = new Map<string, number>();
+  for (const l of newestFirst) {
+    const group = `${l.resource}\u0000${l.supportReference ?? ""}`;
+    const n = perGroup.get(group) ?? 0;
+    if (n < perSlug) {
+      keep.add(l);
+      perGroup.set(group, n + 1);
+    }
+  }
+
+  const chapterOf = (l: JsonlExample) => `${l.book}\u0000${l.ref.split(":")[0]}`;
+  const chapters: string[] = [];
+  for (const l of newestFirst) {
+    if (chapters.length >= recentChapters) break;
+    const ch = chapterOf(l);
+    if (!chapters.includes(ch)) chapters.push(ch);
+  }
+  const recent = new Set(chapters);
+  for (const l of lines) if (recent.has(chapterOf(l))) keep.add(l);
+
+  return lines.filter((l) => keep.has(l));
+}
+
 export function renderValidatedJsonl(lines: readonly JsonlExample[]): string {
   if (lines.length === 0) return "";
   return lines.map((l) => JSON.stringify(l)).join("\n") + "\n";
@@ -402,7 +453,7 @@ export function renderContextPack(input: {
   }
 
   if (examples.lines.length > 0) {
-    files.push({ path: "examples/validated.jsonl", content: renderValidatedJsonl(examples.lines) });
+    files.push({ path: EXAMPLES_PATH, content: renderValidatedJsonl(selectPackExamples(examples.lines)) });
   }
 
   const templatesTsv = renderTemplatesTsv(input.templates);
@@ -411,13 +462,18 @@ export function renderContextPack(input: {
     files.push({ path: "templates/templates.tsv", content: templatesTsv });
   }
 
+  // The shrink guard compares these with the previous export, so they measure
+  // the D1 data, not the bounded file: examples count every validated row (the
+  // pool the file is selected from), and totalBytes leaves the examples file
+  // out — its size moves day to day as the recent chapters change, which would
+  // trip the 10% byte check on ordinary exports.
   const stats: ContextPackStats = {
     terms: input.terms.length,
     examplesTn: examples.lines.filter((l) => l.resource === "tn").length,
     examplesTq: examples.lines.filter((l) => l.resource === "tq").length,
     templates: templatesRowCount,
     contentFiles: contentFileCount(files),
-    totalBytes: totalBytes(files),
+    totalBytes: totalBytes(files.filter((f) => f.path !== EXAMPLES_PATH)),
   };
 
   return { ok: true, files, stats };

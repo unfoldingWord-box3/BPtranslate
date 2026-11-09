@@ -118,6 +118,7 @@ One JSON object per line, append-ordered by validation time (most recent last):
 - `resource`: `tn | tq` (tq lines carry `source`/`target` as `question\tresponse` pairs — exact tq shape to be finalized when the export lands; tn-only is fine for the pilot).
 - **Tombstones:** a later line with `"tombstone": true` for the same `(resource, rowId)` revokes the example (a validated row was un-approved or re-edited). Readers MUST apply last-line-wins per `(resource, rowId)`.
 - **Bot consumption** (PIPELINE-SPEC §2.2 item 4): select up to N (start 15) live examples as few-shots, by `supportReference` match first, then recency. Selection is the skill's call; this file is just the pool.
+- **Bounded pool (writer side, #813).** The file is a selection, not the full history: the 8 most recently validated rows of each `(resource, supportReference)` group (tq rows form one group), plus every validated row of the 4 chapters, across all books, with the most recent validations. Teams work in chapter order, so the reader's "same slug, then most recent" pick lands on the chapters just before the one being drafted. Before this, the file held every validated row and grew with the Bible (2.4 MB at 3,270 Arabic rows). Readers need no change: the schema, ordering and tombstone rule are unchanged. The full history stays in D1, and older selections in this repo's git history.
 - `validated_by` from the spec sketch is dropped (user IDs are editor-internal; provenance lives in the editor's `edit_log`).
 
 ### 3.5 `templates/templates.tsv`
