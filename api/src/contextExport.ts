@@ -325,6 +325,12 @@ export const EXAMPLE_RECENT_CHAPTERS = 4;
  * old chapter must not count that chapter as "just approved".
  */
 const CHAPTER_RECENCY_ROWS = 5;
+/**
+ * Hard ceiling on the file, whatever the data: many distinct SupportReference
+ * values or very long chapters could otherwise grow it again. Newest rows win.
+ * Well under the runners' 16 MB examples-file cap (contextPack.ts).
+ */
+export const EXAMPLES_MAX_BYTES = 4_000_000;
 
 /** Total order, newest first: same input rows give the same selection and file. */
 function newerFirst(a: JsonlExample, b: JsonlExample): number {
@@ -351,6 +357,7 @@ export function selectPackExamples(
   lines: readonly JsonlExample[],
   perSlug = EXAMPLES_PER_SLUG,
   recentChapters = EXAMPLE_RECENT_CHAPTERS,
+  maxBytes = EXAMPLES_MAX_BYTES,
 ): JsonlExample[] {
   const newestFirst = lines.slice().sort(newerFirst);
   const keep = new Set<JsonlExample>();
@@ -384,7 +391,16 @@ export function selectPackExamples(
     .slice(0, recentChapters);
   for (const { rows } of recent) for (const l of rows) keep.add(l);
 
-  return newestFirst.filter((l) => keep.has(l)).reverse();
+  const out: JsonlExample[] = [];
+  const enc = new TextEncoder();
+  let bytes = 0;
+  for (const l of newestFirst) {
+    if (!keep.has(l)) continue;
+    bytes += enc.encode(JSON.stringify(l)).byteLength + 1;
+    if (bytes > maxBytes) break;
+    out.push(l);
+  }
+  return out.reverse();
 }
 
 export function renderValidatedJsonl(lines: readonly JsonlExample[]): string {
