@@ -76,7 +76,7 @@ test("validateGuide reports a missing screenshot in every language folder", () =
     writeFileSync(path.join(root, "help", "screenshots", "en", "a-1.png"), "");
     const mk = (shots) => ({ id: "a", title: "a", routes: [], roles: [], keywords: [], headings: [], body: "", file: "help/en/a.md", screenshots: shots });
     const ar = { id: "a", title: "a", routes: [], roles: [], keywords: [], headings: [], body: "", file: "help/ar/a.md", screenshots: [] };
-    const shot = (name) => ({ name, hash: "#/x", phone: false, top: false });
+    const shot = (name) => ({ name, hash: "#/x", phone: false, top: false, rapid: false });
     const errors = validateGuide({ en: [mk([shot("a-1"), shot("a-2")])], ar: [ar] }, root);
     assert.equal(errors.filter((e) => e.includes('"a-1"')).length, 1, errors.join("\n")); // missing only in ar
     assert.equal(errors.filter((e) => e.includes('"a-2"')).length, 2, errors.join("\n")); // missing in en and ar
@@ -136,8 +136,8 @@ test("parseArticle front-matter subset", () => {
   assert.deepEqual(a.roles, []);
   assert.deepEqual(a.keywords, ["tn", "save"]);
   assert.deepEqual(a.screenshots, [
-    { name: "notes-1", hash: "#/notes/ZEC/1/1", phone: false, top: false },
-    { name: "notes-phone", hash: "#/notes/ZEC/1/1", phone: true, top: false },
+    { name: "notes-1", hash: "#/notes/ZEC/1/1", phone: false, top: false, rapid: false },
+    { name: "notes-phone", hash: "#/notes/ZEC/1/1", phone: true, top: false, rapid: false },
   ]);
   assert.deepEqual(a.headings, ["Open a note", "Sub"]);
   assert.equal(a.body, "Intro.\n## Open a note\n### Sub");
@@ -159,9 +159,9 @@ test("parseArticle reads the phone and top screenshot flags in any order", () =>
     "x.md",
   );
   assert.deepEqual(a.screenshots, [
-    { name: "one", hash: "#/x", phone: false, top: true },
-    { name: "two", hash: "#/y", phone: true, top: true },
-    { name: "three", hash: "#/z", phone: true, top: true },
+    { name: "one", hash: "#/x", phone: false, top: true, rapid: false },
+    { name: "two", hash: "#/y", phone: true, top: true, rapid: false },
+    { name: "three", hash: "#/z", phone: true, top: true, rapid: false },
   ]);
   assert.throws(() => parseArticle("---\nid: a\ntitle: T\nscreenshots:\n  - one top\n---\n", "q.md"), /q\.md.*malformed screenshot/);
 });

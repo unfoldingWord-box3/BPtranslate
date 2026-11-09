@@ -3,10 +3,11 @@ id: notes
 title: Translating notes
 routes: [notes]
 roles: [editor, admin]
-keywords: [notes, tn, translation notes, translate note, draft, approve, save, redo, ai, not needed, quote, support reference, ta, academy, queue, ai run, import, door43]
+keywords: [notes, tn, translation notes, translate note, draft, approve, save, redo, ai, not needed, quote, support reference, ta, academy, queue, ai run, import, door43, rapid check, keyboard, shortcuts, laptop]
 screenshots:
   - notes-1 #/notes/OBA/1/1
   - notes-phone #/notes/OBA/1/1 phone
+  - notes-rapid #/notes/OBA/1/3 rapid
 ---
 
 The **Translation Notes** screen is where you translate the notes (tN) of one chapter. A translation note explains a hard place in a verse. Each note has a quote from the original text, a link to a translationAcademy (tA) article, and the note text. You see the English note and write your own version next to it.
@@ -37,6 +38,23 @@ The other two buttons at the bottom:
 - **Not needed** sets the note aside when it does not need translating. It goes to the trash. Until the nightly publish you can bring it back in the [Review queue](#help:review-queue). After that it is deleted for good.
 
 An icon next to the verse opens the verse view. See [Verse view](#help:verse-view).
+
+## Rapid check
+On a laptop or a larger screen, the **Rapid check** button in the top bar switches to a compact list for checking many notes quickly. Select it again to go back to the cards. The app remembers your choice in this browser. On a phone or a narrow window you always see the cards.
+
+![Rapid check at Obadiah 1:3: the verse at the top and its notes as rows](../screenshots/en/notes-rapid.png)
+
+The verse stays at the top while you scroll. Below it, each note of the verse is one row: its status, its tA type, the original-language quote, the **English note**, and your note. Choose a type under **All types** to list every note of that type in the chapter instead, grouped by verse.
+
+- Click your note in any row to edit it. Select **Save** to keep it, or **Save & Approve** at the bottom to save and approve it.
+- The circle at the start of a row approves that note. It fills in when the note is approved. A note with unsaved typing has to be opened and saved first.
+- **English note** above the list shows or hides the English column.
+
+Keys work once you click in the list:
+- **J** and **K** (or the arrow keys) move to the next and previous note.
+- **Enter** opens the editor. Inside it, **Ctrl+Enter** saves and approves, and **Esc** closes it. What you typed is kept.
+- **A** approves the current note, saving it first if you changed it, and moves on.
+- **E** shows or hides the English column. **U** shows or hides the English ULT, when the screen offers it.
 
 ## When you finish a chapter
 You see **OBA 1 notes complete** with a count of approved, edited and not-needed notes. Select **Continue to chapter 2** or **Review again**.
