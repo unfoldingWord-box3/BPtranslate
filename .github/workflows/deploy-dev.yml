@@ -14,10 +14,15 @@ name: Deploy to dev
 # workflow_dispatch for workflow files that exist on the default branch, and
 # deploy.yml no longer does, so those copies cannot be run.
 #
-# What remains: repo secrets reach any workflow run on a same-repo branch, so
-# anyone with push access can edit THIS file on a branch (say, to add
-# `--env production`) and dispatch it, or use the secret from any other
-# workflow they push. Only the token's own scope stops that.
+# CLOUDFLARE_API_TOKEN is a secret of the `dev` GitHub Environment, not a repo
+# secret, and that environment only allows deployments from `main` (Settings ->
+# Environments -> dev -> Deployment branches). Repo secrets reach any workflow
+# run on a same-repo branch, so as a repo secret the token was usable by anyone
+# who pushed a branch with an edited copy of this file. Now a job on any other
+# ref is refused before it starts, and a copy with `environment:` removed gets
+# no token at all. Keep the `environment: dev` line below, and never re-add the
+# token as a repo secret. CLOUDFLARE_ACCOUNT_ID is not sensitive and stays a
+# repo secret.
 #
 # The token set on 2026-11-09 (#823) is a user API token with account-level
 # Workers Scripts:Edit + D1:Edit, so it can deploy the prod Worker name
@@ -37,6 +42,9 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # Gives this job the `dev` environment's secrets and enforces its
+    # main-only branch rule. See the header.
+    environment: dev
     steps:
       - uses: actions/checkout@v5
 
