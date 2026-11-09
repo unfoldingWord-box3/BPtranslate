@@ -13,6 +13,8 @@ import Box from "@mui/material/Box";
 import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
 import Chip from "@mui/material/Chip";
+import IconButton from "@mui/material/IconButton";
+import EditOutlinedIcon from "@mui/icons-material/EditOutlined";
 import { alpha, useTheme } from "@mui/material/styles";
 import { useTranslation } from "react-i18next";
 import { FlowStatusChip, type FlowStatusKind } from "./FlowStatusChip";
@@ -44,6 +46,8 @@ export interface NotesRapidCheckProps {
   rows: RapidCheckRow[];
   /** Type-filter mode: rows span the chapter, so label each verse group. */
   groupByVerse: boolean;
+  /** Type-filter mode: the compact lanes drawn in a verse group's head. */
+  renderGroupLanes?: (verse: number, refLabel: string) => ReactNode;
   book: string;
   sourceLabel: string;
   sourceDir: "rtl" | "ltr";
@@ -69,6 +73,14 @@ export interface NotesRapidCheckProps {
   onSelect: (idx: number) => void;
   onEdit: (idx: number) => void;
   onApprove: (id: string) => void;
+  /** Takes the approval off an approved row (its circle, clicked again). */
+  onUnapprove: (id: string) => void;
+  /** Opens the quote picker for the open row; null when it can't be offered. */
+  onOpenQuote: (() => void) | null;
+  /** The picker's anchor: the pencil in the open row's quote cell. */
+  quoteAnchorRef: Ref<HTMLButtonElement>;
+  /** The quote picker is open (focus returns to the list when it closes). */
+  quoteOpen: boolean;
   onNext: () => void;
   onPrev: () => void;
   onApproveCurrent: () => void;
@@ -92,6 +104,7 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
   const {
     rows,
     groupByVerse,
+    renderGroupLanes,
     book,
     sourceLabel,
     sourceDir,
@@ -111,6 +124,10 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
     onSelect,
     onEdit,
     onApprove,
+    onUnapprove,
+    onOpenQuote,
+    quoteAnchorRef,
+    quoteOpen,
     onNext,
     onPrev,
     onApproveCurrent,
@@ -142,6 +159,10 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
   useEffect(() => {
     if (!currentId) return;
     const el = scrollRef.current?.querySelector<HTMLElement>(`[data-rapid-row="${CSS.escape(currentId)}"]`);
+    // The first row of a verse group brings the group's head (its lanes)
+    // into view too, so J/K never leave the verse text under the pinned header.
+    const head = el?.previousElementSibling;
+    if (head instanceof HTMLElement && head.dataset.rapidGroup != null) head.scrollIntoView({ block: "nearest" });
     el?.scrollIntoView({ block: "nearest" });
   }, [currentId]);
 
@@ -154,7 +175,7 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
     if (!active || active === document.body || !active.isConnected) {
       scrollRef.current?.focus({ preventScroll: true });
     }
-  }, [currentId, editing, rows]);
+  }, [currentId, editing, rows, quoteOpen]);
 
   const currentApprovable = rows.find((r) => r.isCurrent)?.approvable ?? false;
 
@@ -201,6 +222,9 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
     } else if (code === "KeyU" && !e.shiftKey && onToggleSourceUlt) {
       e.preventDefault();
       onToggleSourceUlt();
+    } else if (code === "KeyQ" && !e.shiftKey && onOpenQuote) {
+      e.preventDefault();
+      if (!e.repeat && !busy && !editLocked) onOpenQuote();
     }
   };
 
@@ -325,11 +349,16 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
           }}
         >
           {rows.map((r, i) => {
+            const groupLanes =
+              groupByVerse && renderGroupLanes && r.verse > 0 && (i === 0 || rows[i - 1].verse !== r.verse)
+                ? renderGroupLanes(r.verse, `${book} ${r.refLabel}`)
+                : null;
             const groupHead =
               groupByVerse && (i === 0 || rows[i - 1].verse !== r.verse) ? (
                 <Box
                   key={`v-${r.id}`}
                   role="listitem"
+                  data-rapid-group={r.verse}
                   sx={{
                     paddingInline: 1.5,
                     paddingBlock: 0.5,
@@ -339,13 +368,31 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
                     fontWeight: 700,
                     borderBottom: "1px solid",
                     borderColor: "divider",
+                    scrollMarginTop: `${stickyH + 4}px`,
+                    ...(groupLanes
+                      ? {
+                          // The rows' first two columns (and their 3px
+                          // current-row bar), so the lanes start where the
+                          // rows' quote column does.
+                          display: "grid",
+                          gridTemplateColumns: "36px minmax(120px, 160px) minmax(0, 1fr)",
+                          columnGap: 1.5,
+                          alignItems: "baseline",
+                          paddingInlineStart: 0,
+                          paddingInlineEnd: 1,
+                          borderInlineStart: "3px solid transparent",
+                        }
+                      : {}),
                   }}
                 >
-                  {book} {r.refLabel}
+                  <Box component="span" sx={groupLanes ? { gridColumn: "1 / 3", paddingInlineStart: 1.5 } : undefined}>
+                    {book} {r.refLabel}
+                  </Box>
+                  {groupLanes}
                 </Box>
               ) : null;
             const circleLabel = r.approved
-              ? t("flowTranslate.status.approved")
+              ? t("flowTranslate.rapid.unapprove.circle")
               : r.blocked
                 ? t("flowTranslate.rapid.openToSave")
                 : r.approvable
@@ -381,11 +428,15 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
                     data-rapid-approve={r.id}
                     aria-label={circleLabel}
                     title={circleLabel}
-                    disabled={r.approved || !r.approvable || busy || editLocked}
-                    onClick={() => {
-                      onApprove(r.id);
-                      // This button turns disabled once approved; keep the
-                      // keyboard in the list.
+                    disabled={(!r.approved && !r.approvable) || busy || editLocked}
+                    onClick={(e) => {
+                      // A double-click's second click (detail 2) must not
+                      // take back the approval the first click just made.
+                      if (e.detail > 1) return;
+                      if (r.approved) onUnapprove(r.id);
+                      else onApprove(r.id);
+                      // The button is disabled while the request runs; keep
+                      // the keyboard in the list.
                       scrollRef.current?.focus({ preventScroll: true });
                     }}
                     sx={{
@@ -397,7 +448,7 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
                       display: "flex",
                       alignItems: "center",
                       justifyContent: "center",
-                      cursor: r.approved || !r.approvable ? "default" : "pointer",
+                      cursor: r.approved || r.approvable ? "pointer" : "default",
                     }}
                   >
                     <Box
@@ -455,13 +506,32 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
                     </Typography>
                   </Box>
 
-                  <Typography
-                    component="p"
-                    dir={sourceDir}
-                    sx={{ m: 0, paddingBlockStart: 0.5, fontFamily: SCRIPTURE_FONT_STACK, fontSize: "1rem", lineHeight: 1.55, textAlign: "start", minWidth: 0 }}
-                  >
-                    {r.quote || "—"}
-                  </Typography>
+                  <Box sx={{ display: "flex", alignItems: "flex-start", gap: 0.25, minWidth: 0 }}>
+                    <Typography
+                      component="p"
+                      dir={sourceDir}
+                      sx={{ m: 0, paddingBlockStart: 0.5, fontFamily: SCRIPTURE_FONT_STACK, fontSize: "1rem", lineHeight: 1.55, textAlign: "start", minWidth: 0, flex: 1 }}
+                    >
+                      {r.quote || "—"}
+                    </Typography>
+                    {r.isCurrent && onOpenQuote && (
+                      // The card view's pencil, on the open row only: the
+                      // quote picker is anchored here (Q opens it too).
+                      <IconButton
+                        ref={quoteAnchorRef}
+                        size="small"
+                        data-rapid-quote={r.id}
+                        disabled={busy || editLocked}
+                        onClick={onOpenQuote}
+                        aria-label={t("flowTranslate.changeQuote")}
+                        aria-haspopup="dialog"
+                        title={t("flowTranslate.rapid.quote.title")}
+                        sx={{ flex: "none", color: "text.secondary" }}
+                      >
+                        <EditOutlinedIcon fontSize="small" />
+                      </IconButton>
+                    )}
+                  </Box>
 
                   {englishCol && (
                     <Typography

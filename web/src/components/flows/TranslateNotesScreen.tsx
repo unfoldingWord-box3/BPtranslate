@@ -167,7 +167,8 @@ import {
   QUICK_DRAFTS_NEED_ORG_KEY,
 } from "../../lib/aiProviderErrors";
 import { resolveFlowChipStatus, flowChipKind, type FlowChipStatus } from "../../lib/flowStatusChip";
-import { flowLaneSegmentsAcross, type FlowSegment } from "../../lib/flowHighlight";
+import { flowLaneSegmentsAcross, type FlowQuote, type FlowSegment } from "../../lib/flowHighlight";
+import { RapidVerseLanes, type RapidLaneSpec } from "./RapidVerseLanes";
 import { isHebrewBook } from "../../lib/sourceSearch";
 import { realChapters } from "../../lib/bookSummary";
 import { drafts, rowKey } from "../../sync/drafts";
@@ -299,6 +300,9 @@ function Lane({ label, text, segments, labelFontFamily, mark }: LaneProps) {
     </Box>
   );
 }
+
+// A stable empty list, so a verse group with no quotes keeps its memo.
+const NO_QUOTES: readonly FlowQuote[] = [];
 
 export default function TranslateNotesScreen({ book, chapter, verse, rowId, role }: TranslateNotesScreenProps) {
   const { t } = useTranslation();
@@ -1093,6 +1097,30 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
     [HL, t],
   );
 
+  // Rapid check, type-filter mode: each verse group draws its own compact
+  // lanes (RapidVerseLanes, #831): the target literal, plus the source ULT
+  // while its toggle is on and it has loaded (mockup board C has no
+  // simplified lane). Built once per data change, not per keystroke.
+  const rapidGroupLanes = useMemo<RapidLaneSpec[]>(() => {
+    const lanes: RapidLaneSpec[] = [{ key: "lit", label: litLabel, index: ultIndex }];
+    if (sourceUltOn && sourceUlt.status === "ready") {
+      lanes.push({ key: "source-ult", label: sourceUltLabel, index: sourceUltIndex });
+    }
+    return lanes;
+  }, [litLabel, ultIndex, sourceUltOn, sourceUlt.status, sourceUltLabel, sourceUltIndex]);
+  const rapidGroupQuotes = useMemo(() => {
+    const byVerse = new Map<number, FlowQuote[]>();
+    if (!rapid || !typeFilter || !queueIds) return byVerse;
+    for (const i of visibleIdx) {
+      const r = rowById.get(queueIds[i]);
+      if (!r || r.verse <= 0) continue;
+      const list = byVerse.get(r.verse) ?? [];
+      list.push({ quote: r.quote, occurrence: r.occurrence });
+      byVerse.set(r.verse, list);
+    }
+    return byVerse;
+  }, [rapid, typeFilter, queueIds, visibleIdx, rowById]);
+
   const englishNote = row ? (sourceNotes.get(row.id)?.note ?? null) : null;
 
   // ── navigation between cards ─────────────────────────────────────────────
@@ -1502,6 +1530,59 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
       } else {
         say(
           t("flowTranslate.approveFailed", {
+            status: err instanceof ApiError ? err.status : t("flowTranslate.genericError"),
+          }),
+        );
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Rapid check: clicking an approved row's circle takes the approval back.
+  // The row goes to 'edited', not its earlier 'ai_draft': a person has
+  // reviewed it, which is what /validate value=0 records. Pinned to the
+  // version and state on screen, so an approval that already changed
+  // elsewhere is reported, not overwritten. Nothing to confirm: clicking the
+  // circle again re-approves, and the toast says what happened.
+  async function unapproveRow(id: string) {
+    if (busy) return;
+    const shown = rowById.get(id);
+    if (!shown) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      const updated = await api.validateNote(id, book, false, {
+        expectedVersion: shown.version,
+        expectedState: "validated",
+      });
+      applyLocalRowReplacement("tn", updated);
+      setStatuses((prev) => {
+        if (prev[id] === undefined) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      setToast(t("flowTranslate.rapid.unapprove.done"));
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        // The statuses table is seeded once per chapter, so a refetch alone
+        // would keep the circle filled: clear it when the server says the
+        // row is no longer approved.
+        const current = (err.body as { current?: { translation_state?: string | null } } | null)?.current;
+        if (current && current.translation_state !== "validated") {
+          setStatuses((prev) => {
+            if (prev[id] !== "approved") return prev;
+            const next = { ...prev };
+            delete next[id];
+            return next;
+          });
+        }
+        say(t("flowTranslate.rapid.unapprove.changedElsewhere"));
+        void refetch();
+      } else {
+        say(
+          t("flowTranslate.rapid.unapprove.failed", {
             status: err instanceof ApiError ? err.status : t("flowTranslate.genericError"),
           }),
         );
@@ -2902,6 +2983,16 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
         <NotesRapidCheck
           rows={rapidRows}
           groupByVerse={typeFilter != null}
+          renderGroupLanes={(v, refLabel) => (
+            <RapidVerseLanes
+              verse={v}
+              refLabel={refLabel}
+              lanes={rapidGroupLanes}
+              sourceIndex={sourceIndex}
+              quotes={rapidGroupQuotes.get(v) ?? NO_QUOTES}
+              mark={mark}
+            />
+          )}
           book={book}
           sourceLabel={sourceLabel}
           sourceDir={sourceDir}
@@ -2937,6 +3028,10 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
             setEditRequest(queueIds[idx]);
           }}
           onApprove={(id) => void (id === currentId ? handleApprove() : approveOtherRow(id))}
+          onUnapprove={(id) => void unapproveRow(id)}
+          onOpenQuote={canPickQuote ? openQuotePicker : null}
+          quoteAnchorRef={setQuoteAnchor}
+          quoteOpen={quoteOpen}
           onNext={goNext}
           onPrev={goPrev}
           onApproveCurrent={() => void handleApprove()}

@@ -1740,7 +1740,20 @@
       "noEnglish": "No English note",
       "openToSave": "This note has unsaved typing. Open it and use Save & Approve.",
       "savePending": "This note still has a change waiting to save. Try again in a moment.",
-      "changedElsewhere": "Someone changed this note since it was shown. It has been reloaded; check it before approving."
+      "changedElsewhere": "Someone changed this note since it was shown. It has been reloaded; check it before approving.",
+      "quote": {
+        "title": "Change which words this note points to (Q)"
+      },
+      "unapprove": {
+        "circle": "Approved. Click to remove the approval",
+        "done": "Approval removed",
+        "changedElsewhere": "This approval changed since it was shown. The note has been reloaded.",
+        "failed": "Could not remove the approval ({{status}})."
+      },
+      "lanes": {
+        "groupAria": "Scripture for {{ref}}",
+        "noText": "No {{label}} text for this verse"
+      }
     }
   },
   "flowBooks": {

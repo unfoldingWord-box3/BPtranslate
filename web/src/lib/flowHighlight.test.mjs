@@ -10,7 +10,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { flowLaneSegments, flowLaneSegmentsAcross } from "./flowHighlight.ts";
+import { flowLaneSegments, flowLaneSegmentsAcross, flowLaneSegmentsForQuotes } from "./flowHighlight.ts";
 import { extractPlainText } from "./usfm.ts";
 import { verseBoundaryText } from "./verseRange.ts";
 
@@ -344,4 +344,57 @@ test("a slice whose quote doesn't resolve contributes its plain text unmarked", 
 
 test("no slices renders nothing", () => {
   assert.deepEqual(flowLaneSegmentsAcross([], "ἐγώ", 1), []);
+});
+
+// ── several quotes in one lane (Rapid check type-filter groups, #831) ───────
+const MRK_SLICE = [
+  { verse: 2, verseObjects: MRK_13_2_ULT_VO, plainText: MRK_13_2_ULT_PLAIN, sourceVerseObjects: MRK_13_2_UGNT_VO },
+];
+
+test("several quotes: each note's words are marked, the text is unchanged", () => {
+  const segs = flowLaneSegmentsForQuotes(MRK_SLICE, [
+    { quote: "βλέπεις", occurrence: 1 },
+    { quote: "λίθος", occurrence: 1 },
+  ]);
+  assert.deepEqual(marks(segs), ["أَتَنْظُرُ", "حَجَرٌ"]);
+  assert.equal(joined(segs), MRK_13_2_ULT_PLAIN);
+});
+
+test("several quotes: one quote alone matches flowLaneSegments", () => {
+  const quote = "βλέπεις ταύτας τὰς μεγάλας οἰκοδομάς";
+  assert.deepEqual(
+    flowLaneSegmentsForQuotes(MRK_SLICE, [{ quote, occurrence: 1 }]),
+    flowLaneSegments(MRK_13_2_ULT_VO, MRK_13_2_ULT_PLAIN, quote, 1, MRK_13_2_UGNT_VO),
+  );
+});
+
+test("several quotes: a quote that does not resolve leaves the others marked", () => {
+  const segs = flowLaneSegmentsForQuotes(MRK_SLICE, [
+    { quote: "not-in-this-verse", occurrence: 1 },
+    { quote: "λίθος", occurrence: 1 },
+    { quote: null, occurrence: 1 },
+  ]);
+  assert.deepEqual(marks(segs), ["حَجَرٌ"]);
+});
+
+test("several quotes: none resolving, or none at all, is the plain text", () => {
+  for (const quotes of [[], [{ quote: "nope", occurrence: 1 }]]) {
+    const segs = flowLaneSegmentsForQuotes(MRK_SLICE, quotes);
+    assert.deepEqual(segs, [{ kind: "text", text: MRK_13_2_ULT_PLAIN, marked: false }]);
+  }
+});
+
+test("several quotes: occurrence is honored per quote", () => {
+  // "οὐ μὴ" twice; occurrence 2 must mark only the second لَا.
+  const segs = flowLaneSegmentsForQuotes(
+    [{ verse: 2, verseObjects: MRK_13_2_ULT_VO, plainText: MRK_13_2_ULT_PLAIN, sourceVerseObjects: null }],
+    [{ quote: "οὐ μὴ", occurrence: 2 }],
+  );
+  assert.deepEqual(marks(segs), ["لَا"]);
+  const before = joined(segs.slice(0, segs.findIndex((s) => s.marked)));
+  assert.ok(before.includes("لَا"));
+});
+
+test("several quotes: no slices renders nothing", () => {
+  assert.deepEqual(flowLaneSegmentsForQuotes([], [{ quote: "λίθος", occurrence: 1 }]), []);
 });
