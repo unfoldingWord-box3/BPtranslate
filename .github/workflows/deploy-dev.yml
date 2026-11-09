@@ -9,11 +9,17 @@ name: Deploy to dev
 # should be touching prod.
 #
 # The file is named deploy-dev.yml, not deploy.yml, on purpose. A dispatch runs
-# the workflow file as it exists ON THE REF YOU PICK, and ~111 older branches in
-# this fork still carry the old prod-deploying deploy.yml. Under a new filename,
-# those branches can't be selected for this button (the file doesn't exist on
-# them). That is a speed bump, not a wall: the durable fix is scoping
-# CLOUDFLARE_API_TOKEN to the bptranslate-dev script only.
+# the workflow file as it exists ON THE REF YOU PICK. Older branches in this
+# fork still carry the old prod-deploying deploy.yml, but GitHub only offers
+# workflow_dispatch for workflow files that exist on the default branch, and
+# deploy.yml no longer does, so those copies cannot be run.
+#
+# What remains: anyone with push access can edit THIS file on a branch (say, to
+# add `--env production`) and dispatch it from that branch. The token cannot
+# stop that. Cloudflare only scopes Workers Scripts:Edit at the account level
+# (confirmed in the dashboard 2026-11-09, issue #823), so CLOUDFLARE_API_TOKEN
+# can deploy any Worker on the unfoldingWord account, including the prod name
+# `bptranslate`. Treat the token as prod-capable.
 on:
   workflow_dispatch:
 
@@ -52,8 +58,8 @@ jobs:
       # bptranslate --remote` WOULD reach the prod DB. Never put the prod
       # name here. Also: Cloudflare's D1 token permission is account-wide
       # (no per-database scoping), so the token this step needs can write
-      # prod D1 too — keep its Workers-Scripts scope dev-only and treat the
-      # token itself as prod-sensitive.
+      # prod D1 too. Its Workers Scripts permission is account-wide as well
+      # (see the header), so treat the token itself as prod-capable.
       - name: Apply D1 migrations (dev databases)
         working-directory: api
         run: |
