@@ -499,6 +499,11 @@ export function renderContextPack(input: {
   }
 
   const selectedExamples = selectPackExamples(examples.lines);
+  // The shrink guard counts the D1 pool and leaves this file out of its bytes,
+  // so it cannot see the file vanish. Fail closed rather than delete it.
+  if (examples.lines.length > 0 && selectedExamples.length === 0) {
+    return { ok: false, reason: "examples_selection_empty" };
+  }
   if (selectedExamples.length > 0) {
     files.push({ path: EXAMPLES_PATH, content: renderValidatedJsonl(selectedExamples) });
   }

@@ -875,16 +875,31 @@ console.log("contextExport — examples/validated.jsonl is bounded (#813)");
   );
 
   // Next day: two more chapters approved. The file shifts to chapters 9-12,
-  // which must not read as a shrink.
+  // which must not read as a shrink even though fewer rows are written.
   const more = [...tnRows];
   for (let c = 11; c <= 12; c++) {
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 5; i++) {
       const id = `t${c}-${i}`;
       more.push({ id, book: "LUK", ref_raw: `${c}:${i + 1}`, support_reference: null, quote: null, note: `target ${id}`, updated_at: c * 100 + i });
       tnSrc.set(sourceRowKey("LUK", id), { note: `source ${id}`, quote: null });
     }
   }
   const r2 = renderContextPack({ ...base, tnRows: more });
+  const file2 = r2.ok ? r2.files.find((f) => f.path === "examples/validated.jsonl") : null;
+  const chaptersIn = (f) => new Set(f.content.trim().split("\n").map((l) => JSON.parse(l)).filter((l) => l.resource === "tn" && l.supportReference !== null).map((l) => l.ref.split(":")[0]));
+  assert(file && file2 && !chaptersIn(file2).has("7") && chaptersIn(file).has("7"), "the recent chapters roll forward (chapter 7 drops out)");
+  assert(file2.content.length < file.content.length, "the rolled-forward file is smaller");
+
+  // Only rows each over the 4 MB ceiling: fail closed instead of deleting the file.
+  const bigId = "big1";
+  const bigSrc = new Map([[sourceRowKey("LUK", bigId), { note: "x".repeat(4_100_000), quote: null }]]);
+  const bigPack = renderContextPack({
+    ...base,
+    tqRows: [],
+    tnRows: [{ id: bigId, book: "LUK", ref_raw: "1:1", support_reference: null, quote: null, note: "t", updated_at: 1 }],
+    sources: { tn: bigSrc, tq: new Map() },
+  });
+  assert(!bigPack.ok && bigPack.reason === "examples_selection_empty", "an all-oversized pool fails the export instead of dropping the file");
   assert(r.ok && r2.ok && contextShrinkRefused(r2.stats, r.stats) === null, "a shifting selection does not trip the shrink guard");
 }
 

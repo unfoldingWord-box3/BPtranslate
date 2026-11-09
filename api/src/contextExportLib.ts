@@ -116,7 +116,7 @@ export type ShrinkDetail = {
  * iff its D1 source is empty, so a file-count drop is always an intentional
  * clear (e.g. instructions_md emptied) that must be allowed to land — the
  * stale file is then deleted from the repo. Bulk data loss is still covered
- * by the terms/examples/totalBytes metrics.
+ * by the terms/examples/guardBytes metrics.
  */
 export function contextShrinkRefused(
   next: ContextPackStats,
