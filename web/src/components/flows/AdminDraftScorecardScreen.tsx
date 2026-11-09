@@ -253,7 +253,8 @@ export default function AdminDraftScorecardScreen({ role, me }: FlowScreenContex
                       .map((ch) => (ch === 0 ? t("adminPages.scorecard.intro") : String(ch)))
                       .join(", "),
                   })}
-              <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+              {/* The server's detail is English; dir="auto" keeps its full stop on the right end in the Arabic UI. */}
+              <Typography variant="body2" color="text.secondary" dir="auto" sx={{ mt: 0.5 }}>
                 {data.englishSourceProblem}
               </Typography>
             </Alert>
