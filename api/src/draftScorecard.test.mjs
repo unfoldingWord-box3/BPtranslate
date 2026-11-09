@@ -69,8 +69,10 @@ test("editSimilarity stays fast at book scale (worst case: every note fully rewr
   const t0 = performance.now();
   for (let i = 0; i < 600; i++) editSimilarity(a + i, b + i);
   const ms = performance.now() - t0;
-  // 3,000 worst-case pairs must stay well inside a Worker's 30s CPU budget.
-  assert.ok(ms * 5 < 20_000, `600 worst-case pairs took ${Math.round(ms)}ms (x5 for a book)`);
+  // A coarse guard against an accidental blow-up (a cubic loop, no prefix
+  // strip), not a benchmark: ~1s locally under the full parallel suite, so the
+  // limit leaves room for a slow CI runner. A Worker request's CPU budget is 30s.
+  assert.ok(ms < 8_000, `600 worst-case pairs took ${Math.round(ms)}ms`);
 });
 
 test("median: odd, even, empty", () => {

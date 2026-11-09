@@ -41,9 +41,11 @@
 //              7 days, so older drafts count as "run no longer on record"
 //              (untracedDrafts) rather than a guess.
 //
-// Bounded: one book per request, two D1 reads (rows with their draft, the
-// book's translate jobs) plus the English source, which sourceNotes.ts caches
-// per isolate. No new tables, no writes.
+// Bounded: one book per request. Two D1 reads of our own (rows with their
+// draft, the book's translate jobs), then readSourceNotes once per drafted
+// chapter: each call does its own project-config and source-override lookups,
+// and the Door43 TSV itself is cached per isolate, so a book costs about one
+// Door43 fetch per source repo. No new tables, no writes.
 
 import type { Context } from "hono";
 import type { Env } from "./index";
