@@ -1750,7 +1750,7 @@
         "redoTitle": "Start one AI redraft for the checked notes. They stay read-only until it finishes.",
         "clear": "Clear",
         "undo": "Undo",
-        "hint": "Space or X checks a note · Shift+click or Shift+J/K checks a range · Approve saves the open note first",
+        "hint": "Space or X checks a note · Shift+click or Shift+J/K checks a range · Approve saves the open note first if it is checked",
         "approved": "Approved: {{count}}.",
         "notNeededDone": "Marked not needed: {{count}}.",
         "restored": "Restored: {{count}}.",

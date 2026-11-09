@@ -60,7 +60,7 @@ Keys work once you click a blank part of the list or a note's type:
 Each row starts with a checkbox. Checked notes get a bar at the bottom in place of the usual buttons:
 - Click a checkbox to check one note. Hold **Shift** and click another to check every note in between. The checkbox above the list checks or clears every note shown.
 - With the keyboard, **Space** or **X** checks the current note, and **Shift+J** or **Shift+K** checks the next or previous note too.
-- **Approve** approves the checked notes. If the open note has a change, it is saved first.
+- **Approve** approves the checked notes. If the open note is checked and has a change, it is saved first.
 - **Redo with AI** asks the AI for new drafts of the checked notes in one run. Those notes are read-only until it finishes.
 - **Not needed** sets the checked notes aside. Select **Undo** in the message that appears, or press **Ctrl+Z**, to bring them back.
 

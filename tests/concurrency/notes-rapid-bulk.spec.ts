@@ -79,6 +79,10 @@ test("rapid check bulk: Shift+click approve skips a stored draft; Not needed the
     "aria-label",
     "This note has unsaved typing. Open it and use Save & Approve.",
   );
+  // The app's "Unsaved: ..." reminder (#372) sits over the bottom bar; close it.
+  const reminder = page.getByRole("status").filter({ hasText: "Unsaved:" });
+  await reminder.getByRole("button", { name: "dismiss" }).click();
+  await expect(reminder).toHaveCount(0);
 
   // No bulk bar until something is checked.
   const bar = page.locator("[data-rapid-bulk-bar]");
@@ -166,6 +170,12 @@ test("rapid check bulk: Arabic UI draws the checkboxes and bar right to left", a
   await list.locator(`[data-rapid-checkbox="${ids[ids.length - 1]}"]`).click({ modifiers: ["Shift"] });
   const bar = page.locator("[data-rapid-bulk-bar]");
   await expect(bar).toContainText(`المحدد: ${ids.length}`);
+  // Right to left: the checkbox column is the row's rightmost cell, right of
+  // the approve circle.
+  await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+  const boxX = (await list.locator(`[data-rapid-checkbox="${ids[0]}"]`).boundingBox())!.x;
+  const circleX = (await list.locator(`[data-rapid-approve="${ids[0]}"]`).boundingBox())!.x;
+  expect(boxX).toBeGreaterThan(circleX);
   // Read-only test: nothing is approved here.
   await page.screenshot({ path: test.info().outputPath("rapid-bulk-ar-1366x768.png") });
 });

@@ -64,8 +64,9 @@ export interface RapidBulkArgs {
   busy: boolean;
   setBusy: (b: boolean) => void;
   setEditing: (b: boolean) => void;
-  /** The screen's Save & approve for the open note; true when it approved. */
-  handleApprove: () => Promise<boolean>;
+  /** The screen's Save & approve for the open note; true when it approved.
+   *  `stay` keeps the cursor (and so the rows shown) where it is. */
+  handleApprove: (opts?: { stay?: boolean }) => Promise<boolean>;
   aiUnavailable: string | null;
   t: TFunction;
 }
@@ -111,8 +112,16 @@ export function useRapidBulk(a: RapidBulkArgs) {
     return s;
   }
 
+  // The open note's draft can still be loading from the store right after
+  // the cursor moves (hasDiff false for a moment), so check both.
   function unsaved(id: string): boolean {
-    return id === a.currentId ? a.hasDiff : a.draftRowIds.has(id);
+    return (id === a.currentId && a.hasDiff) || a.draftRowIds.has(id);
+  }
+
+  // The open note's editor closes while a bulk action works on it, so no new
+  // typing starts under an approval or a set-aside.
+  function closeOpenEditor(ids: string[]) {
+    if (a.currentId && ids.includes(a.currentId)) a.setEditing(false);
   }
 
   function show(r: RapidBulkResult) {
@@ -146,13 +155,14 @@ export function useRapidBulk(a: RapidBulkArgs) {
       // handler still holds the text the user is looking at.
       if (a.currentId && a.hasDiff && ids.includes(a.currentId)) {
         others = ids.filter((id) => id !== a.currentId);
-        if (await a.handleApprove()) approved++;
+        if (await a.handleApprove({ stay: true })) approved++;
         else {
           skipped.failed++;
           left.push(a.currentId);
         }
       }
       a.setBusy(true);
+      closeOpenEditor(others);
       const pending = await pendingRowIds();
       for (const [i, id] of others.entries()) {
         const r = a.rowById.get(id);
@@ -229,6 +239,7 @@ export function useRapidBulk(a: RapidBulkArgs) {
     const prev: Record<string, CardStatus | undefined> = {};
     let stopped = false;
     try {
+      closeOpenEditor(ids);
       const pending = await pendingRowIds();
       for (const [i, id] of ids.entries()) {
         const r = a.rowById.get(id);
@@ -287,6 +298,8 @@ export function useRapidBulk(a: RapidBulkArgs) {
     a.setBusy(true);
     const skipped = emptySkips();
     const restoredIds = new Set<string>();
+    // A 404 means the nightly job has finalized the set-aside: no retry.
+    const gone = new Set<string>();
     let restored = 0;
     let stopped = false;
     try {
@@ -309,6 +322,7 @@ export function useRapidBulk(a: RapidBulkArgs) {
             stopped = true;
             break;
           }
+          if (kind === "noDraft") gone.add(id);
           skipped[kind === "locked" ? "locked" : "failed"]++;
         }
       }
@@ -318,7 +332,7 @@ export function useRapidBulk(a: RapidBulkArgs) {
     }
     // Rows Undo could not reach (refused, or never tried after a stop) stay
     // undoable, so pressing Undo again retries exactly those.
-    const rest = u.ids.filter((id) => !restoredIds.has(id));
+    const rest = u.ids.filter((id) => !restoredIds.has(id) && !gone.has(id));
     if (rest.length > 0) setUndoable({ scope, ids: rest, prev: u.prev });
     show(summarize(t("flowTranslate.rapid.bulk.restored", { count: restored }), skipped, stopped));
   }
@@ -342,6 +356,8 @@ export function useRapidBulk(a: RapidBulkArgs) {
     const alreadyOver: Parameters<typeof settleRedo>[0][] = [];
     const batchId = ++nextBatchRef.current;
     const batch = { open: 0, drafted: 0, kept: 0, failed: null as string | null };
+    // Registered before the first start: a job can end before the next starts.
+    redoBatchesRef.current.set(batchId, batch);
     try {
       const pending = await pendingRowIds();
       for (const id of ids) {
@@ -353,7 +369,7 @@ export function useRapidBulk(a: RapidBulkArgs) {
           // The new draft would land under the typing, which would then hide it.
           skipped.unsaved++;
           left.push(id);
-        } else if (a.statuses[id] === "approved") {
+        } else if (a.statuses[id] === "approved" || r.translation_state === "validated") {
           // A redraft replaces approved text and cannot be undone.
           skipped.approved++;
           left.push(id);
@@ -376,10 +392,14 @@ export function useRapidBulk(a: RapidBulkArgs) {
             sessionKey: getSessionKey(),
             translate: { rowIds: chunk },
           });
-          if (!redoJobsRef.current.has(started.jobId)) batch.open++;
-          redoJobsRef.current.set(started.jobId, { batch: batchId, rowIds: chunk });
+          // A job id already tracked (a covering job answered for this chunk
+          // too) keeps reporting to whichever batch tracked it first.
+          if (!redoJobsRef.current.has(started.jobId)) {
+            batch.open++;
+            redoJobsRef.current.set(started.jobId, { batch: batchId, rowIds: chunk });
+          }
           startedCount += chunk.length;
-          if (a.currentId && chunk.includes(a.currentId)) a.setEditing(false);
+          closeOpenEditor(chunk);
           // The job may already be over (a covering job answered for it).
           const existing = pipelineStore.get(started.jobId);
           if (existing && (existing.state === "done" || existing.state === "failed" || existing.state === "cancelled")) {
@@ -402,7 +422,7 @@ export function useRapidBulk(a: RapidBulkArgs) {
     const lead = t("flowTranslate.rapid.bulk.redoStarted", { count: startedCount });
     const r = summarize(lead, skipped, false);
     show(failure ? { text: `${r.text} ${failure}`, severity: "warning" } : { ...r, severity: r.severity === "success" ? "info" : r.severity });
-    if (batch.open > 0) redoBatchesRef.current.set(batchId, batch);
+    if (batch.open === 0) redoBatchesRef.current.delete(batchId);
     for (const job of alreadyOver) settleRedo(job);
     return left;
   }

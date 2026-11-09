@@ -246,12 +246,13 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
       onSelect(rows[n].idx);
       return;
     }
-    // Space or X checks a row: the row whose checkbox has focus, else the
-    // current row. Space keeps its own meaning on every other button.
-    const boxId = target.dataset.rapidCheckbox;
+    // Space or X checks a row: the row whose checkbox or type/ref button has
+    // focus, else the current row. Space keeps its own meaning on every other
+    // button.
+    const boxId = target.dataset.rapidCheckbox ?? target.dataset.rapidSelect;
     if (
       code === "KeyX" ||
-      (e.key === " " && (boxId != null || target === e.currentTarget || target.dataset.rapidSelect != null))
+      (e.key === " " && (boxId != null || target === e.currentTarget))
     ) {
       e.preventDefault();
       if (e.repeat || selLocked) return;

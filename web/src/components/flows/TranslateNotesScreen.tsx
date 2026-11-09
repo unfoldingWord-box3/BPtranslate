@@ -1413,7 +1413,9 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
   }
 
   // Resolves true when the note was approved (the bulk Approve counts it).
-  async function handleApprove(): Promise<boolean> {
+  // `stay` (bulk Approve) keeps the cursor and skips the toast: moving to the
+  // next open note mid-run would replace the rows the bulk action is on.
+  async function handleApprove(opts?: { stay?: boolean }): Promise<boolean> {
     if (!row || busy) return false;
     setBusy(true);
     setNotice(null);
@@ -1427,8 +1429,10 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
       applyLocalRowReplacement("tn", updated);
       setStatuses((prev) => ({ ...prev, [row.id]: "approved" }));
       setEditing(false);
-      setToast(t("flowTranslate.toastApproved"));
-      advanceAfter(row.id, "approved");
+      if (!opts?.stay) {
+        setToast(t("flowTranslate.toastApproved"));
+        advanceAfter(row.id, "approved");
+      }
       return true;
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) {
