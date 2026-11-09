@@ -2108,7 +2108,12 @@ export const api = {
     id: string,
     book: string,
     value: boolean,
-    opts?: { bulk?: boolean; expectedVersion?: number; expectedState?: "ai_draft" | "edited" },
+    opts?: {
+      bulk?: boolean;
+      expectedVersion?: number;
+      expectedState?: "ai_draft" | "edited" | "validated";
+      expectedUpdatedAt?: number;
+    },
   ) =>
     request<TnRow>(`/api/rows/tn/${encodeURIComponent(id)}/validate?book=${encodeURIComponent(book)}`, {
       method: "POST",
@@ -2120,6 +2125,7 @@ export const api = {
         value: value ? 1 : 0,
         ...(opts?.bulk ? { bulk: true } : {}),
         ...(opts?.expectedState ? { expected_state: opts.expectedState } : {}),
+        ...(opts?.expectedUpdatedAt != null ? { expected_updated_at: opts.expectedUpdatedAt } : {}),
       }),
     }),
 

@@ -21,7 +21,7 @@
 // grow to touch size and the shift-click hint becomes a tap hint (shift-click
 // still works wherever a keyboard exists).
 
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Popper,
@@ -88,6 +88,10 @@ interface Props {
   onSelectKeys: (keys: HighlightKey[]) => void;
   onCancel: () => void;
   onCommit: () => void;
+  // md+ popper only: take keyboard focus on open, close on Esc, and hand
+  // focus back on close. Opt-in (the notes flows screen, whose Rapid check
+  // opens the picker with Q); the classic callers keep the old behavior.
+  manageFocus?: boolean;
 }
 
 export function QuoteBuilderPopper({
@@ -106,6 +110,7 @@ export function QuoteBuilderPopper({
   onSelectKeys,
   onCancel,
   onCommit,
+  manageFocus = false,
 }: Props) {
   const { t } = useTranslation();
   const theme = useTheme();
@@ -113,6 +118,28 @@ export function QuoteBuilderPopper({
   const wide = useMediaQuery(theme.breakpoints.up("md"));
   const phone = !useMediaQuery(theme.breakpoints.up("tablet"));
   const coarse = useMediaQuery("(pointer: coarse)");
+  // With manageFocus, the popper (md+) takes keyboard focus when it opens, so a picker opened
+  // from the keyboard (Rapid check's Q) can be used and closed (Esc) without
+  // the mouse. Closing hands focus back to the button that opened it, if
+  // nothing else took it. The dialog below md does both on its own.
+  // The opener is remembered at open time: Shell clears anchorEl on close.
+  const openerRef = useRef<HTMLElement | null>(null);
+  const paperRef = useCallback((el: HTMLDivElement | null) => {
+    if (!el || !manageFocus) return;
+    const active = document.activeElement;
+    openerRef.current = active instanceof HTMLElement && active !== document.body ? active : null;
+    el.focus({ preventScroll: true });
+  }, [manageFocus]);
+  const wasOpen = useRef(open);
+  useEffect(() => {
+    const was = wasOpen.current;
+    wasOpen.current = open;
+    if (!was || open || !wide || !manageFocus) return;
+    const active = document.activeElement;
+    if (active && active !== document.body && active.isConnected) return;
+    const back = [openerRef.current, anchorEl].find((el) => el?.isConnected);
+    back?.focus({ preventScroll: true });
+  }, [open, wide, anchorEl, manageFocus]);
   const uhbTokens = useMemo(() => collectUhbWords(uhbVerseObjects), [uhbVerseObjects]);
   const ultTokens = useMemo(() => collectTargetTokens(ultVerseObjects), [ultVerseObjects]);
   const ustTokens = useMemo(() => collectTargetTokens(ustVerseObjects), [ustVerseObjects]);
@@ -406,8 +433,25 @@ export function QuoteBuilderPopper({
     >
       <ClickAwayListener onClickAway={onCancel}>
         <Paper
+          {...(manageFocus
+            ? {
+                ref: paperRef,
+                tabIndex: -1,
+                role: "dialog",
+                "aria-label": t("dialogs.quoteBuilder.header", { book, chapter, verse }),
+                onKeyDown: (e: React.KeyboardEvent<HTMLDivElement>) => {
+                  // A child that handled Esc itself (a hover card) keeps the picker open.
+                  if (e.key === "Escape" && !e.defaultPrevented) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    onCancel();
+                  }
+                },
+              }
+            : {})}
           elevation={8}
           sx={{
+            outline: "none",
             width: 560,
             maxHeight: "80vh",
             overflow: "auto",

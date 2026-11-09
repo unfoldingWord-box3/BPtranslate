@@ -137,8 +137,9 @@ test("rapid check: toggle, J/K, edit, Ctrl+Enter approve, circle approve", async
       { timeout: 20_000 },
     )
     .toBe("validated");
-  await expect(circle).toBeDisabled();
-  await expect(circle).toHaveAttribute("aria-label", "Approved");
+  // An approved circle stays clickable: clicking it again takes the approval
+  // back (notes-rapid-lanes.spec.ts covers that, #831).
+  await expect(circle).toHaveAttribute("aria-label", "Approved. Click to remove the approval");
   await expect(list).toBeFocused();
 
   await page.screenshot({ path: test.info().outputPath("rapid-check-1366x768.png") });

@@ -44,11 +44,13 @@ On a screen at least 1200 pixels wide, such as most laptops, the **Rapid check**
 
 ![Rapid check at Obadiah 1:3: the verse at the top and its notes as rows](../screenshots/en/notes-rapid.png)
 
-The verse stays at the top while you scroll, one short line per scripture text. Below it, each note of the verse is one row: its status, its tA type, the original-language quote, the **English note**, and your note. Choose a type under **All types**, on the verse's top line, to list every note of that type in the chapter instead, grouped by verse.
+The verse stays at the top while you scroll, one short line per scripture text. Below it, each note of the verse is one row: its status, its tA type, the original-language quote, the **English note**, and your note. Choose a type under **All types**, on the verse's top line, to list every note of that type in the chapter instead, grouped by verse. Each verse group then starts with that verse's scripture lines, like the verse at the top, with the quotes of the listed notes highlighted. A text you hide at the top is hidden in the groups too.
 
 - Click your note in any row to edit it. Select **Save** to keep it, or **Save & Approve** at the bottom to save and approve it. Click anywhere else in a row to make it the current note without editing.
 - In the editor, **Close** (or **Esc**) closes it and keeps what you typed as an unsaved draft. **Discard changes**, shown once you have changed the note, puts back the saved text and closes the editor.
 - The circle after a row's checkbox approves that note. It fills in when the note is approved. A note with unsaved typing has to be opened and saved first.
+- Click a filled circle to take the approval back. The note shows **Pending** again and a message says **Approval removed**. Click the circle again to approve it.
+- The pencil next to the current note's quote opens the quote picker, where you choose which original-language words the note is about. When the original-language column is hidden, **Q** still opens the picker.
 - To move to another verse, use the arrows on either side of the reference at the top, or select the reference to pick a verse from the list. The list shows only verses that have notes, with how many each has.
 - The short names at the end of the verse's top line, such as **ULT** and **UST**, show or hide each scripture text. A name stays there while its text is hidden, so you can always bring it back.
 - To make room for your note, hide the original-language column or the **English note** column with the crossed-out eye in its heading. A hidden column becomes a small **+** button at the end of the headings: select it to bring the column back.
@@ -60,6 +62,7 @@ Keys work once you click a blank part of the list or a note's type:
 - **Enter** opens the editor. Inside it, **Ctrl+Enter** saves and approves, and **Esc** closes it. What you typed is kept.
 - **A** approves the current note, saving it first if you changed it, and moves on.
 - **E** shows or hides the English column. **U** shows or hides the English ULT, when the screen offers it.
+- **Q** opens the quote picker for the current note. **Esc** closes it.
 - The keyboard button at the start of the column headings lists these keys.
 
 ### Check several notes at once

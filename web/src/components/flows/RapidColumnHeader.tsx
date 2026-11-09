@@ -39,6 +39,8 @@ export interface RapidColumnHeaderProps {
   onToggleEnglish: () => void;
   /** The U key is offered (the screen has a source ULT lane). */
   sourceUltKey: boolean;
+  /** Q opens the quote picker (Rapid check, #831). */
+  quoteKey?: boolean;
   /** A cell ahead of the others: the bulk select-all checkbox (#829). */
   leadingCell?: ReactNode;
 }
@@ -71,6 +73,7 @@ export function RapidColumnHeader({
   showEnglish,
   onToggleEnglish,
   sourceUltKey,
+  quoteKey = false,
   leadingCell,
 }: RapidColumnHeaderProps) {
   const { t } = useTranslation();
@@ -137,6 +140,7 @@ export function RapidColumnHeader({
     [["Ctrl", "Z"], t("flowTranslate.rapid.bulk.keyUndo")],
     ...(englishAvailable ? [[["E"], t("flowTranslate.rapid.cols.keyEnglish")] as [string[], string]] : []),
     ...(sourceUltKey ? [[["U"], t("flowTranslate.rapid.cols.keySourceUlt")] as [string[], string]] : []),
+    ...(quoteKey ? [[["Q"], t("flowTranslate.rapid.quote.key")] as [string[], string]] : []),
   ];
 
   return (

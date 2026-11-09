@@ -156,7 +156,7 @@ test("rapid check bulk: Shift+click approve skips a stored draft; Not needed the
   for (const id of ids.slice(0, 2)) {
     expect(server.get(id)?.trashed_at, id).toBeNull();
     expect(server.get(id)?.translation_state, id).toBe("validated");
-    await expect(list.locator(`[data-rapid-approve="${id}"]`)).toHaveAttribute("aria-label", "Approved");
+    await expect(list.locator(`[data-rapid-approve="${id}"]`)).toHaveAttribute("aria-label", "Approved. Click to remove the approval");
   }
   await expect(result.getByRole("button", { name: "Undo" })).toHaveCount(0);
 });

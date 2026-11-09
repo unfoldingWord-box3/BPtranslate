@@ -1741,6 +1741,19 @@
       "openToSave": "This note has unsaved typing. Open it and use Save & Approve.",
       "savePending": "This note still has a change waiting to save. Try again in a moment.",
       "changedElsewhere": "Someone changed this note since it was shown. It has been reloaded; check it before approving.",
+      "quote": {
+        "title": "Change which words this note points to (Q)",
+        "key": "change the quote"
+      },
+      "unapprove": {
+        "circle": "Approved. Click to remove the approval",
+        "done": "Approval removed",
+        "changedElsewhere": "This note changed since it was shown, so its approval was not removed. The note has been reloaded; check it and try again.",
+        "failed": "Could not remove the approval ({{status}})."
+      },
+      "lanes": {
+        "groupAria": "Scripture for {{ref}}"
+      },
       "bulk": {
         "selectAll": "Check all notes shown",
         "selectNote": "Check note {{ref}}",
