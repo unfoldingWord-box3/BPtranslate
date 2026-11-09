@@ -574,7 +574,7 @@ console.log("contextExportLib — shrink + content count");
     { terms: 10, examplesTn: 5, examplesTq: 0, templates: 40, contentFiles: 3, totalBytes: 100, guardBytes: 100 },
     { terms: 10, examplesTn: 5, examplesTq: 0, templates: 40, contentFiles: 3, totalBytes: 1000, guardBytes: 1000 },
   );
-  assert(bytes && bytes.metric === "totalBytes", "bytes shrink refused");
+  assert(bytes && bytes.metric === "guardBytes", "bytes shrink refused");
   assert(
     !contextShrinkRefused(
       { terms: 10, examplesTn: 5, examplesTq: 0, templates: 40, contentFiles: 3, totalBytes: 700_000, guardBytes: 4000 },
@@ -831,9 +831,10 @@ console.log("contextExport — examples/validated.jsonl is bounded (#813)");
   assert(capped.some((l) => l.validated_at === newest), "the ceiling keeps the newest rows");
   assert(capped.length < selectPackExamples(all).length, "the ceiling drops rows");
 
-  const huge = { resource: "tn", rowId: "huge", book: "LUK", ref: "10:99", supportReference: null, source: "x".repeat(3000), target: "t", validated_at: 5000 };
+  const huge = { resource: "tn", rowId: "huge", book: "LUK", ref: "10:99", supportReference: null, source: "x".repeat(3000), target: "t", validated_at: 1015 };
   const withHuge = selectPackExamples([huge, ...all], 8, 4, 2000);
   assert(!withHuge.includes(huge) && withHuge.length > 0, "a row bigger than the ceiling is skipped, smaller rows still fit");
+  assert(selectPackExamples([huge], 8, 4, 2000).length === 1, "the ceiling never empties a non-empty selection");
 
   // Spelling variants of one SupportReference share a quota (readers match on the slug).
   const variants = Array.from({ length: 12 }, (_, i) => ({

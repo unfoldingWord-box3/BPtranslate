@@ -121,8 +121,8 @@ export async function finalizeContextExport(
             failure_reason = ?10,
             r2_key = COALESCE(?11, r2_key),
             templates_count = ?12,
-            guard_bytes = ?14
-      WHERE id = ?13`,
+            guard_bytes = ?13
+      WHERE id = ?14`,
   )
     .bind(
       patch.status,
@@ -137,8 +137,8 @@ export async function finalizeContextExport(
       patch.failureReason ?? null,
       patch.r2Key ?? null,
       patch.stats?.templates ?? null,
-      id,
       patch.stats?.guardBytes ?? null,
+      id,
     )
     .run();
 }

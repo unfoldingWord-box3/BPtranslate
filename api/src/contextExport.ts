@@ -398,7 +398,9 @@ export function selectPackExamples(
   for (const l of newestFirst) {
     if (!keep.has(l)) continue;
     const size = enc.encode(JSON.stringify(l)).byteLength + 1;
-    if (bytes + size > maxBytes) continue;
+    // Never let the ceiling empty a non-empty selection: an empty file would
+    // delete the previous one from the repo and runners would lose every example.
+    if (bytes + size > maxBytes && out.length > 0) continue;
     bytes += size;
     out.push(l);
   }

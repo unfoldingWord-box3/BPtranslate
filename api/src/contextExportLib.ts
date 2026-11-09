@@ -98,7 +98,7 @@ export function hasSemanticContent(input: {
 }
 
 export type ShrinkDetail = {
-  metric: "terms" | "examples" | "templates" | "totalBytes";
+  metric: "terms" | "examples" | "templates" | "guardBytes";
   previous: number;
   next: number;
 };
@@ -148,7 +148,7 @@ export function contextShrinkRefused(
   if (prevBytes != null && prevBytes > 0 && nextBytes != null) {
     const lost = prevBytes - nextBytes;
     if (lost / prevBytes > 0.1) {
-      return { metric: "totalBytes", previous: prevBytes, next: nextBytes };
+      return { metric: "guardBytes", previous: prevBytes, next: nextBytes };
     }
   }
   return null;
