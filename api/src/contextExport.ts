@@ -318,8 +318,9 @@ export const EXAMPLES_PER_SLUG = 8;
 /** Chapters (across all books) whose validated rows are all kept, most recently approved first. */
 export const EXAMPLE_RECENT_CHAPTERS = 4;
 /**
- * A chapter's recency is the validated_at of its 5th-newest row. Reordering a
- * note, toggling a hint, or acknowledging a review flag bumps updated_at
+ * A chapter's recency is the validated_at of its 5th-newest row, and chapters
+ * with fewer than 5 validated rows rank after all others. Reordering a note,
+ * toggling a hint, or acknowledging a review flag bumps updated_at
  * (= validated_at) on an already-validated row, so a single touched row in an
  * old chapter must not count that chapter as "just approved".
  */
@@ -372,10 +373,14 @@ export function selectPackExamples(
     if (rows) rows.push(l);
     else chapterRows.set(ch, [l]);
   }
-  const score = (rows: JsonlExample[]) => rows[Math.min(CHAPTER_RECENCY_ROWS, rows.length) - 1].validated_at;
   const recent = [...chapterRows.entries()]
-    .map(([ch, rows]) => ({ ch, rows, at: score(rows) }))
-    .sort((a, b) => (b.at - a.at) || (a.ch < b.ch ? -1 : a.ch > b.ch ? 1 : 0))
+    .map(([ch, rows]) => ({
+      ch,
+      rows,
+      full: rows.length >= CHAPTER_RECENCY_ROWS ? 1 : 0,
+      at: rows[Math.min(CHAPTER_RECENCY_ROWS, rows.length) - 1].validated_at,
+    }))
+    .sort((a, b) => (b.full - a.full) || (b.at - a.at) || (a.ch < b.ch ? -1 : a.ch > b.ch ? 1 : 0))
     .slice(0, recentChapters);
   for (const { rows } of recent) for (const l of rows) keep.add(l);
 

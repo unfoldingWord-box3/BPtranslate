@@ -817,6 +817,11 @@ console.log("contextExport — examples/validated.jsonl is bounded (#813)");
     "one bumped row keeps its slot but does not pull in its whole chapter",
   );
 
+  // A one-row chapter (e.g. a book intro) whose row was touched does not take a slot.
+  const intro = { resource: "tn", rowId: "intro", book: "LUK", ref: "front:intro", supportReference: null, source: "s", target: "t", validated_at: 99999 };
+  const introPick = selectPackExamples([intro, ...(ex.ok ? ex.lines : [])]);
+  assert(introPick.filter((l) => l.ref.startsWith("7:")).length === 21, "a touched one-row chapter does not push out a full recent chapter");
+
   // Spelling variants of one SupportReference share a quota (readers match on the slug).
   const variants = Array.from({ length: 12 }, (_, i) => ({
     resource: "tn", rowId: `v${i}`, book: "OBA", ref: "1:1",
