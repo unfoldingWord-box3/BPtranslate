@@ -1151,15 +1151,18 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
   // note's quote in its verse (#831). Without one there is a single group,
   // the open note's verse, and it marks the open note's quote only, as the
   // pinned block does: marking every note of the verse would paint most of it.
+  // Two memos, so that with a filter J/K (which changes the open row) does
+  // not rebuild every group's quotes and re-run every group's highlighting.
   const rowVerse = row?.verse ?? 0;
-  const rapidGroupQuotes = useMemo(() => {
+  const rapidOpenVerseQuotes = useMemo(() => {
     const byVerse = new Map<number, FlowQuote[]>();
-    if (!rapid || !rapidInline) return byVerse;
-    if (!typeFilter) {
-      if (rowVerse > 0) byVerse.set(rowVerse, [{ quote: rowQuote, occurrence: rowOccurrence }]);
-      return byVerse;
-    }
-    if (!queueIds) return byVerse;
+    if (!rapid || !rapidInline || typeFilter || rowVerse <= 0) return byVerse;
+    byVerse.set(rowVerse, [{ quote: rowQuote, occurrence: rowOccurrence }]);
+    return byVerse;
+  }, [rapid, rapidInline, typeFilter, rowVerse, rowQuote, rowOccurrence]);
+  const rapidFilterQuotes = useMemo(() => {
+    const byVerse = new Map<number, FlowQuote[]>();
+    if (!rapid || !rapidInline || !typeFilter || !queueIds) return byVerse;
     for (const i of visibleIdx) {
       const r = rowById.get(queueIds[i]);
       if (!r || r.verse <= 0) continue;
@@ -1168,7 +1171,8 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
       byVerse.set(r.verse, list);
     }
     return byVerse;
-  }, [rapid, rapidInline, typeFilter, queueIds, visibleIdx, rowById, rowVerse, rowQuote, rowOccurrence]);
+  }, [rapid, rapidInline, typeFilter, queueIds, visibleIdx, rowById]);
+  const rapidGroupQuotes = typeFilter ? rapidFilterQuotes : rapidOpenVerseQuotes;
 
   const englishNote = row ? (sourceNotes.get(row.id)?.note ?? null) : null;
 

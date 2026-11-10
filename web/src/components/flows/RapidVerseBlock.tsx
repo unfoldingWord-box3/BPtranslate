@@ -72,8 +72,8 @@ export interface RapidVerseBlockProps {
   controls?: ReactNode;
   /** A line under the lanes (the bridged-verse clamp hint). */
   footnote?: ReactNode;
-  /** False in the "verses inline" placement: the lanes' text lines and the
-   *  footnote are left out; the control line and the lane chips stay. */
+  /** False in the "verses inline" placement: the lanes' text lines are left
+   *  out; the control line, the lane chips and the footnote stay. */
   showLanes?: boolean;
 }
 
@@ -242,7 +242,7 @@ export function RapidVerseBlock({
           ))}
         </Box>
       )}
-      {showLanes && footnote}
+      {footnote}
     </Box>
   );
 }

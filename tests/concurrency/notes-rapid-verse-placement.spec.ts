@@ -27,17 +27,19 @@ async function pickType(browser: Parameters<typeof newUserContext>[0]) {
   const probe = await newUserContext(browser, "rapid-vp-probe");
   openContexts.push(probe.context);
   const chap = await fetchChapter(probe.context.request, probe.auth.token, BOOK, CHAPTER);
-  const live = (chap.tn as Row[]).filter((r) => r.trashed_at == null && r.verse > 0);
+  const live = (chap.tn as Row[]).filter((r) => r.trashed_at == null);
   const versesBySlug = new Map<string, Set<number>>();
   for (const r of live) {
     const slug = slugOf(r.support_reference);
-    if (!slug) continue;
+    if (!slug || r.verse <= 0) continue;
     versesBySlug.set(slug, (versesBySlug.get(slug) ?? new Set()).add(r.verse));
   }
   const [slug, verses] = [...versesBySlug.entries()].sort((a, b) => b[1].size - a[1].size)[0];
   expect(verses.size, `ZEC ${CHAPTER} needs a type spanning 2+ verses`).toBeGreaterThanOrEqual(2);
-  const first = live.find((r) => slugOf(r.support_reference) === slug)!;
-  return { slug, verses, first };
+  const first = live.find((r) => r.verse > 0 && slugOf(r.support_reference) === slug)!;
+  // An intro note of the type gets a group head too (with no lanes).
+  const hasIntro = live.some((r) => r.verse === 0 && slugOf(r.support_reference) === slug);
+  return { slug, verses, first, groupHeads: verses.size + (hasIntro ? 1 : 0) };
 }
 
 async function openRapid(browser: Parameters<typeof newUserContext>[0], name: string, hashTail: string) {
@@ -92,8 +94,9 @@ test("rapid check: verse on top by default, inline on request, and it survives r
     .locator(`[data-rapid-group="${first.verse}"]`)
     .evaluate((el) => el.nextElementSibling?.hasAttribute("data-rapid-row") ?? false);
   expect(nextIsRow).toBe(true);
-  // The open note's quote is still marked, now inline, and its row is still current.
-  if (pinnedMarks > 0) expect(await group.locator("mark").count()).toBeGreaterThan(0);
+  // The open note's quote is marked inline exactly as it was in the pinned
+  // lanes (same lanes, same one quote), and its row is still current.
+  await expect(group.locator("mark")).toHaveCount(pinnedMarks);
   await expect(current).toHaveAttribute("data-rapid-row", first.id);
 
   await page.screenshot({ path: test.info().outputPath("rapid-inline-1366x768.png") });
@@ -112,12 +115,12 @@ test("rapid check: verse on top by default, inline on request, and it survives r
 });
 
 test("rapid check: with a type filter, each placement draws the verse once", async ({ browser }) => {
-  const { slug, verses, first } = await pickType(browser);
+  const { slug, verses, first, groupHeads } = await pickType(browser);
   const { page, list } = await openRapid(browser, "rapid-vp-filter", `${first.verse}?row=${first.id}`);
 
   await page.locator('[aria-label="Filter notes by type"] [role="combobox"]').click();
   await page.locator(`li[role="option"][title="${slug}"]`).click();
-  await expect(list.locator("[data-rapid-group]")).toHaveCount(verses.size);
+  await expect(list.locator("[data-rapid-group]")).toHaveCount(groupHeads);
 
   // Top: only the pinned block; the verse groups carry labels, no lanes.
   await expect(pinnedLanes(page).first()).toBeVisible();

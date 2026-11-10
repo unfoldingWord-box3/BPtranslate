@@ -184,6 +184,9 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
 
   // Keep the current row in view below the pinned header as the cursor moves.
   const currentId = rows.find((r) => r.isCurrent)?.id ?? null;
+  // Switching the verse placement resizes the pinned header and adds or
+  // removes the group heads: bring the current row back into view then too.
+  const inlineLanes = renderGroupLanes != null;
   useEffect(() => {
     if (!currentId) return;
     const el = scrollRef.current?.querySelector<HTMLElement>(`[data-rapid-row="${CSS.escape(currentId)}"]`);
@@ -192,7 +195,7 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
     const head = el?.previousElementSibling;
     if (head instanceof HTMLElement && head.dataset.rapidGroup != null) head.scrollIntoView({ block: "nearest" });
     el?.scrollIntoView({ block: "nearest" });
-  }, [currentId]);
+  }, [currentId, inlineLanes, stickyH]);
 
   // Keyboard focus must stay inside the list for the shortcuts to work. The
   // element that held it can disappear: J past a verse's last note replaces
