@@ -31,6 +31,14 @@ export interface AssistantContext {
   notes: AssistantNote[];
   /** Kept with each proposal and handed back to onApply (e.g. the versions sent). */
   snapshot?: unknown;
+  /** Notes the host left out of `notes`, and why; shown under the reply (issue #859). */
+  omitted?: Omitted;
+}
+
+/** tooLong: over the per-note size limit. tooMany: past what one request can carry. */
+export interface Omitted {
+  tooLong: number;
+  tooMany: number;
 }
 
 export interface AssistantApplyResult {
@@ -47,6 +55,8 @@ interface Turn {
   /** What goes back to the server as this turn. */
   echo: string;
   proposal?: ProposalState;
+  /** Notes left out of the request this reply answers. */
+  omitted?: Omitted;
 }
 
 interface Props {
@@ -78,6 +88,8 @@ export default function AssistantPanel(props: Props) {
   const [busy, setBusy] = useState(false);
   const [applyingIdx, setApplyingIdx] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Every note was left out, so nothing was sent (the server would refuse an empty list).
+  const [unsent, setUnsent] = useState<Omitted | null>(null);
   const inFlight = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
@@ -128,15 +140,20 @@ export default function AssistantPanel(props: Props) {
 
   const send = async () => {
     if (!canSend || inFlight.current) return;
+    setError(null);
+    setUnsent(null);
+    const ctx = buildContext();
+    if (ctx.notes.length === 0) {
+      setUnsent(ctx.omitted ?? { tooLong: 0, tooMany: 0 });
+      return;
+    }
     inFlight.current = true;
     setBusy(true);
-    setError(null);
     const userTurn: Turn = { role: "user", text: trimmed, echo: trimmed };
     const sent = [...turns, userTurn];
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     try {
-      const ctx = buildContext();
       const res = await api.assistantChat(
         {
           lang,
@@ -158,6 +175,7 @@ export default function AssistantPanel(props: Props) {
           text: res.reply,
           echo: echoContent(res.reply, actions),
           proposal: has ? { actions, snapshot: ctx.snapshot, unticked: [], applied: null } : undefined,
+          omitted: ctx.omitted && ctx.omitted.tooLong + ctx.omitted.tooMany > 0 ? ctx.omitted : undefined,
         },
       ]);
       setRemaining(res.remainingUsd);
@@ -205,7 +223,21 @@ export default function AssistantPanel(props: Props) {
     setTurns(() => []);
     setText("");
     setError(null);
+    setUnsent(null);
   };
+
+  // Outside the reply's dir="auto" box, so it follows the UI language, not the reply's.
+  const omittedNotice = (o: Omitted, nothingSent = false) => (
+    <Typography variant="caption" color="text.secondary" component="p" data-assistant-omitted="" sx={{ mt: 0.5, mb: 0, textAlign: "start" }}>
+      {[
+        o.tooLong > 0 && t("assistant.omitted.tooLong", { count: o.tooLong }),
+        o.tooMany > 0 && t("assistant.omitted.tooMany", { count: o.tooMany }),
+        nothingSent && t("assistant.omitted.nothingSent"),
+      ]
+        .filter(Boolean)
+        .join(" ")}
+    </Typography>
+  );
 
   const body = (
     <Box
@@ -253,30 +285,32 @@ export default function AssistantPanel(props: Props) {
                     {m.text}
                   </Typography>
                 ) : (
-                  <Box
-                    key={i}
-                    dir="auto"
-                    sx={{
-                      mt: 1,
-                      textAlign: "start",
-                      fontSize: "0.875rem",
-                      "& p": { marginBlock: "0.4em" },
-                      "& ul, & ol": { paddingInlineStart: "1.4em", marginBlock: "0.4em" },
-                    }}
-                  >
-                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({ children }) => <>{children}</>, img: ({ alt }) => <>{alt}</> }}>
-                      {m.text}
-                    </ReactMarkdown>
-                    {m.proposal && (
-                      <ProposalCard
-                        proposal={m.proposal}
-                        describeId={describeId}
-                        applying={applyingIdx === i}
-                        disabled={applyingIdx !== null}
-                        onToggle={(key) => toggle(i, key)}
-                        onApply={() => void apply(i)}
-                      />
-                    )}
+                  <Box key={i}>
+                    <Box
+                      dir="auto"
+                      sx={{
+                        mt: 1,
+                        textAlign: "start",
+                        fontSize: "0.875rem",
+                        "& p": { marginBlock: "0.4em" },
+                        "& ul, & ol": { paddingInlineStart: "1.4em", marginBlock: "0.4em" },
+                      }}
+                    >
+                      <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({ children }) => <>{children}</>, img: ({ alt }) => <>{alt}</> }}>
+                        {m.text}
+                      </ReactMarkdown>
+                      {m.proposal && (
+                        <ProposalCard
+                          proposal={m.proposal}
+                          describeId={describeId}
+                          applying={applyingIdx === i}
+                          disabled={applyingIdx !== null}
+                          onToggle={(key) => toggle(i, key)}
+                          onApply={() => void apply(i)}
+                        />
+                      )}
+                    </Box>
+                    {m.omitted && omittedNotice(m.omitted)}
                   </Box>
                 ),
               )}
@@ -285,6 +319,11 @@ export default function AssistantPanel(props: Props) {
               {error && (
                 <Alert severity="info" sx={{ mt: 1 }}>
                   {error}
+                </Alert>
+              )}
+              {unsent && (
+                <Alert severity="info" sx={{ mt: 1 }} data-assistant-unsent="">
+                  {omittedNotice(unsent, true)}
                 </Alert>
               )}
             </Box>

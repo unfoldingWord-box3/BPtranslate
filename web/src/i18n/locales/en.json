@@ -4032,6 +4032,13 @@
     "truncated": "The request was too big for one answer. Ask about fewer notes.",
     "failed": "The assistant could not answer. Try again.",
     "limitReached": "This chat has reached its length limit. Start a new chat to continue.",
+    "omitted": {
+      "tooLong_one": "{{count}} note was too long to send to the assistant.",
+      "tooLong_other": "{{count}} notes were too long to send to the assistant.",
+      "tooMany_one": "{{count}} note was left out because there were too many for one request. Tick the notes you mean so they are sent first.",
+      "tooMany_other": "{{count}} notes were left out because there were too many for one request. Tick the notes you mean so they are sent first.",
+      "nothingSent": "Nothing was sent, so there is no charge."
+    },
     "proposal": {
       "title": "Proposed changes",
       "edits": "Edits: {{count}}",

@@ -87,7 +87,7 @@ Nothing changes until you press **Apply**:
 - Edited notes become **Edited** and still need your approval. The assistant can also propose approving or setting aside notes, but a note it edits is never approved in the same step.
 - The app skips a note, and tells you how many it skipped and why, when it has unsaved typing, a change still saving, or someone else changed it since the assistant looked. Skipped notes are not changed.
 
-Each person can use the assistant up to a daily dollar amount, shown under the box. When it is used up, it comes back the next day. A chat has a length limit, so start a **New chat** when it is full or you change topic. If the assistant says the request was too big, ask about fewer notes. The Assistant button appears only when an admin has turned it on under **AI service**, and only for editors and admins.
+Each person can use the assistant up to a daily dollar amount, shown under the box. When it is used up, it comes back the next day. A chat has a length limit, so start a **New chat** when it is full or you change topic. If the assistant says the request was too big, ask about fewer notes. A line under the reply says how many notes were not sent, either because they are too long or because the chapter has too many for one request; in the second case, tick the notes you mean so they are sent first. The Assistant button appears only when an admin has turned it on under **AI service**, and only for editors and admins.
 
 ## When you finish a chapter
 You see **OBA 1 notes complete** with a count of approved, edited and not-needed notes. Select **Continue to chapter 2** or **Review again**.
