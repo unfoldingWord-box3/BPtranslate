@@ -51,10 +51,12 @@ function makeDb(sqlite, hooks = {}) {
       return { results: sqlite.prepare(sql).all(...args), success: true };
     },
     first() {
+      guard(sql, args);
       const r = sqlite.prepare(sql).all(...args);
       return r.length ? r[0] : null;
     },
     run() {
+      guard(sql, args);
       const r = sqlite.prepare(sql).run(...args);
       return { success: true, meta: { changes: Number(r.changes), last_row_id: Number(r.lastInsertRowid) } };
     },
@@ -673,6 +675,11 @@ test("enforcedTokens and slotWords: brackets are not placeholders, links are, sl
   assert.deepEqual(enforcedTokens(SHEET_SOURCE), ["[[rc://*/ta/man/translate/figs-euphemism]]", "(../01/01.md)"]);
   assert.deepEqual(slotWords(SHEET_SOURCE), ["SPEAKER"]);
   assert.deepEqual(slotWords("SPEAKER and SPEAKER [In that case,] PERSON"), ["SPEAKER", "PERSON"], "no repeats");
+  assert.deepEqual(
+    slotWords("Say [the LORD] or see [UST](../ust/01.md) and [[rc://*/ta/man/translate/figs-YOU]]. SPEAKER"),
+    ["SPEAKER"],
+    "caps inside brackets, link text, link targets and rc links are translated wording or links, not slot words",
+  );
   assert.deepEqual(checkPlaceholders(SHEET_SOURCE, GOOD_AR), { missing: [], warnings: [] }, "وSPEAKER counts as present");
   assert.deepEqual(
     checkPlaceholders("x [[rc://*/ta/man/translate/a]] [[rc://*/ta/man/translate/a]]", "س [[rc://*/ta/man/translate/a]]").missing,
@@ -838,4 +845,30 @@ test("an Approve pinned to the version the editor showed is refused after a run 
   const fresh2 = await validate({ "If-Match": "2" }, { value: 1, expected_state: "ai_draft" });
   assert.equal(fresh2.status, 200);
   assert.equal(unitRow("grammar-connect-logic-result-01").translation_state, "validated");
+});
+
+test("a run whose lease is taken over mid-run starts no further model calls", async () => {
+  const { post, sqlite, setBehaviour, calls } = await fresh({ extraSlugs: 6 });
+  setBehaviour(async (_r, db) => {
+    // During the first call, the lease lapses and another press takes it.
+    if (calls.length === 1) db.prepare(`UPDATE template_draft_lock SET holder = 'other-run', lease_until = 9999999999 WHERE id = 1`).run();
+    return null;
+  });
+  const res = await post();
+  assert.equal(res.status, 200);
+  const body = await json(res);
+  // Calls already started in the first wave finish; nothing new starts.
+  assert.ok(calls.length <= 3, `only the first wave's calls, got ${calls.length}`);
+  assert.ok(body.failed.some((f) => f.code === "not_started"), "the rest are reported not_started");
+  assert.equal(body.drafted.length + body.failed.length, MAX_SLUGS_PER_RUN);
+  assert.equal(sqlite.prepare(`SELECT holder FROM template_draft_lock WHERE id = 1`).get().holder, "other-run", "the other run keeps its lease");
+});
+
+test("a renewal that throws stops the run before any call", async () => {
+  const { post, hooks, calls } = await fresh();
+  hooks.fail = (sql) => sql.startsWith("UPDATE template_draft_lock SET lease_until");
+  const body = await json(await post());
+  assert.equal(calls.length, 0);
+  assert.equal(body.failed.length, 4);
+  assert.ok(body.failed.every((f) => f.code === "not_started"));
 });

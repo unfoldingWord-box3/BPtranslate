@@ -52,11 +52,12 @@ export const CALL_TIMEOUT_MS = 120_000;
 /** draft_meta_json.source for drafts written here. */
 export const DRAFT_SOURCE = "approved_notes";
 /** A run that has not released its lease by then is presumed dead and can be taken over. */
-// The lease is renewed after every note type, so a live run never loses it:
-// the longest gap between renewals is one note type's call (CALL_TIMEOUT_MS,
-// at most twice with the truncation retry) plus its writes, about 4 minutes.
-// A run that died (tab closed, isolate gone) blocks new presses for at most
-// this long after its last renewal.
+// The lease is renewed before every note type's model call, so a live run
+// never loses it: the longest gap between renewals is one note type's call
+// (CALL_TIMEOUT_MS, 120 s; at thinking "low" callProvider makes no truncation
+// retry) plus its writes. A run whose renewal fails stops starting calls. A run
+// that died (tab closed, isolate gone) blocks new presses for at most this
+// long after its last renewal.
 export const RUN_LEASE_SECONDS = 5 * 60;
 /** A drafted template longer than max(this, OUTPUT_SOURCE_FACTOR × its English source) is rejected. */
 export const MAX_OUTPUT_FLOOR_CHARS = 4000;
@@ -299,9 +300,16 @@ export function enforcedTokens(md: string): string[] {
   return out;
 }
 
-/** ALL-CAPS slot words, distinct, ignoring any inside link targets or rc links. */
+/**
+ * ALL-CAPS slot words, distinct. Words inside rc links, link targets, square
+ * brackets or link text are skipped: bracketed text and link text are wording
+ * the model translates ([the LORD], [UST](…)), so they cannot also be "keep".
+ */
 export function slotWords(md: string): string[] {
-  const bare = md.replace(RC_LINK, " ").replace(/\]\([^()\s]+\)/g, "] ");
+  const bare = md
+    .replace(RC_LINK, " ")
+    .replace(/\]\([^()\s]+\)/g, "] ")
+    .replace(/\[[^\[\]\n]*\]/g, " ");
   return [...new Set([...bare.matchAll(ALL_CAPS)].map((m) => m[0]))];
 }
 
@@ -541,12 +549,16 @@ export async function acquireRunLease(db: Db, holder: string, now: number): Prom
   return !!res.meta.changes;
 }
 
-/** Push this run's lease out again; a no-op if the lease is no longer this run's. */
-export async function renewRunLease(db: Db, holder: string, now: number): Promise<void> {
-  await db
+/**
+ * Push this run's lease out again. False when the lease is no longer this
+ * run's (it lapsed and another press took it): the caller must stop.
+ */
+export async function renewRunLease(db: Db, holder: string, now: number): Promise<boolean> {
+  const res = await db
     .prepare(`UPDATE template_draft_lock SET lease_until = ?2 WHERE id = 1 AND holder = ?1`)
     .bind(holder, now + RUN_LEASE_SECONDS)
     .run();
+  return !!res.meta.changes;
 }
 
 export async function releaseRunLease(db: Db, holder: string): Promise<void> {
@@ -585,11 +597,17 @@ export async function draftMissingTemplates(
     throw e;
   }
   try {
-    const renew = async () => {
+    // True while this run still holds the lease. A renewal that throws counts
+    // as lost: going on without knowing would risk a second run billing the
+    // same note types.
+    const renew = async (): Promise<boolean> => {
       try {
-        await renewRunLease(env.DB, holder, Math.floor(Date.now() / 1000));
+        const held = await renewRunLease(env.DB, holder, Math.floor(Date.now() / 1000));
+        if (!held) console.error("draft-missing-templates: lease lost to another run; stopping");
+        return held;
       } catch (e) {
-        console.error(`draft-missing-templates: lease renewal failed: ${e instanceof Error ? e.message : String(e)}`);
+        console.error(`draft-missing-templates: lease renewal failed, stopping: ${e instanceof Error ? e.message : String(e)}`);
+        return false;
       }
     };
     return { ok: true, result: await runBatch(env, userId, provider, model, apiKey, skipSlugs, deps, renew) };
@@ -611,7 +629,7 @@ async function runBatch(
   apiKey: string,
   skipSlugs: readonly string[],
   deps: RunDeps,
-  renewLease: () => Promise<void> = async () => {},
+  renewLease: () => Promise<boolean> = async () => true,
 ): Promise<RunResult> {
   const cfg = await getProjectConfig(env);
   const transport = deps.transport ?? transportFor(provider);
@@ -633,6 +651,12 @@ async function runBatch(
 
   const runOne = async (cand: CandidateSlug) => {
     if (stop) {
+      failed.push({ slug: cand.slug, code: "not_started" });
+      return;
+    }
+    // Renew before paying for a call; without the lease, start nothing more.
+    if (!(await renewLease())) {
+      stop = true;
       failed.push({ slug: cand.slug, code: "not_started" });
       return;
     }
@@ -746,7 +770,6 @@ async function runBatch(
         const msg = scrubSecrets(err instanceof Error ? err.message : String(err), [apiKey]).slice(0, 300);
         console.error(`draft-missing-templates: ${cand.slug} internal error: ${msg}`);
       }
-      await renewLease();
     }
   };
   await Promise.all(Array.from({ length: Math.min(RUN_CONCURRENCY, batch.length) }, worker));
