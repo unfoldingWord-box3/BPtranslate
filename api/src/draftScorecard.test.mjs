@@ -28,6 +28,7 @@ import {
   editSimilarity,
   similarity,
   SIMILARITY_SEGMENT_CAP,
+  SIMILARITY_CELL_BUDGET,
   median,
   closingPeriodOutcome,
   isEnglishSourceDraft,
@@ -96,7 +97,21 @@ test("similarity: a middle over the segment cap is scored on capped segments, ap
   assert.deepEqual(similarity("kitten", "sitting"), { value: 1 - 3 / 7, approximate: false });
 });
 
-test("similarity: the request budget is spent per DP cell, then rows fall back to the cheap bound", () => {
+test("buildScorecard: normal notes stay exact; only a pair over the cap is approximate", () => {
+  // The default safety valve covers a 3,000-row book of fully rewritten
+  // 400-code-point notes several times over, so real books never reach it.
+  assert.ok(SIMILARITY_CELL_BUDGET >= 3000 * 400 * 400 * 3);
+  const long = SIMILARITY_SEGMENT_CAP + 500;
+  const rows = [
+    { id: "s1", chapter: 1, finalNote: "نص معدل تمامًا", draftLogId: 1, draftedAt: 1, draftNote: "مسودة مختلفة" },
+    { id: "s2", chapter: 1, finalNote: "b".repeat(long), draftLogId: 2, draftedAt: 1, draftNote: "a".repeat(long) },
+  ];
+  const ch = buildScorecard(rows, [], new Map([[1, new Map()]])).chapters[0];
+  assert.equal(ch.compared, 2);
+  assert.equal(ch.approximateSimilarity, 1, "only the over-cap pair");
+});
+
+test("similarity: past the safety valve, rows fall back to the cheap bound", () => {
   const budget = { cells: 10 };
   // 4×4 = 16 cells > 10: no DP. Cheap bound: max(4, 4) − shared characters (0) = 4.
   assert.deepEqual(similarity("abcd", "wxyz", budget), { value: 0, approximate: true });
@@ -201,6 +216,21 @@ test("matchDraftJob: front matter (chapter 0) rides with a job starting at chapt
   assert.equal(matchDraftJob({ chapter: 0, draftLogId: 5, draftedAt: 150 }, [job({ jobId: "k", start: 2, end: 3 })]), null);
 });
 
+test("matchDraftJob: a chain child created after the draft is never its writer, even with its pruned parent's watermark", () => {
+  // The parent wrote the draft (log id 50, at 500) and has been pruned. The
+  // child inherited the parent's watermark (5) but was created at 600.
+  const child = job({ jobId: "child", createdAt: 600, updatedAt: 900, watermark: 5, contextRef: "o/c@child" });
+  assert.equal(matchDraftJob({ chapter: 1, draftLogId: 50, draftedAt: 500 }, [child]), null);
+  // In the rollup that draft is "Run not on record".
+  const sc = buildScorecard(
+    [{ id: "d", chapter: 1, finalNote: "نص", draftLogId: 50, draftedAt: 500, draftNote: "نص" }],
+    [child],
+    new Map([[1, new Map()]]),
+  );
+  assert.equal(sc.chapters[0].untracedDrafts, 1);
+  assert.deepEqual(sc.chapters[0].contextPacks, []);
+});
+
 test("matchDraftJob: no watermark falls back to created_at; tq-only jobs never match", () => {
   const legacy = job({ jobId: "legacy", createdAt: 100, updatedAt: 300, watermark: null });
   assert.equal(matchDraftJob({ chapter: 1, draftLogId: 1, draftedAt: 150 }, [legacy])?.jobId, "legacy");
@@ -283,6 +313,18 @@ test("buildScorecard: a chapter whose English source was not read excludes nothi
   assert.equal(ch.englishSource, 0);
   assert.equal(ch.compared, 1);
   assert.equal(ch.unchanged, 1);
+});
+
+test("buildScorecard: chapters without a usable draft do not count toward the book's English status", () => {
+  const rows = [
+    // Chapter 1 has only a "no draft logged" row (the route gives it an empty map).
+    row({ id: "n1", chapter: 1, final: "عربي" }),
+    // Chapter 2 is the only drafted chapter, and its English was not read.
+    row({ id: "d2", chapter: 2, draft: "مسودة", final: "عربي" }),
+  ];
+  const sc = buildScorecard(rows, [], new Map([[1, new Map()]]));
+  assert.equal(sc.chapters[1].englishCheck, "none");
+  assert.equal(sc.total.englishCheck, "none", "not 'some': chapter 1 had nothing to check");
 });
 
 test("buildScorecard: some chapters checked, some not → the total is partial", () => {

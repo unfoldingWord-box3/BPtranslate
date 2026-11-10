@@ -32,13 +32,13 @@
 //   unchanged  final === draft, exactly. Share = unchanged / compared.
 //   similarity 1 − levenshtein(draft, final) / max(length), counted in Unicode
 //              code points; two empty strings are 1. Median over compared rows.
-//              Exact for normal notes. CPU is bounded (similarity()): after the
-//              shared prefix/suffix is stripped, a middle longer than
-//              SIMILARITY_SEGMENT_CAP is scored on its first CAP code points
-//              and scaled, and once the request has spent
-//              SIMILARITY_CELL_BUDGET DP cells the remaining rows use a cheap
-//              character-count bound. Both are approximate (counted in
-//              approximateSimilarity).
+//              Exact for normal notes. CPU is bounded per pair (similarity()):
+//              after the shared prefix/suffix is stripped, a middle longer than
+//              SIMILARITY_SEGMENT_CAP code points is scored on its first CAP
+//              code points and scaled — approximate, counted in
+//              approximateSimilarity and marked "≈" on the page.
+//              SIMILARITY_CELL_BUDGET is only a safety valve that real books
+//              never reach (see there).
 //   closing    eligible: the draft, trailing whitespace trimmed, ends with "]"
 //   period     (so there is no period after it). Made: the final, trimmed the
 //              same way, ends with "].". Share = made / eligible.
@@ -47,8 +47,10 @@
 //              its payload records the job id, so the job is inferred. The
 //              candidates are tN translate jobs for the book that cover the
 //              row's chapter (chapter 0 rides with a job starting at 1), were
-//              enqueued before the draft (edit_log id > the job's
-//              edit_log_watermark; created_at when the job has no watermark),
+//              created before the draft (created_at <= drafted_at, and edit_log
+//              id > the job's edit_log_watermark when it has one; a chain
+//              child inherits its parent's older watermark, so the watermark
+//              alone is not enough),
 //              and had not finished before it (drafted_at <= updated_at). The
 //              applying job stamps updated_at right after its apply, so the
 //              writer is the candidate whose updated_at is EARLIEST; ties go to
@@ -146,11 +148,14 @@ export interface DraftScorecardResponse {
 /** Longest middle segment (after the shared prefix/suffix strip) scored exactly. */
 export const SIMILARITY_SEGMENT_CAP = 2_000;
 /**
- * DP cells one request may spend on similarity. ~100M cells/s in V8 here, so
- * this keeps a 3,000-row book to roughly a second of CPU; normal notes use a
- * few thousand cells each, so only a book full of long rewrites reaches it.
+ * Safety valve on the DP cells one request may spend (~100M cells/s in V8
+ * here, so ~15s, inside a Worker's 30s CPU limit). Real books never reach it:
+ * notes are a few hundred code points, so even a 3,000-row book rewritten end
+ * to end is a few hundred million cells, and a pair over the segment cap
+ * costs at most CAP² = 4M. Only past this valve does a row fall back to the
+ * cheap character-count bound, which overstates similarity.
  */
-export const SIMILARITY_CELL_BUDGET = 100_000_000;
+export const SIMILARITY_CELL_BUDGET = 1_500_000_000;
 
 /** Remaining DP cells for one request; similarity() spends from it. */
 export interface CellBudget {
@@ -184,13 +189,13 @@ function levenshtein(x: string[], xs: number, xe: number, y: string[], ys: numbe
  * 1 − levenshtein(a, b) / max(len) over Unicode code points, with bounded
  * CPU. Equal strings short-circuit; the shared prefix and suffix are stripped
  * first, so a small edit in a long note stays cheap. Then:
- *   - both middles ≤ SIMILARITY_SEGMENT_CAP and the budget covers n×m cells:
- *     exact;
- *   - otherwise, if the budget covers the capped segments (the first CAP code
- *     points of each middle): their edit rate, scaled to the full middle and
- *     clamped to the true bounds [|n−m|, max(n, m)] — approximate;
- *   - otherwise a cheap O(n+m) bound: max(n, m) minus the characters the two
- *     middles share (a lower bound on the distance) — approximate.
+ *   - both middles ≤ SIMILARITY_SEGMENT_CAP: exact;
+ *   - a middle over the cap: the edit rate of the capped segments (the first
+ *     CAP code points of each middle), scaled to the full middle and clamped
+ *     to the true bounds [|n−m|, max(n, m)] — approximate;
+ *   - only if the request's safety valve (SIMILARITY_CELL_BUDGET) is spent: a
+ *     cheap O(n+m) bound, max(n, m) minus the characters the two middles
+ *     share — approximate.
  */
 export function similarity(
   a: string,
@@ -286,8 +291,12 @@ export function matchDraftJob(
       (draft.chapter >= j.startChapter && draft.chapter <= j.endChapter) ||
       (draft.chapter === 0 && j.startChapter === 1);
     if (!covers) continue;
+    // The writer always exists before its draft. The watermark alone is not
+    // enough: a follow-up or chain child inherits its parent's older
+    // watermark, so once the parent is pruned the child would otherwise pass
+    // for a draft written before it was created.
     const enqueuedBefore =
-      j.editLogWatermark != null ? draft.draftLogId > j.editLogWatermark : j.createdAt <= draft.draftedAt;
+      j.createdAt <= draft.draftedAt && (j.editLogWatermark == null || draft.draftLogId > j.editLogWatermark);
     if (!enqueuedBefore || draft.draftedAt > j.updatedAt) continue;
     if (
       !best ||
@@ -396,9 +405,11 @@ export function buildScorecard(
       else s.untraced++;
     }
   }
-  const tallies = [...byChapter.values()];
-  const unchecked = tallies.filter((t) => t.englishCheck === "none").length;
-  total.englishCheck = unchecked === 0 ? "all" : unchecked === tallies.length ? "none" : "some";
+  // Only chapters with at least one usable draft had anything to check, so a
+  // chapter of "no draft logged" rows does not count toward all/some/none.
+  const drafted = [...byChapter.values()].filter((t) => t.validated > t.noDraft);
+  const unchecked = drafted.filter((t) => t.englishCheck === "none").length;
+  total.englishCheck = unchecked === 0 ? "all" : unchecked === drafted.length ? "none" : "some";
   const chapters = [...byChapter.entries()].sort(([p], [q]) => p - q).map(([ch, t]) => finish(ch, t));
   return { chapters, total: finish(null, total) };
 }
@@ -407,21 +418,24 @@ export function buildScorecard(
 
 // The latest ai_pipeline audit row per validated, live tN row of the book.
 // Book-scoped on edit_log.book. A pre-0017 audit row has a NULL book, so it is
-// accepted only when the row has no book-matched one: `e.book IS NULL` sorts
-// after 0 (book-matched) first, so another book's NULL-book row for a shared
-// id can never outrank this book's own draft. The (kind, row_key) index keeps
-// the correlated subquery cheap.
+// used only when the row has no book-matched one: the COALESCE tries this
+// book's latest row first, so another book's NULL-book row for a shared id can
+// never outrank this book's own draft. Each lookup is a plain "latest by id"
+// walk of the (kind, row_key) index, with no sort.
 export const SCORECARD_ROWS_SQL = `
   SELECT t.id AS id, t.chapter AS chapter, t.note AS final_note,
          d.id AS draft_log_id, d.created_at AS drafted_at,
          CASE WHEN json_valid(d.payload_json) THEN json_extract(d.payload_json, '$.note') END AS draft_note
     FROM tn_rows t
-    LEFT JOIN edit_log d ON d.id = (
-      SELECT e.id FROM edit_log e
-       WHERE e.kind = 'tn' AND e.row_key = t.id
-         AND (e.book = t.book OR e.book IS NULL)
-         AND e.source = 'ai_pipeline' AND e.action IN ('create', 'update')
-       ORDER BY (e.book IS NULL), e.id DESC LIMIT 1
+    LEFT JOIN edit_log d ON d.id = COALESCE(
+      (SELECT e.id FROM edit_log e
+        WHERE e.kind = 'tn' AND e.row_key = t.id AND e.book = t.book
+          AND e.source = 'ai_pipeline' AND e.action IN ('create', 'update')
+        ORDER BY e.id DESC LIMIT 1),
+      (SELECT e.id FROM edit_log e
+        WHERE e.kind = 'tn' AND e.row_key = t.id AND e.book IS NULL
+          AND e.source = 'ai_pipeline' AND e.action IN ('create', 'update')
+        ORDER BY e.id DESC LIMIT 1)
     )
    WHERE t.book = ?1 AND t.deleted_at IS NULL AND t.trashed_at IS NULL
      AND t.translation_state = 'validated'
