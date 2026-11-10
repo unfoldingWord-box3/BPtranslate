@@ -2538,7 +2538,9 @@ export const api = {
     request<AssistantChatResponse>(`/api/assistant/chat`, {
       method: "POST",
       body: JSON.stringify(body),
-      timeoutMs: 60_000,
+      // Longer than the server's 120 s provider timeout, so a slow answer that
+      // the server pays for still reaches the user.
+      timeoutMs: 130_000,
       signal,
     }),
   setAssistantSettings: (enabled: boolean) =>

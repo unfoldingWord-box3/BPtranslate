@@ -63,6 +63,8 @@ export interface AssistantSelection {
   edits: { id: string; note: string; version: number }[];
   approve: string[];
   notNeeded: string[];
+  /** Each note's version when the proposal was asked for. */
+  versions: ReadonlyMap<string, number>;
 }
 
 export interface RapidBulkArgs {
@@ -500,7 +502,8 @@ export function useRapidBulk(a: RapidBulkArgs) {
    * the stale-version row a later step reads is never one an earlier step
    * changed.
    */
-  async function applyAssistant(sel: AssistantSelection): Promise<RapidBulkResult> {
+  async function applyAssistant(sel: AssistantSelection): Promise<RapidBulkResult & { retryable?: boolean }> {
+    if (running || a.busy) return { text: t("assistant.apply.busy"), severity: "warning", retryable: true };
     const skipped = emptySkips();
     const parts: string[] = [];
     let stopped = false;
@@ -508,20 +511,44 @@ export function useRapidBulk(a: RapidBulkArgs) {
       for (const k of REASONS) skipped[k] += r.skipped[k];
       stopped = stopped || r.stopped;
     };
+    // Approve and Not needed act on the note as it is now, so a note changed
+    // since the assistant read it is skipped, like an edit. The open note with
+    // unsaved typing is skipped too: plain Approve would save and approve that
+    // typing, which the proposal never showed.
+    const unchanged = (ids: string[]) =>
+      ids.filter((id) => {
+        const v = sel.versions.get(id);
+        if (v === undefined || a.rowById.get(id)?.version !== v) {
+          skipped.changed++;
+          return false;
+        }
+        return true;
+      });
+    const approveIds = unchanged(sel.approve).filter((id) => {
+      if (id === a.currentId && a.hasDiff) {
+        skipped.unsaved++;
+        return false;
+      }
+      return true;
+    });
+    const notNeededIds = unchanged(sel.notNeeded);
+    const noRun: RunOut = { left: [], count: 0, skipped: emptySkips(), stopped: false };
     const edits = await runEdits(sel.edits);
-    if (edits.blocked) return { text: t("assistant.apply.busy"), severity: "warning" };
+    if (edits.blocked) return { text: t("assistant.apply.busy"), severity: "warning", retryable: true };
     if (sel.edits.length > 0) {
       merge(edits);
       parts.push(t("assistant.apply.edited", { count: edits.count }));
     }
     if (!stopped && sel.approve.length > 0) {
-      const r = await runApprove(sel.approve);
+      // All of them skipped above: still report the count (0) with the reasons.
+      const r = approveIds.length > 0 ? await runApprove(approveIds) : noRun;
       if (r.blocked) return { text: t("assistant.apply.busy"), severity: "warning" };
       merge(r);
       parts.push(t("flowTranslate.rapid.bulk.approved", { count: r.count }));
     }
     if (!stopped && sel.notNeeded.length > 0) {
-      const r = await runNotNeeded(sel.notNeeded);
+      // All of them skipped above: still report the count (0) with the reasons.
+      const r = notNeededIds.length > 0 ? await runNotNeeded(notNeededIds) : noRun;
       if (r.blocked) return { text: t("assistant.apply.busy"), severity: "warning" };
       merge(r);
       parts.push(t("flowTranslate.rapid.bulk.notNeededDone", { count: r.count }));

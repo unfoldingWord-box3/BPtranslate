@@ -3393,6 +3393,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
                 edits: editsWithVersions(sel.edits, versions),
                 approve: sel.approve,
                 notNeeded: sel.notNeeded,
+                versions,
               }),
           }}
           bulk={{

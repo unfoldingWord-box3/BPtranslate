@@ -7,7 +7,10 @@ import type { AssistantNote } from "../../sync/api.ts";
 // text per note, 200 KB for the whole JSON body.
 export const MAX_NOTES = 200;
 export const MAX_NOTE_CHARS = 6000;
-const MAX_NOTES_JSON_CHARS = 170_000;
+// UTF-8 bytes, like the server's 200 KB body limit: Arabic and Hebrew take two
+// bytes a character. The rest of the body (the chat turns) needs room too.
+const MAX_NOTES_JSON_BYTES = 120_000;
+const utf8 = new TextEncoder();
 
 export interface RapidAssistantRow {
   id: string;
@@ -43,8 +46,8 @@ export function buildRapidNotes(
   const keep = new Set<string>();
   let size = 2;
   const fits = (n: AssistantNote) => {
-    const add = JSON.stringify(n).length + 1;
-    if (keep.size >= MAX_NOTES || size + add > MAX_NOTES_JSON_CHARS) return false;
+    const add = utf8.encode(JSON.stringify(n)).length + 1;
+    if (keep.size >= MAX_NOTES || size + add > MAX_NOTES_JSON_BYTES) return false;
     size += add;
     keep.add(n.id);
     return true;

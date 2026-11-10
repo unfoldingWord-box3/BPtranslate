@@ -44,3 +44,11 @@ test("editsWithVersions: attaches the captured version, drops unknown ids", () =
   const out = editsWithVersions([{ id: "a", note: "x" }, { id: "z", note: "y" }], new Map([["a", 4]]));
   assert.deepEqual(out, [{ id: "a", note: "x", version: 4 }]);
 });
+
+test("buildRapidNotes: the budget counts UTF-8 bytes, so Arabic fits the server's 200 KB body", () => {
+  // 100 Arabic notes of 1500 characters: ~150k characters but ~300 KB of UTF-8.
+  const rows = Array.from({ length: 100 }, (_, i) => row("n" + i, { note: "ب".repeat(1500) }));
+  const { notes } = buildRapidNotes(rows, new Set());
+  assert.ok(new TextEncoder().encode(JSON.stringify(notes)).length <= 120_000);
+  assert.ok(notes.length > 0 && notes.length < 100);
+});

@@ -36,6 +36,8 @@ export interface AssistantContext {
 export interface AssistantApplyResult {
   text: string;
   severity: "success" | "info" | "warning";
+  /** Nothing was tried (another action was running): keep the card open for another Apply. */
+  retryable?: boolean;
 }
 
 interface Turn {
@@ -146,8 +148,11 @@ export default function AssistantPanel(props: Props) {
       );
       const actions = normalizeActions(res.actions);
       const has = actionCount(actions) > 0;
-      setTurns(() => [
-        ...sent,
+      // Append to the turns as they are NOW: a tick or an Apply on an earlier
+      // card while this message was in flight must survive the reply.
+      setTurns((prev) => [
+        ...prev,
+        userTurn,
         {
           role: "assistant",
           text: res.reply,
@@ -185,7 +190,8 @@ export default function AssistantPanel(props: Props) {
     try {
       const sel = selectedActions(p.actions, new Set(p.unticked));
       const r = await onApply(sel, p.snapshot);
-      patchProposal(i, (q) => ({ ...q, applied: r }));
+      if (r.retryable) setError(r.text);
+      else patchProposal(i, (q) => ({ ...q, applied: r }));
     } catch {
       patchProposal(i, (q) => ({ ...q, applied: { text: t("assistant.apply.failed"), severity: "warning" } }));
     } finally {
@@ -257,7 +263,7 @@ export default function AssistantPanel(props: Props) {
                       "& ul, & ol": { paddingInlineStart: "1.4em", marginBlock: "0.4em" },
                     }}
                   >
-                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({ children }) => <>{children}</> }}>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({ children }) => <>{children}</>, img: ({ alt }) => <>{alt}</> }}>
                       {m.text}
                     </ReactMarkdown>
                     {m.proposal && (
