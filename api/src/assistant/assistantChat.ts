@@ -85,10 +85,10 @@ function jsonObjectOf(text: string): Record<string, unknown> | null {
   const strict = parseObject(t);
   if (strict) return strict;
   // A model sometimes adds a line before or after the fence, or prose around
-  // a bare object: try a fence anywhere in the reply, then the first "{"
-  // through the last "}".
-  const inner = text.match(/```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n?```/i);
-  const fenced = inner ? parseObject(inner[1].trim()) : null;
+  // a bare object: try a single fence anywhere in the reply, then the first
+  // "{" through the last "}". Two fences are ambiguous and fall through.
+  const fences = [...text.matchAll(/```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n?```/gi)];
+  const fenced = fences.length === 1 ? parseObject(fences[0][1].trim()) : null;
   if (fenced) return fenced;
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");

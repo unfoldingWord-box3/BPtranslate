@@ -175,6 +175,10 @@ test("parseActions: text before or after a fence, or prose around a bare object,
   assert.deepEqual(parseActions("I {think} so {maybe}", ctx), { ok: false, kind: "unparseable" });
   assert.deepEqual(parseActions("```json\n{ not json }\n```", ctx), { ok: false, kind: "unparseable" });
   assert.deepEqual(parseActions('{"reply": "a"} or {"reply": "b"}', ctx), { ok: false, kind: "unparseable" });
+  assert.deepEqual(
+    parseActions('```json\n{"reply": "a"}\n```\nor\n```json\n{"reply": "b"}\n```', ctx),
+    { ok: false, kind: "unparseable" },
+  );
 });
 
 test("parseActions: a sent note stored with a real line break is not an edit when returned unchanged (#863)", () => {
