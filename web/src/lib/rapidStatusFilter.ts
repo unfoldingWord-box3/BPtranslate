@@ -22,6 +22,16 @@ export const RAPID_STATUS_BUCKETS: readonly RapidStatusBucket[] = [
   "skipped",
 ];
 
+/**
+ * Whether the menu offers a status. Every status is offered even with no
+ * notes yet, so "hide approved" can be set before anything is approved.
+ * Aquifer import is the exception: most projects never have one. A hidden
+ * status that is not offered hides nothing, so it does not count as a filter.
+ */
+export function rapidStatusOffered(b: RapidStatusBucket, counts: ReadonlyMap<RapidStatusBucket, number>): boolean {
+  return b !== "aquifer" || (counts.get(b) ?? 0) > 0;
+}
+
 /** The menu option a chip status belongs to. */
 export function rapidStatusBucket(status: FlowChipStatus): RapidStatusBucket {
   switch (status) {

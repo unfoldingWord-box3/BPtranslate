@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { rapidStatusBucket, rapidStatusMatches, withOpenNote, RAPID_STATUS_BUCKETS } from "./rapidStatusFilter.ts";
+import { rapidStatusBucket, rapidStatusMatches, rapidStatusOffered, withOpenNote, RAPID_STATUS_BUCKETS } from "./rapidStatusFilter.ts";
 
 test("chip statuses group by the label tn shows", () => {
   assert.equal(rapidStatusBucket("aiDraft"), "draft");
@@ -41,6 +41,12 @@ test("the open note stays in the list, in queue order", () => {
 test("an open note already listed returns the same array", () => {
   const m = [0, 2, 4];
   assert.equal(withOpenNote(m, 2, true), m);
+});
+
+test("every status is offered with no notes, except Aquifer import", () => {
+  const none = new Map();
+  for (const b of RAPID_STATUS_BUCKETS) assert.equal(rapidStatusOffered(b, none), b !== "aquifer", b);
+  assert.equal(rapidStatusOffered("aquifer", new Map([["aquifer", 2]])), true);
 });
 
 test("an open note the type filter hides is not added back", () => {

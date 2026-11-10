@@ -178,6 +178,7 @@ import { resolveFlowChipStatus, flowChipKind, type FlowChipStatus } from "../../
 import {
   RAPID_STATUS_BUCKETS,
   rapidStatusBucket,
+  rapidStatusOffered,
   rapidStatusMatches,
   withOpenNote,
   type RapidStatusBucket,
@@ -926,11 +927,6 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
   // Rapid check offers it; the card and list views (the done view among
   // them) ignore it.
   const [hiddenStatuses, setHiddenStatuses] = useState<ReadonlySet<RapidStatusBucket>>(NO_HIDDEN_STATUSES);
-  const statusFilterOn = rapid && view !== "done" && hiddenStatuses.size > 0;
-  // Either filter turns Rapid check's list chapter-wide; every cursor
-  // movement then maps through visibleIdx. With neither, the original code
-  // paths run untouched.
-  const filterOn = typeFilter != null || statusFilterOn;
   // The status a note's chip shows, minus the open editor's live diff (the
   // open note is always listed, so its live state never decides anything).
   // noteChip below resolves through this too, so filter and chip agree.
@@ -964,6 +960,22 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
     },
     [queueIds, rowById, noteChipStatus],
   );
+  // Menu counts: every note the status filter chooses from, by status.
+  const statusCounts = useMemo(() => {
+    const counts = new Map<RapidStatusBucket, number>();
+    if (!rapid) return counts;
+    for (const i of statusCandidates) {
+      const b = bucketAt(i);
+      counts.set(b, (counts.get(b) ?? 0) + 1);
+    }
+    return counts;
+  }, [rapid, statusCandidates, bucketAt]);
+  const statusFilterOn =
+    rapid && view !== "done" && [...hiddenStatuses].some((b) => rapidStatusOffered(b, statusCounts));
+  // Either filter turns Rapid check's list chapter-wide; every cursor
+  // movement then maps through visibleIdx. With neither, the original code
+  // paths run untouched.
+  const filterOn = typeFilter != null || statusFilterOn;
   const statusMatchIdx = useMemo(
     () => (statusFilterOn ? rapidStatusMatches(statusCandidates, bucketAt, hiddenStatuses) : statusCandidates),
     [statusFilterOn, statusCandidates, bucketAt, hiddenStatuses],
@@ -975,16 +987,6 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
         : typeMatchIdx,
     [statusFilterOn, statusMatchIdx, cursor, typeFilter, typeMatchIdx],
   );
-  // Menu counts: every note the status filter chooses from, by status.
-  const statusCounts = useMemo(() => {
-    const counts = new Map<RapidStatusBucket, number>();
-    if (!rapid) return counts;
-    for (const i of statusCandidates) {
-      const b = bucketAt(i);
-      counts.set(b, (counts.get(b) ?? 0) + 1);
-    }
-    return counts;
-  }, [rapid, statusCandidates, bucketAt]);
   // A new status choice moves off an open note it hides, to the next shown
   // note (else the first). With nothing shown the open note stays alone.
   const applyHiddenStatuses = (next: ReadonlySet<RapidStatusBucket>) => {
@@ -2267,7 +2269,17 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
           value={typeFilter ?? ""}
           onChange={(e) => {
             const v = e.target.value as string;
-            setTypeFilter(v === "" ? null : v);
+            const next = v === "" ? null : v;
+            setTypeFilter(next);
+            // Land on a note both filters show; the type effect alone would
+            // pick the type's first note even if its status is hidden.
+            if (next && statusFilterOn) {
+              const ofType = queueIds.flatMap((id, i) =>
+                typeSlugOf(rowById.get(id)?.support_reference) === next ? [i] : [],
+              );
+              const m = rapidStatusMatches(ofType, bucketAt, hiddenStatuses);
+              if (m.length > 0 && !m.includes(cursor)) setCursor(m.find((i) => i > cursor) ?? m[0]);
+            }
           }}
           aria-label={t("flowTranslate.filterAria")}
           sx={{ borderRadius: "10px", fontSize: "0.875rem", bgcolor: "background.paper" }}

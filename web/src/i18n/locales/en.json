@@ -1899,7 +1899,7 @@
         "showAll": "Show all",
         "only": "Only",
         "onlyAria": "Show only {{status}}",
-        "hint": "The open note always stays in the list.",
+        "hint": "The open note stays in the list until you move to another note.",
         "onlyShown": "Only: {{list}}",
         "hidden": "Hidden: {{list}}",
         "shown": "Showing {{shown}} of {{total}}",

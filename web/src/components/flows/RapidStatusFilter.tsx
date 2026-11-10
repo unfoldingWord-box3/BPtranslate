@@ -15,13 +15,7 @@ import { useTheme } from "@mui/material/styles";
 import { useTranslation } from "react-i18next";
 import { FlowStatusChip } from "./FlowStatusChip";
 import { flowChipKind } from "../../lib/flowStatusChip";
-import { RAPID_STATUS_BUCKETS, type RapidStatusBucket } from "../../lib/rapidStatusFilter";
-
-// Every status is offered even with no notes yet, so "hide approved" can be
-// set before anything is approved. Aquifer import is the exception: most
-// projects never have one.
-const offered = (b: RapidStatusBucket, counts: ReadonlyMap<RapidStatusBucket, number>) =>
-  b !== "aquifer" || (counts.get(b) ?? 0) > 0;
+import { RAPID_STATUS_BUCKETS, rapidStatusOffered, type RapidStatusBucket } from "../../lib/rapidStatusFilter";
 
 export interface RapidStatusFilterMenuProps {
   hidden: ReadonlySet<RapidStatusBucket>;
@@ -36,7 +30,7 @@ export function RapidStatusFilterMenu({ hidden, counts, labels, onChange }: Rapi
   const side = useTheme().direction === "rtl" ? "right" : "left";
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   const active = hidden.size > 0;
-  const options = RAPID_STATUS_BUCKETS.filter((b) => offered(b, counts));
+  const options = RAPID_STATUS_BUCKETS.filter((b) => rapidStatusOffered(b, counts));
   const name = t("flowTranslate.rapid.statusFilter.button");
 
   const toggle = (b: RapidStatusBucket) => {
@@ -131,10 +125,11 @@ export interface RapidStatusFilterLineProps {
 export function RapidStatusFilterLine({ hidden, counts, labels, shown, total, onShowAll }: RapidStatusFilterLineProps) {
   const { t, i18n } = useTranslation();
   // Name whichever side is shorter: "Hidden: Approved" or "Only: Pending".
-  const offeredBuckets = RAPID_STATUS_BUCKETS.filter((b) => offered(b, counts));
+  const offeredBuckets = RAPID_STATUS_BUCKETS.filter((b) => rapidStatusOffered(b, counts));
   const off = offeredBuckets.filter((b) => hidden.has(b));
   const on = offeredBuckets.filter((b) => !hidden.has(b));
-  const showOnly = on.length < off.length;
+  // With every status hidden there is nothing to name after "Only".
+  const showOnly = on.length > 0 && on.length < off.length;
   const list = new Intl.ListFormat(i18n.language, { style: "short", type: "unit" }).format(
     (showOnly ? on : off).map((b) => labels[b]),
   );
