@@ -163,6 +163,9 @@ test("parseActions: text before or after a fence, or prose around a bare object,
     "```json\n" + body + "\n```\nLet me know if you want more.",
     "Sure.\n```\n" + body + "\n```\nDone.",
     "Here: " + body + " Hope that helps.",
+    // Braces in the prose around a fence must not hide the fenced object.
+    "Explanation {example}\n```json\n" + body + "\n```",
+    "```json\n" + body + "\n```\nThanks {bye}",
   ]) {
     const r = parseActions(text, ctx);
     assert.equal(r.ok, true, text);
