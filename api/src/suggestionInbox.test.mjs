@@ -27,6 +27,8 @@ import {
   changeKey,
   buildInbox,
   ruleReproduces,
+  checkExamples,
+  realExamples,
   draftLine,
   MIN_HITS,
   MIN_CHAPTERS,
@@ -278,6 +280,7 @@ test("precision: a marks-only rule that would also fire inside ZWNJ compounds th
   assert.equal(card.hits, 10);
   assert.equal(card.opportunities, 10); // the diff alone sees no other chance
   assert.deepEqual(card.precision, { fires: 13, correct: 10, minPrecision: 0.9 });
+  assert.equal(card.ruleBlocked, "precision");
   assert.notEqual(card.home, "house_style");
   const approve = await h.call("POST", `/${BOOK}/approve`, { key });
   assert.equal(approve.status, 409);
@@ -583,4 +586,60 @@ test("bound: a 3,000-row book is worked out well inside a Worker request", () =>
   console.log(`buildInbox: 3,000 rows in ${ms.toFixed(0)} ms`);
   assert.equal(r.scanned.compared, 3000);
   assert.ok(ms < 10_000, `${ms} ms`);
+});
+
+// ── 4. Budgets fail closed ──────────────────────────────────────────────────
+
+const mufidRule = (enabled) => ({
+  id: "m",
+  kind: "whole_word",
+  find: "مفيدا",
+  replace: "مفيدًا",
+  scope: "note",
+  examples: [],
+  counterExamples: [],
+  enabled,
+  sortOrder: 0,
+});
+
+test("budget: with the check budget spent, a card is not hidden as covered and is not offered as a rule", () => {
+  const rows = repeated((i) => `قد يكون مفيدا هنا ${i}`, (i) => `قد يكون مفيدًا هنا ${i}`);
+  const ctx = { ...emptyCtx(), rules: [mufidRule(false)] };
+  // Normal budget: the existing (switched-off) rule covers it.
+  const normal = buildInbox(rows, ctx);
+  assert.equal(normal.suggestions.length, 0);
+  assert.equal(normal.excluded.rule, 1);
+  // No budget left: nothing can be checked, so the card stays and is no rule.
+  const starved = buildInbox(rows, ctx, undefined, undefined, { cells: 0 });
+  assert.equal(starved.excluded.rule, 0);
+  assert.equal(starved.suggestions.length, 1);
+  const card = starved.suggestions[0];
+  assert.notEqual(card.home, "house_style");
+  assert.equal(card.rule, null);
+  assert.deepEqual(card.precision, { fires: 10, correct: 0, minPrecision: 0.9 });
+  assert.equal(card.ruleBlocked, "precision");
+  // With a normal budget and no covering rule, it is a rule card.
+  assert.equal(buildInbox(rows, emptyCtx()).suggestions[0].home, "house_style");
+});
+
+test("approve's example check: unknown when the budget runs out, mismatch when the rule differs", () => {
+  const fn = compileRule(mufidRule(true));
+  const key = changeKey("change", "مفيدا", "مفيدًا");
+  const notes = [{ draft: "قد يكون مفيدا هنا", final: "قد يكون مفيدًا هنا" }];
+  assert.equal(checkExamples(fn, key, notes, { cells: Infinity }), "ok");
+  assert.equal(checkExamples(fn, key, notes, { cells: 0 }), "unknown");
+  assert.equal(checkExamples(fn, key, [{ draft: "قد يكون مفيدا هنا", final: "قد يكون مفيد هنا" }], { cells: Infinity }), "mismatch");
+  assert.equal(checkExamples(fn, key, [], { cells: Infinity }), "mismatch");
+});
+
+test("realExamples: no pair when the rule changes nothing on the example line, so approve refuses", () => {
+  const fn = compileRule(mufidRule(true));
+  const draft = "سطر أول مفيدا\\nسطر ثان";
+  const s = draft.indexOf("مفيدا");
+  assert.deepEqual(realExamples(fn, [{ draft, change: { draftStart: s, draftEnd: s + 5 } }]), [
+    { before: "سطر أول مفيدا", after: "سطر أول مفيدًا" },
+  ]);
+  // A change span on a line the rule does not touch yields nothing.
+  const t = draft.indexOf("ثان");
+  assert.deepEqual(realExamples(fn, [{ draft, change: { draftStart: t, draftEnd: t + 3 } }]), []);
 });

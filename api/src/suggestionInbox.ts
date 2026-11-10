@@ -191,7 +191,11 @@ export interface Suggestion {
   rule: SuggestedRule | null;
   /** For a change one of the rule shapes covers: how the rule did on this book's drafts (null otherwise). */
   precision: RulePrecision | null;
+  /** Why a rule-shaped card is not a house-style card: its precision, or its examples (the rule does not make the editor's change on each). */
+  ruleBlocked: RuleBlocked;
 }
+
+export type RuleBlocked = "precision" | "examples" | null;
 
 export interface InboxRow {
   id: string;
@@ -576,19 +580,69 @@ export function ruleReproduces(
   finalIn: string,
   budget: CellBudget = { cells: Infinity },
 ): boolean {
+  return reproduceCheck(fn, key, draftIn, finalIn, budget) === true;
+}
+
+/**
+ * ruleReproduces with the third answer kept: null when a diff did not fit the
+ * per-pair cap or the budget, so the question could not be answered. Every
+ * caller treats null as a failure (fail closed); approve reports it as
+ * rule_imprecise rather than rule_mismatch.
+ */
+export function reproduceCheck(
+  fn: (t: string) => string,
+  key: string,
+  draftIn: string,
+  finalIn: string,
+  budget: CellBudget,
+): boolean | null {
   const draft = nfc(draftIn);
   const final = nfc(finalIn);
   const ruled = fn(draft);
   if (ruled === draft) return false;
   // A larger per-pair cap than the grouping diff, so a long note the grouping
   // skipped can still be checked; past it (or past the budget) the answer is
-  // "not reproduced", never a guess.
+  // unknown, never a guess.
   const edits = noteChanges(draft, ruled, budget, false, PRECISION_SEGMENT_CAP);
-  if (!edits || edits.length === 0 || edits.some((c) => c.key !== key)) return false;
+  if (!edits) return null;
+  if (edits.length === 0 || edits.some((c) => c.key !== key)) return false;
   const had = noteChanges(draft, final, budget, false, PRECISION_SEGMENT_CAP);
-  const left = noteChanges(ruled, final, budget, false, PRECISION_SEGMENT_CAP);
-  if (!had || !left) return false;
+  const left = had && noteChanges(ruled, final, budget, false, PRECISION_SEGMENT_CAP);
+  if (!had || !left) return null;
   return sameKeys(left, had.filter((c) => c.key !== key).map((c) => c.key));
+}
+
+/** The rule's stored examples: each example's draft line and what the rule makes of it, only where it changes something. */
+export function realExamples(
+  fn: (t: string) => string,
+  notes: { draft: string; change: { draftStart: number; draftEnd: number } }[],
+): { before: string; after: string }[] {
+  return notes
+    .map((n) => draftLine(n.draft, n.change.draftStart, n.change.draftEnd))
+    .map((before) => ({ before, after: fn(before) }))
+    .filter((e) => e.after !== e.before)
+    .slice(0, EXAMPLE_COUNT);
+}
+
+/**
+ * Approve's check on a card's example notes, in full: "ok" when the rule makes
+ * exactly the editor's change on every one, "mismatch" when it does not on
+ * one, "unknown" when a check ran out of cap or budget.
+ */
+export function checkExamples(
+  fn: (t: string) => string,
+  key: string,
+  notes: { draft: string; final: string }[],
+  budget: CellBudget,
+): "ok" | "mismatch" | "unknown" {
+  if (notes.length === 0) return "mismatch";
+  let unknown = false;
+  for (const n of notes) {
+    const r = reproduceCheck(fn, key, n.draft, n.final, budget);
+    if (r === false) return "mismatch";
+    if (r === null) unknown = true;
+  }
+  return unknown ? "unknown" : "ok";
 }
 
 export interface RulePrecision {
@@ -629,10 +683,12 @@ export function precisionPasses(p: RulePrecision): boolean {
   return p.fires >= MIN_RULE_FIRES && p.correct >= p.minPrecision * p.fires;
 }
 
-function ruleReproducesOn(rule: HouseStyleRule, key: string, rows: Prepared[], every: boolean): boolean {
+// Budgeted like every check: an exhausted budget answers "no" (fail closed),
+// so a card stays visible and no rule home is offered.
+function ruleReproducesOn(rule: HouseStyleRule, key: string, rows: Prepared[], every: boolean, budget: CellBudget): boolean {
   const fn = compileRule(rule);
   if (!fn || rows.length === 0) return false;
-  const ok = (p: Prepared) => ruleReproduces(fn, key, p.draft, p.final);
+  const ok = (p: Prepared) => ruleReproduces(fn, key, p.draft, p.final, budget);
   return every ? rows.every(ok) : rows.some(ok);
 }
 
@@ -711,6 +767,8 @@ export function buildInbox(
   budget: CellBudget = { cells: DIFF_CELL_BUDGET },
   /** When given, receives each card's example notes in full (for approve). */
   exampleNotes?: Map<string, ExampleNote[]>,
+  /** One request-scoped budget for every rule check (precision, covered-by-rule, examples). */
+  checkBudget: CellBudget = { cells: PRECISION_CELL_BUDGET },
 ): Omit<SuggestionInboxResponse, "book" | "notMigrated"> {
   const scanned = { validated: rows.length, noDraft: 0, compared: 0, skippedLong: 0 };
   const prepared: Prepared[] = [];
@@ -741,7 +799,7 @@ export function buildInbox(
   }
 
   const excluded: InboxExcluded = { rejected: 0, rule: 0, term: 0, template: 0, commonIssues: 0, lesson: 0 };
-  const precisionBudget: CellBudget = { cells: PRECISION_CELL_BUDGET };
+  const precisionBudget = checkBudget;
   const commonIssues = ctx.commonIssues;
   const templates = ctx.templates.map(norm);
   const suggestions: Suggestion[] = [];
@@ -755,7 +813,7 @@ export function buildInbox(
     }
     const examples = pickExamples(g.hits);
     // Covered only when the rule makes exactly this change on an example.
-    if (ctx.rules.some((r) => ruleReproducesOn(r, key, examples, false))) {
+    if (ctx.rules.some((r) => ruleReproducesOn(r, key, examples, false, checkBudget))) {
       excluded.rule++;
       continue;
     }
@@ -789,7 +847,13 @@ export function buildInbox(
     // diff hits: drafts the rule would change but the editor left alone, or
     // where it would change more, count against it.
     if (cand && candFn) precision = measurePrecision(candFn, key, prepared, cand.minPrecision, precisionBudget);
-    if (cand && precision && precisionPasses(precision) && ruleReproducesOn(asRule(cand.rule), key, examples, true)) {
+    // Why a rule-shaped card is not offered as a rule (null when it is, or has no rule shape).
+    let ruleBlocked: RuleBlocked = null;
+    if (cand && precision) {
+      if (!precisionPasses(precision)) ruleBlocked = "precision";
+      else if (!ruleReproducesOn(asRule(cand.rule), key, examples, true, checkBudget)) ruleBlocked = "examples";
+    }
+    if (cand && precision && ruleBlocked === null) {
       home = "house_style";
       rule = cand.rule;
     } else if (wordsOf(s.before).length >= 2 && templates.some((t) => t.includes(norm(s.before)))) {
@@ -821,6 +885,7 @@ export function buildInbox(
       home,
       rule,
       precision,
+      ruleBlocked,
     });
     exampleNotes?.set(
       key,
@@ -963,16 +1028,15 @@ suggestionInbox.post("/:book/approve", requireAdmin, async (c) => {
   // The rule must make exactly the editor's change on every example's FULL
   // draft, and nothing else.
   const notes = exampleNotes.get(card.key) ?? [];
-  if (notes.length === 0 || !notes.every((n) => ruleReproduces(fn, card.key, n.draft, n.final))) {
-    return c.json({ error: "rule_mismatch" }, 409);
-  }
+  // Budgeted like the card's own checks; a check that cannot finish fails closed.
+  const verdict = checkExamples(fn, card.key, notes, { cells: PRECISION_CELL_BUDGET });
+  if (verdict === "unknown") return c.json({ error: "rule_imprecise", precision: card.precision }, 409);
+  if (verdict === "mismatch") return c.json({ error: "rule_mismatch" }, 409);
   // Stored examples are real pairs: the whole line of the draft that holds the
   // change (no "…"), and what the rule makes of that line.
-  const examples = notes
-    .map((n) => draftLine(n.draft, n.change.draftStart, n.change.draftEnd))
-    .map((before) => ({ before, after: fn(before) }))
-    .filter((e) => e.after !== e.before)
-    .slice(0, EXAMPLE_COUNT);
+  const examples = realExamples(fn, notes);
+  // Never store a rule without at least one real pair.
+  if (examples.length === 0) return c.json({ error: "rule_mismatch" }, 409);
   try {
     await c.env.DB.prepare(
       `INSERT INTO house_style_rules
