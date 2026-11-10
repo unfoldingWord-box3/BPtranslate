@@ -17,7 +17,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
-import { Alert, Box, Button, Chip, MenuItem, Stack, TextField, Typography } from "@mui/material";
+import { Alert, Box, Button, Chip, MenuItem, Stack, TextField, Typography, useTheme } from "@mui/material";
 
 import { AdminDesk } from "./AdminDesk";
 import { AdminPageHeader } from "./AdminPageHeader";
@@ -64,15 +64,21 @@ const HOME_EDITOR: Record<Exclude<SuggestionHome, "house_style">, { hash: string
 // The text Approve copies for a non-rule home. Symbols only, no UI language:
 // it is pasted into the workspace's own guidance. A Common issues line holds
 // both texts, which is what hides the card once it is saved there.
+// Arrows are not mirrored in right-to-left text, so an Arabic or Hebrew line
+// gets "←" to keep pointing from the old words to the new ones.
 function copyText(s: Suggestion): string {
+  const arrow = /[֐-ࣿיִ-﷿ﹰ-﻿]/.test(s.before + s.after) ? "←" : "→";
   const after = s.after === "" ? "∅" : `«${s.after}»`;
-  return s.home === "common_issues" ? `- «${s.before}» → ${after}` : `${s.before} → ${s.after}`;
+  return s.home === "common_issues" ? `- «${s.before}» ${arrow} ${after}` : `${s.before} ${arrow} ${s.after}`;
 }
 
-const mono = { fontFamily: "monospace", fontSize: "0.95rem" } as const;
+// The changed text. Not monospace: monospace fonts lack Arabic shaping, and
+// the live test showed "(مُكيَّف)" with its parentheses drawn apart.
+const changeTextSx = { fontSize: "1.05rem", fontWeight: 600 } as const;
 
 export default function AdminSuggestionInboxScreen({ role, me }: FlowScreenContext) {
   const { t } = useTranslation();
+  const theme = useTheme();
   const isAdmin = role === "admin";
 
   const [books, setBooks] = useState<BookListEntry[] | null>(null);
@@ -196,20 +202,23 @@ export default function AdminSuggestionInboxScreen({ role, me }: FlowScreenConte
   }
 
   const chapterList = (chs: number[]) =>
-    chs.map((ch) => (ch === 0 ? t("adminPages.suggestions.intro") : String(ch))).join(", ");
+    chs
+      .map((ch) => (ch === 0 ? t("adminPages.suggestions.intro") : String(ch)))
+      .join(t("adminPages.suggestions.listSep"));
 
   const changeLine = (s: Suggestion) => (
     <Stack direction="row" flexWrap="wrap" alignItems="center" gap={1}>
-      <Box component="bdi" sx={{ ...mono, bgcolor: "action.hover", px: 0.75, borderRadius: 1 }}>
+      <Box component="bdi" sx={{ ...changeTextSx, bgcolor: "action.hover", px: 0.75, borderRadius: 1 }}>
         {s.before}
       </Box>
+      {/* The row follows the page direction, so in Arabic the old words are on the right. */}
       <Typography component="span" aria-hidden>
-        →
+        {theme.direction === "rtl" ? "←" : "→"}
       </Typography>
       {s.after === "" ? (
         <Chip size="small" variant="outlined" label={t("adminPages.suggestions.deleted")} />
       ) : (
-        <Box component="bdi" sx={{ ...mono, bgcolor: "action.hover", px: 0.75, borderRadius: 1 }}>
+        <Box component="bdi" sx={{ ...changeTextSx, bgcolor: "action.hover", px: 0.75, borderRadius: 1 }}>
           {s.after}
         </Box>
       )}
@@ -249,13 +258,14 @@ export default function AdminSuggestionInboxScreen({ role, me }: FlowScreenConte
                   <Typography component="span" variant="body2" color="text.secondary">
                     {t("adminPages.suggestions.draft")}
                   </Typography>
-                  <Typography component="span" variant="body2" dir="auto">
+                  {/* justifySelf start: each excerpt sits next to its label, laid out by its own direction. */}
+                  <Typography component="span" variant="body2" dir="auto" sx={{ justifySelf: "start" }}>
                     {e.draft}
                   </Typography>
                   <Typography component="span" variant="body2" color="text.secondary">
                     {t("adminPages.suggestions.final")}
                   </Typography>
-                  <Typography component="span" variant="body2" dir="auto">
+                  <Typography component="span" variant="body2" dir="auto" sx={{ justifySelf: "start" }}>
                     {e.final}
                   </Typography>
                 </Box>
@@ -267,7 +277,7 @@ export default function AdminSuggestionInboxScreen({ role, me }: FlowScreenConte
               {msg.text}
               {msg.severity === "info" && editor && (
                 <Stack spacing={1} sx={{ mt: 1 }}>
-                  <Box component="bdi" sx={{ ...mono, display: "block", userSelect: "all" }}>
+                  <Box component="bdi" sx={{ ...changeTextSx, display: "block", userSelect: "all" }}>
                     {copyText(s)}
                   </Box>
                   <Box>

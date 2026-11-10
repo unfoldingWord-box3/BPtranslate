@@ -2958,6 +2958,7 @@
       "none": "No correction was made at least {{hits}} times across at least {{chapters}} chapters of this book, other than ones already covered.",
       "excluded": "Not shown because they are already covered: {{rule}} by a house-style rule, {{term}} by a term, {{template}} by a template, {{commonIssues}} by a Common issues line; {{rejected}} rejected.",
       "intro": "Intro",
+      "listSep": ", ",
       "deleted": "deleted",
       "atEnd": "at the end of the note",
       "hitsOf": "Made in {{hits}} of {{opportunities}} drafts that had it",
