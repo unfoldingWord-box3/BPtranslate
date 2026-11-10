@@ -35,7 +35,7 @@ To write your note:
 
 The other two buttons at the bottom:
 - **Redo** asks the AI for a fresh draft. It works in the background and the new draft appears when ready. It needs a quote and a support reference on the note.
-- **Not needed** sets the note aside when it does not need translating. It goes to the trash. Until the nightly publish you can bring it back in the [Review queue](#help:review-queue). After that it is deleted for good.
+- **Not needed** sets the note aside when it does not need translating. It goes to the trash. Until the nightly publish you can bring it back in the [Review queue](#help:review-queue). After that it is deleted for good. If someone else changed the note and your screen does not show their change yet, it is not set aside: the app reloads it and tells you, so you can read their change first.
 
 An icon next to the verse opens the verse view. See [Verse view](#help:verse-view).
 

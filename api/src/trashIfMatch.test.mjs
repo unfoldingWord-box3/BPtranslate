@@ -1,0 +1,289 @@
+// Issue #837: Not needed (POST /api/rows/tn/:id/trash) accepts an optional
+// If-Match pinning the version the person was shown.
+//
+// Run from api/:
+//   node --experimental-strip-types --no-warnings --test src/trashIfMatch.test.mjs
+//
+// THE BUG. /trash took no precondition, so "Not needed" could set aside a
+// note a colleague edited a moment earlier, and the person clicking never saw
+// that edit. Rapid check's bulk Not needed re-reads the chapter first, which
+// narrows the gap to the time between that read and the trash request; the
+// single-note button had no check at all.
+//
+// THE FIX. With If-Match, the trash lands only if the row is still at that
+// version; otherwise 409 version_mismatch with the row as it is now, and no
+// trash and no audit entry. Without the header, the route behaves as before.
+//
+// Same harness as chapterLockApproveTrash.test.mjs: the REAL Hono router
+// against the REAL migration schema.
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { DatabaseSync } from "node:sqlite";
+import { readdirSync, readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { Hono } from "hono";
+
+import { rows } from "./rows.ts";
+
+function makeDb(sqlite) {
+  const mk = (sql, args) => ({
+    bind: (...a) => mk(sql, a),
+    all() {
+      return { results: sqlite.prepare(sql).all(...args), success: true };
+    },
+    first() {
+      const r = sqlite.prepare(sql).all(...args);
+      return r.length ? r[0] : null;
+    },
+    // Async like D1's, so logRowConflict's `.run().catch(...)` hands
+    // waitUntil a real promise instead of throwing on a plain object.
+    async run() {
+      const r = sqlite.prepare(sql).run(...args);
+      return { success: true, meta: { changes: Number(r.changes), last_row_id: Number(r.lastInsertRowid) } };
+    },
+  });
+  return {
+    prepare: (sql) => mk(sql, []),
+    async batch(stmts) {
+      const out = [];
+      for (const s of stmts) out.push(await s.run());
+      return out;
+    },
+  };
+}
+
+const BOOK = "ZEC";
+
+function fresh() {
+  const sqlite = new DatabaseSync(":memory:");
+  const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations");
+  for (const f of readdirSync(dir).filter((f) => f.endsWith(".sql")).sort()) {
+    sqlite.exec(readFileSync(join(dir, f), "utf8"));
+  }
+  sqlite.prepare(`INSERT INTO users (id, dcs_user_id, dcs_username) VALUES (9, 909, 'translator')`).run();
+  const ins = sqlite.prepare(
+    `INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, note, sort_order, version, updated_by, translation_state)
+     VALUES (?, ?, 1, ?, ?, 'note text', 10, 3, 9, ?)`,
+  );
+  ins.run("draft", BOOK, 1, "1:1", "ai_draft");
+  // A note the translate pipeline never touched: /trash works on these too,
+  // so a stale pin must still be a 409, not a 404.
+  ins.run("plain", BOOK, 2, "1:2", null);
+  ins.run("approved", BOOK, 3, "1:3", "validated");
+  ins.run("gone", BOOK, 4, "1:4", "ai_draft");
+  sqlite.prepare(`UPDATE tn_rows SET deleted_at = 100 WHERE id = 'gone'`).run();
+
+  const app = new Hono();
+  app.use("*", async (c, next) => {
+    c.set("userId", 9);
+    c.set("role", "editor");
+    await next();
+  });
+  app.route("/api/rows", rows);
+  const env = { DB: makeDb(sqlite) };
+  // Collected, so a test can wait for the conflict-log insert (and the
+  // broadcast) the route hands to waitUntil before reading the table.
+  const pending = [];
+  const ctx = {
+    waitUntil(p) {
+      if (p && typeof p.then === "function") pending.push(p);
+    },
+    passThroughOnException() {},
+  };
+  const settle = () => Promise.allSettled(pending.splice(0));
+  // body: undefined sends no body at all (the classic editor's request).
+  const trash = (id, ifMatch, body) =>
+    app.request(
+      `/api/rows/tn/${id}/trash?book=${BOOK}`,
+      {
+        method: "POST",
+        headers: {
+          ...(ifMatch === undefined ? {} : { "If-Match": ifMatch }),
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      },
+      env,
+      ctx,
+    );
+  const row = (id) => sqlite.prepare(`SELECT version, trashed_at, translation_state FROM tn_rows WHERE id = ?`).get(id);
+  const trashLog = (id) =>
+    sqlite.prepare(`SELECT COUNT(*) AS n FROM edit_log WHERE row_key = ? AND action = 'trash'`).get(id).n;
+  const conflicts = (id) =>
+    sqlite.prepare(`SELECT action, expected_version, current_version FROM row_conflict_log WHERE row_id = ?`).all(id);
+  const translateJob = () =>
+    sqlite
+      .prepare(
+        `INSERT INTO pipeline_jobs (job_id, user_id, pipeline_type, book, start_chapter, end_chapter, session_key, state, created_at)
+         VALUES ('job-1', 9, 'translate', ?, 1, 1, 's', 'running', 1000)`,
+      )
+      .run(BOOK);
+  return { trash, row, trashLog, conflicts, settle, translateJob, sqlite };
+}
+
+test("a stale If-Match is refused with 409 version_mismatch and the note is not set aside", async () => {
+  const { trash, row, trashLog, conflicts, settle } = fresh();
+  const res = await trash("draft", "2");
+  assert.equal(res.status, 409);
+  const body = await res.json();
+  assert.equal(body.error, "version_mismatch");
+  assert.equal(body.current?.id, "draft", "the 409 carries the row as it is now");
+  assert.equal(body.current?.version, 3);
+  assert.equal(body.current?.trashed_at, null);
+  assert.ok("latest_source" in body.current, "with latest_source, like every row the client puts on screen");
+  assert.equal(row("draft").trashed_at, null, "the note was not trashed");
+  assert.equal(trashLog("draft"), 0, "a refused trash writes no audit entry");
+  await settle();
+  assert.deepEqual(
+    conflicts("draft").map((r) => ({ ...r })),
+    [{ action: "trash", expected_version: 2, current_version: 3 }],
+    "the refusal is recorded in row_conflict_log as a trash",
+  );
+});
+
+test("a stale If-Match on a note with no translation state is still a 409, not a 404", async () => {
+  const { trash, row } = fresh();
+  const res = await trash("plain", "7");
+  assert.equal(res.status, 409);
+  assert.equal((await res.json()).error, "version_mismatch");
+  assert.equal(row("plain").trashed_at, null);
+});
+
+test("a matching If-Match sets the note aside", async () => {
+  const { trash, row, trashLog } = fresh();
+  for (const header of ["3", '"3"']) {
+    const id = header === "3" ? "draft" : "plain";
+    const res = await trash(id, header);
+    assert.equal(res.status, 200, `If-Match: ${header}`);
+    const body = await res.json();
+    assert.notEqual(body.trashed_at, null);
+    assert.equal(body.version, 3, "trash does not bump the version");
+    assert.notEqual(row(id).trashed_at, null);
+    assert.equal(trashLog(id), 1);
+  }
+});
+
+test("no If-Match keeps today's behavior: the note is set aside", async () => {
+  const { trash, row, trashLog } = fresh();
+  const res = await trash("draft");
+  assert.equal(res.status, 200);
+  assert.notEqual(row("draft").trashed_at, null);
+  assert.equal(trashLog("draft"), 1);
+});
+
+test("a malformed If-Match is a 400, as on /validate, and nothing changes", async () => {
+  const { trash, row } = fresh();
+  const res = await trash("draft", "abc");
+  assert.equal(res.status, 400);
+  assert.equal((await res.json()).error, "invalid_if_match");
+  assert.equal(row("draft").trashed_at, null);
+});
+
+test("an unknown note is still a 404 with or without If-Match", async () => {
+  const { trash } = fresh();
+  assert.equal((await trash("nope", "3")).status, 404);
+  assert.equal((await trash("nope")).status, 404);
+});
+
+test("a deleted note with a stale If-Match is a 404, not a 409", async () => {
+  const { trash, row } = fresh();
+  const res = await trash("gone", "2");
+  assert.equal(res.status, 404);
+  assert.equal((await res.json()).error, "not_found");
+  assert.equal(row("gone").trashed_at, null);
+});
+
+test("while a translate run holds the chapter, a stale If-Match still gets chapter_locked", async () => {
+  const { trash, row, translateJob } = fresh();
+  translateJob();
+  const res = await trash("draft", "2", { expected_state: "edited" });
+  assert.equal(res.status, 409);
+  assert.equal((await res.json()).error, "chapter_locked", "the lock answers first");
+  assert.equal(row("draft").trashed_at, null);
+});
+
+// expected_state (#837 review): approving does not bump the version, so a
+// version pin alone would let Not needed set aside a note a colleague just
+// approved.
+test("expected_state: a note a peer approved since it was shown is refused with 409", async () => {
+  const { trash, row, trashLog, conflicts, settle } = fresh();
+  // Shown as an AI draft at version 3; a peer approved it (still version 3).
+  const res = await trash("approved", "3", { expected_state: "ai_draft" });
+  assert.equal(res.status, 409);
+  const body = await res.json();
+  assert.equal(body.error, "version_mismatch");
+  assert.equal(body.current?.translation_state, "validated");
+  assert.equal(row("approved").trashed_at, null, "the approved note was not set aside");
+  assert.equal(trashLog("approved"), 0, "no audit entry");
+  await settle();
+  assert.deepEqual(
+    conflicts("approved").map((r) => ({ ...r })),
+    [{ action: "trash", expected_version: 3, current_version: 3 }],
+  );
+  // The state pin alone, with no If-Match, refuses too.
+  const res2 = await trash("approved", undefined, { expected_state: "edited" });
+  assert.equal(res2.status, 409);
+  assert.equal(row("approved").trashed_at, null);
+});
+
+test("expected_state: a matching state (and version) sets the note aside", async () => {
+  const { trash, row, trashLog } = fresh();
+  const res = await trash("approved", "3", { expected_state: "validated" });
+  assert.equal(res.status, 200);
+  assert.notEqual(row("approved").trashed_at, null);
+  assert.equal(trashLog("approved"), 1, "the audit entry still lands: it runs after the UPDATE sets trashed_at");
+});
+
+// expected_state: null (#837 review round 2). A note the translate pipeline
+// never drafted has no state; a peer's approval gives it one without bumping
+// the version, so "shown with no state" has to be a pin of its own, distinct
+// from leaving the field out.
+test("expected_state null: a no-state note a peer approved since it was shown is refused with 409", async () => {
+  const { trash, row, trashLog, sqlite } = fresh();
+  sqlite.prepare(`UPDATE tn_rows SET translation_state = 'validated' WHERE id = 'plain'`).run();
+  const res = await trash("plain", "3", { expected_state: null });
+  assert.equal(res.status, 409);
+  const body = await res.json();
+  assert.equal(body.error, "version_mismatch");
+  assert.equal(body.current?.translation_state, "validated");
+  assert.equal(row("plain").trashed_at, null, "the approved note was not set aside");
+  assert.equal(trashLog("plain"), 0, "no audit entry");
+  // The null pin alone, with no If-Match, refuses too.
+  assert.equal((await trash("plain", undefined, { expected_state: null })).status, 409);
+  assert.equal(row("plain").trashed_at, null);
+});
+
+test("expected_state null: an unchanged no-state note is set aside, with its audit entry", async () => {
+  const { trash, row, trashLog } = fresh();
+  const res = await trash("plain", "3", { expected_state: null });
+  assert.equal(res.status, 200);
+  assert.notEqual(row("plain").trashed_at, null);
+  assert.equal(trashLog("plain"), 1);
+});
+
+test("expected_state null on a drafted note is a 409: null pins 'no state', it is not 'no check'", async () => {
+  const { trash, row } = fresh();
+  const res = await trash("draft", undefined, { expected_state: null });
+  assert.equal(res.status, 409);
+  assert.equal(row("draft").trashed_at, null);
+});
+
+test("no expected_state keeps today's behavior, with an empty JSON body or none", async () => {
+  const { trash, row } = fresh();
+  assert.equal((await trash("approved", undefined, {})).status, 200);
+  assert.notEqual(row("approved").trashed_at, null);
+  assert.equal((await trash("draft")).status, 200, "no body at all");
+  assert.notEqual(row("draft").trashed_at, null);
+});
+
+test("a bad expected_state or body is a 400 and nothing changes", async () => {
+  const { trash, row } = fresh();
+  const res = await trash("draft", undefined, { expected_state: "approved" });
+  assert.equal(res.status, 400);
+  assert.equal((await res.json()).error, "validation_failed");
+  // A JSON string, not an object: fails the schema.
+  assert.equal((await trash("draft", "3", "not an object")).status, 400);
+  assert.equal(row("draft").trashed_at, null);
+});

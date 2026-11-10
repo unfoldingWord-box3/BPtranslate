@@ -26,6 +26,7 @@
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import type { TFunction } from "i18next";
 import { api, ApiError, isChapterLockedBody, type TnRow } from "../../sync/api";
+import { versionMismatchRow } from "../../lib/versionMismatch";
 import { outbox } from "../../sync/outbox";
 import { drafts, rowKey } from "../../sync/drafts";
 import { pipelineStore, getSessionKey } from "../../sync/pipelineStore";
@@ -162,7 +163,9 @@ export function useRapidBulk(a: RapidBulkArgs) {
     if (!(err instanceof ApiError)) return "failed";
     if (err.status === 401 || err.status === 403) return "stop";
     if (isChapterLockedBody(err.body)) return "locked";
-    if (err.status === 409) return "changed";
+    // Only a version_mismatch means someone changed the row; any other 409
+    // (workspace_mismatch, say) is a plain failure.
+    if (versionMismatchRow(err)) return "changed";
     if (err.status === 404) return "noDraft";
     return "failed";
   }
@@ -270,6 +273,7 @@ export function useRapidBulk(a: RapidBulkArgs) {
     const prev: Record<string, CardStatus | undefined> = {};
     let stopped = false;
     let refetchNeeded = false;
+    let openChanged = false;
     try {
       closeOpenEditor(ids);
       const pending = await pendingRowIds();
@@ -297,12 +301,20 @@ export function useRapidBulk(a: RapidBulkArgs) {
         }
         if (!changed || changed.has(id)) {
           skipped[changed ? "changed" : "failed"]++;
-          if (changed) refetchNeeded = true;
+          if (changed) {
+            refetchNeeded = true;
+            if (id === a.currentId) openChanged = true;
+          }
           left.push(id);
           continue;
         }
         try {
-          const updated = await api.trashNote(id, book);
+          // Pinned to the version and state on screen (#837): a peer's edit
+          // or approval that lands after the re-read above is refused, not
+          // set aside unseen.
+          // Always sent, null included: null pins "still has no state".
+          const shownState = r.translation_state ?? null;
+          const updated = await api.trashNote(id, book, { expectedVersion: r.version, expectedState: shownState });
           prev[id] = a.statuses[id];
           a.applyLocalRowReplacement("tn", updated);
           a.setStatuses((p) => ({ ...p, [id]: "skipped" }));
@@ -316,14 +328,24 @@ export function useRapidBulk(a: RapidBulkArgs) {
             left.push(...ids.slice(i + 1));
             break;
           }
-          skipped[kind === "changed" || kind === "noDraft" ? "failed" : kind]++;
+          skipped[kind === "noDraft" ? "failed" : kind]++;
+          if (kind === "changed") {
+            // The row as it is now, on screen at once; the refetch follows.
+            const current = versionMismatchRow<TnRow>(err);
+            if (current) a.applyLocalRowReplacement("tn", current);
+            refetchNeeded = true;
+            if (id === a.currentId) openChanged = true;
+          }
         }
       }
     } finally {
       a.setBusy(false);
       setRunning(false);
     }
-    if (refetchNeeded) void a.refetch();
+    // The open note's editor is keyed on its id plus a reload counter, so a
+    // plain refetch would leave it showing the old text: reload re-seeds it.
+    if (openChanged) a.reload();
+    else if (refetchNeeded) void a.refetch();
     if (done.length > 0) setUndoable({ scope, ids: done, prev });
     show(summarize(t("flowTranslate.rapid.bulk.notNeededDone", { count: done.length }), skipped, stopped));
     return left;
