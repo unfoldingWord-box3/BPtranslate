@@ -236,6 +236,10 @@ test("GET lists the period and (مُكيَّف) cards with hit/opportunity count
   assert.deepEqual(period.chapters, [1, 2, 3, 4]);
   assert.equal(period.home, "house_style");
   assert.deepEqual(period.rule, { kind: "final_bracket_period", find: "]", replace: "].", scope: "end-of-note" });
+  // Precision: the rule fires on the 30 drafts ending in a plain "]" and is
+  // right on all of them. It skips the rc-link "]]" drafts and the two drafts
+  // that end with the tag, so neither counts for or against it.
+  assert.deepEqual(period.precision, { fires: 30, correct: 30, minPrecision: 0.8 });
   assert.equal(period.examples.length, 3);
   // Examples come from different chapters and show the draft and the final.
   assert.equal(new Set(period.examples.map((e) => e.chapter)).size, 3);
@@ -250,6 +254,8 @@ test("GET lists the period and (مُكيَّف) cards with hit/opportunity count
   assert.deepEqual(muk.chapters, [1, 2, 3, 4]);
   assert.equal(muk.home, "house_style");
   assert.deepEqual(muk.rule, { kind: "literal", find: MUK_NFC, replace: "", scope: "note" });
+  // It would also delete the tag in the 2 drafts the editor left alone: 14 of 16.
+  assert.deepEqual(muk.precision, { fires: 16, correct: 14, minPrecision: 0.8 });
 
   const term = r.body.suggestions[2];
   assert.equal(term.hits, 10);
@@ -258,6 +264,46 @@ test("GET lists the period and (مُكيَّف) cards with hit/opportunity count
   assert.equal(term.rule, null);
 
   assert.equal(r.body.scanned.noDraft, 1);
+});
+
+test("precision: a marks-only rule that would also fire inside ZWNJ compounds the editor left alone is not offered", async () => {
+  const zwnj = String.fromCharCode(0x200c);
+  const notes = [];
+  for (let i = 0; i < 10; i++) notes.push({ chapter: 1 + (i % 3), draft: `قد يكون مفيدا هنا ${i}`, final: `قد يكون مفيدًا هنا ${i}` });
+  // "مفيدا" + ZWNJ + "ها": one word to the editor; whole_word still matches its start.
+  for (let i = 0; i < 3; i++) notes.push({ chapter: 4, draft: `هذه مفيدا${zwnj}ها ${i}`, final: `هذه مفيدا${zwnj}ها ${i}` });
+  const h = fixture({ notes });
+  const key = changeKey("change", "مفيدا", "مفيدًا");
+  const card = (await h.call("GET", `/${BOOK}`)).body.suggestions.find((s) => s.key === key);
+  assert.equal(card.hits, 10);
+  assert.equal(card.opportunities, 10); // the diff alone sees no other chance
+  assert.deepEqual(card.precision, { fires: 13, correct: 10, minPrecision: 0.9 });
+  assert.notEqual(card.home, "house_style");
+  const approve = await h.call("POST", `/${BOOK}/approve`, { key });
+  assert.equal(approve.status, 409);
+  assert.equal(approve.body.error, "rule_imprecise");
+  assert.equal(h.sqlite.prepare(`SELECT COUNT(*) AS n FROM house_style_rules`).get().n, 0);
+});
+
+test("precision: drafts the diff cap skipped still count as correct when the rule matches them", async () => {
+  const notes = [];
+  for (let i = 0; i < 10; i++) notes.push({ chapter: 1 + (i % 3), draft: `قد يكون مفيدا هنا ${i}`, final: `قد يكون مفيدًا هنا ${i}` });
+  // Long notes whose rest was rewritten (a middle over 400 tokens): the
+  // grouping diff skips them, but the editor made the same mark change.
+  const many = (p, i) => Array.from({ length: 450 }, (_, k) => `${p}${i}x${k}`).join(" ");
+  for (let i = 0; i < 3; i++) {
+    notes.push({ chapter: 5, draft: `هنا مفيدا تعني ${many("أ", i)}`, final: `هنا مفيدًا تعني ${many("ب", i)}` });
+  }
+  const h = fixture({ notes });
+  const r = (await h.call("GET", `/${BOOK}`)).body;
+  assert.equal(r.scanned.skippedLong, 3);
+  const card = r.suggestions.find((s) => s.key === changeKey("change", "مفيدا", "مفيدًا"));
+  // 10 hits of 13 opportunities (77%) would have failed a 90% share; the rule
+  // is right on all 13 drafts it changes.
+  assert.equal(card.hits, 10);
+  assert.equal(card.opportunities, 13);
+  assert.deepEqual(card.precision, { fires: 13, correct: 13, minPrecision: 0.9 });
+  assert.equal(card.home, "house_style");
 });
 
 test("a change an existing house-style rule makes is not suggested, even while the rule is off", async () => {

@@ -65,9 +65,13 @@
 //   home      house_style ONLY for the three shapes candidateRule allows (the
 //             closing period after a final "]"; deleting a tag fully enclosed
 //             in () or []; one whole word whose only change is its combining
-//             marks), when hits reach that shape's share of opportunities (50%,
-//             50%, 90%) and the rule reproduces the change exactly on every
-//             example's full draft. Else template when before (two words or
+//             marks), when the rule's measured precision passes: run over
+//             every compared draft of the book, it changes at least
+//             MIN_RULE_FIRES (10) drafts, and on at least 80% of them (90% for
+//             marks) it makes exactly the editor's change (ruleReproduces;
+//             a draft whose check cannot finish counts as wrong). It must also
+//             reproduce the change on every example. Approve re-checks the
+//             gate (409 rule_imprecise). Else template when before (two words or
 //             more) appears in a note template. Else term when both sides are
 //             one to three words with no punctuation. Else common_issues.
 //
@@ -83,8 +87,15 @@
 // Reject also takes the book: only a card currently shown for that book can be
 // rejected (else 404), so no arbitrary key is stored.
 //
-// Cost, measured in node on this box: 3,000 rows with small changes, about
-// 0.6 s; 3,000 fully rewritten 200-token notes, about 1.9 s.
+// Cost, measured in node on this box (single run each):
+//   - 3,000 rows with a small change each, the closing period among them, so
+//     one rule card whose precision check runs over all 3,000 drafts: about
+//     1.1-1.3 s (0.6 s before the precision gate);
+//   - 3,000 fully rewritten 200-token notes, no rule card: about 1.9 s;
+//   - worst case seen: 3,000 notes that each delete the tag AND rewrite 200
+//     tokens, so every row needs three full precision diffs: about 5.7 s.
+// The precision checks spend their own PRECISION_CELL_BUDGET (300M cells),
+// so even past these figures a request is bounded; rows past it count as wrong.
 
 import { Hono } from "hono";
 import { z } from "zod";
@@ -119,6 +130,12 @@ export const DIFF_SEGMENT_CAP = 400;
  * 480M, so this valve only trips on books far past real sizes.
  */
 export const DIFF_CELL_BUDGET = 300_000_000;
+/** Longest differing middle the precision check (ruleReproduces) diffs; Uint16-safe. */
+export const PRECISION_SEGMENT_CAP = 2_000;
+/** LCS cells the precision checks of one request may fill, apart from DIFF_CELL_BUDGET. */
+export const PRECISION_CELL_BUDGET = 300_000_000;
+/** A rule card needs at least this many drafts the rule would change. */
+export const MIN_RULE_FIRES = 10;
 
 // ── Data shapes ─────────────────────────────────────────────────────────────
 
@@ -172,6 +189,8 @@ export interface Suggestion {
   home: SuggestedHome;
   /** The rule Approve would create; set only when home is house_style. */
   rule: SuggestedRule | null;
+  /** For a change one of the rule shapes covers: how the rule did on this book's drafts (null otherwise). */
+  precision: RulePrecision | null;
 }
 
 export interface InboxRow {
@@ -291,7 +310,7 @@ export interface CellBudget {
 }
 
 // Runs of differing tokens, by longest common subsequence. null = too long.
-function diffTokens(a: string[], b: string[], budget: CellBudget): Hunk[] | null {
+function diffTokens(a: string[], b: string[], budget: CellBudget, cap = DIFF_SEGMENT_CAP): Hunk[] | null {
   let s = 0;
   while (s < a.length && s < b.length && a[s] === b[s]) s++;
   let ea = a.length;
@@ -304,10 +323,11 @@ function diffTokens(a: string[], b: string[], budget: CellBudget): Hunk[] | null
   const m = eb - s;
   if (n === 0 && m === 0) return [];
   if (n === 0 || m === 0) return [{ d0: s, d1: ea, f0: s, f1: eb }];
-  if (n > DIFF_SEGMENT_CAP || m > DIFF_SEGMENT_CAP || n * m > budget.cells) return null;
+  if (n > cap || m > cap || n * m > budget.cells) return null;
   budget.cells -= n * m;
   const W = m + 1;
-  // Uint16 is safe: an LCS length is at most DIFF_SEGMENT_CAP (400) < 65,535.
+  // Uint16 is safe: an LCS length is at most the cap (400, or 2,000 for the
+  // precision check) < 65,535.
   const L = new Uint16Array((n + 1) * W);
   for (let i = n - 1; i >= 0; i--) {
     for (let j = m - 1; j >= 0; j--) {
@@ -413,6 +433,7 @@ export function noteChanges(
   finalIn: string,
   budget: CellBudget = { cells: Infinity },
   filter = true,
+  cap = DIFF_SEGMENT_CAP,
 ): NoteChange[] | null {
   const draft = nfc(draftIn);
   const final = nfc(finalIn);
@@ -423,6 +444,7 @@ export function noteChanges(
     dt.map((t) => t.text),
     ft.map((t) => t.text),
     budget,
+    cap,
   );
   if (!hunks) return null;
   const bold = boldRanges(draft);
@@ -502,25 +524,26 @@ export function isMarksOnly(before: string, after: string): boolean {
 /**
  * The house-style rule for a change, offered ONLY for the three shapes that are
  * safe to run on every future draft (every book, notes and questions), with the
- * share of opportunities its hits must reach:
- *   - the closing period after the note's final "]" (final_bracket_period), 50%;
+ * precision the rule must reach on this book (rulePrecision: of the drafts it
+ * would change, the share where it makes exactly the editor's change):
+ *   - the closing period after the note's final "]" (final_bracket_period), 80%;
  *   - deleting a tag fully enclosed in () or [] with a letter inside (literal;
- *     the brackets bound the match), 50%;
+ *     the brackets bound the match), 80%;
  *   - one whole word whose only change is its combining marks (whole_word),
  *     90%, because a mark change can be grammar and right only in context.
  * Everything else (punctuation swaps, word+punctuation literals with no letter
  * boundary, respellings, bare word deletions) is never an automatic rule.
  */
-export function candidateRule(s: { change: ChangeKind; before: string; after: string }): { rule: SuggestedRule; minShare: number } | null {
+export function candidateRule(s: { change: ChangeKind; before: string; after: string }): { rule: SuggestedRule; minPrecision: number } | null {
   if (s.change === "insert-end" && s.before === "]" && s.after === "].") {
-    return { rule: { kind: "final_bracket_period", find: "]", replace: "].", scope: "end-of-note" }, minShare: 0.5 };
+    return { rule: { kind: "final_bracket_period", find: "]", replace: "].", scope: "end-of-note" }, minPrecision: 0.8 };
   }
   if (s.change !== "change") return null;
   if (s.after === "" && isEnclosedTag(s.before)) {
-    return { rule: { kind: "literal", find: s.before, replace: "", scope: "note" }, minShare: 0.5 };
+    return { rule: { kind: "literal", find: s.before, replace: "", scope: "note" }, minPrecision: 0.8 };
   }
   if (isMarksOnly(s.before, s.after)) {
-    return { rule: { kind: "whole_word", find: s.before, replace: s.after, scope: "note" }, minShare: 0.9 };
+    return { rule: { kind: "whole_word", find: s.before, replace: s.after, scope: "note" }, minPrecision: 0.9 };
   }
   return null;
 }
@@ -546,18 +569,64 @@ const sameKeys = (a: NoteChange[], b: string[]) => {
  * and against the final, this change is gone while every other difference is
  * untouched. Unfiltered diffs, so a long or bold-adjacent edit cannot hide.
  */
-export function ruleReproduces(fn: (t: string) => string, key: string, draftIn: string, finalIn: string): boolean {
+export function ruleReproduces(
+  fn: (t: string) => string,
+  key: string,
+  draftIn: string,
+  finalIn: string,
+  budget: CellBudget = { cells: Infinity },
+): boolean {
   const draft = nfc(draftIn);
   const final = nfc(finalIn);
   const ruled = fn(draft);
   if (ruled === draft) return false;
-  const inf = { cells: Infinity };
-  const edits = noteChanges(draft, ruled, inf, false);
+  // A larger per-pair cap than the grouping diff, so a long note the grouping
+  // skipped can still be checked; past it (or past the budget) the answer is
+  // "not reproduced", never a guess.
+  const edits = noteChanges(draft, ruled, budget, false, PRECISION_SEGMENT_CAP);
   if (!edits || edits.length === 0 || edits.some((c) => c.key !== key)) return false;
-  const had = noteChanges(draft, final, inf, false);
-  const left = noteChanges(ruled, final, inf, false);
+  const had = noteChanges(draft, final, budget, false, PRECISION_SEGMENT_CAP);
+  const left = noteChanges(ruled, final, budget, false, PRECISION_SEGMENT_CAP);
   if (!had || !left) return false;
   return sameKeys(left, had.filter((c) => c.key !== key).map((c) => c.key));
+}
+
+export interface RulePrecision {
+  /** Compared drafts of the book the rule would change. */
+  fires: number;
+  /** Of those, the drafts where it makes exactly the editor's change (ruleReproduces). */
+  correct: number;
+  /** The share it must reach to be offered as a rule (0.8 or 0.9). */
+  minPrecision: number;
+}
+
+/**
+ * Run the rule over every compared draft of the book. A draft it changes is a
+ * fire; a fire is correct only when ruleReproduces holds against that row's
+ * final within the budget. Rows the grouping diff skipped are run too: when
+ * their check cannot finish, they count as fired and not correct, so unknown
+ * rows never raise precision.
+ */
+function measurePrecision(
+  fn: (t: string) => string,
+  key: string,
+  rows: Prepared[],
+  minPrecision: number,
+  budget: CellBudget,
+): RulePrecision {
+  let fires = 0;
+  let correct = 0;
+  for (const p of rows) {
+    if (fn(p.draft) === p.draft) continue;
+    fires++;
+    if (ruleReproduces(fn, key, p.draft, p.final, budget)) correct++;
+  }
+  return { fires, correct, minPrecision };
+}
+
+/** At least MIN_RULE_FIRES fires, and correct / fires at least the shape's bar. */
+export function precisionPasses(p: RulePrecision): boolean {
+  return p.fires >= MIN_RULE_FIRES && p.correct >= p.minPrecision * p.fires;
 }
 
 function ruleReproducesOn(rule: HouseStyleRule, key: string, rows: Prepared[], every: boolean): boolean {
@@ -672,6 +741,7 @@ export function buildInbox(
   }
 
   const excluded: InboxExcluded = { rejected: 0, rule: 0, term: 0, template: 0, commonIssues: 0, lesson: 0 };
+  const precisionBudget: CellBudget = { cells: PRECISION_CELL_BUDGET };
   const commonIssues = ctx.commonIssues;
   const templates = ctx.templates.map(norm);
   const suggestions: Suggestion[] = [];
@@ -712,12 +782,14 @@ export function buildInbox(
 
     let home: SuggestedHome;
     let rule: SuggestedRule | null = null;
+    let precision: RulePrecision | null = null;
     const cand = candidateRule(s);
-    if (
-      cand &&
-      g.hits.length >= cand.minShare * opportunities &&
-      ruleReproducesOn(asRule(cand.rule), key, examples, true)
-    ) {
+    const candFn = cand ? compileRule(asRule(cand.rule)) : null;
+    // Gate on measured precision over every compared draft of the book, not on
+    // diff hits: drafts the rule would change but the editor left alone, or
+    // where it would change more, count against it.
+    if (cand && candFn) precision = measurePrecision(candFn, key, prepared, cand.minPrecision, precisionBudget);
+    if (cand && precision && precisionPasses(precision) && ruleReproducesOn(asRule(cand.rule), key, examples, true)) {
       home = "house_style";
       rule = cand.rule;
     } else if (wordsOf(s.before).length >= 2 && templates.some((t) => t.includes(norm(s.before)))) {
@@ -748,6 +820,7 @@ export function buildInbox(
       }),
       home,
       rule,
+      precision,
     });
     exampleNotes?.set(
       key,
@@ -879,6 +952,10 @@ suggestionInbox.post("/:book/approve", requireAdmin, async (c) => {
   const inbox = await computeInbox(c.env.DB, book, exampleNotes);
   const card = inbox.suggestions.find((s) => s.key === body.key);
   if (!card) return c.json({ error: "suggestion_not_found" }, 404);
+  // The same precision gate the card was built with, recomputed on today's data.
+  if (card.precision && !precisionPasses(card.precision)) {
+    return c.json({ error: "rule_imprecise", precision: card.precision }, 409);
+  }
   if (card.home !== "house_style" || !card.rule) return c.json({ error: "not_a_rule", home: card.home }, 409);
   const id = await ruleId(card.key);
   const fn = compileRule(asRule(card.rule, id));
