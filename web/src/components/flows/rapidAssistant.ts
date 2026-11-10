@@ -30,8 +30,15 @@ export interface RapidAssistantRow {
   translation_state?: string | null;
 }
 
+/** What a later Apply is checked against: each sent note's version and approval state. */
+export interface RapidSnapshot {
+  versions: ReadonlyMap<string, number>;
+  /** translation_state, null when the row has none. Approving does not bump the version (#860). */
+  states: ReadonlyMap<string, string | null>;
+}
+
 /**
- * The notes sent with a message, in screen order, plus the version each row
+ * The notes sent with a message, in screen order, plus the version and state each row
  * had at that moment (the snapshot a later Apply is checked against). A note
  * over the server's size limit is left out rather than cut, because the model
  * could then "fix" the part it never saw. When the chapter is too big for one
@@ -42,7 +49,7 @@ export interface RapidAssistantRow {
 export function buildRapidNotes(
   rows: readonly RapidAssistantRow[],
   checked: ReadonlySet<string>,
-): { notes: AssistantNote[]; versions: Map<string, number>; omitted: RapidOmitted } {
+): { notes: AssistantNote[]; versions: Map<string, number>; states: Map<string, string | null>; omitted: RapidOmitted } {
   const refOf = (r: RapidAssistantRow) => (r.verse === 0 ? `${r.chapter}:intro` : `${r.chapter}:${r.verse}`);
   const tooLongRefs = rows.filter((r) => (r.note ?? "").length > MAX_NOTE_CHARS).map(refOf);
   const all: AssistantNote[] = rows
@@ -73,8 +80,32 @@ export function buildRapidNotes(
   return {
     notes,
     versions: new Map(notes.map((n) => [n.id, version.get(n.id) as number])),
+    states: new Map(notes.map((n) => [n.id, n.state])),
     omitted: { tooLong: tooLongRefs.length, tooMany: tooManyRefs.length, tooLongRefs, tooManyRefs },
   };
+}
+
+/**
+ * Split a proposal's Approve or Not needed ids into the rows still as the
+ * assistant saw them and the rest: a version or approval-state change since
+ * the snapshot (or no snapshot at all) is `changed`; a row no longer on the
+ * screen is `missing`, which the result line reports as a failure.
+ */
+export function stillAsProposed(
+  ids: readonly string[],
+  snap: RapidSnapshot,
+  rowById: ReadonlyMap<string, { version: number; translation_state?: string | null }>,
+): { ids: string[]; changed: number; missing: number } {
+  const out: string[] = [];
+  let changed = 0;
+  let missing = 0;
+  for (const id of ids) {
+    const r = rowById.get(id);
+    if (!r) missing++;
+    else if (snap.versions.get(id) !== r.version || !snap.states.has(id) || snap.states.get(id) !== (r.translation_state ?? null)) changed++;
+    else out.push(id);
+  }
+  return { ids: out, changed, missing };
 }
 
 /**

@@ -3388,12 +3388,13 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
                 before: r.note ?? "",
               };
             },
-            onApply: (sel, versions) =>
+            onApply: (sel, snapshot) =>
               rapidBulk.applyAssistant({
-                edits: editsWithVersions(sel.edits, versions),
+                edits: editsWithVersions(sel.edits, snapshot.versions),
                 approve: sel.approve,
                 notNeeded: sel.notNeeded,
-                versions,
+                versions: snapshot.versions,
+                states: snapshot.states,
               }),
           }}
           bulk={{

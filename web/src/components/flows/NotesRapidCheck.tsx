@@ -26,7 +26,7 @@ import AssistantPanel, { type AssistantApplyResult } from "../../assistant/Assis
 import { assistantVisible, useAssistantStatus } from "../../assistant/useAssistantStatus";
 import type { NoteInfo } from "../../assistant/ProposalCard";
 import type { AssistantActions } from "../../sync/api";
-import { buildRapidNotes, type RapidAssistantRow } from "./rapidAssistant";
+import { buildRapidNotes, type RapidAssistantRow, type RapidSnapshot } from "./rapidAssistant";
 
 export interface RapidCheckRow {
   id: string;
@@ -56,8 +56,8 @@ export interface RapidAssistantProps {
   /** The chapter's notes that are not set aside, in screen order, read at send time. */
   rows: () => RapidAssistantRow[];
   describeId: (id: string) => NoteInfo | null;
-  /** `versions` is the snapshot buildRapidNotes captured when the proposal was requested. */
-  onApply: (selection: AssistantActions, versions: ReadonlyMap<string, number>) => Promise<AssistantApplyResult>;
+  /** `snapshot` is what buildRapidNotes captured when the proposal was requested. */
+  onApply: (selection: AssistantActions, snapshot: RapidSnapshot) => Promise<AssistantApplyResult>;
 }
 
 export interface NotesRapidCheckProps {
@@ -765,11 +765,11 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
         refreshStatus={assistantStatus.refresh}
         resetKey={`${book}:${assistant.chapter}`}
         buildContext={() => {
-          const { notes, versions, omitted } = buildRapidNotes(assistant.rows(), new Set(selectedIds));
-          return { book, chapter: assistant.chapter, notes, snapshot: versions, omitted };
+          const { notes, versions, states, omitted } = buildRapidNotes(assistant.rows(), new Set(selectedIds));
+          return { book, chapter: assistant.chapter, notes, snapshot: { versions, states }, omitted };
         }}
         describeId={assistant.describeId}
-        onApply={(sel, snapshot) => assistant.onApply(sel, snapshot as ReadonlyMap<string, number>)}
+        onApply={(sel, snapshot) => assistant.onApply(sel, snapshot as RapidSnapshot)}
       />
     )}
     </Box>
