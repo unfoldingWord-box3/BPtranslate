@@ -29,6 +29,7 @@ import {
   END_OUTPUT,
   TranslateProviderError,
   callProvider,
+  scrubSecrets,
   extractOutput,
   hasInternalAdapter,
   transportFor,
@@ -50,17 +51,30 @@ export const RUN_CONCURRENCY = 3;
 export const CALL_TIMEOUT_MS = 120_000;
 /** draft_meta_json.source for drafts written here. */
 export const DRAFT_SOURCE = "approved_notes";
+/** A run that has not released its lease by then is presumed dead and can be taken over. */
+export const RUN_LEASE_SECONDS = 10 * 60;
+/** A drafted template longer than max(this, OUTPUT_SOURCE_FACTOR × its English source) is rejected. */
+export const MAX_OUTPUT_FLOOR_CHARS = 4000;
+export const OUTPUT_SOURCE_FACTOR = 4;
 /** Provider failures that will fail every slug the same way: stop starting new calls. */
 const FATAL_CODES = new Set(["invalid_key", "model_not_found"]);
 const AI_SOURCE = "ai_pipeline";
 
 // Human-approved notes only. Same rule as VALIDATED_TN_EXAMPLES_SQL
 // (contextExport.ts): bulk approvals (admin_bulk_state set) were never read
-// one at a time, so they must not teach the template either.
+// one at a time, so they must not teach the template either. A note with no
+// text teaches nothing, so it does not count toward the threshold either
+// (the same notes loadExamples can show).
 const approvedTnWhere = (t: string) => `${t}translation_state = 'validated'
        AND ${t}admin_bulk_state IS NULL
        AND ${t}deleted_at IS NULL AND ${t}trashed_at IS NULL
-       AND ${t}support_reference IS NOT NULL AND TRIM(${t}support_reference) <> ''`;
+       AND ${t}support_reference IS NOT NULL AND TRIM(${t}support_reference) <> ''
+       AND TRIM(COALESCE(${t}note, '')) <> ''`;
+
+// Matches a support reference (bare slug or rc:// path) to the slug bound at
+// ?N, the same rule as shortSupport: the last path segment.
+const slugMatch = (col: string, n: number) =>
+  `(TRIM(${col}) = ?${n} OR substr(TRIM(${col}), -(length(?${n}) + 1)) = '/' || ?${n})`;
 
 // ---------------------------------------------------------------------------
 // Data shapes
@@ -82,6 +96,8 @@ export type Availability =
 /** One unit this run may write, with the state and version it was read at. */
 export type OpenUnit = {
   template_id: string;
+  /** support_ref as stored; the write is pinned to it. */
+  support_ref: string;
   type: string | null;
   source_md: string;
   target_md: string | null;
@@ -156,7 +172,7 @@ export async function findCandidateSlugs(db: Db): Promise<CandidateSlug[]> {
 
   const unitRs = await db
     .prepare(
-      `SELECT template_id, TRIM(support_ref) AS slug, type, source_md, target_md, translation_state,
+      `SELECT template_id, support_ref, type, source_md, target_md, translation_state,
               draft_meta_json, pre_draft_json, version
          FROM template_units
         WHERE deleted_at IS NULL AND origin = 'sheet'
@@ -164,7 +180,7 @@ export async function findCandidateSlugs(db: Db): Promise<CandidateSlug[]> {
     )
     .all<{
       template_id: string;
-      slug: string;
+      support_ref: string;
       type: string | null;
       source_md: string;
       target_md: string | null;
@@ -175,21 +191,24 @@ export async function findCandidateSlugs(db: Db): Promise<CandidateSlug[]> {
     }>();
   const bySlug = new Map<string, { validated: boolean; open: CandidateSlug["units"] }>();
   for (const u of unitRs.results ?? []) {
-    const entry = bySlug.get(u.slug) ?? { validated: false, open: [] };
+    // Same normalization as the tN side: a path-form support_ref counts as its slug.
+    const slug = shortSupport(u.support_ref);
+    const entry = bySlug.get(slug) ?? { validated: false, open: [] };
     if (u.translation_state === "validated") entry.validated = true;
     const state = u.translation_state;
     if (state == null || (state === "ai_draft" && !isApprovedNotesDraft(u.draft_meta_json))) {
       entry.open.push({
         template_id: u.template_id,
+        support_ref: u.support_ref,
         type: u.type,
-        source_md: u.source_md,
+        source_md: u.source_md ?? "",
         target_md: u.target_md,
         translation_state: state,
         pre_draft_json: u.pre_draft_json,
         version: u.version,
       });
     }
-    bySlug.set(u.slug, entry);
+    bySlug.set(slug, entry);
   }
 
   const out: CandidateSlug[] = [];
@@ -225,9 +244,7 @@ export async function loadExamples(db: Db, slug: string): Promise<ExampleNote[]>
                 ORDER BY el.id DESC LIMIT 1) AS ai_note
          FROM tn_rows t
         WHERE ${approvedTnWhere("t.")}
-          AND (TRIM(t.support_reference) = ?1
-               OR substr(TRIM(t.support_reference), -(length(?1) + 1)) = '/' || ?1)
-          AND t.note IS NOT NULL AND TRIM(t.note) <> ''
+          AND ${slugMatch("t.support_reference", 1)}
         ORDER BY t.updated_at DESC, t.book, t.id
         LIMIT ?2`,
     )
@@ -356,15 +373,20 @@ async function resolveProvider(env: Env, decrypt: boolean): Promise<Resolved> {
 // ---------------------------------------------------------------------------
 
 /**
- * Store one unit's draft. The UPDATE is pinned to the version AND the state
- * the unit was read at: an edit bumps the version, but Approve flips the state
- * without one, so pinning only the version would let a draft land on a
- * template someone approved while the model was writing. Either way the
- * person wins and the draft is dropped. The edit_log row is gated on the
- * update having landed and carries target_md so the history view can replay it.
+ * Store one unit's draft. The UPDATE is pinned to what the unit looked like
+ * when it was read, so whatever a person did while the model was writing wins
+ * and the draft is dropped:
+ *   - version: an edit bumps it;
+ *   - state: Approve flips it without a version bump;
+ *   - support_ref: a sheet sync can move the unit to another note type;
+ *   - no sibling of the note type approved meanwhile: the type then has an
+ *     approved template and no longer qualifies.
+ * The edit_log row is gated on the update having landed and carries target_md
+ * so the history view can replay it.
  */
 async function writeDraft(
   db: Db,
+  slug: string,
   unit: OpenUnit,
   targetMd: string,
   meta: Record<string, unknown>,
@@ -384,9 +406,17 @@ async function writeDraft(
                 updated_at = ?4,
                 updated_by = ?5
           WHERE template_id = ?6 AND deleted_at IS NULL AND version = ?7
-            AND translation_state IS ?8`,
+            AND translation_state IS ?8
+            AND support_ref = ?9
+            AND NOT EXISTS (
+              SELECT 1 FROM template_units v
+               WHERE v.deleted_at IS NULL AND v.origin = 'sheet' AND v.translation_state = 'validated'
+                 AND ${slugMatch("v.support_ref", 10)})`,
       )
-      .bind(targetMd, JSON.stringify(meta), preDraftJson, now, userId, unit.template_id, unit.version, unit.translation_state),
+      .bind(
+        targetMd, JSON.stringify(meta), preDraftJson, now, userId,
+        unit.template_id, unit.version, unit.translation_state, unit.support_ref, slug,
+      ),
     db
       .prepare(
         `INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action, source, payload_json)
@@ -413,7 +443,38 @@ export type RunDeps = {
   transport?: Transport;
 };
 
-export type RunOutcome = { ok: true; result: RunResult } | { ok: false; availability: Availability & { available: false } };
+export type RunOutcome =
+  | { ok: true; result: RunResult }
+  | { ok: false; error: UnavailableReason | "run_in_progress" | "not_migrated"; provider: string | null };
+
+// ---------------------------------------------------------------------------
+// Lease: one run at a time (migration 0081)
+// ---------------------------------------------------------------------------
+
+/** Take the run lease, or report it held. A lease past lease_until is free. */
+export async function acquireRunLease(db: Db, holder: string, now: number): Promise<boolean> {
+  const res = await db
+    .prepare(
+      `INSERT INTO template_draft_lock (id, holder, lease_until) VALUES (1, ?1, ?2)
+       ON CONFLICT(id) DO UPDATE SET holder = excluded.holder, lease_until = excluded.lease_until
+        WHERE template_draft_lock.holder IS NULL OR template_draft_lock.lease_until IS NULL
+           OR template_draft_lock.lease_until < ?3`,
+    )
+    .bind(holder, now + RUN_LEASE_SECONDS, now)
+    .run();
+  return !!res.meta.changes;
+}
+
+export async function releaseRunLease(db: Db, holder: string): Promise<void> {
+  await db
+    .prepare(`UPDATE template_draft_lock SET holder = NULL, lease_until = NULL WHERE id = 1 AND holder = ?1`)
+    .bind(holder)
+    .run();
+}
+
+function tooLong(md: string, sourceMd: string): boolean {
+  return md.length > Math.max(MAX_OUTPUT_FLOOR_CHARS, OUTPUT_SOURCE_FACTOR * sourceMd.length);
+}
 
 export async function draftMissingTemplates(
   env: Env,
@@ -423,23 +484,59 @@ export async function draftMissingTemplates(
 ): Promise<RunOutcome> {
   const { availability, apiKey } = await resolveProvider(env, true);
   if (!availability.available || !apiKey) {
-    return { ok: false, availability: availability as Availability & { available: false } };
+    const reason = availability.available ? "ai_provider_not_configured" : availability.reason;
+    return { ok: false, error: reason, provider: availability.provider };
   }
   const { provider, model } = availability;
+
+  const holder = crypto.randomUUID();
+  try {
+    if (!(await acquireRunLease(env.DB, holder, Math.floor(Date.now() / 1000)))) {
+      return { ok: false, error: "run_in_progress", provider };
+    }
+  } catch (e) {
+    if (/no such table/i.test(e instanceof Error ? e.message : String(e))) {
+      return { ok: false, error: "not_migrated", provider };
+    }
+    throw e;
+  }
+  try {
+    return { ok: true, result: await runBatch(env, userId, provider, model, apiKey, skipSlugs, deps) };
+  } finally {
+    try {
+      await releaseRunLease(env.DB, holder);
+    } catch (e) {
+      // The lease runs out on its own after RUN_LEASE_SECONDS.
+      console.error(`draft-missing-templates: lease release failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+}
+
+async function runBatch(
+  env: Env,
+  userId: number | null,
+  provider: string,
+  model: string,
+  apiKey: string,
+  skipSlugs: readonly string[],
+  deps: RunDeps,
+): Promise<RunResult> {
   const cfg = await getProjectConfig(env);
   const transport = deps.transport ?? transportFor(provider);
 
+  // Slugs the previous press reported as failed wait one press, so a slug that
+  // keeps failing cannot take a place in every batch. If skipping would leave
+  // nothing to do they are retried instead: while the server says work
+  // remains, a press always does some.
+  const candidates = await findCandidateSlugs(env.DB);
   const skip = new Set(skipSlugs);
-  const batch = (await findCandidateSlugs(env.DB)).filter((c) => !skip.has(c.slug)).slice(0, MAX_SLUGS_PER_RUN);
+  const unskipped = candidates.filter((c) => !skip.has(c.slug));
+  const batch = (unskipped.length > 0 ? unskipped : candidates).slice(0, MAX_SLUGS_PER_RUN);
 
   const drafted: RunResult["drafted"] = [];
   const failed: RunResult["failed"] = [];
   let cost: number | null = null;
   let stop = false;
-  const addCost = (usage: { inputTokens: number; outputTokens: number }) => {
-    const c = estimateCost(provider, model, usage);
-    if (c != null) cost = (cost ?? 0) + c;
-  };
 
   const runOne = async (cand: CandidateSlug) => {
     if (stop) {
@@ -456,6 +553,14 @@ export async function draftMissingTemplates(
       units: cand.units,
       examples,
     });
+    // This slug's own spend, kept on each unit it drafts.
+    let slugCost: number | null = null;
+    const addCost = (usage: { inputTokens: number; outputTokens: number }) => {
+      const c = estimateCost(provider, model, usage);
+      if (c == null) return;
+      slugCost = (slugCost ?? 0) + c;
+      cost = (cost ?? 0) + c;
+    };
     let text: string;
     try {
       const outcome = await callProvider(transport, {
@@ -473,8 +578,14 @@ export async function draftMissingTemplates(
       console.error(`draft-missing-templates: ${cand.slug} failed (${provider}, ${code})`);
       return;
     }
-    const byId = parseTemplateOutput(text, cand.units.map((u) => u.template_id));
-    if (byId.size === 0) {
+    const parsed = parseTemplateOutput(text, cand.units.map((u) => u.template_id));
+    // Missing, empty, or far longer than its English source: not a template.
+    const sane = new Map<string, string>();
+    for (const u of cand.units) {
+      const md = parsed.get(u.template_id);
+      if (md && !tooLong(md, u.source_md)) sane.set(u.template_id, md);
+    }
+    if (sane.size === 0) {
       failed.push({ slug: cand.slug, code: "unreadable_output" });
       return;
     }
@@ -485,29 +596,41 @@ export async function draftMissingTemplates(
       draft_change_count: examples.filter((e) => e.aiNote).length,
       provider,
       model,
+      // The estimated cost of this note type's call(s), shared by its units.
+      cost_usd: slugCost,
     };
     let written = 0;
     for (const unit of cand.units) {
-      const md = byId.get(unit.template_id);
-      if (md && (await writeDraft(env.DB, unit, md, meta, userId))) written++;
+      const md = sane.get(unit.template_id);
+      if (md && (await writeDraft(env.DB, cand.slug, unit, md, meta, userId))) written++;
     }
-    if (written > 0) drafted.push({ slug: cand.slug, approvedNotes: cand.approvedNotes, units: written });
-    else failed.push({ slug: cand.slug, code: "not_written" });
+    if (written === 0) failed.push({ slug: cand.slug, code: "not_written" });
+    // Some units came back unusable: the units written stay written, and the
+    // slug is reported (and skipped by the next press) rather than counted done.
+    else if (sane.size < cand.units.length) failed.push({ slug: cand.slug, code: "partial_output" });
+    else drafted.push({ slug: cand.slug, approvedNotes: cand.approvedNotes, units: written });
   };
 
   // A small pool: RUN_CONCURRENCY calls in flight, each slug written as soon
-  // as its own call returns.
+  // as its own call returns. One slug's unexpected error (D1, bad data) is
+  // reported for that slug and the others carry on.
   let next = 0;
   const worker = async () => {
     while (next < batch.length) {
       const cand = batch[next++];
-      await runOne(cand);
+      try {
+        await runOne(cand);
+      } catch (err) {
+        failed.push({ slug: cand.slug, code: "internal_error" });
+        const msg = scrubSecrets(err instanceof Error ? err.message : String(err), [apiKey]).slice(0, 300);
+        console.error(`draft-missing-templates: ${cand.slug} internal error: ${msg}`);
+      }
     }
   };
   await Promise.all(Array.from({ length: Math.min(RUN_CONCURRENCY, batch.length) }, worker));
 
   const remaining = (await findCandidateSlugs(env.DB)).length;
-  return { ok: true, result: { drafted, failed, remaining, estimatedCostUsd: cost } };
+  return { drafted, failed, remaining, estimatedCostUsd: cost };
 }
 
 /** What the button shows before it is pressed. */
@@ -537,8 +660,8 @@ export function draftMissingRoutes(deps: RunDeps = {}) {
 
   app.get("/", requireAdmin, async (c) => c.json(await draftMissingPreview(c.env)));
 
-  // Body (optional): { skipSlugs: string[] } — slugs that failed earlier in
-  // this session, so one slug that always fails cannot hold every later press.
+  // Body (optional): { skipSlugs: string[] } — the slugs the previous press
+  // reported as failed; they wait this one press (see runBatch).
   app.post("/", requireAdmin, async (c) => {
     let skipSlugs: string[] = [];
     try {
@@ -550,15 +673,18 @@ export function draftMissingRoutes(deps: RunDeps = {}) {
       // No body: skip nothing.
     }
     const work = draftMissingTemplates(c.env, currentUserId(c), { skipSlugs }, deps);
-    // Keep the run going if the admin closes the tab mid-run: each slug that
-    // finishes is still written.
+    // If the admin closes the tab, Workers keep the request running for only
+    // about 30 seconds more. Slugs that finish in that window are still
+    // written; the rest are simply not drafted. The lease is released in the
+    // run's own finally, or runs out after RUN_LEASE_SECONDS if the run is cut
+    // off first.
     try {
       c.executionCtx.waitUntil(work.catch(() => {}));
     } catch {
       // No ExecutionContext (unit tests).
     }
     const out = await work;
-    if (!out.ok) return c.json({ error: out.availability.reason, provider: out.availability.provider }, 409);
+    if (!out.ok) return c.json({ error: out.error, provider: out.provider }, out.error === "not_migrated" ? 503 : 409);
     return c.json(out.result);
   });
 

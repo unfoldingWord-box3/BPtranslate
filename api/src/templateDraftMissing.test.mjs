@@ -33,10 +33,16 @@ const PLAINTEXT_KEY = "sk-ant-api03-notarealkey-000000wxyz";
 const ADMIN = 9;
 const EDITOR = 7;
 
-function makeDb(sqlite) {
+// `hooks.fail(sql, args)` returning true makes that statement throw, to stand
+// in for a D1 failure.
+function makeDb(sqlite, hooks = {}) {
+  const guard = (sql, args) => {
+    if (hooks.fail?.(sql, args)) throw new Error("D1_ERROR: simulated failure");
+  };
   const mk = (sql, args) => ({
     bind: (...a) => mk(sql, a),
     all() {
+      guard(sql, args);
       return { results: sqlite.prepare(sql).all(...args), success: true };
     },
     first() {
@@ -125,6 +131,10 @@ async function fresh({ provider = "claude", model = "claude-sonnet-5", withKey =
   // figs-idiom: 5 bulk-approved and 3 trashed approved notes do not lift it to 20.
   for (let i = 0; i < 5; i++) tn.run(`b${i}`, "TIT", 50 + i, `1:${50 + i}`, "rc://*/ta/man/translate/figs-idiom", "bulk", 1, "approved", null);
   for (let i = 0; i < 3; i++) tn.run(`t${i}`, "TIT", 60 + i, `1:${60 + i}`, "rc://*/ta/man/translate/figs-idiom", "trashed", 1, null, 1);
+  // figs-idiom: 3 approved notes with no text do not count either.
+  tn.run("e0", "TIT", 80, "1:80", "rc://*/ta/man/translate/figs-idiom", "", 1, null, null);
+  tn.run("e1", "TIT", 81, "1:81", "rc://*/ta/man/translate/figs-idiom", "   ", 1, null, null);
+  tn.run("e2", "TIT", 82, "1:82", "rc://*/ta/man/translate/figs-idiom", null, 1, null, null);
   // Same id in another book with an AI draft: must not leak into TIT's pair.
   aiLog.run("n000", "JUD", JSON.stringify({ note: "WRONG BOOK" }));
 
@@ -157,7 +167,8 @@ async function fresh({ provider = "claude", model = "claude-sonnet-5", withKey =
 
   const slug = `t${Math.random().toString(36).slice(2)}`;
   clearProjectConfigCache(slug);
-  const env = { DB: makeDb(sqlite), AI_KEY_WRAPPING_KEY: WRAPPING_KEY, WORKSPACE_SLUG: slug };
+  const hooks = {};
+  const env = { DB: makeDb(sqlite, hooks), AI_KEY_WRAPPING_KEY: WRAPPING_KEY, WORKSPACE_SLUG: slug };
   const appFor = (role, userId) => {
     const app = new Hono();
     app.use("*", async (c, next) => {
@@ -174,7 +185,7 @@ async function fresh({ provider = "claude", model = "claude-sonnet-5", withKey =
     req("/api/templates/draft-missing", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body ?? {}) }, role);
   const unitRow = (id) => sqlite.prepare(`SELECT * FROM template_units WHERE template_id = ?`).get(id);
   const snapshot = () => sqlite.prepare(`SELECT template_id, target_md, translation_state, version, draft_meta_json FROM template_units ORDER BY template_id`).all();
-  return { sqlite, env, req, post, unitRow, snapshot, calls, setBehaviour: (b) => (behaviour = b) };
+  return { sqlite, env, hooks, req, post, unitRow, snapshot, calls, setBehaviour: (b) => (behaviour = b) };
 }
 
 const DRAFTED = ["figs-metaphor-01", "figs-metaphor-02", "grammar-connect-logic-result-01", "translate-names-01", "writing-newevent-02"];
@@ -238,6 +249,7 @@ test("a run drafts qualifying slugs' untouched and older-AI-draft units as ai_dr
     assert.equal(meta.source, "approved_notes");
     assert.equal(meta.approved_note_count, COUNTS[id]);
     assert.equal(meta.example_count, Math.min(COUNTS[id], 30));
+    assert.ok(typeof meta.cost_usd === "number" && meta.cost_usd > 0, "the slug call's estimated cost is kept on the unit");
     const published = id === "grammar-connect-logic-result-01" ? "منشور سابقًا" : null;
     assert.equal(JSON.parse(u.pre_draft_json).target_md, published, "the last-published snapshot is kept (draft over draft) or taken fresh");
   }
@@ -450,4 +462,189 @@ test("buildTemplatePrompt asks for every template id", () => {
   });
   assert.ok(user.includes('{"figs-x-01":"…","figs-x-02":"…"}'));
   assert.ok(!user.includes("AI draft:"));
+});
+
+// ── Review follow-ups ─────────────────────────────────────────────────────
+
+const json = (res) => res.json();
+
+test("a second press while a run is in progress is refused with run_in_progress and pays nothing", async () => {
+  const { post, sqlite, setBehaviour, calls } = await fresh();
+  let open;
+  const gate = new Promise((r) => (open = r));
+  let started;
+  const firstCall = new Promise((r) => (started = r));
+  setBehaviour(async () => {
+    started();
+    await gate;
+    return null;
+  });
+  const first = post();
+  await firstCall;
+  const second = await post();
+  assert.equal(second.status, 409);
+  assert.equal((await json(second)).error, "run_in_progress");
+  const callsWhileHeld = calls.length;
+  open();
+  const done = await first;
+  assert.equal(done.status, 200);
+  assert.equal((await json(done)).drafted.length, 4);
+  assert.ok(callsWhileHeld <= 3, "only the first run's own calls");
+  assert.equal(calls.length, 4, "the refused press made no call");
+  const lock = sqlite.prepare(`SELECT holder, lease_until FROM template_draft_lock WHERE id = 1`).get();
+  assert.equal(lock.holder, null, "the lease is released when the run ends");
+});
+
+test("a lease left by a dead run blocks until it expires, then is taken over", async () => {
+  const { post, sqlite, calls } = await fresh();
+  const now = Math.floor(Date.now() / 1000);
+  sqlite.prepare(`INSERT INTO template_draft_lock (id, holder, lease_until) VALUES (1, 'dead-run', ?)`).run(now + 300);
+  const held = await post();
+  assert.equal(held.status, 409);
+  assert.equal((await json(held)).error, "run_in_progress");
+  assert.equal(calls.length, 0);
+  sqlite.prepare(`UPDATE template_draft_lock SET lease_until = ? WHERE id = 1`).run(now - 1);
+  const res = await post();
+  assert.equal(res.status, 200);
+  assert.equal((await json(res)).drafted.length, 4);
+});
+
+test("the lease is released even when the run fails", async () => {
+  const { post, sqlite, setBehaviour } = await fresh();
+  setBehaviour(async () => {
+    throw Object.assign(new Error("overloaded"), { status: 529 });
+  });
+  const res = await post();
+  assert.equal(res.status, 200);
+  assert.equal(sqlite.prepare(`SELECT holder FROM template_draft_lock WHERE id = 1`).get().holder, null);
+});
+
+test("approved notes with no text do not count toward the threshold", async () => {
+  const { req, sqlite } = await fresh();
+  const preview = await json(await req("/api/templates/draft-missing", { method: "GET" }));
+  assert.ok(!preview.qualifying.some((q) => q.slug === "figs-idiom"), "19 notes with text + 3 empty is still 19");
+  // One more note with text tips it over.
+  sqlite
+    .prepare(
+      `INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, support_reference, note, sort_order, version, translation_state)
+       VALUES ('x1', 'TIT', 1, 99, '1:99', 'figs-idiom', 'نص', 1, 1, 'validated')`,
+    )
+    .run();
+  const after = await json(await req("/api/templates/draft-missing", { method: "GET" }));
+  assert.deepEqual(after.qualifying.find((q) => q.slug === "figs-idiom"), { slug: "figs-idiom", approvedNotes: 20, units: 1 });
+});
+
+test("an unexpected error on one slug is reported for that slug and the others are still drafted", async () => {
+  const { post, hooks, unitRow } = await fresh();
+  hooks.fail = (sql, args) => sql.includes("FROM edit_log el") && args[0] === "translate-names";
+  const res = await post();
+  assert.equal(res.status, 200);
+  const body = await json(res);
+  assert.deepEqual(body.failed, [{ slug: "translate-names", code: "internal_error" }]);
+  assert.equal(body.drafted.length, 3);
+  assert.equal(unitRow("translate-names-01").translation_state, null);
+  assert.equal(unitRow("figs-metaphor-01").translation_state, "ai_draft");
+});
+
+test("a partial answer writes what came back and reports the slug as partial, not done", async () => {
+  const { post, unitRow, setBehaviour } = await fresh();
+  setBehaviour(async (r) =>
+    r.user.includes("SupportReference: figs-metaphor")
+      ? {
+          text: `${BEGIN_OUTPUT}\n${JSON.stringify({ "figs-metaphor-01": "قالب أول" })}\n${END_OUTPUT}`,
+          usage: { inputTokens: 10, outputTokens: 10 },
+          stopReason: "end_turn",
+        }
+      : null,
+  );
+  const body = await json(await post());
+  assert.deepEqual(body.failed, [{ slug: "figs-metaphor", code: "partial_output" }]);
+  assert.ok(!body.drafted.some((d) => d.slug === "figs-metaphor"));
+  assert.equal(unitRow("figs-metaphor-01").translation_state, "ai_draft");
+  assert.equal(unitRow("figs-metaphor-02").translation_state, null);
+  assert.equal(body.remaining, 1, "the missing unit is still to draft");
+});
+
+test("a template far longer than its English source is rejected as unreadable", async () => {
+  const { post, unitRow, setBehaviour } = await fresh();
+  setBehaviour(async (r) =>
+    r.user.includes("SupportReference: translate-names")
+      ? {
+          text: `${BEGIN_OUTPUT}\n${JSON.stringify({ "translate-names-01": "ك".repeat(4001) })}\n${END_OUTPUT}`,
+          usage: { inputTokens: 10, outputTokens: 10 },
+          stopReason: "end_turn",
+        }
+      : null,
+  );
+  const body = await json(await post());
+  assert.deepEqual(body.failed, [{ slug: "translate-names", code: "unreadable_output" }]);
+  assert.equal(unitRow("translate-names-01").translation_state, null);
+});
+
+test("when a sibling template is approved while the model is writing, the other units are not written", async () => {
+  const { post, unitRow, setBehaviour } = await fresh();
+  setBehaviour(async (r, sqlite) => {
+    if (r.user.includes("SupportReference: figs-metaphor")) {
+      sqlite
+        .prepare(`UPDATE template_units SET target_md = 'معتمد', translation_state = 'validated' WHERE template_id = 'figs-metaphor-01'`)
+        .run();
+    }
+    return null;
+  });
+  const body = await json(await post());
+  assert.equal(unitRow("figs-metaphor-01").translation_state, "validated");
+  assert.equal(unitRow("figs-metaphor-02").translation_state, null, "B is not written once A is approved");
+  assert.deepEqual(body.failed, [{ slug: "figs-metaphor", code: "not_written" }]);
+});
+
+test("a unit moved to another note type while the model is writing is not written", async () => {
+  const { post, unitRow, setBehaviour } = await fresh();
+  setBehaviour(async (r, sqlite) => {
+    if (r.user.includes("SupportReference: translate-names")) {
+      sqlite.prepare(`UPDATE template_units SET support_ref = 'figs-other' WHERE template_id = 'translate-names-01'`).run();
+    }
+    return null;
+  });
+  const body = await json(await post());
+  assert.equal(unitRow("translate-names-01").translation_state, null);
+  assert.deepEqual(body.failed, [{ slug: "translate-names", code: "not_written" }]);
+});
+
+test("a path-form template support_ref is matched by its slug, like the notes", async () => {
+  const { post, sqlite, unitRow, calls } = await fresh();
+  sqlite
+    .prepare(
+      `INSERT INTO template_units (template_id, support_ref, sheet_order, type, source_md, source_hash, origin, version)
+       VALUES ('figs-litotes-01', 'rc://*/ta/man/translate/figs-litotes', 99, 'note', 'Litotes [ALT]', 'h', 'sheet', 1)`,
+    )
+    .run();
+  const tn = sqlite.prepare(
+    `INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, support_reference, note, sort_order, version, translation_state)
+     VALUES (?, 'JUD', 1, ?, ?, 'figs-litotes', ?, 1, 1, 'validated')`,
+  );
+  for (let i = 0; i < 21; i++) tn.run(`l${i}`, i + 1, `1:${i + 1}`, `تلطيف ${i}`);
+  const body = await json(await post());
+  assert.ok(body.drafted.some((d) => d.slug === "figs-litotes" && d.approvedNotes === 21));
+  assert.ok(calls.some((c) => c.user.includes("# SupportReference: figs-litotes")));
+  assert.equal(unitRow("figs-litotes-01").translation_state, "ai_draft");
+});
+
+test("the real templates router, mounted as index.ts mounts it, reaches /draft-missing", async () => {
+  const { env } = await fresh();
+  const app = new Hono();
+  app.use("*", async (c, next) => {
+    c.set("userId", ADMIN);
+    c.set("role", "admin");
+    await next();
+  });
+  app.route("/api/templates", templates);
+  const get = await app.request("/api/templates/draft-missing", { method: "GET" }, env);
+  assert.equal(get.status, 200);
+  assert.equal((await json(get)).qualifying.length, 4);
+  // No transport injected here, so only a refusal is safe to exercise: an
+  // unsupported provider stops before any call.
+  env.DB.prepare(`UPDATE ai_provider_config SET provider = 'openai', model = 'gpt-5.5' WHERE id = 1`).run();
+  const res = await app.request("/api/templates/draft-missing", { method: "POST" }, env);
+  assert.equal(res.status, 409);
+  assert.equal((await json(res)).error, "provider_not_supported");
 });
