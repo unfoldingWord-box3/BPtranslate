@@ -32,7 +32,7 @@ Use the list on the left to jump to a section. After you change a section, press
 - A rule changes drafts that arrive after you switch it on. Drafts already in the project stay as they are.
 - Scripture quotes in bold and the Quote column are never changed.
 - The AI's original wording is saved with each draft's record, so the fixes can be checked later.
-- If a draft still contains the English phrase "If it would be helpful in your language", the app marks the draft. It does not rewrite the phrase.
+- If a draft still contains the English phrase "If it would be helpful in your language", the app notes this in the draft's record for later review. It does not rewrite the phrase, and nothing on screen shows this yet.
 
 You cannot add or edit rules on this page. New rules are added by the development team.
 
