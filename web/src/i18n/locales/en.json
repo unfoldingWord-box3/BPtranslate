@@ -1894,6 +1894,17 @@
         "option": "{{ref}} ({{count}})",
         "keyVerse": "previous / next verse"
       },
+      "statusFilter": {
+        "button": "Filter by status",
+        "showAll": "Show all",
+        "only": "Only",
+        "onlyAria": "Show only {{status}}",
+        "hint": "The open note stays in the list until you move to another note.",
+        "onlyShown": "Only: {{list}}",
+        "hidden": "Hidden: {{list}}",
+        "shown": "Showing {{shown}} of {{total}}",
+        "pager": "status filter"
+      },
       "cols": {
         "hide": "Hide the {{name}} column",
         "show": "Show the {{name}} column",

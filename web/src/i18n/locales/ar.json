@@ -1878,6 +1878,17 @@
         "option": "{{ref}} ({{count}})",
         "keyVerse": "الآية السابقة / التالية"
       },
+      "statusFilter": {
+        "button": "تصفية حسب الحالة",
+        "showAll": "عرض الكل",
+        "only": "فقط",
+        "onlyAria": "عرض «{{status}}» فقط",
+        "hint": "تبقى الملاحظة المفتوحة في القائمة حتى تنتقل إلى ملاحظة أخرى.",
+        "onlyShown": "فقط: {{list}}",
+        "hidden": "المخفية: {{list}}",
+        "shown": "يظهر {{shown}} من {{total}}",
+        "pager": "تصفية الحالة"
+      },
       "cols": {
         "hide": "إخفاء عمود {{name}}",
         "show": "إظهار عمود {{name}}",
