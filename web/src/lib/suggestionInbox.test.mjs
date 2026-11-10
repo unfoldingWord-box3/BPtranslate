@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { floorPercent, approveErrorKey } from "./suggestionInbox.ts";
+import { floorPercent, approveErrorKey, precisionLine } from "./suggestionInbox.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const locale = (lang) => JSON.parse(readFileSync(join(here, "..", "i18n", "locales", `${lang}.json`), "utf8"));
@@ -25,7 +25,27 @@ test("floorPercent: 29 of 50 is 58% (the float ratio gives 57)", () => {
   assert.equal(floorPercent(0, 0), 0);
 });
 
-test("approveErrorKey: rule_exists, not_migrated, rule_unsupported and rule_unchecked have plain en and ar text", () => {
+test("precisionLine: a share only of drafts that were checked; none checked shows no share, never 0 (0%)", () => {
+  const en = locale("en");
+  const ar = locale("ar");
+  assert.deepEqual(precisionLine({ fires: 50, correct: 29, unchecked: 0 }), {
+    key: "adminPages.suggestions.precision",
+    values: { fires: 50, correct: 29, pct: 58 },
+  });
+  assert.deepEqual(precisionLine({ fires: 11, correct: 10, unchecked: 1 }), {
+    key: "adminPages.suggestions.precisionPartial",
+    values: { fires: 11, unchecked: 1, checked: 10, correct: 10, pct: 100 },
+  });
+  const none = precisionLine({ fires: 10, correct: 0, unchecked: 10 });
+  assert.deepEqual(none, { key: "adminPages.suggestions.precisionNoneChecked", values: { fires: 10 } });
+  for (const loc of [en, ar]) {
+    const text = lookup(loc, none.key);
+    assert.equal(typeof text, "string");
+    assert.ok(!text.includes("{{pct}}") && !text.includes("{{correct}}"));
+  }
+});
+
+test("approveErrorKey:rule_exists, not_migrated, rule_unsupported and rule_unchecked have plain en and ar text", () => {
   const en = locale("en");
   const ar = locale("ar");
   const codes = ["suggestion_not_found", "rule_mismatch", "rule_imprecise", "rule_unchecked", "rule_unsupported", "not_migrated"];

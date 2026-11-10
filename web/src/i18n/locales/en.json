@@ -2977,6 +2977,7 @@
       "precisionBelow": "Not offered as a rule: precision below {{min}}% (it must match in at least {{min}}% of at least 10 drafts).",
       "examplesBlocked": "Not offered as a rule: the rule doesn't reproduce the editor's change on every example.",
       "precisionPartial": "The rule would change {{fires}} drafts in this book; {{unchecked}} of them could not be checked in time. Of the other {{checked}}, it matches the editor's change in {{correct}} ({{pct}}%).",
+      "precisionNoneChecked": "The rule would change {{fires}} drafts in this book; none of them could be checked in time.",
       "uncheckedBlocked": "Not offered as a rule: it could not be fully checked in time.",
       "errImprecise": "The rule no longer matches the editors' changes often enough, so it was not added. Reload the page.",
       "errUnchecked": "The rule could not be fully checked in time, so it was not added.",

@@ -12,6 +12,29 @@ export function floorPercent(part: number, whole: number): number {
 }
 
 /**
+ * The card's precision sentence (i18n key and values). With drafts left
+ * unchecked, the share is of the drafts that were checked; when none were,
+ * there is no share to show (never "0 (0%)", which reads as a measurement).
+ */
+export function precisionLine(p: { fires: number; correct: number; unchecked: number }): {
+  key: string;
+  values: Record<string, number>;
+} {
+  const checked = p.fires - p.unchecked;
+  if (p.unchecked === 0) {
+    return {
+      key: "adminPages.suggestions.precision",
+      values: { fires: p.fires, correct: p.correct, pct: floorPercent(p.correct, p.fires) },
+    };
+  }
+  if (checked === 0) return { key: "adminPages.suggestions.precisionNoneChecked", values: { fires: p.fires } };
+  return {
+    key: "adminPages.suggestions.precisionPartial",
+    values: { fires: p.fires, unchecked: p.unchecked, checked, correct: p.correct, pct: floorPercent(p.correct, checked) },
+  };
+}
+
+/**
  * The plain-language message (i18n key) for an approve error code from
  * POST /api/suggestion-inbox/:book/approve (api/src/suggestionInbox.ts).
  * rule_exists is not here: the rule is already stored, so the page treats it

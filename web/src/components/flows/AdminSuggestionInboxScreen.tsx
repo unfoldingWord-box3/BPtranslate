@@ -46,7 +46,7 @@ import {
   type SuggestionInboxResponse,
 } from "../../sync/api";
 import { bookName, BOOKS } from "../../lib/bookNames";
-import { approveErrorKey, floorPercent } from "../../lib/suggestionInbox";
+import { approveErrorKey, precisionLine } from "../../lib/suggestionInbox";
 
 const CANON_INDEX = new Map(BOOKS.map((b, i) => [b.code, i]));
 const canonSort = (a: BookListEntry, b: BookListEntry) =>
@@ -319,19 +319,10 @@ export default function AdminSuggestionInboxScreen({ role, me }: FlowScreenConte
             <Typography variant="body2" data-testid="rule-precision">
               {/* Floored integer percent, so 79.6% never shows as 80% next to an 80% bar.
                   With drafts left unchecked, the share is of the drafts that were checked. */}
-              {s.precision.unchecked > 0
-                ? t("adminPages.suggestions.precisionPartial", {
-                    fires: s.precision.fires,
-                    unchecked: s.precision.unchecked,
-                    checked: s.precision.fires - s.precision.unchecked,
-                    correct: s.precision.correct,
-                    pct: floorPercent(s.precision.correct, s.precision.fires - s.precision.unchecked),
-                  })
-                : t("adminPages.suggestions.precision", {
-                    fires: s.precision.fires,
-                    correct: s.precision.correct,
-                    pct: floorPercent(s.precision.correct, s.precision.fires),
-                  })}
+              {(() => {
+                const line = precisionLine(s.precision);
+                return t(line.key, line.values);
+              })()}
               {/* Say why it is not a rule only with the real reason. */}
               {s.ruleBlocked === "precision" &&
                 ` ${t("adminPages.suggestions.precisionBelow", { min: Math.round(s.precision.minPrecision * 100) })}`}
