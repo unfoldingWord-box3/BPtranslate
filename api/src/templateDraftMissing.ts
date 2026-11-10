@@ -137,6 +137,8 @@ export type RunResult = {
   /** Qualifying slugs still without a draft after this run (failed ones included). */
   remaining: number;
   estimatedCostUsd: number | null;
+  /** Every template_id this run wrote, partial slugs included, so an open editor can reload. */
+  written: string[];
 };
 
 type Db = Env["DB"];
@@ -534,6 +536,7 @@ async function runBatch(
   const batch = (unskipped.length > 0 ? unskipped : candidates).slice(0, MAX_SLUGS_PER_RUN);
 
   const drafted: RunResult["drafted"] = [];
+  const writtenIds: string[] = [];
   const failed: RunResult["failed"] = [];
   let cost: number | null = null;
   let stop = false;
@@ -596,13 +599,20 @@ async function runBatch(
       draft_change_count: examples.filter((e) => e.aiNote).length,
       provider,
       model,
-      // The estimated cost of this note type's call(s), shared by its units.
-      cost_usd: slugCost,
+      // The estimated cost of the whole note type's call(s), NOT this unit's
+      // share: every unit the call drafted carries the same value, so summing
+      // it across units over-counts. slug_unit_count is how many units the
+      // call was asked to draft.
+      slug_cost_usd: slugCost,
+      slug_unit_count: cand.units.length,
     };
     let written = 0;
     for (const unit of cand.units) {
       const md = sane.get(unit.template_id);
-      if (md && (await writeDraft(env.DB, cand.slug, unit, md, meta, userId))) written++;
+      if (md && (await writeDraft(env.DB, cand.slug, unit, md, meta, userId))) {
+        written++;
+        writtenIds.push(unit.template_id);
+      }
     }
     if (written === 0) failed.push({ slug: cand.slug, code: "not_written" });
     // Some units came back unusable: the units written stay written, and the
@@ -630,7 +640,7 @@ async function runBatch(
   await Promise.all(Array.from({ length: Math.min(RUN_CONCURRENCY, batch.length) }, worker));
 
   const remaining = (await findCandidateSlugs(env.DB)).length;
-  return { drafted, failed, remaining, estimatedCostUsd: cost };
+  return { drafted, failed, remaining, estimatedCostUsd: cost, written: writtenIds };
 }
 
 /** What the button shows before it is pressed. */

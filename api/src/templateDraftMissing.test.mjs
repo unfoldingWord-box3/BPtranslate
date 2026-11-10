@@ -229,6 +229,7 @@ test("a run drafts qualifying slugs' untouched and older-AI-draft units as ai_dr
   assert.deepEqual(body.failed, []);
   assert.equal(body.remaining, 0);
   assert.equal(typeof body.estimatedCostUsd, "number");
+  assert.deepEqual([...body.written].sort(), [...DRAFTED].sort(), "the response lists every unit written");
 
   assert.equal(calls.length, 4, "one call per slug");
   for (const c of calls) {
@@ -249,7 +250,9 @@ test("a run drafts qualifying slugs' untouched and older-AI-draft units as ai_dr
     assert.equal(meta.source, "approved_notes");
     assert.equal(meta.approved_note_count, COUNTS[id]);
     assert.equal(meta.example_count, Math.min(COUNTS[id], 30));
-    assert.ok(typeof meta.cost_usd === "number" && meta.cost_usd > 0, "the slug call's estimated cost is kept on the unit");
+    assert.ok(typeof meta.slug_cost_usd === "number" && meta.slug_cost_usd > 0, "the slug call's estimated cost is kept on the unit");
+    assert.equal(meta.slug_unit_count, id.startsWith("figs-metaphor") ? 2 : 1, "and how many units share it");
+    assert.equal(meta.cost_usd, undefined, "no per-unit-looking cost field");
     const published = id === "grammar-connect-logic-result-01" ? "منشور سابقًا" : null;
     assert.equal(JSON.parse(u.pre_draft_json).target_md, published, "the last-published snapshot is kept (draft over draft) or taken fresh");
   }
@@ -560,6 +563,7 @@ test("a partial answer writes what came back and reports the slug as partial, no
   const body = await json(await post());
   assert.deepEqual(body.failed, [{ slug: "figs-metaphor", code: "partial_output" }]);
   assert.ok(!body.drafted.some((d) => d.slug === "figs-metaphor"));
+  assert.ok(body.written.includes("figs-metaphor-01") && !body.written.includes("figs-metaphor-02"), "a partial slug's written unit is listed");
   assert.equal(unitRow("figs-metaphor-01").translation_state, "ai_draft");
   assert.equal(unitRow("figs-metaphor-02").translation_state, null);
   assert.equal(body.remaining, 1, "the missing unit is still to draft");
