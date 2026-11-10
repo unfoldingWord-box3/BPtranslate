@@ -20,6 +20,7 @@ import { FlowStatusChip, type FlowStatusKind } from "./FlowStatusChip";
 import { RapidColumnHeader } from "./RapidColumnHeader";
 import { SCRIPTURE_FONT_STACK } from "../../theme";
 import { arabicFontSize, startsArabicScript } from "../../lib/arabicScriptSize";
+import { carryRapidSelection, NO_RAPID_SELECTION, type RapidSelection } from "../../lib/rapidSelection";
 import { RapidBulkBar, RapidBulkResultLine, type RapidBulkProps } from "./RapidBulkBar";
 import Button from "@mui/material/Button";
 import AssistantPanel, { type AssistantApplyResult } from "../../assistant/AssistantPanel";
@@ -85,8 +86,10 @@ export interface NotesRapidCheckProps {
   onToggleSourceUlt: (() => void) | null;
   /** Alerts and the verse block, pinned above the list. */
   header: ReactNode;
-  /** The screen's article-type filter; null when the chapter has no types. */
+  /** A line above the column header: what the status filter hides. */
   filterControl: ReactNode;
+  /** The status filter's menu button, in the "Status · type" header cell. */
+  statusFilter?: ReactNode;
   /** The screen's editor for the current row (TextField + Save). */
   editor: ReactNode;
   editing: boolean;
@@ -116,6 +119,8 @@ export interface NotesRapidCheckProps {
   onStopEdit: () => void;
   /** Checkbox multi-select and its bulk verbs (#829). */
   bulk: RapidBulkProps;
+  /** The chapter the rows come from ("ZEC:4"): another one clears the checks. */
+  selectionScope: string;
   /** The assistant chat; null hides it. */
   assistant: RapidAssistantProps | null;
 }
@@ -152,6 +157,7 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
     onToggleSourceUlt,
     header,
     filterControl,
+    statusFilter,
     editor,
     editing,
     editorContainerRef,
@@ -173,6 +179,7 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
     onStartEdit,
     onStopEdit,
     bulk,
+    selectionScope,
     assistant,
   } = props;
   const { t, i18n } = useTranslation();
@@ -231,19 +238,24 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
   const currentApprovable = rows.find((r) => r.isCurrent)?.approvable ?? false;
 
   // Checked notes (#829): visual state only, and only for the rows on screen.
-  // The selection is tagged with the row set it was made on, so moving to
-  // another verse or filter clears it instead of acting on hidden notes.
-  const idsKey = rows.map((r) => r.id).join(",");
-  const [sel, setSel] = useState<{ key: string; ids: ReadonlySet<string>; anchor: string | null }>({
-    key: "",
-    ids: new Set(),
-    anchor: null,
-  });
-  const selected = sel.key === idsKey ? sel.ids : new Set<string>();
-  const anchor = sel.key === idsKey ? sel.anchor : null;
+  // When the rows change inside the chapter (the status filter hides a note
+  // just approved, the open note moves off a hidden status), checks on rows
+  // still shown are kept and the others dropped (#867); hidden notes are never
+  // acted on. Another chapter, or another verse with no filter on, clears it.
+  const [sel, setSel] = useState<RapidSelection>(NO_RAPID_SELECTION);
+  const carried = carryRapidSelection(
+    sel,
+    selectionScope,
+    rows.map((r) => r.id),
+  );
+  // Stored at once (React's adjust-state-during-render pattern), so a row
+  // dropped here stays unchecked if it is shown again.
+  if (carried !== sel) setSel(carried);
+  const selected = carried.ids;
+  const anchor = carried.anchor;
   const selectedIds = rows.filter((r) => selected.has(r.id)).map((r) => r.id);
   const setSelected = (ids: Iterable<string>, nextAnchor: string | null = anchor) =>
-    setSel({ key: idsKey, ids: new Set(ids), anchor: nextAnchor });
+    setSel({ scope: selectionScope, ids: new Set(ids), anchor: nextAnchor });
   const toggleRow = (id: string) => {
     const next = new Set(selected);
     if (next.has(id)) next.delete(id);
@@ -265,10 +277,12 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
   // skipped rows) cannot overwrite a selection made in the meantime.
   const selLocked = busy || bulk.running;
   const runBulk = (action: (ids: string[]) => Promise<string[]>) => {
-    const key = idsKey;
+    const scope = selectionScope;
     void action(selectedIds).then((left) => {
-      // Rows the action skipped stay checked, so they are easy to find.
-      setSel((prev) => (prev.key === key ? { key, ids: new Set(left), anchor: null } : prev));
+      // Rows the action skipped stay checked, so they are easy to find. The
+      // rows it approved may have left the list by now (hidden by the status
+      // filter); the next render drops any id that is not on screen.
+      setSel((prev) => (prev.scope === scope ? { scope, ids: new Set(left), anchor: null } : prev));
     });
     scrollRef.current?.focus({ preventScroll: true });
   };
@@ -407,6 +421,7 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
           )}
           <RapidColumnHeader
             cols={`${CHECK_COL} ${cols}`}
+            statusFilter={statusFilter}
             leadingCell={
               <CheckBox
                 checked={allChecked ? true : selectedIds.length > 0 ? "mixed" : false}

@@ -28,7 +28,7 @@
 // `role` / `me` / `onNavigate` arrive with the shared flow-screen contract;
 // verse movement stays on this screen's own hash route, so none is read here.
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
@@ -48,6 +48,8 @@ import useMediaQuery from "@mui/material/useMediaQuery";
 import { alpha, useTheme } from "@mui/material/styles";
 import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
+import CropPortraitOutlinedIcon from "@mui/icons-material/CropPortraitOutlined";
+import ViewAgendaOutlinedIcon from "@mui/icons-material/ViewAgendaOutlined";
 
 import { FlowHeader } from "./FlowHeader";
 import {
@@ -69,6 +71,14 @@ import {
   type ResourceItem,
 } from "./VerseSpineModel";
 import type { FlowScreenContext } from "./types";
+import {
+  chapterSpans,
+  currentIndexAt,
+  rowsOverlapping,
+  spanFor,
+  spanIndexOf,
+  type VerseSpan,
+} from "./verseSpans";
 
 import { useChapter } from "../../hooks/useChapter";
 import { useLexicon } from "../../hooks/useLexicon";
@@ -79,7 +89,7 @@ import {
   useProjectConfigLoadFailed,
 } from "../../hooks/useProjectConfig";
 import { SCRIPTURE_FONT_STACK } from "../../theme";
-import type { VerseDto } from "../../sync/api";
+import type { ChapterPayload, VerseDto } from "../../sync/api";
 import { isHebrewBook } from "../../lib/sourceSearch";
 import { versionDirection, versionLabel } from "../../lib/versionLabels";
 import { buildVerseIndex, noteOverlapsRange, verseObjectsOf } from "../../lib/verseRange";
@@ -92,21 +102,31 @@ export interface VerseScreenProps extends FlowScreenContext {
 
 type Mode = "read" | "audit";
 
-// The distinct rows of one lane's expanded index that overlap [start, end], in
-// verse order. `buildVerseIndex` maps every verse a row covers to the SAME DTO
-// reference, so identity de-duplication is exact — a `\v 15-16` row appears
-// once, not twice.
-function rowsOverlapping(
-  index: Record<number, VerseDto>,
-  start: number,
-  end: number,
-): VerseDto[] {
-  const out: VerseDto[] = [];
-  for (let v = start; v <= end; v++) {
-    const dto = index[v];
-    if (dto && !out.includes(dto)) out.push(dto);
+// "One verse" steps verse by verse (the original screen); "Scroll" lays the
+// whole chapter out as one list you scroll through freely.
+type Layout = "single" | "scroll";
+const LAYOUT_KEY = "be:verseViewLayout";
+// Scroll layout: how long the top verse must hold before it goes into the
+// address bar, and before the rest of the app is told (which costs a render).
+const URL_WRITE_MS = 300;
+const ROUTE_SYNC_MS = 2000;
+// How long an arrow press counts as still gliding to its verse.
+const GLIDE_MS = 700;
+
+function readLayout(): Layout {
+  try {
+    return localStorage.getItem(LAYOUT_KEY) === "scroll" ? "scroll" : "single";
+  } catch {
+    return "single";
   }
-  return out;
+}
+
+function writeLayout(layout: Layout): void {
+  try {
+    localStorage.setItem(LAYOUT_KEY, layout);
+  } catch {
+    // Private window or blocked storage: the choice just isn't remembered.
+  }
 }
 
 // One lane's verseObjects for a whole verse span, concatenated in verse order —
@@ -143,6 +163,95 @@ function activeGroupIds(lane: LaneModel, positions: Set<number>): Set<string> {
   return out;
 }
 
+function selectedPositionsFor(selection: VerseSelection | null, resources: ResourceItem[]): Set<number> {
+  if (!selection) return new Set<number>();
+  if (selection.kind === "word") return new Set(selection.positions);
+  const item = resources.find((r) => r.key === selection.key);
+  return new Set(item?.positions ?? []);
+}
+
+interface SpanModel {
+  words: OriginalWord[];
+  lit: LaneModel;
+  sim: LaneModel;
+  resources: ResourceItem[];
+  flags: CoherenceFlag[];
+  /** Words carrying a note or a term link: a quiet underline shows where the helps attach. */
+  markedPositions: Set<number>;
+}
+
+// Everything the screen derives for one verse span: the original words, the
+// two lanes joined on them, the helps that touch the span, and the coherence
+// observations. Pure derivation, no fetch. The one-verse layout runs it once;
+// the scrolling list runs it per section, only while that section is near the
+// viewport.
+function useSpanModel(
+  data: ChapterPayload | null,
+  sourceIndex: Record<number, VerseDto>,
+  litIndex: Record<number, VerseDto>,
+  simIndex: Record<number, VerseDto>,
+  start: number,
+  end: number,
+): SpanModel {
+  const { t } = useTranslation();
+  const sourceVO = useMemo(
+    () => spanVerseObjects(sourceIndex, start, end),
+    [sourceIndex, start, end],
+  );
+  // `t` is a dep because collectOriginalWords bakes translated morphology
+  // glosses into each word; without it a language switch leaves them stale in
+  // the previous language until the verse data changes. Safe here — this memo
+  // is pure derivation, no fetch (contrast the loader effects, which must NOT
+  // depend on `t` or they refire on every language change).
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- `t` is a deliberate recompute signal (see above); the linter cannot see that collectOriginalWords reads the active language.
+  const words = useMemo(() => collectOriginalWords(sourceVO), [sourceVO, t]);
+
+  const lit = useMemo(
+    () => buildLane("ULT", spanVerseObjects(litIndex, start, end), sourceVO, words),
+    [litIndex, start, end, sourceVO, words],
+  );
+  const sim = useMemo(
+    () => buildLane("UST", spanVerseObjects(simIndex, start, end), sourceVO, words),
+    [simIndex, start, end, sourceVO, words],
+  );
+
+  const resources = useMemo(() => {
+    if (!data) return [] as ResourceItem[];
+    // The words on screen are the whole span's, so the helps that belong with
+    // them are every note/link/question touching any verse in the span.
+    const here = (row: { verse: number; ref_raw?: string | null }) =>
+      noteOverlapsRange(row, start, end);
+    return buildResources(
+      data.tn.filter((r) => here(r) && !r.trashed_at),
+      data.twl.filter(here),
+      data.tq.filter(here),
+      sourceVO,
+      words,
+    );
+  }, [data, start, end, sourceVO, words]);
+
+  // Display-only derivation, so `t` belongs in the deps: the flag chips must
+  // re-render in the new language. Nothing here fetches or mutates.
+  const flags = useMemo(
+    () => coherence(words, lit, sim, resources, t),
+    [words, lit, sim, resources, t],
+  );
+
+  const markedPositions = useMemo(() => {
+    const s = new Set<number>();
+    for (const r of resources) {
+      if (r.kind === "tq") continue;
+      for (const p of r.positions) s.add(p);
+    }
+    return s;
+  }, [resources]);
+
+  return useMemo(
+    () => ({ words, lit, sim, resources, flags, markedPositions }),
+    [words, lit, sim, resources, flags, markedPositions],
+  );
+}
+
 export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) {
   const theme = useTheme();
   const { t } = useTranslation();
@@ -153,23 +262,61 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
   const { status, data, error, refetch } = useChapter(book, chapter);
   const projectConfig = useProjectConfig();
 
+  const [layout, setLayout] = useState<Layout>(readLayout);
+  const scrolling = layout === "scroll";
   const [mode, setMode] = useState<Mode>("read");
   const [selection, setSelection] = useState<VerseSelection | null>(null);
+  // In the scrolling list every section has its own words, so a selection
+  // also names the section (by its span's first verse) it was made in.
+  const [selectionStart, setSelectionStart] = useState<number | null>(null);
   // The tA / tW article shown in place of the resource list (issue #478). Kept
   // apart from `selection` so closing it returns to the list with the same row
   // still selected.
   const [article, setArticle] = useState<VerseArticle | null>(null);
+  // Scroll layout: the first verse of the section at the top of the view.
+  const [currentStart, setCurrentStart] = useState(verse);
+  // The list's latest report, ahead of the render that carries it.
+  const latestCurrentRef = useRef(verse);
+  const onCurrentChange = useCallback((start: number) => {
+    latestCurrentRef.current = start;
+    setCurrentStart(start);
+  }, []);
+  // A request for the scrolling list to bring a verse into view. `n` makes a
+  // repeat request for the same verse count as new.
+  const [scrollRequest, setScrollRequest] = useState<ScrollRequest>({ start: verse, smooth: false, n: 0 });
+  const requestScroll = useCallback((start: number, smooth: boolean) => {
+    setScrollRequest((prev) => ({ start, smooth, n: prev.n + 1 }));
+  }, []);
 
   // A selection names words of THIS verse; stepping verses invalidates it, and
   // the article opened from it. Reset during render (the React "adjust state
   // when a prop changes" pattern) so the new verse never paints with the old
-  // verse's selection.
+  // verse's selection. In the scroll layout the list follows the new verse.
   const verseKey = `${book}|${chapter}|${verse}`;
   const [prevVerseKey, setPrevVerseKey] = useState(verseKey);
   if (verseKey !== prevVerseKey) {
     setPrevVerseKey(verseKey);
-    setSelection(null);
-    setArticle(null);
+    // While scrolling, this screen writes the verse at the top of the list into
+    // the route, which comes back here as a new `verse`. That is not a move:
+    // the verse is already in view. (Leaving the scroll layout reports the
+    // verse being read the same way, and keeps the selection made in it.)
+    const echo = verse === currentStart && prevVerseKey.startsWith(`${book}|${chapter}|`);
+    if (!echo) {
+      setSelection(null);
+      setSelectionStart(null);
+      setArticle(null);
+      setCurrentStart(verse);
+      if (scrolling) setScrollRequest((prev) => ({ start: verse, smooth: false, n: prev.n + 1 }));
+    }
+  }
+
+  // Crossing the desk breakpoint swaps what scrolls the list (the text column
+  // on the desk, the page on a phone), and the new scroller starts at its top.
+  // Bring the verse being read back into view.
+  const [prevIsDesktop, setPrevIsDesktop] = useState(isDesktop);
+  if (isDesktop !== prevIsDesktop) {
+    setPrevIsDesktop(isDesktop);
+    if (scrolling) setScrollRequest((prev) => ({ start: currentStart, smooth: false, n: prev.n + 1 }));
   }
 
   // The article belongs to the selection it was opened from: picking any other
@@ -178,8 +325,8 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
   const selectionKey = !selection
     ? ""
     : selection.kind === "word"
-      ? `w:${selection.positions.join(",")}`
-      : `r:${selection.key}`;
+      ? `${selectionStart}|w:${selection.positions.join(",")}`
+      : `${selectionStart}|r:${selection.key}`;
   const [prevSelectionKey, setPrevSelectionKey] = useState(selectionKey);
   if (selectionKey !== prevSelectionKey) {
     setPrevSelectionKey(selectionKey);
@@ -248,85 +395,10 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
   );
   const litIndex = useMemo(() => buildVerseIndex(data?.verses?.ULT), [data]);
   const simIndex = useMemo(() => buildVerseIndex(data?.verses?.UST), [data]);
+  const laneIndexes = useMemo(() => [sourceIndex, litIndex, simIndex], [sourceIndex, litIndex, simIndex]);
 
-  // A bridged row (`\v 15-16`) covers MORE than the routed verse, and the join
-  // this whole screen rests on only holds when both sides describe the SAME
-  // stretch of text: matching a two-verse English row against one verse of
-  // Hebrew mis-counts every `x-occurrence` and invents "not rendered" holes.
-  // So the screen widens to the span the rows actually cover — start at the
-  // routed verse and grow until no lane's row crosses an edge. AlignScreen
-  // does the same thing for its one target lane (buildSlice +
-  // concatSourceRange); here three lanes can each bridge differently, so the
-  // span is their union. The guard bounds the loop; two passes suffice in
-  // practice.
-  const span = useMemo(() => {
-    let start = verse;
-    let end = verse;
-    for (let guard = 0; guard < 8; guard++) {
-      let s = start;
-      let e = end;
-      for (const index of [sourceIndex, litIndex, simIndex]) {
-        for (const dto of rowsOverlapping(index, start, end)) {
-          s = Math.min(s, dto.verse);
-          e = Math.max(e, dto.verse_end ?? dto.verse);
-        }
-      }
-      if (s === start && e === end) break;
-      start = s;
-      end = e;
-    }
-    return { start, end };
-  }, [sourceIndex, litIndex, simIndex, verse]);
-  const bridged = span.end > span.start;
-
-  const sourceVO = useMemo(
-    () => spanVerseObjects(sourceIndex, span.start, span.end),
-    [sourceIndex, span],
-  );
-  // `t` is a dep because collectOriginalWords bakes translated morphology
-  // glosses into each word; without it a language switch leaves them stale in
-  // the previous language until the verse data changes. Safe here — this memo
-  // is pure derivation, no fetch (contrast the loader effects, which must NOT
-  // depend on `t` or they refire on every language change).
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- `t` is a deliberate recompute signal (see above); the linter cannot see that collectOriginalWords reads the active language.
-  const words = useMemo(() => collectOriginalWords(sourceVO), [sourceVO, t]);
-
-  const lit = useMemo(
-    () => buildLane("ULT", spanVerseObjects(litIndex, span.start, span.end), sourceVO, words),
-    [litIndex, span, sourceVO, words],
-  );
-  const sim = useMemo(
-    () => buildLane("UST", spanVerseObjects(simIndex, span.start, span.end), sourceVO, words),
-    [simIndex, span, sourceVO, words],
-  );
-
-  const resources = useMemo(() => {
-    if (!data) return [] as ResourceItem[];
-    // The words on screen are the whole span's, so the helps that belong with
-    // them are every note/link/question touching any verse in the span.
-    const here = (row: { verse: number; ref_raw?: string | null }) =>
-      noteOverlapsRange(row, span.start, span.end);
-    return buildResources(
-      data.tn.filter((r) => here(r) && !r.trashed_at),
-      data.twl.filter(here),
-      data.tq.filter(here),
-      sourceVO,
-      words,
-    );
-  }, [data, span, sourceVO, words]);
-
-  // Display-only derivation, so `t` belongs in the deps: the flag chips must
-  // re-render in the new language. Nothing here fetches or mutates.
-  const flags = useMemo(
-    () => coherence(words, lit, sim, resources, t),
-    [words, lit, sim, resources, t],
-  );
-
-  const strongs = useMemo(
-    () => [...new Set(words.map((w) => w.strong).filter(Boolean))],
-    [words],
-  );
-  const lexicon = useLexicon(strongs);
+  // The routed verse's span: a bridged row (`\v 15-16`) widens it (spanFor).
+  const span = useMemo(() => spanFor(verse, laneIndexes), [laneIndexes, verse]);
 
   // Verse list for the stepper + picker. The source lane anchors "which verses
   // exist" (it is present even when a target lane is mid-replacement); ULT is
@@ -338,21 +410,114 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
       .filter((n) => n > 0)
       .sort((a, b) => a - b);
   }, [data, sourceLane]);
+  // The scrolling list's sections, one per span.
+  const spans = useMemo(() => chapterSpans(verseNums, laneIndexes), [verseNums, laneIndexes]);
+
+  // The span the header names: the routed one, or in the scroll layout the
+  // section at the top of the view.
+  const shown = scrolling ? (spans[spanIndexOf(spans, currentStart)] ?? span) : span;
+  // The span the detail pane describes: in the scroll layout, the section the
+  // selection was made in, else the one at the top of the view.
+  const focus = scrolling
+    ? (spans[spanIndexOf(spans, selectionStart ?? currentStart)] ?? span)
+    : span;
+  const bridged = span.end > span.start;
+  const model = useSpanModel(data, sourceIndex, litIndex, simIndex, focus.start, focus.end);
+  const { words, lit, sim, resources, flags, markedPositions } = model;
+
+  const strongs = useMemo(
+    () => [...new Set(words.map((w) => w.strong).filter(Boolean))],
+    [words],
+  );
+  const lexicon = useLexicon(strongs);
+
+  // The address bar follows the verse at the top of the scrolling list, with
+  // no history entry, so a reload or a bookmark lands where the reader is.
+  const writeVerseUrl = useCallback(
+    (v: number) => {
+      history.replaceState(null, "", `${location.pathname}${location.search}#/verse/${book}/${chapter}/${v}`);
+    },
+    [book, chapter],
+  );
+  // Tells the router too, so the rest of the app (the classic-editor link, the
+  // last-position memory) knows the verse. That re-renders the whole app, so
+  // it waits until the reader has stopped on a verse.
+  const reportVerse = useCallback(
+    (v: number) => {
+      writeVerseUrl(v);
+      window.dispatchEvent(new HashChangeEvent("hashchange"));
+    },
+    [writeVerseUrl],
+  );
+  useEffect(() => {
+    if (!scrolling) return;
+    const url = window.setTimeout(() => writeVerseUrl(currentStart), URL_WRITE_MS);
+    const moved = currentStart < span.start || currentStart > span.end;
+    // The list may already have moved on (its update not yet rendered) when
+    // the timer fires; telling the router a verse the reader has left would
+    // read as navigation and pull the list back to it.
+    const route = moved
+      ? window.setTimeout(() => {
+          if (latestCurrentRef.current === currentStart) reportVerse(currentStart);
+        }, ROUTE_SYNC_MS)
+      : 0;
+    return () => {
+      window.clearTimeout(url);
+      window.clearTimeout(route);
+    };
+  }, [scrolling, currentStart, span, writeVerseUrl, reportVerse]);
+
+  const changeLayout = (next: Layout) => {
+    if (next === layout) return;
+    writeLayout(next);
+    setLayout(next);
+    if (next === "scroll") {
+      // The one-verse selection belongs to the routed span's section.
+      setSelectionStart(selection ? span.start : null);
+      setCurrentStart(span.start);
+      requestScroll(span.start, false);
+    } else {
+      // Land the one-verse layout on the verse being read (or the one the
+      // selection was made in, so the selection stays meaningful).
+      const target = selectionStart ?? currentStart;
+      if (target < span.start || target > span.end) {
+        setCurrentStart(target);
+        reportVerse(target);
+      }
+    }
+  };
+
+  // Scroll layout: the verse the arrows last asked for. A glide takes a moment
+  // to bring it to the top, and a second press in that time steps on from it.
+  const lastGoRef = useRef<{ start: number; at: number } | null>(null);
 
   // Step off the SPAN, not the routed verse: on a bridged 15-16 row, "next"
   // from 15 must reach 17, not 16 — 16 renders the identical span.
   const go = useCallback(
     (delta: number) => {
       if (verseNums.length === 0) return;
+      let from = shown;
+      const last = lastGoRef.current;
+      if (scrolling && last && performance.now() - last.at < GLIDE_MS) {
+        from = spans[spanIndexOf(spans, last.start)] ?? shown;
+      }
       const next =
         delta < 0
-          ? [...verseNums].reverse().find((n) => n < span.start)
-          : verseNums.find((n) => n > span.end);
+          ? [...verseNums].reverse().find((n) => n < from.start)
+          : verseNums.find((n) => n > from.end);
       if (next == null) return;
-      location.hash = `#/verse/${book}/${chapter}/${next}`;
+      if (scrolling) {
+        lastGoRef.current = { start: next, at: performance.now() };
+        requestScroll(next, true);
+      } else location.hash = `#/verse/${book}/${chapter}/${next}`;
     },
-    [verseNums, span, book, chapter],
+    [verseNums, shown, spans, scrolling, requestScroll, book, chapter],
   );
+
+  const clearSelection = useCallback(() => {
+    setSelection(null);
+    setSelectionStart(null);
+  }, []);
 
   // ← / → step verses, r / a switch mode, Esc clears — the mockup's keys.
   useEffect(() => {
@@ -374,56 +539,103 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
       } else if (e.key === "Escape") {
         // Escape backs out one step: an open article first, then the selection.
         if (article) closeArticle();
-        else setSelection(null);
+        else clearSelection();
       } else if (e.key === "r" || e.key === "a") {
         setMode(e.key === "a" ? "audit" : "read");
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [go, article, closeArticle]);
+  }, [go, article, closeArticle, clearSelection]);
 
-  // --- selection → highlight sets ------------------------------------------
-  const selectedPositions = useMemo(() => {
-    if (!selection) return new Set<number>();
-    if (selection.kind === "word") return new Set(selection.positions);
-    const item = resources.find((r) => r.key === selection.key);
-    return new Set(item?.positions ?? []);
-  }, [selection, resources]);
+  // --- selection → highlight sets (one-verse layout) -----------------------
+  const selectedPositions = useMemo(
+    () => selectedPositionsFor(selection, resources),
+    [selection, resources],
+  );
 
   const litOn = useMemo(() => activeGroupIds(lit, selectedPositions), [lit, selectedPositions]);
   const simOn = useMemo(() => activeGroupIds(sim, selectedPositions), [sim, selectedPositions]);
 
-  // Words carrying a note or a term link get a quiet underline, so the reader
-  // can see where the helps attach before clicking anything.
-  const markedPositions = useMemo(() => {
-    const s = new Set<number>();
-    for (const r of resources) {
-      if (r.kind === "tq") continue;
-      for (const p of r.positions) s.add(p);
-    }
-    return s;
-  }, [resources]);
-
-  const selectWord = useCallback((positions: number[]) => {
-    setSelection(positions.length ? { kind: "word", positions } : null);
+  // Every selection names the section it came from; the one-verse layout has
+  // only the routed span.
+  const selectIn = useCallback((start: number, sel: VerseSelection | null) => {
+    setSelection(sel);
+    setSelectionStart(sel ? start : null);
   }, []);
+
+  const selectWord = useCallback(
+    (positions: number[]) => {
+      selectIn(focus.start, positions.length ? { kind: "word", positions } : null);
+    },
+    [selectIn, focus.start],
+  );
 
   const selectGroup = useCallback(
     (lane: LaneModel, groupId: string | null) => {
       if (!groupId) {
         // A supplied word — no original behind it, so nothing to anchor to.
-        setSelection(null);
+        selectIn(focus.start, null);
         return;
       }
       selectWord(lane.positionsByGroup.get(groupId) ?? []);
     },
-    [selectWord],
+    [selectIn, selectWord, focus.start],
+  );
+
+  const selectResource = useCallback(
+    (sel: VerseSelection | null) => selectIn(focus.start, sel),
+    [selectIn, focus.start],
+  );
+
+  // Everything a scrolling section needs that is the same for every section.
+  // Held in one memo so a section re-renders only when it truly changes.
+  const sectionCtx = useMemo<SectionContext>(
+    () => ({
+      book,
+      chapter,
+      data,
+      sourceIndex,
+      litIndex,
+      simIndex,
+      mode,
+      setMode,
+      litLabel,
+      simLabel,
+      originalLabel,
+      rtl,
+      litRtl,
+      simRtl,
+      compact: !isTablet,
+      stacked: !isDesktop,
+      onSelect: selectIn,
+      closeArticle,
+    }),
+    [
+      book,
+      chapter,
+      data,
+      sourceIndex,
+      litIndex,
+      simIndex,
+      mode,
+      litLabel,
+      simLabel,
+      originalLabel,
+      rtl,
+      litRtl,
+      simRtl,
+      isTablet,
+      isDesktop,
+      selectIn,
+      closeArticle,
+    ],
   );
 
   // --- states ---------------------------------------------------------------
   // "ZEC 1:15-16" when a row bridges — the label must name what is on screen.
-  const refLabel = `${book} ${chapter}:${bridged ? `${span.start}-${span.end}` : verse}`;
+  const spanLabel = (s: VerseSpan) => `${chapter}:${s.end > s.start ? `${s.start}-${s.end}` : s.start}`;
+  const refLabel = `${book} ${spanLabel(scrolling ? focus : span)}`;
 
   const { skip } = theme.palette.flows;
   // Chevrons point along the reading direction, so they flip under an RTL UI
@@ -432,7 +644,7 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
   // "ZEC 1:3 · EN to العربية" — the shared flow-screen subtitle, with the verse
   // (or the bridged span) in the chapter slot so the title row names what is
   // on screen.
-  const chapterVerse = `${chapter}:${bridged ? `${span.start}-${span.end}` : verse}`;
+  const chapterVerse = spanLabel(shown);
   const targetLabel = projectConfig?.languageName || t("flowTranslate.targetFallback");
   const sub = isTranslationProject(projectConfig)
     ? t("flowTranslate.subtitleTranslation", {
@@ -442,15 +654,18 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
         target: targetLabel,
       })
     : t("flowTranslate.subtitle", { book, chapter: chapterVerse, target: targetLabel });
-  const verseIndex = verseNums.indexOf(span.start);
+  const verseIndex = verseNums.indexOf(shown.start);
+  const pickerVerse = scrolling ? shown.start : verse;
 
   const verseSelect = (
     <Select
       size="small"
-      value={verseNums.includes(verse) ? String(verse) : ""}
+      value={verseNums.includes(pickerVerse) ? String(pickerVerse) : ""}
       onChange={(e) => {
         const v = Number(e.target.value);
-        if (v) location.hash = `#/verse/${book}/${chapter}/${v}`;
+        if (!v) return;
+        if (scrolling) requestScroll(v, false);
+        else location.hash = `#/verse/${book}/${chapter}/${v}`;
       }}
       displayEmpty
       inputProps={{ "aria-label": t("flowVerse.verse.goToVerse") }}
@@ -484,6 +699,37 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
       <ToggleButton value="audit" sx={{ minBlockSize: 32, paddingInline: 1.5, fontSize: "0.78rem" }}>
         {t("flowVerse.verse.modeAudit")}
       </ToggleButton>
+    </ToggleButtonGroup>
+  );
+
+  // One verse at a time, or the whole chapter as one scrolling list. Icons
+  // only on a phone, where the row has no room for the words.
+  const layoutToggle = (
+    <ToggleButtonGroup
+      size="small"
+      exclusive
+      value={layout}
+      onChange={(_e, v) => v && changeLayout(v as Layout)}
+      aria-label={t("flowVerse.verse.layoutAria")}
+      sx={{ flex: "none" }}
+    >
+      {(
+        [
+          ["single", t("flowVerse.verse.layoutSingle"), t("flowVerse.verse.layoutSingleTitle"), <CropPortraitOutlinedIcon key="i" fontSize="small" />],
+          ["scroll", t("flowVerse.verse.layoutScroll"), t("flowVerse.verse.layoutScrollTitle"), <ViewAgendaOutlinedIcon key="i" fontSize="small" />],
+        ] as [Layout, string, string, ReactNode][]
+      ).map(([value, label, title, icon]) => (
+        <ToggleButton
+          key={value}
+          value={value}
+          aria-label={label}
+          title={title}
+          sx={{ minBlockSize: 32, paddingInline: isTablet ? 1.25 : 1, fontSize: "0.78rem", gap: 0.5 }}
+        >
+          {icon}
+          {isTablet && <span>{label}</span>}
+        </ToggleButton>
+      ))}
     </ToggleButtonGroup>
   );
 
@@ -534,7 +780,7 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
               title={t("flowVerse.verse.prevTitle")}
               size="small"
               onClick={() => go(-1)}
-              disabled={verseNums.length === 0 || span.start <= verseNums[0]}
+              disabled={verseNums.length === 0 || shown.start <= verseNums[0]}
               sx={{ bgcolor: skip.soft, width: 30, height: 30, flex: "none" }}
             >
               <ChevronLeftIcon fontSize="small" sx={chevronFlip} />
@@ -545,12 +791,13 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
               title={t("flowVerse.verse.nextTitle")}
               size="small"
               onClick={() => go(1)}
-              disabled={verseNums.length === 0 || span.end >= verseNums[verseNums.length - 1]}
+              disabled={verseNums.length === 0 || shown.end >= verseNums[verseNums.length - 1]}
               sx={{ bgcolor: skip.soft, width: 30, height: 30, flex: "none" }}
             >
               <ChevronRightIcon fontSize="small" sx={chevronFlip} />
             </IconButton>
           </Stack>
+          {isDesktop && layoutToggle}
           {isDesktop && modeToggle}
         </Stack>
       </Box>
@@ -572,23 +819,27 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
     >
       {verseSelect}
       <Box sx={{ flex: 1 }} />
+      {layoutToggle}
       {modeToggle}
     </Box>
   );
 
   // The mode hint and the observation chips open the text column, instead of
-  // stacking a second bordered band under the title row.
+  // stacking a second bordered band under the title row. In the scroll layout
+  // each section carries its own chips.
   const modeLine = (
     <Box sx={{ display: "flex", alignItems: "center", gap: 1.25, flexWrap: "wrap", marginBlockEnd: 2 }}>
       <Typography variant="body2" color="text.secondary" sx={{ fontSize: "0.78rem" }}>
         {mode === "read" ? t("flowVerse.verse.readHint") : t("flowVerse.verse.auditHint")}
       </Typography>
       <Box sx={{ flex: 1 }} />
-      <FlagRow flags={flags} onPick={(f) => {
-        if (!f.positions.length) return;
-        setMode("audit");
-        selectWord(f.positions);
-      }} />
+      {!scrolling && (
+        <FlagRow flags={flags} onPick={(f) => {
+          if (!f.positions.length) return;
+          setMode("audit");
+          selectWord(f.positions);
+        }} />
+      )}
     </Box>
   );
 
@@ -655,7 +906,48 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
       </Box>
     );
   } else {
-    const textColumn = (
+    const detailPane = (
+      <VerseDetailPane
+        refLabel={refLabel}
+        selection={selection}
+        words={words}
+        lit={lit}
+        sim={sim}
+        litLabel={litLabel}
+        simLabel={simLabel}
+        originalLabel={originalLabel}
+        resources={resources}
+        lexicon={lexicon}
+        rtl={rtl}
+        onSelect={selectResource}
+        onOpenArticle={openArticle}
+      />
+    );
+
+    const textColumn = scrolling ? (
+      <Box
+        data-verse-scroller={isDesktop ? "" : undefined}
+        sx={{
+          minInlineSize: 0,
+          overflowY: "auto",
+          paddingBlock: 2,
+          paddingInline: { xs: 1.5, tablet: 2.5 },
+          paddingBlockEnd: 5,
+        }}
+      >
+        {modeLine}
+        <VerseScrollList
+          spans={spans}
+          request={scrollRequest}
+          onCurrentChange={onCurrentChange}
+          ctx={sectionCtx}
+          selection={selection}
+          selectionStart={selectionStart}
+          article={article}
+          inlineDetail={isDesktop || !selection ? null : detailPane}
+        />
+      </Box>
+    ) : (
       <Box
         sx={{
           minInlineSize: 0,
@@ -718,7 +1010,7 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
             selection={selection}
             rtl={rtl}
             compact={!isTablet}
-            onSelect={setSelection}
+            onSelect={selectResource}
           />
         )}
       </Box>
@@ -740,21 +1032,7 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
           paddingBlockEnd: 5,
         }}
       >
-        <VerseDetailPane
-          refLabel={refLabel}
-          selection={selection}
-          words={words}
-          lit={lit}
-          sim={sim}
-          litLabel={litLabel}
-          simLabel={simLabel}
-          originalLabel={originalLabel}
-          resources={resources}
-          lexicon={lexicon}
-          rtl={rtl}
-          onSelect={setSelection}
-          onOpenArticle={openArticle}
-        />
+        {detailPane}
       </Box>
     );
 
@@ -773,6 +1051,10 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
         {textColumn}
         {detailColumn}
       </Box>
+    ) : scrolling ? (
+      // On a phone the page scrolls the list, so a detail column after it would
+      // sit below the whole chapter: the selected section shows it in place.
+      <Box component="main">{textColumn}</Box>
     ) : (
       <Box component="main">
         {textColumn}
@@ -1563,3 +1845,443 @@ function ResourceList({
     </Box>
   );
 }
+
+// --- Scroll layout --------------------------------------------------------
+//
+// The whole chapter as one list, one section per verse span. Memory stays flat
+// however long the chapter: only the sections within LOAD_MARGIN_PX of the
+// view are built (their joined lanes, resources and DOM). Every other section
+// is an empty box at its last measured height, or an estimate before it has
+// been seen, so the scrollbar and the reading position hold steady while
+// sections load and unload. Chrome's scroll anchoring absorbs the difference
+// when an estimated box above the view turns into the real verse.
+
+interface ScrollRequest {
+  start: number;
+  smooth: boolean;
+  n: number;
+}
+
+interface SectionContext {
+  book: string;
+  chapter: number;
+  data: ChapterPayload | null;
+  sourceIndex: Record<number, VerseDto>;
+  litIndex: Record<number, VerseDto>;
+  simIndex: Record<number, VerseDto>;
+  mode: Mode;
+  setMode: (m: Mode) => void;
+  litLabel: string;
+  simLabel: string;
+  originalLabel: string;
+  rtl: boolean;
+  litRtl: boolean;
+  simRtl: boolean;
+  compact: boolean;
+  stacked: boolean;
+  onSelect: (start: number, sel: VerseSelection | null) => void;
+  closeArticle: () => void;
+}
+
+// Build sections this far above and below the view (CSS px), so a section is
+// ready before it scrolls in, even on a fast fling.
+const LOAD_MARGIN_PX = 1600;
+// The line, below the top of the view, that decides which section is current.
+const CURRENT_LINE_PX = 96;
+// Room left above a section brought into view by the stepper or the picker.
+const SCROLL_TO_GAP_PX = 8;
+// How long a far jump holds its target in place while sections around it build.
+const PIN_MS = 1000;
+// Height of a section never yet built, until real ones have been measured.
+const INITIAL_ESTIMATE_PX = 420;
+
+// What scrolls the list: on the desk the text column (marked
+// data-verse-scroller), on a phone the page (null).
+function scrollParentOf(el: HTMLElement | null): HTMLElement | null {
+  return el?.closest<HTMLElement>("[data-verse-scroller]") ?? null;
+}
+
+function VerseScrollList({
+  spans,
+  request,
+  onCurrentChange,
+  ctx,
+  selection,
+  selectionStart,
+  article,
+  inlineDetail,
+}: {
+  spans: VerseSpan[];
+  request: ScrollRequest;
+  onCurrentChange: (start: number) => void;
+  ctx: SectionContext;
+  selection: VerseSelection | null;
+  selectionStart: number | null;
+  article: VerseArticle | null;
+  /** Phone only: the detail pane, shown inside the section the selection is in. */
+  inlineDetail: ReactNode;
+}) {
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const elsRef = useRef(new Map<number, HTMLElement>());
+  const [live, setLive] = useState<Set<number>>(() => new Set());
+  // Running average of measured section heights, for boxes not yet built.
+  const measuredRef = useRef(new Map<number, number>());
+  const [estimate, setEstimate] = useState(INITIAL_ESTIMATE_PX);
+
+  const registerEl = useCallback((start: number, el: HTMLElement | null) => {
+    if (el) elsRef.current.set(start, el);
+    else elsRef.current.delete(start);
+  }, []);
+
+  const onMeasured = useCallback((start: number, h: number) => {
+    const m = measuredRef.current;
+    m.set(start, h);
+    let sum = 0;
+    for (const v of m.values()) sum += v;
+    // Rounded so the estimate settles instead of re-rendering on every pixel.
+    const next = Math.max(120, Math.round(sum / m.size / 40) * 40);
+    setEstimate((prev) => (prev === next ? prev : next));
+  }, []);
+
+  // Load and unload sections as they near or leave the view, and track which
+  // one is current.
+  useEffect(() => {
+    const root = scrollParentOf(listRef.current);
+    const io = new IntersectionObserver(
+      (entries) => {
+        setLive((prev) => {
+          let next: Set<number> | null = null;
+          for (const e of entries) {
+            const start = Number((e.target as HTMLElement).dataset.verseStart);
+            if (e.isIntersecting === prev.has(start)) continue;
+            next ??= new Set(prev);
+            if (e.isIntersecting) next.add(start);
+            else next.delete(start);
+          }
+          return next ?? prev;
+        });
+      },
+      { root, rootMargin: `${LOAD_MARGIN_PX}px 0px` },
+    );
+    for (const s of spans) {
+      const el = elsRef.current.get(s.start);
+      if (el) io.observe(el);
+    }
+
+    let raf = 0;
+    let last = -1;
+    const compute = () => {
+      raf = 0;
+      if (spans.length === 0) return;
+      const line = (root ? root.getBoundingClientRect().top : 0) + CURRENT_LINE_PX;
+      const tops = spans.map((s) => elsRef.current.get(s.start)?.getBoundingClientRect().top ?? Infinity);
+      const start = spans[currentIndexAt(tops, line)].start;
+      if (start !== last) {
+        last = start;
+        onCurrentChange(start);
+      }
+    };
+    const onScroll = () => {
+      if (!raf) raf = requestAnimationFrame(compute);
+    };
+    const target: HTMLElement | Window = root ?? window;
+    target.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      io.disconnect();
+      target.removeEventListener("scroll", onScroll);
+      if (raf) cancelAnimationFrame(raf);
+    };
+    // `ctx.stacked` flips at the desk breakpoint, which swaps what scrolls.
+  }, [spans, onCurrentChange, ctx.stacked]);
+
+  // Bring a requested verse into view: once on arrival, and again for each
+  // stepper / picker use. Held until the chapter's sections exist.
+  const handledRef = useRef(-1);
+  // Ends the current hold. Kept apart from the effect's cleanup: a chapter
+  // refetch re-runs the effect, and must not cut a hold short. On unmount the
+  // request counts as unhandled again, so a remount (StrictMode runs one in
+  // development) brings the verse into view once more.
+  const stopHoldRef = useRef<(() => void) | null>(null);
+  useEffect(
+    () => () => {
+      stopHoldRef.current?.();
+      handledRef.current = -1;
+    },
+    [],
+  );
+  useEffect(() => {
+    if (handledRef.current === request.n) return;
+    const i = spanIndexOf(spans, request.start);
+    const el = i >= 0 ? elsRef.current.get(spans[i].start) : undefined;
+    if (!el) return;
+    handledRef.current = request.n;
+    stopHoldRef.current?.();
+    const root = scrollParentOf(listRef.current);
+    const target: HTMLElement | Window = root ?? window;
+    const offset = () =>
+      el.getBoundingClientRect().top - (root ? root.getBoundingClientRect().top : 0) - SCROLL_TO_GAP_PX;
+    // Glide only over a short distance. A long glide crosses sections not yet
+    // measured, which change height as it passes and leave it short.
+    const viewH = root ? root.clientHeight : window.innerHeight;
+    if (request.smooth && Math.abs(offset()) < 2 * viewH) {
+      target.scrollBy({ top: offset(), behavior: "smooth" });
+      return;
+    }
+    // A far jump lands among boxes still at their estimated height. As the
+    // sections around the target build, the ones above it change height, and
+    // scroll anchoring can't hold the target because the target box itself
+    // changes too. So hold it in place for a moment, until the reader scrolls.
+    target.scrollBy({ top: offset() });
+    const until = performance.now() + PIN_MS;
+    let raf = 0;
+    const stop = () => {
+      cancelAnimationFrame(raf);
+      for (const t of ["wheel", "touchstart", "keydown", "mousedown"]) window.removeEventListener(t, stop, true);
+    };
+    const hold = () => {
+      if (!el.isConnected) {
+        stop();
+        return;
+      }
+      const off = offset();
+      if (Math.abs(off) > 1) target.scrollBy({ top: off });
+      if (performance.now() < until) raf = requestAnimationFrame(hold);
+      else stop();
+    };
+    for (const t of ["wheel", "touchstart", "keydown", "mousedown"]) window.addEventListener(t, stop, true);
+    raf = requestAnimationFrame(hold);
+    stopHoldRef.current = stop;
+  }, [request, spans]);
+
+  return (
+    <Box ref={listRef}>
+      {spans.map((s) => {
+        const owns = selectionStart === s.start;
+        return (
+          <VerseSection
+            key={s.start}
+            span={s}
+            live={live.has(s.start)}
+            estimate={estimate}
+            ctx={ctx}
+            selection={owns ? selection : null}
+            article={owns ? article : null}
+            inlineDetail={owns ? inlineDetail : null}
+            registerEl={registerEl}
+            onMeasured={onMeasured}
+          />
+        );
+      })}
+      {/* Room after the last verse, so it too can scroll up to the top and
+          count as the verse being read. */}
+      <Box aria-hidden sx={{ minBlockSize: "calc(100dvh - 200px)" }} />
+    </Box>
+  );
+}
+
+const VerseSection = memo(function VerseSection({
+  span,
+  live,
+  estimate,
+  ctx,
+  selection,
+  article,
+  inlineDetail,
+  registerEl,
+  onMeasured,
+}: {
+  span: VerseSpan;
+  live: boolean;
+  estimate: number;
+  ctx: SectionContext;
+  selection: VerseSelection | null;
+  article: VerseArticle | null;
+  inlineDetail: ReactNode;
+  registerEl: (start: number, el: HTMLElement | null) => void;
+  onMeasured: (start: number, h: number) => void;
+}) {
+  const boxRef = useRef<HTMLDivElement | null>(null);
+  const [height, setHeight] = useState<number | null>(null);
+  const setRef = useCallback(
+    (el: HTMLDivElement | null) => {
+      boxRef.current = el;
+      registerEl(span.start, el);
+    },
+    [registerEl, span.start],
+  );
+
+  // Remember the built height, so the empty box left behind on unload is the
+  // same size and nothing below it moves.
+  useEffect(() => {
+    const el = boxRef.current;
+    if (!live || !el) return;
+    const ro = new ResizeObserver((entries) => {
+      const h = Math.round(entries[0]?.borderBoxSize?.[0]?.blockSize ?? el.offsetHeight);
+      setHeight(h);
+      onMeasured(span.start, h);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [live, onMeasured, span.start]);
+
+  return (
+    <Box
+      ref={setRef}
+      data-verse-start={span.start}
+      data-verse-live={live ? "" : undefined}
+      sx={{
+        boxSizing: "border-box",
+        borderBlockEnd: "1px solid",
+        borderColor: "divider",
+        paddingBlock: 2,
+      }}
+      style={live ? undefined : { blockSize: height ?? estimate }}
+    >
+      {live && (
+        <VerseSectionBody
+          span={span}
+          ctx={ctx}
+          selection={selection}
+          article={article}
+          inlineDetail={inlineDetail}
+        />
+      )}
+    </Box>
+  );
+});
+
+const VerseSectionBody = memo(function VerseSectionBody({
+  span,
+  ctx,
+  selection,
+  article,
+  inlineDetail,
+}: {
+  span: VerseSpan;
+  ctx: SectionContext;
+  selection: VerseSelection | null;
+  article: VerseArticle | null;
+  inlineDetail: ReactNode;
+}) {
+  const { t } = useTranslation();
+  const { book, chapter, onSelect } = ctx;
+  const { start, end } = span;
+  const model = useSpanModel(ctx.data, ctx.sourceIndex, ctx.litIndex, ctx.simIndex, start, end);
+  const { words, lit, sim, resources, flags, markedPositions } = model;
+
+  const selectedPositions = useMemo(
+    () => (selection ? selectedPositionsFor(selection, resources) : EMPTY_POSITIONS),
+    [selection, resources],
+  );
+  const litOn = useMemo(() => activeGroupIds(lit, selectedPositions), [lit, selectedPositions]);
+  const simOn = useMemo(() => activeGroupIds(sim, selectedPositions), [sim, selectedPositions]);
+
+  const selectWord = useCallback(
+    (positions: number[]) => onSelect(start, positions.length ? { kind: "word", positions } : null),
+    [onSelect, start],
+  );
+  const selectGroup = useCallback(
+    (lane: LaneModel, groupId: string | null) => {
+      if (!groupId) {
+        onSelect(start, null);
+        return;
+      }
+      selectWord(lane.positionsByGroup.get(groupId) ?? []);
+    },
+    [onSelect, selectWord, start],
+  );
+  const selectResource = useCallback((sel: VerseSelection) => onSelect(start, sel), [onSelect, start]);
+
+  const bridged = end > start;
+  const label = `${book} ${chapter}:${bridged ? `${start}-${end}` : start}`;
+
+  return (
+    <>
+      <Box sx={{ display: "flex", alignItems: "center", gap: 1.25, flexWrap: "wrap", marginBlockEnd: 1.5 }}>
+        <Typography component="h2" sx={{ fontSize: "0.95rem", fontWeight: 700, m: 0 }}>
+          {label}
+        </Typography>
+        <Box sx={{ flex: 1 }} />
+        <FlagRow
+          flags={flags}
+          onPick={(f) => {
+            if (!f.positions.length) return;
+            ctx.setMode("audit");
+            selectWord(f.positions);
+          }}
+        />
+      </Box>
+      {bridged && (
+        <Alert severity="info" sx={{ mb: 2 }}>
+          {t("flowVerse.verse.bridgedNotice", { start, end })}
+        </Alert>
+      )}
+      {words.length === 0 && (
+        <Alert severity="info" sx={{ mb: 2 }}>
+          {t("flowVerse.verse.noOriginalText", { label: ctx.originalLabel, ref: label })}
+        </Alert>
+      )}
+      {ctx.mode === "read" ? (
+        <ReadMode
+          words={words}
+          lit={lit}
+          sim={sim}
+          litLabel={ctx.litLabel}
+          simLabel={ctx.simLabel}
+          originalLabel={ctx.originalLabel}
+          rtl={ctx.rtl}
+          litRtl={ctx.litRtl}
+          simRtl={ctx.simRtl}
+          selectedPositions={selectedPositions}
+          markedPositions={markedPositions}
+          litOn={litOn}
+          simOn={simOn}
+          onSelectWord={selectWord}
+          onSelectGroup={selectGroup}
+        />
+      ) : (
+        <AuditMode
+          words={words}
+          lit={lit}
+          sim={sim}
+          litLabel={ctx.litLabel}
+          simLabel={ctx.simLabel}
+          resources={resources}
+          rtl={ctx.rtl}
+          litRtl={ctx.litRtl}
+          simRtl={ctx.simRtl}
+          compact={ctx.compact}
+          selectedPositions={selectedPositions}
+          onSelectWord={selectWord}
+        />
+      )}
+      {inlineDetail && (
+        <Box
+          sx={{
+            bgcolor: "background.paper",
+            border: "1px solid",
+            borderColor: "divider",
+            borderRadius: 1.5,
+            paddingInline: 1.5,
+            marginBlockEnd: 2,
+          }}
+        >
+          {inlineDetail}
+        </Box>
+      )}
+      {article ? (
+        <VerseArticleView article={article} stacked={ctx.stacked} onClose={ctx.closeArticle} />
+      ) : (
+        <ResourceList
+          resources={resources}
+          selection={selection}
+          rtl={ctx.rtl}
+          compact={ctx.compact}
+          onSelect={selectResource}
+        />
+      )}
+    </>
+  );
+});
+
+const EMPTY_POSITIONS = new Set<number>();

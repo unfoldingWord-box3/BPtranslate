@@ -1894,6 +1894,17 @@
         "option": "{{ref}} ({{count}})",
         "keyVerse": "previous / next verse"
       },
+      "statusFilter": {
+        "button": "Filter by status",
+        "showAll": "Show all",
+        "only": "Only",
+        "onlyAria": "Show only {{status}}",
+        "hint": "The open note stays in the list until you move to another note.",
+        "onlyShown": "Only: {{list}}",
+        "hidden": "Hidden: {{list}}",
+        "shown": "Showing {{shown}} of {{total}}",
+        "pager": "status filter"
+      },
       "cols": {
         "hide": "Hide the {{name}} column",
         "show": "Show the {{name}} column",
@@ -3673,6 +3684,11 @@
       "viewAria": "View",
       "modeRead": "Read",
       "modeAudit": "Audit",
+      "layoutAria": "One verse or the whole chapter",
+      "layoutSingle": "One verse",
+      "layoutSingleTitle": "Show one verse at a time; step with the arrows",
+      "layoutScroll": "Scroll",
+      "layoutScrollTitle": "Scroll through the whole chapter, verse after verse",
       "readHint": "Read the verse three ways. Click any word to see what the other texts do with it.",
       "auditHint": "One row per original word: what the literal text made of it, and what the simplified text made of it.",
       "loadError": "{{book}} {{chapter}} could not be loaded{{details}}.",
