@@ -1,5 +1,5 @@
 import { expect, test, type BrowserContext, type Page } from "@playwright/test";
-import { fetchChapter, newUserContext, type TnRow } from "./helpers";
+import { authedRequest, fetchChapter, newUserContext, type TnRow } from "./helpers";
 
 // Rapid check bulk actions (#829): checkboxes with Shift+click ranges,
 // select-all, Space / X / Shift+J to check from the keyboard, and the bulk
@@ -189,4 +189,73 @@ test("rapid check bulk: Arabic UI draws the checkboxes and bar right to left", a
   expect(boxX).toBeGreaterThan(circleX);
   // Read-only test: nothing is approved here.
   await page.screenshot({ path: test.info().outputPath("rapid-bulk-ar-1366x768.png") });
+});
+
+// #837: bulk Not needed pins each trash to the version on screen. A peer's
+// edit that lands after the bulk action's chapter re-read (the gap #836 left
+// open) is refused by the server, and the note is skipped and reported, not
+// set aside unseen. The peer PATCH runs inside the route handler for that
+// note's trash request, so it lands after every client-side check.
+test("rapid check bulk: Not needed skips a note a peer edited just before its trash", async ({ browser }) => {
+  const { context, auth } = await newUserContext(browser, "rapid-bulk-pin");
+  openContexts.push(context);
+  await context.addInitScript(() => {
+    try {
+      localStorage.setItem("be:notesRapidCheck", "true");
+    } catch {
+      /* private mode */
+    }
+  });
+  const peer = await newUserContext(browser, "rapid-bulk-peer");
+  openContexts.push(peer.context);
+  const peerApi = authedRequest(peer.context.request, peer.auth.token, peer.auth.csrf);
+
+  // The last verse with 2+ live notes: the first test works on the first
+  // verse with 4+, so the two stay apart.
+  const chap = await fetchChapter(context.request, auth.token, BOOK, CHAPTER);
+  const live = (chap.tn as Row[]).filter((r) => r.trashed_at == null && r.verse > 0);
+  const byVerse = new Map<number, Row[]>();
+  for (const r of live) byVerse.set(r.verse, [...(byVerse.get(r.verse) ?? []), r]);
+  const verse = [...byVerse.keys()].sort((a, b) => b - a).find((v) => byVerse.get(v)!.length >= 2);
+  expect(verse, `ZEC ${CHAPTER} needs a verse with 2+ notes`).toBeDefined();
+
+  const page = await context.newPage();
+  const list = await openRapid(page, verse!, byVerse.get(verse!)![0].id);
+  const ids = (await list.locator("[data-rapid-row]").evaluateAll((els) => els.map((el) => el.getAttribute("data-rapid-row")))) as string[];
+  const [kept, edited] = ids;
+  const shown = (await serverRows(context, auth.token)).get(edited)!;
+
+  // The peer edits `edited` the moment its trash request leaves the browser.
+  let sentIfMatch: string | undefined;
+  await page.route(`**/api/rows/tn/${edited}/trash*`, async (route) => {
+    sentIfMatch = route.request().headers()["if-match"];
+    const res = await peerApi.patch(`/api/rows/tn/${edited}?book=${BOOK}`, { note: `${shown.note} peer edit` }, shown.version);
+    expect(res.status(), "peer PATCH").toBe(200);
+    await route.continue();
+  });
+
+  await list.locator(`[data-rapid-checkbox="${kept}"]`).click();
+  await list.locator(`[data-rapid-checkbox="${edited}"]`).click({ modifiers: ["Shift"] });
+  const bar = page.locator("[data-rapid-bulk-bar]");
+  await expect(bar).toContainText("Checked: 2");
+  await bar.getByRole("button", { name: "Not needed", exact: true }).click();
+
+  const result = page.locator("[data-rapid-bulk-result]");
+  await expect(result).toContainText("Marked not needed: 1. Skipped: 1 (changed by someone else, reloaded: 1).", {
+    timeout: 20_000,
+  });
+  expect(sentIfMatch, "the trash request carried the version on screen").toBe(String(shown.version));
+  const server = await serverRows(context, auth.token);
+  expect(server.get(kept)?.trashed_at, "the untouched note was set aside").not.toBeNull();
+  expect(server.get(edited)?.trashed_at, "the peer-edited note was not set aside").toBeNull();
+  expect(server.get(edited)?.note).toBe(`${shown.note} peer edit`);
+  // The skipped note stays checked, so a second press acts on it once seen.
+  await expect(bar).toContainText("Checked: 1");
+  await expect(list.locator(`[data-rapid-checkbox="${edited}"]`)).toHaveAttribute("aria-checked", "true");
+  await page.screenshot({ path: test.info().outputPath("rapid-bulk-pin-1366x768.png") });
+
+  // Leave the chapter as found: Undo brings the set-aside note back.
+  await result.getByRole("button", { name: "Undo" }).click();
+  await expect(result).toContainText("Restored: 1.", { timeout: 20_000 });
+  expect((await serverRows(context, auth.token)).get(kept)?.trashed_at).toBeNull();
 });
