@@ -31,6 +31,7 @@ import { useTheme } from "@mui/material/styles";
 import { useTranslation } from "react-i18next";
 import type { FlowSegment } from "../../lib/flowHighlight";
 import { SCRIPTURE_FONT_STACK } from "../../theme";
+import { arabicFontSize, startsArabicScript } from "../../lib/arabicScriptSize";
 
 export interface RapidLane {
   /** Stable id: the resource the pref is keyed by. */
@@ -218,7 +219,8 @@ export function RapidVerseBlock({
                 {l.caption}
                 {l.body ??
                   (l.text ? (
-                    // dir="auto" follows the content, as in the card view's Lane.
+                    // dir="auto" follows the content, as in the card view's Lane;
+                    // Arabic text is drawn a size larger to match the English.
                     <Box
                       component="span"
                       dir="auto"
@@ -226,7 +228,7 @@ export function RapidVerseBlock({
                         display: "block",
                         textAlign: "start",
                         fontFamily: SCRIPTURE_FONT_STACK,
-                        fontSize: "0.9375rem",
+                        fontSize: arabicFontSize("0.9375rem", startsArabicScript(l.text)),
                         lineHeight: 1.5,
                       }}
                     >

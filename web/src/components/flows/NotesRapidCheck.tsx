@@ -19,6 +19,7 @@ import { useTranslation } from "react-i18next";
 import { FlowStatusChip, type FlowStatusKind } from "./FlowStatusChip";
 import { RapidColumnHeader } from "./RapidColumnHeader";
 import { SCRIPTURE_FONT_STACK } from "../../theme";
+import { arabicFontSize, startsArabicScript } from "../../lib/arabicScriptSize";
 import { RapidBulkBar, RapidBulkResultLine, type RapidBulkProps } from "./RapidBulkBar";
 
 export interface RapidCheckRow {
@@ -661,7 +662,8 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
                           "&:hover": { borderColor: "divider", bgcolor: "action.hover" },
                         }}
                       >
-                        <Box component="span" dir="auto" sx={{ display: "block", fontSize: "0.9375rem", lineHeight: 1.5, whiteSpace: "pre-wrap", textAlign: "start" }}>
+                        {/* Arabic is drawn a size larger to match the English (arabicScriptSize). */}
+                        <Box component="span" dir="auto" sx={{ display: "block", fontSize: arabicFontSize("0.9375rem", startsArabicScript(r.targetText)), lineHeight: 1.5, whiteSpace: "pre-wrap", textAlign: "start" }}>
                           {r.targetText.trim().length > 0 ? (
                             r.targetText
                           ) : (
