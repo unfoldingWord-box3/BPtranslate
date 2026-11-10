@@ -424,6 +424,7 @@ export function useRapidBulk(a: RapidBulkArgs) {
     let startedCount = 0;
     let failure: string | null = null;
     let refetchNeeded = false;
+    let openChanged = false;
     const alreadyOver: Parameters<typeof settleRedo>[0][] = [];
     const batchId = ++nextBatchRef.current;
     const batch = { open: 0, drafted: 0, kept: 0, failed: null as string | null };
@@ -455,7 +456,10 @@ export function useRapidBulk(a: RapidBulkArgs) {
         } else if (!changed || changed.has(id)) {
           // A peer's edit since this screen loaded would be redrafted unseen.
           skipped[changed ? "changed" : "failed"]++;
-          if (changed) refetchNeeded = true;
+          if (changed) {
+            refetchNeeded = true;
+            if (id === a.currentId) openChanged = true;
+          }
           left.push(id);
         } else eligible.push(id);
       }
@@ -497,7 +501,11 @@ export function useRapidBulk(a: RapidBulkArgs) {
       a.setBusy(false);
       setRunning(false);
     }
-    if (refetchNeeded) void a.refetch();
+    // The open note's editor is keyed on its id plus a reload counter, so a
+    // plain refetch would leave it showing the old text: reload re-seeds it
+    // (#853, as Not needed and Approve do).
+    if (openChanged) a.reload();
+    else if (refetchNeeded) void a.refetch();
     const lead = t("flowTranslate.rapid.bulk.redoStarted", { count: startedCount });
     const r = summarize(lead, skipped, false);
     show(failure ? { text: `${r.text} ${failure}`, severity: "warning" } : { ...r, severity: r.severity === "success" ? "info" : r.severity });

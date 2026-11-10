@@ -1,5 +1,5 @@
 import { expect, test, type BrowserContext, type Page } from "@playwright/test";
-import { authedRequest, fetchChapter, newUserContext, type TnRow } from "./helpers";
+import { authedRequest, closeTolerant, fetchChapter, newUserContext, type TnRow } from "./helpers";
 
 // Rapid check bulk actions (#829): checkboxes with Shift+click ranges,
 // select-all, Space / X / Shift+J to check from the keyboard, and the bulk
@@ -420,4 +420,105 @@ test("rapid check bulk: Approve reloads the open note a peer edited just before 
   // back. Approve has no Undo; global-setup reseeds ZEC 4 as AI drafts.
   await restoreNoteText(peerApi, edited, shown.note, server.get(edited)!.version);
   expect((await serverRows(context, auth.token)).get(edited)?.note).toBe(shown.note);
+});
+
+// #853: bulk Redo with AI reloads the open note when it skips it as changed,
+// as bulk Not needed (#837) and bulk Approve (#850) do. Redo sends no version,
+// so its last check is the chapter re-read (changedSinceShown); the peer PATCH
+// runs inside the route handler for that read, so it lands after every check
+// the browser made before. Only the open note is checked, so no AI job starts:
+// a job that finished would reload the screen itself and hide the bug.
+test("rapid check bulk: Redo with AI reloads the open note a peer edited just before the redo", async ({ browser }) => {
+  const { context, auth } = await newUserContext(browser, "rapid-bulk-redo-pin");
+  openContexts.push(context);
+  await context.addInitScript(() => {
+    try {
+      localStorage.setItem("be:notesRapidCheck", "true");
+    } catch {
+      /* private mode */
+    }
+  });
+  const peer = await newUserContext(browser, "rapid-bulk-redo-peer");
+  openContexts.push(peer.context);
+  const peerApi = authedRequest(peer.context.request, peer.auth.token, peer.auth.csrf);
+
+  // A verse none of the tests above uses: not the first with 4+, not the last
+  // with 2+, not the single-button test's verse, not the bulk Approve test's.
+  const chap = await fetchChapter(context.request, auth.token, BOOK, CHAPTER);
+  const live = (chap.tn as Row[]).filter((r) => r.trashed_at == null && r.verse > 0);
+  const byVerse = new Map<number, Row[]>();
+  for (const r of live) byVerse.set(r.verse, [...(byVerse.get(r.verse) ?? []), r]);
+  const asc = [...byVerse.keys()].sort((a, b) => a - b);
+  const taken = new Set([asc.find((v) => byVerse.get(v)!.length >= 4), [...asc].reverse().find((v) => byVerse.get(v)!.length >= 2)]);
+  taken.add(asc.find((v) => !taken.has(v)));
+  taken.add(asc.find((v) => !taken.has(v) && byVerse.get(v)!.length >= 2));
+  const verse = asc.find((v) => !taken.has(v));
+  expect(verse, `ZEC ${CHAPTER} needs a fifth verse with notes`).toBeDefined();
+  const target = byVerse.get(verse!)![0];
+  // Redo skips an approved note before it looks for a peer's edit.
+  expect(target.translation_state, `seeded ai_draft for ${target.id}`).toBe("ai_draft");
+
+  const page = await context.newPage();
+  // Bulk Redo is offered only in a translation workspace; the seeded one is
+  // authoring, so the screen is told it is translating.
+  await page.route(
+    "**/api/project-config",
+    closeTolerant(page, async (route) => {
+      if (route.request().method() !== "GET") return route.continue();
+      const res = await route.fetch();
+      const body = await res.json();
+      body.config = { ...body.config, mode: "translation" };
+      return route.fulfill({ response: res, json: body });
+    }),
+  );
+  // No AI provider is ever called: a start would mean the note was not skipped.
+  let aiCalls = 0;
+  await page.route(/\/api\/(pipelines\/start|tn-quick)/, (route) => {
+    aiCalls++;
+    return route.fulfill({ status: 503, json: { error: "stubbed in test" } });
+  });
+  // The peer edits the note the moment the redo's chapter re-read leaves the
+  // browser. One-shot: the refetch after the run must not edit again.
+  let armed = false;
+  let peerEdited = false;
+  await page.route(
+    (url) => url.pathname === `/api/chapters/${BOOK}/${CHAPTER}`,
+    closeTolerant(page, async (route) => {
+      if (armed && route.request().method() === "GET") {
+        armed = false;
+        const res = await peerApi.patch(`/api/rows/tn/${target.id}?book=${BOOK}`, { note: `${target.note} redo peer edit` }, target.version);
+        expect(res.status(), "peer PATCH").toBe(200);
+        peerEdited = true;
+      }
+      return route.continue();
+    }),
+  );
+
+  const list = await openRapid(page, verse!, target.id);
+  await expect(list.locator('[data-rapid-row][aria-current="true"]')).toHaveAttribute("data-rapid-row", target.id);
+  await list.locator(`[data-rapid-checkbox="${target.id}"]`).click();
+  const bar = page.locator("[data-rapid-bulk-bar]");
+  await expect(bar).toContainText("Checked: 1");
+  const redoBtn = bar.getByRole("button", { name: "Redo with AI" });
+  await expect(redoBtn).toBeEnabled();
+
+  armed = true;
+  await redoBtn.click();
+
+  const result = page.locator("[data-rapid-bulk-result]");
+  await expect(result).toContainText("Skipped: 1 (changed by someone else, reloaded: 1).", { timeout: 20_000 });
+  expect(peerEdited, "the peer edit ran inside the redo's chapter re-read").toBe(true);
+  expect(aiCalls, "no AI job was started").toBe(0);
+  const server = (await serverRows(context, auth.token)).get(target.id)!;
+  expect(server.note).toBe(`${target.note} redo peer edit`);
+  // The open note was reloaded: it shows the peer's text, not the old text.
+  await expect(list.locator(`[data-rapid-row="${target.id}"]`)).toContainText("redo peer edit", { timeout: 20_000 });
+  // The skipped note stays checked, so a second press acts on it once seen.
+  await expect(bar).toContainText("Checked: 1");
+  await expect(list.locator(`[data-rapid-checkbox="${target.id}"]`)).toHaveAttribute("aria-checked", "true");
+  await page.screenshot({ path: test.info().outputPath("rapid-bulk-redo-pin-1366x768.png") });
+
+  // Leave the chapter's text as found: the peer puts the note's text back.
+  await restoreNoteText(peerApi, target.id, target.note, server.version);
+  expect((await serverRows(context, auth.token)).get(target.id)?.note).toBe(target.note);
 });
