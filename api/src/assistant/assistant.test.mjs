@@ -168,10 +168,10 @@ test("parseActions: text before or after a fence, or prose around a bare object,
     assert.equal(r.ok, true, text);
     assert.deepEqual(r.actions.approve, ["n1"], text);
   }
-  // Braces that are not JSON, or an array, are still failures.
+  // Braces that are not JSON, or two objects, are still failures.
   assert.deepEqual(parseActions("I {think} so {maybe}", ctx), { ok: false, kind: "unparseable" });
   assert.deepEqual(parseActions("```json\n{ not json }\n```", ctx), { ok: false, kind: "unparseable" });
-  assert.deepEqual(parseActions('Result: [1, {"reply": "x"}]', ctx), { ok: false, kind: "unparseable" });
+  assert.deepEqual(parseActions('{"reply": "a"} or {"reply": "b"}', ctx), { ok: false, kind: "unparseable" });
 });
 
 test("parseActions: a sent note stored with a real line break is not an edit when returned unchanged (#863)", () => {
