@@ -29,7 +29,9 @@ export function RapidStatusFilterMenu({ hidden, counts, labels, onChange }: Rapi
   // Popover origins are physical; open toward the inline end in both directions.
   const side = useTheme().direction === "rtl" ? "right" : "left";
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
-  const active = hidden.size > 0;
+  // A hidden status the menu does not offer here (Aquifer import in a chapter
+  // with none) hides nothing, so it does not light the button.
+  const active = [...hidden].some((b) => rapidStatusOffered(b, counts));
   const options = RAPID_STATUS_BUCKETS.filter((b) => rapidStatusOffered(b, counts));
   const name = t("flowTranslate.rapid.statusFilter.button");
 
