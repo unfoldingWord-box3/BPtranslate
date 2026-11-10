@@ -52,7 +52,12 @@ export const CALL_TIMEOUT_MS = 120_000;
 /** draft_meta_json.source for drafts written here. */
 export const DRAFT_SOURCE = "approved_notes";
 /** A run that has not released its lease by then is presumed dead and can be taken over. */
-export const RUN_LEASE_SECONDS = 10 * 60;
+// The lease is renewed after every note type, so a live run never loses it:
+// the longest gap between renewals is one note type's call (CALL_TIMEOUT_MS,
+// at most twice with the truncation retry) plus its writes, about 4 minutes.
+// A run that died (tab closed, isolate gone) blocks new presses for at most
+// this long after its last renewal.
+export const RUN_LEASE_SECONDS = 5 * 60;
 /** A drafted template longer than max(this, OUTPUT_SOURCE_FACTOR × its English source) is rejected. */
 export const MAX_OUTPUT_FLOOR_CHARS = 4000;
 export const OUTPUT_SOURCE_FACTOR = 4;
@@ -87,7 +92,8 @@ export type UnavailableReason =
   | "ai_key_encryption_unavailable"
   | "ai_provider_key_decrypt_failed"
   | "provider_not_supported"
-  | "not_translation_project";
+  | "not_translation_project"
+  | "not_migrated";
 
 export type Availability =
   | { available: true; provider: string; model: string }
@@ -272,24 +278,31 @@ export async function loadExamples(db: Db, slug: string): Promise<ExampleNote[]>
 // Placeholders
 // ---------------------------------------------------------------------------
 
-// What the prompt tells the model to keep exactly, and what the output is
-// checked for. One definition for both, so they cannot drift:
-//   - text in square brackets: [ALT], [thing], [Zechariah 1:1]
-//   - ALL-CAPS slot words of two or more letters: NOTE, ALT, REF
-//   - link targets: the (../01/01.md) after a ](
-const BRACKETED = /\[[^\[\]\n]*\]/g;
-const ALL_CAPS = /(?<![\p{L}\p{N}_])[A-Z][A-Z0-9_]+(?![\p{L}\p{N}_])/gu;
+// What the prompt tells the model about the English template's special
+// pieces, and what the output is checked for. One definition for both:
+//   - ENFORCED, kept verbatim or the unit is not written: markdown link
+//     targets, the (../01/01.md) after a ](, and [[rc://…]] links.
+//   - WARNED, never a reason to reject: ALL-CAPS slot words of 2+ letters
+//     (SPEAKER, PERSON). Missing ones are recorded on the draft.
+//   - Text in square brackets is NOT a placeholder: in the real sheet it is
+//     English example wording ("[passed away] or [died]") that must be
+//     translated.
+const RC_LINK = /\[\[rc:\/\/[^\]\s]+\]\]/g;
 const LINK_TARGET = /\]\(([^()\s]+)\)/g;
+const ALL_CAPS = /(?<![A-Za-z0-9_])[A-Z][A-Z0-9_]+(?![A-Za-z0-9_])/g;
 
-/** Every placeholder token in `md`, with repeats, in the order found per kind. */
-export function placeholderTokens(md: string): string[] {
+/** Link targets and rc links: every one must appear in the draft, repeats counted. */
+export function enforcedTokens(md: string): string[] {
   const out: string[] = [];
-  for (const m of md.matchAll(BRACKETED)) out.push(m[0]);
-  // Caps words inside a bracket or link target are already covered by that token.
-  const bare = md.replace(BRACKETED, " ").replace(/\]\([^()\s]+\)/g, " ");
-  for (const m of bare.matchAll(ALL_CAPS)) out.push(m[0]);
+  for (const m of md.matchAll(RC_LINK)) out.push(m[0]);
   for (const m of md.matchAll(LINK_TARGET)) out.push(`(${m[1]})`);
   return out;
+}
+
+/** ALL-CAPS slot words, distinct, ignoring any inside link targets or rc links. */
+export function slotWords(md: string): string[] {
+  const bare = md.replace(RC_LINK, " ").replace(/\]\([^()\s]+\)/g, "] ");
+  return [...new Set([...bare.matchAll(ALL_CAPS)].map((m) => m[0]))];
 }
 
 function countTokens(tokens: string[]): Map<string, number> {
@@ -298,14 +311,28 @@ function countTokens(tokens: string[]): Map<string, number> {
   return m;
 }
 
-/** The English placeholders `output` dropped or altered (empty when it kept them all). */
-export function missingPlaceholders(sourceMd: string, output: string): string[] {
-  const have = countTokens(placeholderTokens(output));
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+export type PlaceholderCheck = {
+  /** Enforced tokens the draft dropped or altered: the unit is not written. */
+  missing: string[];
+  /** Slot words the draft dropped: recorded, not rejected. */
+  warnings: string[];
+};
+
+export function checkPlaceholders(sourceMd: string, output: string): PlaceholderCheck {
+  const have = countTokens(enforcedTokens(output));
   const missing: string[] = [];
-  for (const [tok, n] of countTokens(placeholderTokens(sourceMd))) {
+  for (const [tok, n] of countTokens(enforcedTokens(sourceMd))) {
     if ((have.get(tok) ?? 0) < n) missing.push(tok);
   }
-  return missing;
+  // Any letter may sit directly before a slot word in the draft: Arabic
+  // attaches و/ب/ل/ف/ك (and the tatweel) to the next word, as in وSPEAKER.
+  // Only a Latin letter, digit or underscore on either side makes it another word.
+  const warnings = slotWords(sourceMd).filter(
+    (w) => !new RegExp(`(?<![A-Za-z0-9_])${escapeRe(w)}(?![A-Za-z0-9_])`).test(output),
+  );
+  return { missing, warnings };
 }
 
 export type TemplatePromptInput = {
@@ -325,15 +352,18 @@ export function buildTemplatePrompt(input: TemplatePromptInput): { system: strin
     "A note template is the standard wording translators reuse for one kind of note. Each kind is named by a SupportReference slug such as figs-metaphor.",
     "You are given the English template(s) for one slug and notes in the target language that editors have already approved for that slug. Where a note began as an AI draft, the draft is shown next to the approved wording: the editor's changes show the phrasing they prefer.",
     "Write each template in the target language so that it reads like the approved notes: use their recurring wording, connectives and terms, and avoid wording the editors kept changing.",
-    "Keep the structure of the English template. Keep every placeholder exactly as the English template writes it (text in square brackets, ALL-CAPS slot words, link targets) and in the matching place. Each template lists its placeholders; a draft that drops or changes one is thrown away.",
+    "Keep the structure of the English template. Keep link targets (the part in parentheses right after a link) and [[rc://…]] links exactly as written; a draft that drops or changes one is thrown away. Keep ALL-CAPS slot words such as SPEAKER exactly as they are. Translate the text inside square brackets: it is example wording, not a placeholder.",
     "Do not copy verse-specific content from the notes into a template.",
     `Reply with one JSON object that maps each template id to its template text, between the lines ${BEGIN_OUTPUT} and ${END_OUTPUT}. Nothing else is read.`,
   ].join("\n");
 
   const units = input.units
     .map((u) => {
-      const tokens = [...new Set(placeholderTokens(u.source_md))];
-      const keep = tokens.length ? `\n\nPlaceholders to keep exactly: ${tokens.join(" ")}` : "";
+      const exact = [...new Set(enforcedTokens(u.source_md))];
+      const slots = slotWords(u.source_md);
+      const keep =
+        (exact.length ? `\n\nKeep exactly: ${exact.join(" ")}` : "") +
+        (slots.length ? `\n\nSlot words to keep: ${slots.join(" ")}` : "");
       return `## Template ${u.template_id}${u.type ? ` (type: ${u.type})` : ""}\n\n${u.source_md.trim()}${keep}`;
     })
     .join("\n\n");
@@ -491,7 +521,7 @@ export type RunDeps = {
 
 export type RunOutcome =
   | { ok: true; result: RunResult }
-  | { ok: false; error: UnavailableReason | "run_in_progress" | "not_migrated"; provider: string | null };
+  | { ok: false; error: UnavailableReason | "run_in_progress"; provider: string | null };
 
 // ---------------------------------------------------------------------------
 // Lease: one run at a time (migration 0081)
@@ -509,6 +539,14 @@ export async function acquireRunLease(db: Db, holder: string, now: number): Prom
     .bind(holder, now + RUN_LEASE_SECONDS, now)
     .run();
   return !!res.meta.changes;
+}
+
+/** Push this run's lease out again; a no-op if the lease is no longer this run's. */
+export async function renewRunLease(db: Db, holder: string, now: number): Promise<void> {
+  await db
+    .prepare(`UPDATE template_draft_lock SET lease_until = ?2 WHERE id = 1 AND holder = ?1`)
+    .bind(holder, now + RUN_LEASE_SECONDS)
+    .run();
 }
 
 export async function releaseRunLease(db: Db, holder: string): Promise<void> {
@@ -547,7 +585,14 @@ export async function draftMissingTemplates(
     throw e;
   }
   try {
-    return { ok: true, result: await runBatch(env, userId, provider, model, apiKey, skipSlugs, deps) };
+    const renew = async () => {
+      try {
+        await renewRunLease(env.DB, holder, Math.floor(Date.now() / 1000));
+      } catch (e) {
+        console.error(`draft-missing-templates: lease renewal failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    };
+    return { ok: true, result: await runBatch(env, userId, provider, model, apiKey, skipSlugs, deps, renew) };
   } finally {
     try {
       await releaseRunLease(env.DB, holder);
@@ -566,6 +611,7 @@ async function runBatch(
   apiKey: string,
   skipSlugs: readonly string[],
   deps: RunDeps,
+  renewLease: () => Promise<void> = async () => {},
 ): Promise<RunResult> {
   const cfg = await getProjectConfig(env);
   const transport = deps.transport ?? transportFor(provider);
@@ -627,18 +673,22 @@ async function runBatch(
     }
     const parsed = parseTemplateOutput(text, cand.units.map((u) => u.template_id));
     // Missing, empty, or far longer than its English source: not a template.
-    // Readable but missing or changing an English placeholder: never written.
+    // Readable but dropping or changing a link target or rc link: never
+    // written. A dropped slot word is only recorded (placeholder_warnings).
     const sane = new Map<string, string>();
+    const warningsById = new Map<string, string[]>();
     let readable = 0;
     let badPlaceholders = 0;
     for (const u of cand.units) {
       const md = parsed.get(u.template_id);
       if (!md || tooLong(md, u.source_md)) continue;
       readable++;
-      if (missingPlaceholders(u.source_md, md).length > 0) {
+      const check = checkPlaceholders(u.source_md, md);
+      if (check.missing.length > 0) {
         badPlaceholders++;
         continue;
       }
+      if (check.warnings.length > 0) warningsById.set(u.template_id, check.warnings);
       sane.set(u.template_id, md);
     }
     if (readable === 0) {
@@ -666,7 +716,9 @@ async function runBatch(
     let written = 0;
     for (const unit of cand.units) {
       const md = sane.get(unit.template_id);
-      if (md && (await writeDraft(env.DB, cand.slug, unit, md, meta, userId))) {
+      const warnings = warningsById.get(unit.template_id);
+      const unitMeta = warnings ? { ...meta, placeholder_warnings: warnings } : meta;
+      if (md && (await writeDraft(env.DB, cand.slug, unit, md, unitMeta, userId))) {
         written++;
         writtenIds.push(unit.template_id);
       }
@@ -694,6 +746,7 @@ async function runBatch(
         const msg = scrubSecrets(err instanceof Error ? err.message : String(err), [apiKey]).slice(0, 300);
         console.error(`draft-missing-templates: ${cand.slug} internal error: ${msg}`);
       }
+      await renewLease();
     }
   };
   await Promise.all(Array.from({ length: Math.min(RUN_CONCURRENCY, batch.length) }, worker));
@@ -710,8 +763,17 @@ export async function draftMissingPreview(env: Env): Promise<Availability & {
 }> {
   const { availability } = await resolveProvider(env, false);
   const cands = await findCandidateSlugs(env.DB);
+  // A workspace DB without migration 0081 cannot take the run lease: say so
+  // up front (the button then explains it) instead of letting a press 503.
+  let effective: Availability = availability;
+  try {
+    await env.DB.prepare(`SELECT 1 FROM template_draft_lock LIMIT 1`).first();
+  } catch (e) {
+    if (!/no such table/i.test(e instanceof Error ? e.message : String(e))) throw e;
+    effective = { available: false, reason: "not_migrated", provider: availability.provider };
+  }
   return {
-    ...availability,
+    ...effective,
     qualifying: cands.map((c) => ({ slug: c.slug, approvedNotes: c.approvedNotes, units: c.units.length })),
     minApprovedNotes: MIN_APPROVED_NOTES,
     batchSize: MAX_SLUGS_PER_RUN,

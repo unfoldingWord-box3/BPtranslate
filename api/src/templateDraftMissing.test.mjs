@@ -21,8 +21,11 @@ import {
   buildTemplatePrompt,
   MAX_EXAMPLES_PER_SLUG,
   MAX_SLUGS_PER_RUN,
-  placeholderTokens,
-  missingPlaceholders,
+  enforcedTokens,
+  slotWords,
+  checkPlaceholders,
+  renewRunLease,
+  RUN_LEASE_SECONDS,
 } from "./templateDraftMissing.ts";
 import { templates } from "./templates.ts";
 import { loadContextPackInputs } from "./contextExport.ts";
@@ -657,42 +660,70 @@ test("the real templates router, mounted as index.ts mounts it, reaches /draft-m
 
 // ── Review round 3 ────────────────────────────────────────────────────────
 
-test("placeholderTokens: brackets, ALL-CAPS slot words and link targets, with repeats", () => {
+// ── Placeholders (review round 4: real sheet shapes) ───────────────────────
+
+// Shapes from the live template sheet: English example wording in brackets
+// (translated), an rc link and a link target (kept verbatim), a slot word.
+const SHEET_SOURCE =
+  "If it would be clearer, you could say SPEAKER plainly, as in [passed away] or [died]. See [[rc://*/ta/man/translate/figs-euphemism]] and [Genesis 1:1](../01/01.md).";
+const GOOD_AR =
+  "إن كان أوضح، يمكنك أن تقول وSPEAKER بصراحة، كما في [انتقل] أو [مات]. انظر [[rc://*/ta/man/translate/figs-euphemism]] و[تكوين 1:1](../01/01.md).";
+
+test("enforcedTokens and slotWords: brackets are not placeholders, links are, slot words are distinct", () => {
+  assert.deepEqual(enforcedTokens(SHEET_SOURCE), ["[[rc://*/ta/man/translate/figs-euphemism]]", "(../01/01.md)"]);
+  assert.deepEqual(slotWords(SHEET_SOURCE), ["SPEAKER"]);
+  assert.deepEqual(slotWords("SPEAKER and SPEAKER [In that case,] PERSON"), ["SPEAKER", "PERSON"], "no repeats");
+  assert.deepEqual(checkPlaceholders(SHEET_SOURCE, GOOD_AR), { missing: [], warnings: [] }, "وSPEAKER counts as present");
   assert.deepEqual(
-    placeholderTokens("This could mean: (1) NOTE Alternate translation: [ALT] (2) NOTE Alternate translation: [ALT]"),
-    ["[ALT]", "[ALT]", "NOTE", "NOTE"],
+    checkPlaceholders("x [[rc://*/ta/man/translate/a]] [[rc://*/ta/man/translate/a]]", "س [[rc://*/ta/man/translate/a]]").missing,
+    ["[[rc://*/ta/man/translate/a]]"],
+    "a repeated link counts",
   );
-  assert.deepEqual(placeholderTokens("See [Genesis 1:1](../01/01.md). Alternate translation: [ALT]"), [
-    "[Genesis 1:1]",
-    "[ALT]",
-    "(../01/01.md)",
-  ]);
-  assert.deepEqual(missingPlaceholders("x [ALT] [ALT]", "س [ALT]"), ["[ALT]"], "a repeat counts");
-  assert.deepEqual(missingPlaceholders("x NOTE [ALT]", "س NOTE [ALT]"), []);
+  assert.deepEqual(checkPlaceholders("x SPEAKER", "س SPEAKERS").warnings, ["SPEAKER"], "a Latin letter after makes it another word");
 });
 
-test("the prompt lists each template's placeholders", async () => {
-  const { post, calls } = await fresh();
+const setSource = (sqlite, id, md) => sqlite.prepare(`UPDATE template_units SET source_md = ? WHERE template_id = ?`).run(md, id);
+const answer = (obj) => ({
+  text: `${BEGIN_OUTPUT}\n${JSON.stringify(obj)}\n${END_OUTPUT}`,
+  usage: { inputTokens: 10, outputTokens: 10 },
+  stopReason: "end_turn",
+});
+
+test("the prompt lists what to keep exactly and the slot words, and says to translate bracketed text", async () => {
+  const { post, sqlite, calls } = await fresh();
+  setSource(sqlite, "translate-names-01", SHEET_SOURCE);
   await post();
   const names = calls.find((c) => c.user.includes("# SupportReference: translate-names"));
-  assert.match(names.user, /## Template translate-names-01 \(type: note\)\n\nEnglish template for translate-names \[ALT\]\n\nPlaceholders to keep exactly: \[ALT\]/);
+  assert.ok(
+    names.user.includes(
+      `${SHEET_SOURCE}\n\nKeep exactly: [[rc://*/ta/man/translate/figs-euphemism]] (../01/01.md)\n\nSlot words to keep: SPEAKER`,
+    ),
+  );
+  assert.match(names.system, /Translate the text inside square brackets/);
+  assert.ok(!names.user.includes("Keep exactly: [passed away]"));
+});
+
+test("a draft that translates the bracketed example wording and keeps the links is written", async () => {
+  const { post, sqlite, unitRow, setBehaviour } = await fresh();
+  setSource(sqlite, "translate-names-01", SHEET_SOURCE);
+  setBehaviour(async (r) => (r.user.includes("SupportReference: translate-names") ? answer({ "translate-names-01": GOOD_AR }) : null));
+  const body = await json(await post());
+  assert.ok(body.drafted.some((d) => d.slug === "translate-names"));
+  const u = unitRow("translate-names-01");
+  assert.equal(u.translation_state, "ai_draft");
+  assert.equal(u.target_md, GOOD_AR);
+  assert.equal(JSON.parse(u.draft_meta_json).placeholder_warnings, undefined);
 });
 
 for (const [label, bad] of [
-  ["dropped", "قالب بلا خانة"],
-  ["altered", "قالب [alt] معدّل"],
+  ["changed rc link", GOOD_AR.replace("figs-euphemism]]", "figs-metaphor]]")],
+  ["changed link target", GOOD_AR.replace("(../01/01.md)", "(../01/02.md)")],
+  ["dropped rc link", GOOD_AR.replace(" [[rc://*/ta/man/translate/figs-euphemism]]", "")],
 ]) {
-  test(`a draft with a ${label} placeholder is never written and is reported as placeholder_missing`, async () => {
-    const { post, unitRow, setBehaviour } = await fresh();
-    setBehaviour(async (r) =>
-      r.user.includes("SupportReference: translate-names")
-        ? {
-            text: `${BEGIN_OUTPUT}\n${JSON.stringify({ "translate-names-01": bad })}\n${END_OUTPUT}`,
-            usage: { inputTokens: 10, outputTokens: 10 },
-            stopReason: "end_turn",
-          }
-        : null,
-    );
+  test(`a draft with a ${label} is never written and is reported as placeholder_missing`, async () => {
+    const { post, sqlite, unitRow, setBehaviour } = await fresh();
+    setSource(sqlite, "translate-names-01", SHEET_SOURCE);
+    setBehaviour(async (r) => (r.user.includes("SupportReference: translate-names") ? answer({ "translate-names-01": bad }) : null));
     const body = await json(await post());
     assert.deepEqual(body.failed, [{ slug: "translate-names", code: "placeholder_missing" }]);
     assert.equal(unitRow("translate-names-01").translation_state, null);
@@ -700,21 +731,72 @@ for (const [label, bad] of [
   });
 }
 
-test("one unit with a bad placeholder: its sibling is written, the note type is reported placeholder_missing", async () => {
-  const { post, unitRow, setBehaviour } = await fresh();
+test("a dropped slot word is written with a warning, not rejected", async () => {
+  const { post, sqlite, unitRow, setBehaviour } = await fresh();
+  setSource(sqlite, "translate-names-01", SHEET_SOURCE);
+  const noSlot = GOOD_AR.replace("وSPEAKER", "المتكلم");
+  setBehaviour(async (r) => (r.user.includes("SupportReference: translate-names") ? answer({ "translate-names-01": noSlot }) : null));
+  const body = await json(await post());
+  assert.ok(body.drafted.some((d) => d.slug === "translate-names"));
+  const u = unitRow("translate-names-01");
+  assert.equal(u.translation_state, "ai_draft");
+  assert.deepEqual(JSON.parse(u.draft_meta_json).placeholder_warnings, ["SPEAKER"]);
+});
+
+test("one unit with a changed link: its sibling is written, the note type is reported placeholder_missing", async () => {
+  const { post, sqlite, unitRow, setBehaviour } = await fresh();
+  setSource(sqlite, "figs-metaphor-02", SHEET_SOURCE);
   setBehaviour(async (r) =>
     r.user.includes("SupportReference: figs-metaphor")
-      ? {
-          text: `${BEGIN_OUTPUT}\n${JSON.stringify({ "figs-metaphor-01": "قالب [ALT]", "figs-metaphor-02": "قالب بلا خانة" })}\n${END_OUTPUT}`,
-          usage: { inputTokens: 10, outputTokens: 10 },
-          stopReason: "end_turn",
-        }
+      ? answer({ "figs-metaphor-01": "قالب [بديل]", "figs-metaphor-02": GOOD_AR.replace("(../01/01.md)", "(x)") })
       : null,
   );
   const body = await json(await post());
   assert.deepEqual(body.failed, [{ slug: "figs-metaphor", code: "placeholder_missing" }]);
   assert.equal(unitRow("figs-metaphor-01").translation_state, "ai_draft");
   assert.equal(unitRow("figs-metaphor-02").translation_state, null);
+});
+
+test("the lease is renewed after each note type and its expiry is 5 minutes", async () => {
+  const { post, sqlite, setBehaviour } = await fresh();
+  const seen = [];
+  setBehaviour(async (_r, db) => {
+    seen.push(db.prepare(`SELECT lease_until FROM template_draft_lock WHERE id = 1`).get().lease_until);
+    // Age the lease during the first wave: only a renewal can bring it back.
+    if (seen.length === 3) db.prepare(`UPDATE template_draft_lock SET lease_until = 1 WHERE id = 1`).run();
+    return null;
+  });
+  const before = Math.floor(Date.now() / 1000);
+  await post();
+  assert.equal(RUN_LEASE_SECONDS, 300);
+  assert.equal(seen.length, 4, "4 note types, 3 at a time: the 4th starts after one finishes");
+  assert.ok(seen.slice(0, 3).every((v) => v >= before + RUN_LEASE_SECONDS), "taken for 5 minutes");
+  assert.ok(seen[3] >= before + RUN_LEASE_SECONDS, "renewed after a note type finished");
+  assert.equal(sqlite.prepare(`SELECT holder FROM template_draft_lock WHERE id = 1`).get().holder, null);
+});
+
+test("renewRunLease only extends the caller's own lease", async () => {
+  const { sqlite, env } = await fresh();
+  sqlite.prepare(`INSERT INTO template_draft_lock (id, holder, lease_until) VALUES (1, 'other', 100)`).run();
+  await renewRunLease(env.DB, "me", 1000);
+  assert.equal(sqlite.prepare(`SELECT lease_until FROM template_draft_lock`).get().lease_until, 100);
+  await renewRunLease(env.DB, "other", 1000);
+  assert.equal(sqlite.prepare(`SELECT lease_until FROM template_draft_lock`).get().lease_until, 1000 + RUN_LEASE_SECONDS);
+});
+
+test("without migration 0081 the preview says not_migrated (200) and a press is refused 503", async () => {
+  const { req, post, sqlite, calls } = await fresh();
+  sqlite.exec(`DROP TABLE template_draft_lock`);
+  const res = await req("/api/templates/draft-missing", { method: "GET" });
+  assert.equal(res.status, 200);
+  const body = await json(res);
+  assert.equal(body.available, false);
+  assert.equal(body.reason, "not_migrated");
+  assert.equal(body.qualifying.length, 4);
+  const p = await post();
+  assert.equal(p.status, 503);
+  assert.equal((await json(p)).error, "not_migrated");
+  assert.equal(calls.length, 0);
 });
 
 test("when some of a note type's writes lose their pin, it is reported as partial_output, not drafted", async () => {
