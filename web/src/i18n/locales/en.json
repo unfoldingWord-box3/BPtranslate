@@ -364,6 +364,12 @@
         "helper": "It uses this organization's AI key and is capped at ${{cap}} per person per day.",
         "needsKey": "It only answers once an API key is saved.",
         "loadFailed": "Couldn't load the help assistant setting."
+      },
+      "assistantChat": {
+        "label": "Let editors ask an AI assistant to propose bulk edits",
+        "helper": "Lets editors ask an AI to propose bulk edits on the Rapid check screen. Each person can spend up to ${{cap}} a day.",
+        "needsKey": "It only answers once an API key is saved.",
+        "loadFailed": "Couldn't load the assistant chat setting."
       }
     },
     "localization": {
@@ -4003,6 +4009,43 @@
       "superlative": "superlative",
       "diminutive": "diminutive",
       "indeclinable": "indeclinable"
+    }
+  },
+  "assistant": {
+    "title": "Assistant",
+    "open": "Assistant",
+    "close": "Close the assistant",
+    "intro": "Ask the assistant to suggest changes to the notes on this screen. Nothing changes until you press Apply.",
+    "label": "Ask the assistant",
+    "followUpLabel": "Ask a follow-up",
+    "placeholder": "For example: change “Lord” to “LORD” in the checked notes",
+    "send": "Send",
+    "sending": "Thinking…",
+    "cancel": "Cancel",
+    "newChat": "New chat",
+    "remaining": "${{amount}} left today",
+    "notConfigured": "The assistant isn't set up for this organization.",
+    "unavailable": "The assistant isn't available right now.",
+    "disabled": "The assistant has been turned off for this organization.",
+    "budgetExhausted": "Today's assistant allowance is used up. It resets {{when}}.",
+    "budgetExhaustedNoTime": "Today's assistant allowance is used up. It resets tomorrow (UTC).",
+    "truncated": "The request was too big for one answer. Ask about fewer notes.",
+    "failed": "The assistant could not answer. Try again.",
+    "limitReached": "This chat has reached its length limit. Start a new chat to continue.",
+    "proposal": {
+      "title": "Proposed changes",
+      "edits": "Edits: {{count}}",
+      "approvals": "Approve: {{count}}",
+      "notNeeded": "Mark not needed: {{count}}",
+      "include": "Include the change to note {{ref}}",
+      "unknownNote": "A note that is no longer on screen",
+      "apply": "Apply {{count}}",
+      "applying": "Applying…"
+    },
+    "apply": {
+      "edited": "Edited: {{count}} (they still need approval).",
+      "busy": "Another action is still running. Try again in a moment.",
+      "failed": "Applying the changes failed. Check the notes before trying again."
     }
   },
   "help": {

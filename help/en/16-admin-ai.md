@@ -40,3 +40,6 @@ Once saved, the key is stored encrypted and is never shown again. You see **Conf
 
 ## Let the team ask the AI help assistant
 Under the key settings, the switch **Let team members ask the AI help assistant** turns on the **Ask AI** area in the Help panel for everyone in your organization. It is off until you turn it on. The assistant uses your organization's AI key, so it only answers once an API key is saved. Each person can use up to a daily dollar amount, shown under the switch. Turn the switch off at any time to hide **Ask AI** again.
+
+## Let editors ask the assistant for bulk edits
+Next to that switch, **Let editors ask an AI assistant to propose bulk edits** turns on the **Assistant** chat on the Rapid check notes screen, for editors and admins. It is off until you turn it on. It uses your organization's AI key and only answers once an API key is saved. It proposes changes, and nothing is saved until the person presses **Apply**. Each person can use up to a daily dollar amount, shown under the switch.

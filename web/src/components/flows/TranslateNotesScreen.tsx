@@ -195,6 +195,7 @@ import { pipelineStore, getSessionKey, type PipelineJob } from "../../sync/pipel
 import { jobLocksChapterNotes, jobLocksNote, lockJobReleased } from "../../lib/chapterLock";
 import { redoOutcome } from "../../lib/applySkipped";
 import { useRapidBulk } from "./useRapidBulk";
+import { editsWithVersions } from "./rapidAssistant";
 import {
   api,
   ApiError,
@@ -3372,6 +3373,28 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
             if (!editLocked) setEditing(true);
           }}
           onStopEdit={() => setEditing(false)}
+          assistant={{
+            chapter,
+            rows: () =>
+              (queueIds ?? []).flatMap((id) => {
+                const r = rowById.get(id);
+                return r && r.trashed_at == null && statuses[id] !== "skipped" ? [r] : [];
+              }),
+            describeId: (id) => {
+              const r = rowById.get(id);
+              if (!r) return null;
+              return {
+                label: r.verse === 0 ? t("flowTranslate.introRef", { chapter: r.chapter }) : noteRefLabel(r),
+                before: r.note ?? "",
+              };
+            },
+            onApply: (sel, versions) =>
+              rapidBulk.applyAssistant({
+                edits: editsWithVersions(sel.edits, versions),
+                approve: sel.approve,
+                notNeeded: sel.notNeeded,
+              }),
+          }}
           bulk={{
             onApprove: rapidBulk.approve,
             onRedo: rapidBulk.redo,

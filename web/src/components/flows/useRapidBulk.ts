@@ -33,6 +33,7 @@ import { pipelineStore, getSessionKey } from "../../sync/pipelineStore";
 import { isApprovableRow } from "../../lib/reviewApproval";
 import { isAiProviderNotConfigured } from "../../lib/aiProviderErrors";
 import { redoOutcome } from "../../lib/applySkipped";
+import { escapeNewlines, waitForOp } from "./translateShared";
 
 type CardStatus = "approved" | "skipped";
 
@@ -45,6 +46,23 @@ const REASONS: SkipReason[] = ["unsaved", "pending", "changed", "locked", "noDra
 export interface RapidBulkResult {
   text: string;
   severity: "success" | "info" | "warning";
+}
+
+/** What one bulk verb did, before it is turned into the result line. */
+interface RunOut {
+  left: string[];
+  count: number;
+  skipped: Record<SkipReason, number>;
+  stopped: boolean;
+  /** Another bulk action (or a save) was running: nothing was tried. */
+  blocked?: boolean;
+}
+
+/** What the assistant's Apply sends (issue #858): edits carry the version the proposal was made against. */
+export interface AssistantSelection {
+  edits: { id: string; note: string; version: number }[];
+  approve: string[];
+  notNeeded: string[];
 }
 
 export interface RapidBulkArgs {
@@ -170,9 +188,17 @@ export function useRapidBulk(a: RapidBulkArgs) {
     return "failed";
   }
 
+  const blockedRun = (ids: string[]): RunOut => ({ left: ids, count: 0, skipped: emptySkips(), stopped: false, blocked: true });
+
   /** Approve the checked notes. Returns the ids left unapproved. */
   async function approve(ids: string[]): Promise<string[]> {
-    if (running || a.busy || ids.length === 0) return ids;
+    const r = await runApprove(ids);
+    if (!r.blocked) show(summarize(t("flowTranslate.rapid.bulk.approved", { count: r.count }), r.skipped, r.stopped));
+    return r.left;
+  }
+
+  async function runApprove(ids: string[]): Promise<RunOut> {
+    if (running || a.busy || ids.length === 0) return blockedRun(ids);
     setRunning(true);
     setResult(null);
     setUndoable(null);
@@ -263,13 +289,18 @@ export function useRapidBulk(a: RapidBulkArgs) {
     // it showing the old text: reload re-seeds it (#850, as Not needed does).
     if (openChanged) a.reload();
     else if (refetchNeeded) void a.refetch();
-    show(summarize(t("flowTranslate.rapid.bulk.approved", { count: approved }), skipped, stopped));
-    return left;
+    return { left, count: approved, skipped, stopped };
   }
 
   /** Mark the checked notes Not needed. Returns the ids left untouched. */
   async function notNeeded(ids: string[]): Promise<string[]> {
-    if (running || a.busy || ids.length === 0) return ids;
+    const r = await runNotNeeded(ids);
+    if (!r.blocked) show(summarize(t("flowTranslate.rapid.bulk.notNeededDone", { count: r.count }), r.skipped, r.stopped));
+    return r.left;
+  }
+
+  async function runNotNeeded(ids: string[]): Promise<RunOut> {
+    if (running || a.busy || ids.length === 0) return blockedRun(ids);
     setRunning(true);
     setResult(null);
     setUndoable(null);
@@ -354,8 +385,150 @@ export function useRapidBulk(a: RapidBulkArgs) {
     if (openChanged) a.reload();
     else if (refetchNeeded) void a.refetch();
     if (done.length > 0) setUndoable({ scope, ids: done, prev });
-    show(summarize(t("flowTranslate.rapid.bulk.notNeededDone", { count: done.length }), skipped, stopped));
-    return left;
+    return { left, count: done.length, skipped, stopped };
+  }
+
+  /**
+   * Save the assistant's proposed note texts (issue #858). The same per-row
+   * rules as Approve: unsaved typing, a write still in the outbox, a note set
+   * aside, or a version that is no longer the one the proposal was made
+   * against are skipped and counted. Each edit goes through the outbox like a
+   * typed save and waits for its result (saveDraft's wait). The edited note
+   * ends up 'edited' on the server, so it still needs approval.
+   */
+  async function runEdits(edits: AssistantSelection["edits"]): Promise<RunOut> {
+    if (edits.length === 0) return { left: [], count: 0, skipped: emptySkips(), stopped: false };
+    const ids = edits.map((e) => e.id);
+    if (running || a.busy) return blockedRun(ids);
+    setRunning(true);
+    setResult(null);
+    setUndoable(null);
+    a.setBusy(true);
+    const skipped = emptySkips();
+    const left: string[] = [];
+    let saved = 0;
+    let refetchNeeded = false;
+    let openChanged = false;
+    try {
+      closeOpenEditor(ids);
+      const pending = await pendingRowIds();
+      const stored = await storedDraftIds(ids);
+      for (const e of edits) {
+        const r = a.rowById.get(e.id);
+        if (!r) {
+          skipped.failed++;
+          left.push(e.id);
+          continue;
+        }
+        if (unsaved(e.id, stored)) {
+          skipped.unsaved++;
+          left.push(e.id);
+          continue;
+        }
+        if (a.statuses[e.id] === "skipped" || r.trashed_at != null) {
+          skipped.notNeeded++;
+          left.push(e.id);
+          continue;
+        }
+        if (!pending || pending.has(e.id)) {
+          skipped.pending++;
+          left.push(e.id);
+          continue;
+        }
+        if (r.version !== e.version) {
+          skipped.changed++;
+          refetchNeeded = true;
+          if (e.id === a.currentId) openChanged = true;
+          left.push(e.id);
+          continue;
+        }
+        const patch = { note: escapeNewlines(e.note) };
+        try {
+          const op = await outbox.enqueueRow("tn", e.id, r.version, patch, { book, baseline: { note: r.note } });
+          const res = await waitForOp(op.id);
+          if (res === null) {
+            // Still queued (or the lane is read-only): not confirmed, so not counted.
+            skipped.pending++;
+            left.push(e.id);
+          } else if (res.kind === "ok") {
+            const u = res.updated as TnRow | null;
+            a.applyLocalRowReplacement("tn", u && u.id === e.id && typeof u.version === "number" ? u : { ...r, ...patch });
+            // Like a typed save: an edit takes the note off Approved.
+            a.setStatuses((p) => {
+              if (p[e.id] === undefined) return p;
+              const next = { ...p };
+              delete next[e.id];
+              return next;
+            });
+            saved++;
+            if (e.id === a.currentId) openChanged = true;
+          } else {
+            left.push(e.id);
+            if (res.kind === "conflict") {
+              // The held write is the assistant's, not typing: discard it.
+              void outbox.drop(op.id, { onlyIfStatus: "conflict" }).catch(() => undefined);
+              skipped.changed++;
+              refetchNeeded = true;
+              if (e.id === a.currentId) openChanged = true;
+            } else if (res.kind === "locked") {
+              skipped.locked++;
+            } else {
+              void outbox.drop(op.id, { onlyIfStatus: "failed" }).catch(() => undefined);
+              skipped.failed++;
+            }
+          }
+        } catch {
+          skipped.failed++;
+          left.push(e.id);
+        }
+      }
+    } finally {
+      a.setBusy(false);
+      setRunning(false);
+    }
+    // The open note's editor is keyed on its id plus a reload counter, so a
+    // plain refetch would leave it showing the old text: reload re-seeds it.
+    if (openChanged) a.reload();
+    else if (refetchNeeded || saved > 0) void a.refetch();
+    return { left, count: saved, skipped, stopped: false };
+  }
+
+  /**
+   * Apply what the user ticked on an assistant proposal: edits first, then
+   * approvals, then Not needed, each through the rules above. One result line.
+   * Edits win over an approval of the same note (the caller drops those), so
+   * the stale-version row a later step reads is never one an earlier step
+   * changed.
+   */
+  async function applyAssistant(sel: AssistantSelection): Promise<RapidBulkResult> {
+    const skipped = emptySkips();
+    const parts: string[] = [];
+    let stopped = false;
+    const merge = (r: RunOut) => {
+      for (const k of REASONS) skipped[k] += r.skipped[k];
+      stopped = stopped || r.stopped;
+    };
+    const edits = await runEdits(sel.edits);
+    if (edits.blocked) return { text: t("assistant.apply.busy"), severity: "warning" };
+    if (sel.edits.length > 0) {
+      merge(edits);
+      parts.push(t("assistant.apply.edited", { count: edits.count }));
+    }
+    if (!stopped && sel.approve.length > 0) {
+      const r = await runApprove(sel.approve);
+      if (r.blocked) return { text: t("assistant.apply.busy"), severity: "warning" };
+      merge(r);
+      parts.push(t("flowTranslate.rapid.bulk.approved", { count: r.count }));
+    }
+    if (!stopped && sel.notNeeded.length > 0) {
+      const r = await runNotNeeded(sel.notNeeded);
+      if (r.blocked) return { text: t("assistant.apply.busy"), severity: "warning" };
+      merge(r);
+      parts.push(t("flowTranslate.rapid.bulk.notNeededDone", { count: r.count }));
+    }
+    const out = summarize(parts.join(" "), skipped, stopped);
+    show(out);
+    return out;
   }
 
   /** Bring back the notes the last bulk Not needed set aside. */
@@ -572,6 +745,8 @@ export function useRapidBulk(a: RapidBulkArgs) {
       setUndoable(null);
     },
     approve,
+    applyEdits: runEdits,
+    applyAssistant,
     redo,
     notNeeded,
     undo: undoable && undoable.scope === scope ? () => void undo() : null,

@@ -1302,6 +1302,52 @@ export interface HelpAskErrorBody {
   remainingUsd?: number;
 }
 
+export interface AssistantStatus {
+  enabled: boolean;
+  configured: boolean;
+  keyUsable: boolean;
+  provider: string | null;
+  model: string | null;
+  capUsd: number;
+  remainingUsd: number;
+  canAsk: boolean;
+  /** The caller is an editor or admin in this workspace. */
+  canEdit: boolean;
+}
+export interface AssistantNote {
+  id: string;
+  ref: string;
+  quote: string | null;
+  note: string;
+  state: string | null;
+  checked: boolean;
+}
+export interface AssistantChatBody {
+  lang: string;
+  screen: "rapid_check";
+  context: { book: string; chapter: number; notes: AssistantNote[] };
+  messages: { role: "user" | "assistant"; content: string }[];
+}
+export interface AssistantActions {
+  edits: { id: string; note: string }[];
+  approve: string[];
+  notNeeded: string[];
+}
+export interface AssistantChatResponse {
+  reply: string;
+  actions: AssistantActions;
+  remainingUsd: number;
+}
+/** Error body of /api/assistant/chat (read it from ApiError.body). */
+export interface AssistantErrorBody {
+  code?: string;
+  resetsAt?: string;
+  remainingUsd?: number;
+  reason?: string;
+  /** assistant_failed: "truncated" | "unparseable" | "empty_answer" | a provider kind. */
+  kind?: string;
+}
+
 export interface AiProviderSettings {
   provider: string;
   model: string | null;
@@ -2481,6 +2527,22 @@ export const api = {
     }),
   setHelpChatEnabled: (enabled: boolean) =>
     request<{ enabled: boolean }>(`/api/help/settings`, {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    }),
+  // ── In-app assistant chat (api/src/assistant) ──
+  getAssistantStatus: (lang?: string) =>
+    request<AssistantStatus>(`/api/assistant/status${lang ? `?lang=${encodeURIComponent(lang)}` : ""}`),
+  // One model call per message; the server never writes.
+  assistantChat: (body: AssistantChatBody, signal?: AbortSignal) =>
+    request<AssistantChatResponse>(`/api/assistant/chat`, {
+      method: "POST",
+      body: JSON.stringify(body),
+      timeoutMs: 60_000,
+      signal,
+    }),
+  setAssistantSettings: (enabled: boolean) =>
+    request<{ enabled: boolean }>(`/api/assistant/settings`, {
       method: "PUT",
       body: JSON.stringify({ enabled }),
     }),

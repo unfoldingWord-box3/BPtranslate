@@ -21,6 +21,12 @@ import { RapidColumnHeader } from "./RapidColumnHeader";
 import { SCRIPTURE_FONT_STACK } from "../../theme";
 import { arabicFontSize, startsArabicScript } from "../../lib/arabicScriptSize";
 import { RapidBulkBar, RapidBulkResultLine, type RapidBulkProps } from "./RapidBulkBar";
+import Button from "@mui/material/Button";
+import AssistantPanel, { type AssistantApplyResult } from "../../assistant/AssistantPanel";
+import { assistantVisible, useAssistantStatus } from "../../assistant/useAssistantStatus";
+import type { NoteInfo } from "../../assistant/ProposalCard";
+import type { AssistantActions } from "../../sync/api";
+import { buildRapidNotes, type RapidAssistantRow } from "./rapidAssistant";
 
 export interface RapidCheckRow {
   id: string;
@@ -42,6 +48,16 @@ export interface RapidCheckRow {
   approvable: boolean;
   /** Not the open row, and it holds unsaved typing: open it to save first. */
   blocked: boolean;
+}
+
+/** What the in-app assistant (#858) needs from the screen. */
+export interface RapidAssistantProps {
+  chapter: number;
+  /** The chapter's notes that are not set aside, in screen order, read at send time. */
+  rows: () => RapidAssistantRow[];
+  describeId: (id: string) => NoteInfo | null;
+  /** `versions` is the snapshot buildRapidNotes captured when the proposal was requested. */
+  onApply: (selection: AssistantActions, versions: ReadonlyMap<string, number>) => Promise<AssistantApplyResult>;
 }
 
 export interface NotesRapidCheckProps {
@@ -100,6 +116,8 @@ export interface NotesRapidCheckProps {
   onStopEdit: () => void;
   /** Checkbox multi-select and its bulk verbs (#829). */
   bulk: RapidBulkProps;
+  /** The assistant chat; null hides it. */
+  assistant: RapidAssistantProps | null;
 }
 
 const INSPIRE = "#31ADE3";
@@ -155,8 +173,9 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
     onStartEdit,
     onStopEdit,
     bulk,
+    assistant,
   } = props;
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const theme = useTheme();
   const dark = theme.palette.mode === "dark";
   const { ok, skip } = theme.palette.flows;
@@ -254,6 +273,12 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
     scrollRef.current?.focus({ preventScroll: true });
   };
 
+  // The assistant chat (#858): its button shows only to people who can apply
+  // what it proposes, and only when an admin has switched it on.
+  const [assistantOpen, setAssistantOpen] = useState(false);
+  const assistantStatus = useAssistantStatus(i18n.language, assistantOpen);
+  const assistantOn = assistant != null && assistantVisible(assistantStatus.status);
+
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (e.defaultPrevented) return;
     const target = e.target as HTMLElement;
@@ -348,7 +373,8 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
   };
 
   return (
-    <Box sx={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", width: "100%", maxWidth: 1440, mx: "auto" }}>
+    <Box sx={{ flex: 1, minHeight: 0, display: "flex", width: "100%" }}>
+    <Box sx={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", maxWidth: 1440, mx: "auto" }}>
       <Box
         ref={scrollRef}
         role="region"
@@ -690,6 +716,20 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
           })}
         </Box>
       </Box>
+      {assistantOn && (
+        <Box sx={{ display: "flex", justifyContent: "flex-end", paddingInline: 2.5, paddingBlock: 0.5, bgcolor: "background.paper", borderBlockStart: "1px solid", borderColor: "divider" }}>
+          <Button
+            size="small"
+            variant={assistantOpen ? "contained" : "outlined"}
+            onClick={() => setAssistantOpen((o) => !o)}
+            aria-pressed={assistantOpen}
+            data-rapid-assistant-button=""
+            sx={{ minHeight: 32, borderRadius: "12px", fontWeight: 700 }}
+          >
+            {t("assistant.open")}
+          </Button>
+        </Box>
+      )}
       {bulk.result && (
         <RapidBulkResultLine
           result={bulk.result}
@@ -714,6 +754,24 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
       ) : (
         footer
       )}
+    </Box>
+    {assistant && (
+      <AssistantPanel
+        open={assistantOpen}
+        onClose={() => setAssistantOpen(false)}
+        lang={i18n.language}
+        screen="rapid_check"
+        status={assistantStatus.status}
+        refreshStatus={assistantStatus.refresh}
+        resetKey={`${book}:${assistant.chapter}`}
+        buildContext={() => {
+          const { notes, versions } = buildRapidNotes(assistant.rows(), new Set(selectedIds));
+          return { book, chapter: assistant.chapter, notes, snapshot: versions };
+        }}
+        describeId={assistant.describeId}
+        onApply={(sel, snapshot) => assistant.onApply(sel, snapshot as ReadonlyMap<string, number>)}
+      />
+    )}
     </Box>
   );
 }
