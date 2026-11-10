@@ -197,7 +197,18 @@ export default function AdminDraftScorecardScreen({ role, me }: FlowScreenContex
             ? dash
             : t("adminPages.scorecard.pctCount", { pct: pct(c.unchangedPct), n: c.unchanged })}
         </TableCell>
-        <TableCell sx={cellSx}>{c.medianSimilarity == null ? dash : c.medianSimilarity.toFixed(2)}</TableCell>
+        <TableCell sx={cellSx}>
+          {c.medianSimilarity == null ? (
+            dash
+          ) : c.approximateSimilarity > 0 ? (
+            // Some notes were too long to compare exactly (api/src/draftScorecard.ts, similarity()).
+            <Tooltip title={t("adminPages.scorecard.approxTooltip", { n: c.approximateSimilarity })}>
+              <span tabIndex={0}>≈ {c.medianSimilarity.toFixed(2)}</span>
+            </Tooltip>
+          ) : (
+            c.medianSimilarity.toFixed(2)
+          )}
+        </TableCell>
         <TableCell sx={cellSx}>
           {c.closingPeriod.eligible === 0
             ? dash

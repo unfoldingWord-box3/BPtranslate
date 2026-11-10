@@ -53,7 +53,7 @@ Good to know:
    - **Draft was English**: the AI draft was the English note, not translated. These notes are left out of the columns to the right. A note that is the same as the English for a good reason, such as one that holds only links, is counted here too.
    - **Compared**: the notes the other columns are about.
    - **Approved unchanged**: the share approved exactly as the AI wrote them.
-   - **Median similarity**: how much of a draft was kept, from 0 (all rewritten) to 1 (unchanged). A very long note that was rewritten end to end gets an approximate similarity, to keep the page fast.
+   - **Median similarity**: how much of a draft was kept, from 0 (all rewritten) to 1 (unchanged). When the changed part of a note is longer than 2,000 characters, only its first 2,000 characters are compared, so that note's similarity is approximate and the chapter's median is marked ≈. Point at the ≈ to see how many notes it covers.
    - **Period added after ]**: of the drafts that end with ] and no period, the share where the editor had to add the period.
    - **Context pack**: the version of the guidance the AI was given, with how many notes used it. Hover over it to see the full name. **Not pinned (latest pack at run time, if any)** means the run was not tied to one version: it used the latest guidance when it ran, or none if no guidance had been exported yet. **Run not on record** means the AI run has been cleared. Each draft is matched to its AI run by time, so in rare cases where runs overlapped a draft can be credited to the wrong run.
 
