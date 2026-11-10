@@ -302,7 +302,9 @@ export function useRapidBulk(a: RapidBulkArgs) {
           continue;
         }
         try {
-          const updated = await api.trashNote(id, book);
+          // Pinned to the version on screen (#837): a peer's edit that lands
+          // after the re-read above is refused, not set aside unseen.
+          const updated = await api.trashNote(id, book, r.version);
           prev[id] = a.statuses[id];
           a.applyLocalRowReplacement("tn", updated);
           a.setStatuses((p) => ({ ...p, [id]: "skipped" }));
@@ -316,7 +318,8 @@ export function useRapidBulk(a: RapidBulkArgs) {
             left.push(...ids.slice(i + 1));
             break;
           }
-          skipped[kind === "changed" || kind === "noDraft" ? "failed" : kind]++;
+          skipped[kind === "noDraft" ? "failed" : kind]++;
+          if (kind === "changed") refetchNeeded = true;
         }
       }
     } finally {

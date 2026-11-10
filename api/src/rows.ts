@@ -1256,31 +1256,38 @@ async function setTqTranslationState(
 // (standing authorship is whoever wrote the note content). The audit action is
 // 'trash'/'untrash' — deliberately NOT in the history version filter, so these
 // flips don't surface as duplicate-version rows in the history dialog.
+// expected: the version the caller saw (from If-Match, #837); the flip lands
+// only if the row is still at it, and so does the audit entry. null = no check.
 async function setTnTrashed(
   env: Env,
   id: string,
   book: string,
   userId: number | null,
   trashed: boolean,
+  expected: number | null = null,
 ): Promise<TnRow | null> {
   const now = Math.floor(Date.now() / 1000);
   const action = trashed ? "trash" : "untrash";
+  // Each statement binds exactly the parameters it references (D1 rejects an
+  // unreferenced ?N), so the pin and its value come and go together.
+  const pin = (n: number) => (expected !== null ? ` AND version = ?${n}` : "");
+  const pinValue = expected !== null ? [expected] : [];
   const [updateRes] = await env.DB.batch([
     env.DB
       .prepare(
         `UPDATE tn_rows
            SET trashed_at = ?1, updated_at = ?2
-         WHERE id = ?3 AND deleted_at IS NULL${bookClause(4)}`,
+         WHERE id = ?3 AND deleted_at IS NULL${bookClause(4)}${pin(5)}`,
       )
-      .bind(trashed ? now : null, now, id, book),
+      .bind(trashed ? now : null, now, id, book, ...pinValue),
     env.DB
       .prepare(
         `INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action)
          SELECT 'tn', ?1, book, ?2, version, version, ?3
            FROM tn_rows
-          WHERE id = ?1 AND deleted_at IS NULL${bookClause(4)}`,
+          WHERE id = ?1 AND deleted_at IS NULL${bookClause(4)}${pin(5)}`,
       )
-      .bind(id, userId ?? null, action, book),
+      .bind(id, userId ?? null, action, book, ...pinValue),
   ]);
   if (!updateRes.meta.changes) return null;
   return env.DB.prepare(`SELECT * FROM tn_rows WHERE id = ?1${bookClause(2)}`).bind(id, book).first<TnRow>();
@@ -1534,16 +1541,44 @@ rows.post("/tn/:id/keep", requireEditor, async (c) => {
 // and gains a Restore button. Reversible via /restore; finalized to a
 // permanent deleted_at tombstone by the nightly 06:00 UTC job. Refused while a
 // translate run will write this note (#602); otherwise
-// non-version-bumping, like /preserve. No If-Match — idempotent state flip.
+// non-version-bumping, like /preserve, and idempotent.
+// Optional If-Match (#837): the version the person was shown. The note is set
+// aside only if it is still at that version; otherwise 409 version_mismatch
+// with the row as it is now (the /validate shape), so a colleague's edit is
+// never set aside unseen. Omitted: no check, as before. The web app's Not
+// needed buttons send it; the classic editor and Review queue do not.
 rows.post("/tn/:id/trash", requireEditor, async (c) => {
   const id = c.req.param("id");
   const book = c.req.query("book");
   if (!book) return c.json({ error: "book_required" }, 400);
+  const ifMatch = c.req.header("if-match");
+  const expected = parseIfMatch(ifMatch);
+  if (ifMatch !== undefined && expected === null) return c.json({ error: "invalid_if_match" }, 400);
   const userId = currentUserId(c);
   const lock = await translateLockForTnId(c.env, id, book);
   if (lock) return c.json(lockedResponseBody(lock), 409);
-  const updated = await setTnTrashed(c.env, id, book, userId, true);
-  if (!updated) return c.json({ error: "not_found" }, 404);
+  const updated = await setTnTrashed(c.env, id, book, userId, true, expected);
+  if (!updated) {
+    if (expected !== null) {
+      const fresh = await c.env.DB.prepare(`SELECT * FROM tn_rows WHERE id = ?1${bookClause(2)}`)
+        .bind(id, book)
+        .first<TnRow>();
+      if (fresh && !fresh.deleted_at && fresh.version !== expected) {
+        logRowConflict(c, {
+          kind: "tn",
+          rowId: id,
+          book,
+          action: "trash",
+          userId,
+          expectedVersion: expected,
+          fields: ["trashed_at"],
+          current: fresh as unknown as Record<string, unknown>,
+        });
+        return c.json({ error: "version_mismatch", current: fresh }, 409);
+      }
+    }
+    return c.json({ error: "not_found" }, 404);
+  }
   c.executionCtx.waitUntil(
     broadcastChapter(c.env, updated.book, updated.chapter, { type: "row.upserted", kind: "tn", row: updated }),
   );

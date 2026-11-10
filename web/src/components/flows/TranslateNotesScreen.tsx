@@ -1692,7 +1692,9 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
     setBusy(true);
     setNotice(null);
     try {
-      const updated = await api.trashNote(row.id, book);
+      // Pinned to the version on screen (#837): a colleague's edit since then
+      // is refused with a 409 instead of being set aside unseen.
+      const updated = await api.trashNote(row.id, book, row.version);
       applyLocalRowReplacement("tn", updated);
       setStatuses((prev) => ({ ...prev, [row.id]: "skipped" }));
       setEditing(false);
@@ -1716,6 +1718,13 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
       if (err instanceof ApiError && isChapterLockedBody(err.body)) {
         setChapterLock({ body: err.body, rowId: row.id });
         say(t("flowTranslate.noteLockedByTranslate"));
+        return;
+      }
+      if (err instanceof ApiError && err.status === 409) {
+        // The open note: bump the reload nonce too, so the editor re-hydrates
+        // from the reloaded row and shows the colleague's text (reloadRow).
+        say(t("flowTranslate.rapid.changedElsewhere"));
+        void refetch().then(() => setReloadNonce((n) => n + 1));
         return;
       }
       say(

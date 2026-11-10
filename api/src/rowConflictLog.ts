@@ -8,7 +8,7 @@ export interface RowConflictInput {
   kind: string;
   rowId: string;
   book: string | null;
-  action: "patch" | "delete" | "validate";
+  action: "patch" | "delete" | "validate" | "trash";
   userId: number | null;
   // null: a validate that pinned only the state, not the version.
   expectedVersion: number | null;
