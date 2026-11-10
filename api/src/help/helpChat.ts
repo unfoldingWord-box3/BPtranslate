@@ -11,10 +11,12 @@
 // transports: those return no cache-token usage and are shaped for one-shot
 // batch output. Error classification and secret scrubbing ARE reused.
 //
-// UNTESTED AGAINST A LIVE KEY: the openai and xai chat-completions adapter and
-// the gemini adapter have only been exercised against stubbed responses. Claude
-// is the same SDK the translate runner already uses. Run each provider once
-// with a real key before turning the assistant on for an org that uses it.
+// LIVE-KEY STATUS: the gemini adapter ran against a real key on 2026-11-10
+// (gemini-3.8-flash, the editing assistant's json mode, issue #858); help's
+// plain-text gemini call has not. The openai and xai chat-completions adapter
+// have only been exercised against stubbed responses. Claude is the same SDK
+// the translate runner already uses. Run each untested provider once with a
+// real key before turning an assistant on for an org that uses it.
 
 import Anthropic from "@anthropic-ai/sdk";
 import { classifyProviderError, scrubSecrets, GEMINI_API_BASE } from "../translate/llm.ts";
