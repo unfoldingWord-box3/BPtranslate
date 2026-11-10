@@ -98,7 +98,7 @@ test("buildRapidNotes: captures each sent note's approval state, null when it ha
   assert.equal(states.has("x"), false);
 });
 
-test("stillAsProposed: a version or approval-state change is 'changed', a row gone from the screen is 'missing' (#860)", () => {
+test("stillAsProposed: a version change is 'changed', an approval-state change is 'stateChanged' (#878), a row gone from the screen is 'missing' (#860)", () => {
   const snap = {
     versions: new Map([["same", 3], ["nullState", 3], ["moved", 3], ["approved", 3], ["gone", 3]]),
     states: new Map([["same", "ai_draft"], ["nullState", null], ["moved", "ai_draft"], ["approved", "ai_draft"], ["gone", "ai_draft"]]),
