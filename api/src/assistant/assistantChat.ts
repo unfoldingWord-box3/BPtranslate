@@ -68,10 +68,7 @@ export type ParsedActions =
   | { ok: true; reply: string; actions: AssistantActions }
   | { ok: false; kind: "unparseable" | "empty_answer" };
 
-function jsonObjectOf(text: string): Record<string, unknown> | null {
-  let t = text.trim();
-  const fence = t.match(/^```(?:json)?[ \t]*\r?\n?([\s\S]*?)\r?\n?```$/i);
-  if (fence) t = fence[1].trim();
+function parseObject(t: string): Record<string, unknown> | null {
   if (!t.startsWith("{")) return null;
   try {
     const v = JSON.parse(t);
@@ -79,6 +76,23 @@ function jsonObjectOf(text: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+function jsonObjectOf(text: string): Record<string, unknown> | null {
+  let t = text.trim();
+  const fence = t.match(/^```(?:json)?[ \t]*\r?\n?([\s\S]*?)\r?\n?```$/i);
+  if (fence) t = fence[1].trim();
+  const strict = parseObject(t);
+  if (strict) return strict;
+  // A model sometimes adds a line before or after the fence, or prose around
+  // a bare object: try a single fence anywhere in the reply, then the first
+  // "{" through the last "}". Two fences are ambiguous and fall through.
+  const fences = [...text.matchAll(/```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n?```/gi)];
+  const fenced = fences.length === 1 ? parseObject(fences[0][1].trim()) : null;
+  if (fenced) return fenced;
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  return start >= 0 && end > start ? parseObject(text.slice(start, end + 1)) : null;
 }
 
 function idList(v: unknown, known: Set<string>): string[] {
@@ -94,7 +108,13 @@ export function parseActions(text: string, context: AssistantContext): ParsedAct
   const reply = typeof obj.reply === "string" ? obj.reply.trim() : "";
   if (reply === "") return { ok: false, kind: "empty_answer" };
 
-  const sent = new Map(context.notes.map((n) => [n.id, n.note]));
+  // Notes store a line break as the two characters \n. A model that writes
+  // a real line break means the same thing, so store it the stored way;
+  // otherwise an untouched multi-line note would come back as an "edit".
+  // Older rows can hold real line breaks, so the sent text is compared in the
+  // same form (#863).
+  const storedForm = (s: string) => s.replace(/\r\n|\r|\n/g, "\\n");
+  const sent = new Map(context.notes.map((n) => [n.id, storedForm(n.note)]));
   const known = new Set(sent.keys());
 
   const edits = new Map<string, string>();
@@ -104,10 +124,7 @@ export function parseActions(text: string, context: AssistantContext): ParsedAct
       const note = (e as { note?: unknown } | null)?.note;
       if (typeof id !== "string" || typeof note !== "string" || !known.has(id)) continue;
       edits.delete(id); // last edit wins
-      // Notes store a line break as the two characters \n. A model that writes
-      // a real line break means the same thing, so store it the stored way;
-      // otherwise an untouched multi-line note would come back as an "edit".
-      const stored = note.replace(/\r\n|\r|\n/g, "\\n");
+      const stored = storedForm(note);
       if (stored === sent.get(id) || stored.length > MAX_PROPOSED_NOTE_CHARS) continue;
       edits.set(id, stored);
     }

@@ -34,6 +34,7 @@ import { isApprovableRow } from "../../lib/reviewApproval";
 import { isAiProviderNotConfigured } from "../../lib/aiProviderErrors";
 import { redoOutcome } from "../../lib/applySkipped";
 import { escapeNewlines, waitForOp } from "./translateShared";
+import { stillAsProposed } from "./rapidAssistant";
 
 type CardStatus = "approved" | "skipped";
 
@@ -56,6 +57,8 @@ interface RunOut {
   stopped: boolean;
   /** Another bulk action (or a save) was running: nothing was tried. */
   blocked?: boolean;
+  /** Edits sent to the outbox but not confirmed before the wait ran out: they may still save. */
+  unconfirmed?: number;
 }
 
 /** What the assistant's Apply sends (issue #858): edits carry the version the proposal was made against. */
@@ -65,6 +68,8 @@ export interface AssistantSelection {
   notNeeded: string[];
   /** Each note's version when the proposal was asked for. */
   versions: ReadonlyMap<string, number>;
+  /** Each note's translation_state then: approving does not bump the version. */
+  states: ReadonlyMap<string, string | null>;
 }
 
 export interface RapidBulkArgs {
@@ -409,6 +414,7 @@ export function useRapidBulk(a: RapidBulkArgs) {
     const skipped = emptySkips();
     const left: string[] = [];
     let saved = 0;
+    let unconfirmed = 0;
     let refetchNeeded = false;
     let openChanged = false;
     try {
@@ -449,8 +455,10 @@ export function useRapidBulk(a: RapidBulkArgs) {
           const op = await outbox.enqueueRow("tn", e.id, r.version, patch, { book, baseline: { note: r.note } });
           const res = await waitForOp(op.id);
           if (res === null) {
-            // Still queued (or the lane is read-only): not confirmed, so not counted.
-            skipped.pending++;
+            // Still queued (or the lane is read-only): not confirmed, so not
+            // counted as edited. It is not a skip either, since the outbox may
+            // still send it, so it gets its own line (#860).
+            unconfirmed++;
             left.push(e.id);
           } else if (res.kind === "ok") {
             const u = res.updated as TnRow | null;
@@ -492,7 +500,7 @@ export function useRapidBulk(a: RapidBulkArgs) {
     // plain refetch would leave it showing the old text: reload re-seeds it.
     if (openChanged) a.reload();
     else if (refetchNeeded || saved > 0) void a.refetch();
-    return { left, count: saved, skipped, stopped: false };
+    return { left, count: saved, skipped, stopped: false, unconfirmed };
   }
 
   /**
@@ -507,42 +515,49 @@ export function useRapidBulk(a: RapidBulkArgs) {
     const skipped = emptySkips();
     const parts: string[] = [];
     let stopped = false;
+    const addSkips = (s: Record<SkipReason, number>) => {
+      for (const k of REASONS) skipped[k] += s[k];
+    };
     const merge = (r: RunOut) => {
-      for (const k of REASONS) skipped[k] += r.skipped[k];
+      addSkips(r.skipped);
       stopped = stopped || r.stopped;
     };
     // Approve and Not needed act on the note as it is now, so a note changed
-    // since the assistant read it is skipped, like an edit. The open note with
+    // since the assistant read it (its version, or its approval state, which
+    // approving does not version) is skipped, like an edit. A note no longer
+    // on the screen is a failure, as in the plain runners. The open note with
     // unsaved typing is skipped too: plain Approve would save and approve that
-    // typing, which the proposal never showed.
-    const unchanged = (ids: string[]) =>
-      ids.filter((id) => {
-        const v = sel.versions.get(id);
-        if (v === undefined || a.rowById.get(id)?.version !== v) {
-          skipped.changed++;
-          return false;
-        }
-        return true;
-      });
-    const approveIds = unchanged(sel.approve).filter((id) => {
+    // typing, which the proposal never showed. Each step's skips are counted
+    // into its own tally and reported only if the run reaches that step.
+    const unchanged = (ids: string[], into: Record<SkipReason, number>) => {
+      const r = stillAsProposed(ids, sel, a.rowById);
+      into.changed += r.changed;
+      into.failed += r.missing;
+      return r.ids;
+    };
+    const approveSkips = emptySkips();
+    const approveIds = unchanged(sel.approve, approveSkips).filter((id) => {
       if (id === a.currentId && a.hasDiff) {
-        skipped.unsaved++;
+        approveSkips.unsaved++;
         return false;
       }
       return true;
     });
-    const notNeededIds = unchanged(sel.notNeeded);
+    const notNeededSkips = emptySkips();
+    const notNeededIds = unchanged(sel.notNeeded, notNeededSkips);
     const noRun: RunOut = { left: [], count: 0, skipped: emptySkips(), stopped: false };
     const edits = await runEdits(sel.edits);
     if (edits.blocked) return { text: t("assistant.apply.busy"), severity: "warning", retryable: true };
     if (sel.edits.length > 0) {
       merge(edits);
       parts.push(t("assistant.apply.edited", { count: edits.count }));
+      if (edits.unconfirmed) parts.push(t("assistant.apply.stillSaving", { count: edits.unconfirmed }));
     }
     if (!stopped && sel.approve.length > 0) {
       // All of them skipped above: still report the count (0) with the reasons.
       const r = approveIds.length > 0 ? await runApprove(approveIds) : noRun;
       if (r.blocked) return { text: t("assistant.apply.busy"), severity: "warning" };
+      addSkips(approveSkips);
       merge(r);
       parts.push(t("flowTranslate.rapid.bulk.approved", { count: r.count }));
     }
@@ -550,10 +565,12 @@ export function useRapidBulk(a: RapidBulkArgs) {
       // All of them skipped above: still report the count (0) with the reasons.
       const r = notNeededIds.length > 0 ? await runNotNeeded(notNeededIds) : noRun;
       if (r.blocked) return { text: t("assistant.apply.busy"), severity: "warning" };
+      addSkips(notNeededSkips);
       merge(r);
       parts.push(t("flowTranslate.rapid.bulk.notNeededDone", { count: r.count }));
     }
     const out = summarize(parts.join(" "), skipped, stopped);
+    if (edits.unconfirmed) out.severity = "warning";
     show(out);
     return out;
   }

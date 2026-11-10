@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MAX_NOTES, MAX_NOTE_CHARS, buildRapidNotes, editsWithVersions } from "./rapidAssistant.ts";
+import { MAX_NOTES, MAX_NOTE_CHARS, buildRapidNotes, editsWithVersions, stillAsProposed } from "./rapidAssistant.ts";
 
 const row = (id, o = {}) => ({ id, chapter: 2, verse: 3, quote: "q", note: "text " + id, version: 7, translation_state: "ai_draft", ...o });
 
@@ -87,4 +87,32 @@ test("buildRapidNotes: over the byte budget, a checked note is kept and the rest
   assert.equal(omitted.tooManyRefs.length, omitted.tooMany);
   assert.ok(!omitted.tooManyRefs.includes("2:100"));
   assert.equal(omitted.tooLong, 0);
+});
+
+test("buildRapidNotes: captures each sent note's approval state, null when it has none (#860)", () => {
+  const rows = [row("a", { translation_state: "validated" }), row("b", { translation_state: undefined }), row("x", { note: "x".repeat(MAX_NOTE_CHARS + 1) })];
+  const { states } = buildRapidNotes(rows, new Set());
+  assert.equal(states.get("a"), "validated");
+  assert.equal(states.get("b"), null);
+  assert.equal(states.has("x"), false);
+});
+
+test("stillAsProposed: a version or approval-state change is 'changed', a row gone from the screen is 'missing' (#860)", () => {
+  const snap = {
+    versions: new Map([["same", 3], ["nullState", 3], ["moved", 3], ["approved", 3], ["gone", 3]]),
+    states: new Map([["same", "ai_draft"], ["nullState", null], ["moved", "ai_draft"], ["approved", "ai_draft"], ["gone", "ai_draft"]]),
+  };
+  const rowById = new Map([
+    ["same", { version: 3, translation_state: "ai_draft" }],
+    // A row with no state field matches the null that was sent.
+    ["nullState", { version: 3 }],
+    ["moved", { version: 4, translation_state: "ai_draft" }],
+    // Approving does not bump the version, so only the state shows it.
+    ["approved", { version: 3, translation_state: "validated" }],
+    ["unsent", { version: 1, translation_state: null }],
+  ]);
+  const r = stillAsProposed(["same", "nullState", "moved", "approved", "gone", "unsent"], snap, rowById);
+  assert.deepEqual(r.ids, ["same", "nullState"]);
+  assert.equal(r.changed, 3); // moved, approved, and unsent (nothing to check it against)
+  assert.equal(r.missing, 1); // gone
 });

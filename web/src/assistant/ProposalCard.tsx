@@ -2,6 +2,7 @@
 // Not needed rows, each with a checkbox, and an Apply button. Knows nothing
 // about the screen it came from: labels and "before" text come from describeId.
 
+import { useMemo } from "react";
 import { Alert, Box, Button, Checkbox, Stack, Typography } from "@mui/material";
 import { alpha, useTheme } from "@mui/material/styles";
 import { useTranslation } from "react-i18next";
@@ -21,13 +22,16 @@ export interface NoteInfo {
   before: string;
 }
 
+// The word diff is O(m·n), so it is computed only when the texts change, not
+// on every render of the panel (each keystroke in the chat box is one, #860).
 function DiffText({ before, proposed }: { before: string; proposed: string }) {
   const theme = useTheme();
   const del = alpha(theme.palette.error.main, theme.palette.mode === "dark" ? 0.3 : 0.15);
   const add = alpha(theme.palette.success.main, theme.palette.mode === "dark" ? 0.3 : 0.2);
+  const ops = useMemo(() => noteDiff(before, proposed), [before, proposed]);
   return (
     <Typography component="div" variant="body2" dir="auto" sx={{ whiteSpace: "pre-wrap", textAlign: "start", overflowWrap: "anywhere" }}>
-      {noteDiff(before, proposed).map((op, i) =>
+      {ops.map((op, i) =>
         op.type === "eq" ? (
           <span key={i}>{op.text}</span>
         ) : op.type === "del" ? (
