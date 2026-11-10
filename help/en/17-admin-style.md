@@ -31,6 +31,7 @@ Use the list on the left to jump to a section. After you change a section, press
 - Every rule is **Off** until an admin switches it **On**. Switch a rule on only after the language's editor has confirmed it.
 - A rule changes drafts that arrive after you switch it on. Drafts already in the project stay as they are.
 - Scripture quotes in bold and the Quote column are never changed.
+- The closing-period rule adds nothing when the words inside the final brackets already end with a punctuation mark (… ؟ . ! ? or ؛, so ... too), so the rule never adds a second mark.
 - The AI's original wording is saved with each draft's record, so the fixes can be checked later.
 - If a draft still contains the English phrase "If it would be helpful in your language", the app notes this in the draft's record for later review. It does not rewrite the phrase, and nothing on screen shows this yet.
 

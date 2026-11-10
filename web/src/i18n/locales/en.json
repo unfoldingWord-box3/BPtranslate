@@ -580,7 +580,7 @@
       "note": "Anywhere in the text.",
       "endOfNote": "Only at the end of the text."
     },
-    "finalBracketPeriodDetail": "When the text ends with ] (for example an alternate translation), a period is added after it, unless the words inside the brackets end with … or ؟.",
+    "finalBracketPeriodDetail": "When the text ends with ] (for example an alternate translation), a period is added after it, unless the words inside the brackets already end with a punctuation mark: … ؟ . ! ? or ؛ (so ... too).",
     "on": "On",
     "off": "Off",
     "toggleAria": "Switch rule on or off: {{rule}}",
