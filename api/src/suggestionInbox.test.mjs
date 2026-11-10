@@ -21,7 +21,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 
-import { tokenize, noteChanges, changeKey, MIN_HITS, MIN_CHAPTERS, suggestionInbox } from "./suggestionInbox.ts";
+import { tokenize, noteChanges, changeKey, buildInbox, MIN_HITS, MIN_CHAPTERS, suggestionInbox } from "./suggestionInbox.ts";
 import { houseStyleForProposal, loadEnabledHouseStyleRules } from "./houseStyle.ts";
 
 // (مُكيَّف) with its marks in both orders: NFC puts the fatha before the shadda.
@@ -353,4 +353,66 @@ test("an editor gets 403 on every inbox route", async () => {
 test("an unknown book is refused", async () => {
   const h = fixture();
   assert.equal((await h.call("GET", "/XYZ")).status, 400);
+});
+
+// ── 3. Homes and coverage, on the pure builder ──────────────────────────────
+
+test("noteChanges: a change at the very start of a note never throws and stays one change", () => {
+  assert.deepEqual(noteChanges("كلمة أخرى", "…").map((c) => c.key), [changeKey("change", "كلمة أخرى", "…")]);
+  assert.deepEqual(noteChanges("كلمة", ".").map((c) => c.key), [changeKey("change", "كلمة", ".")]);
+});
+
+const emptyCtx = () => ({ rules: [], terms: [], templates: [], commonIssues: "", rejected: new Set() });
+const repeated = (draft, final) =>
+  Array.from({ length: 10 }, (_, i) => ({ id: `x${i}`, chapter: 1 + (i % 3), draftNote: draft(i), finalNote: final(i) }));
+
+test("home: words that come from a note template → template", () => {
+  const rows = repeated((i) => `انظر الملاحظة السابقة هنا ${i}`, (i) => `انظر الشرح هنا ${i}`);
+  const ctx = { ...emptyCtx(), templates: ["قد تحتاج أن انظر الملاحظة السابقة في هذا الموضع."] };
+  const r = buildInbox(rows, ctx);
+  assert.equal(r.suggestions.length, 1);
+  assert.equal(r.suggestions[0].home, "template");
+  assert.equal(r.suggestions[0].rule, null);
+  // Without the template it is a term-sized change.
+  assert.equal(buildInbox(rows, emptyCtx()).suggestions[0].home, "term");
+});
+
+test("home: a bare word deleted is wording → Common issues; the copied line then hides the card", () => {
+  const rows = repeated((i) => `مهم جدا ${i}`, (i) => `مهم ${i}`);
+  const r = buildInbox(rows, emptyCtx());
+  assert.equal(r.suggestions.length, 1);
+  assert.equal(r.suggestions[0].home, "common_issues");
+  assert.equal(r.suggestions[0].rule, null);
+  // The line the page copies for this card (AdminSuggestionInboxScreen copyText).
+  const covered = buildInbox(rows, { ...emptyCtx(), commonIssues: "## مشكلات\n- «جدا» ← ∅\n" });
+  assert.equal(covered.suggestions.length, 0);
+  assert.equal(covered.excluded.commonIssues, 1);
+});
+
+test("home: a punctuation-only Common issues card is hidden by its copied line", () => {
+  // Editors swap a semicolon for a comma in only 10 of 30 drafts that had
+  // one: under half, so not a rule.
+  const rows = [
+    ...repeated((i) => `قال؛ ثم ذهب ${i}`, (i) => `قال، ثم ذهب ${i}`),
+    ...Array.from({ length: 20 }, (_, i) => ({ id: `k${i}`, chapter: 5, draftNote: `قال؛ ثم ${i}`, finalNote: `قال؛ ثم ${i}` })),
+  ];
+  const r = buildInbox(rows, emptyCtx());
+  assert.equal(r.suggestions.length, 1);
+  assert.equal(r.suggestions[0].opportunities, 30);
+  assert.equal(r.suggestions[0].home, "common_issues");
+  const covered = buildInbox(rows, { ...emptyCtx(), commonIssues: "- «؛» ← «،»" });
+  assert.equal(covered.suggestions.length, 0);
+});
+
+test("bound: a 3,000-row book is worked out well inside a Worker request", () => {
+  const rows = Array.from({ length: 3000 }, (_, i) => {
+    const words = Array.from({ length: 40 }, (_, k) => `كلمة${(i * 7 + k) % 97}`).join(" ");
+    return { id: `b${i}`, chapter: 1 + (i % 24), draftNote: `${words} ترجمة بديلة: [نص ${i}]`, finalNote: `${words} تعديل ترجمة بديلة: [نص ${i}].` };
+  });
+  const t0 = performance.now();
+  const r = buildInbox(rows, emptyCtx());
+  const ms = performance.now() - t0;
+  console.log(`buildInbox: 3,000 rows in ${ms.toFixed(0)} ms`);
+  assert.equal(r.scanned.compared, 3000);
+  assert.ok(ms < 10_000, `${ms} ms`);
 });

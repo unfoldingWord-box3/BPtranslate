@@ -36,7 +36,8 @@
 //             - a change whose before has a word and whose after is only
 //               punctuation is split into a deletion plus an insertion, so a
 //               note where the editor deleted "(مُكيَّف)" AND added the closing
-//               period counts for both.
+//               period counts for both (not at the very start of the note,
+//               where the insertion has no token before it to anchor on).
 //             - dropped: either side longer than MAX_CHANGE_TOKENS tokens (a
 //               rewrite, not a repeatable correction), a change that crosses a
 //               line break, and a change inside a **bold** Scripture quote.
@@ -57,12 +58,14 @@
 //             term's target (only when that side has a word); covered by a
 //             template: some note template's text contains after (two words
 //             or more); already a Common issues line: the Common issues text
-//             contains before (with a word) and after; already a lesson:
+//             contains before (with a word) and after, or the line the page
+//             copies («before» → «after»); already a lesson:
 //             stubbed until lessons exist (#817), see coveredByLesson.
 //   home      (suggestedHome) house_style when the change is mechanical (at
-//             most one word on each side and, when both have one, the same
-//             word respelled: equal without combining marks, or one letter
-//             different), a rule can express it (candidateRule, compileRule
+//             most one word on each side; when both have one, the same word
+//             respelled: equal without combining marks, or one letter
+//             different; a word deleted alone, with no punctuation around
+//             it, is wording, not mechanics), a rule can express it (candidateRule, compileRule
 //             accepts it, and it reproduces the change on an example), and
 //             editors made it in at least half its opportunities (a rule fires
 //             on every one). Else template when before (two words or more)
@@ -351,7 +354,7 @@ function buildChange(
     if (d0 > 0) {
       d0--;
       f0--;
-    } else if (d1 < dt.length) {
+    } else if (d1 < dt.length && f1 < ft.length) {
       d1++;
       f1++;
     } else return null;
@@ -395,8 +398,10 @@ export function noteChanges(draftIn: string, finalIn: string, budget: CellBudget
   const out: NoteChange[] = [];
   for (const h of hunks) {
     const parts: Hunk[] = [h];
-    // Word(s) out, punctuation in: a deletion plus an insertion.
-    if (h.d1 > h.d0 && h.f1 > h.f0) {
+    // Word(s) out, punctuation in: a deletion plus an insertion. Only with a
+    // token before the change to anchor the insertion on (at the very start
+    // there is none, and the change stays one change).
+    if (h.d0 > 0 && h.d1 > h.d0 && h.f1 > h.f0) {
       const beforeHasWord = dt.slice(h.d0, h.d1).some((t) => t.word);
       const afterAllPunct = ft.slice(h.f0, h.f1).every((t) => !t.word);
       if (beforeHasWord && afterAllPunct) {
@@ -461,7 +466,10 @@ function isMechanical(s: { change: ChangeKind; before: string; after: string }):
   const bw = wordsOf(s.before);
   const aw = wordsOf(s.after);
   if (bw.length > 1 || aw.length > 1) return false;
-  return bw.length === 0 || aw.length === 0 || isRespelling(bw[0], aw[0]);
+  // A bare word deleted or inserted is wording, not mechanics; a word with
+  // punctuation around it (a tag like "(مُكيَّف)") is.
+  if (bw.length !== aw.length) return (bw.length ? !allWords(s.before) : !allWords(s.after));
+  return bw.length === 0 || isRespelling(bw[0], aw[0]);
 }
 
 /** The house-style rule that would make this change, before checking it runs. */
@@ -522,9 +530,13 @@ function coveredByTemplate(s: { after: string }, templates: string[]): boolean {
   return templates.some((t) => t.includes(after));
 }
 
+// Either both texts appear (when before has a word, so punctuation alone never
+// matches), or the line the page copies for a Common issues card does:
+// «before» and «after» (or nothing, for a deletion) in guillemets.
 function coveredByCommonIssues(s: { before: string; after: string }, commonIssues: string): boolean {
-  if (wordsOf(s.before).length === 0) return false;
-  return commonIssues.includes(norm(s.before)) && (s.after === "" || commonIssues.includes(norm(s.after)));
+  const has = (x: string) => commonIssues.includes(norm(x));
+  if (wordsOf(s.before).length > 0 && has(s.before) && (s.after === "" || has(s.after))) return true;
+  return has(`«${s.before}»`) && (s.after === "" || has(`«${s.after}»`));
 }
 
 /** Pick examples: notes with the fewest other changes first, one per chapter first. */

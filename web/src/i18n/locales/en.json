@@ -2989,7 +2989,7 @@
       "howHits": "Made in X of Y: X notes had the change made; Y drafts contained the words it changes (or, for a change at the end, ended with them), including those X.",
       "howExcluded": "A change is not shown when a house-style rule already makes it (even a rule that is off), a term already gives the approved wording, a note template already contains it, or the Common issues text already lists it.",
       "howHome": "Suggested home: a house-style rule for a small mechanical change (punctuation, a tag, the spelling of one word) that editors made in at least half the drafts that had it; a note template when the old words come from a template; a term for a change of one to three words; otherwise a Common issues line.",
-      "howApprove": "Approve on a house-style card adds the rule, switched on, to Style: House style; it fixes drafts that arrive from then on. On the other cards, Approve copies a line for you to paste into that editor, because those editors cannot be filled in from here. The card goes away once the term, template or Common issues text covers it.",
+      "howApprove": "Approve on a house-style card adds the rule, switched on, to Style: House style; it fixes drafts that arrive from then on. On the other cards, Approve copies a line for you to paste into that editor, because those editors cannot be filled in from here. The card goes away once the term, template or Common issues text covers it; if it still shows after your edit, reject it.",
       "howReject": "Reject hides the card for good, in every book."
     }
   },
