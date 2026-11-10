@@ -55,7 +55,8 @@
 //             run on the FULL draft of one of the card's examples, the rule
 //             makes exactly this change and nothing else (ruleReproduces);
 //             covered by a term: after (with a word) equals the target of a
-//             live term that is not deprecated or forbidden; covered by a
+//             live term that is not deprecated or forbidden, or the
+//             replacement of a forbidden term; covered by a
 //             template: some note template's text contains after (two words
 //             or more); already a Common issues line: one line of that text is
 //             exactly the line the page copies ("- «before» → «after»", either
@@ -68,10 +69,15 @@
 //             marks), when the rule's measured precision passes: run over
 //             every compared draft of the book, it changes at least
 //             MIN_RULE_FIRES (10) drafts, and on at least 80% of them (90% for
-//             marks) it makes exactly the editor's change (ruleReproduces;
-//             a draft whose check cannot finish counts as wrong). It must also
-//             reproduce the change on every example. Approve re-checks the
-//             gate (409 rule_imprecise). Else template when before (two words or
+//             marks) it makes exactly the editor's change (ruleReproduces).
+//             A draft whose check cannot finish counts as unchecked, and no
+//             rule is offered while any draft is unchecked; the card then says
+//             "could not be fully checked" when the drafts that were checked
+//             pass (ruleBlocked "unchecked"), else "precision below". It must
+//             also reproduce the change on every example. Approve re-checks the
+//             gate (409 rule_imprecise, or rule_unchecked). A card whose key
+//             is over MAX_KEY_LENGTH is not shown (the routes could not take
+//             it back). Else template when before (two words or
 //             more) appears in a note template. Else term when both sides are
 //             one to three words with no punctuation. Else common_issues.
 //
@@ -94,8 +100,11 @@
 //   - 3,000 fully rewritten 200-token notes, no rule card: about 1.9 s;
 //   - worst case seen: 3,000 notes that each delete the tag AND rewrite 200
 //     tokens, so every row needs three full precision diffs: about 5.7 s.
-// The precision checks spend their own PRECISION_CELL_BUDGET (300M cells),
-// so even past these figures a request is bounded; rows past it count as wrong.
+// The precision checks and the examples gate spend their own
+// PRECISION_CELL_BUDGET (300M cells) and the covered-by-rule checks their own
+// COVERAGE_CELL_BUDGET (100M, #856), so even past these figures a request is
+// bounded, and a heavy precision run cannot bring covered cards back. A row past
+// its budget counts as unchecked, never as correct.
 
 import { Hono } from "hono";
 import { z } from "zod";
@@ -132,8 +141,18 @@ export const DIFF_SEGMENT_CAP = 400;
 export const DIFF_CELL_BUDGET = 300_000_000;
 /** Longest differing middle the precision check (ruleReproduces) diffs; Uint16-safe. */
 export const PRECISION_SEGMENT_CAP = 2_000;
-/** LCS cells the precision checks of one request may fill, apart from DIFF_CELL_BUDGET. */
+/** LCS cells the precision checks and the examples gate of one request may fill, apart from DIFF_CELL_BUDGET. */
 export const PRECISION_CELL_BUDGET = 300_000_000;
+/**
+ * LCS cells the covered-by-rule checks of one request may fill, apart from the
+ * two budgets above, so a heavy precision run cannot make covered changes
+ * reappear as cards (#856). These checks run only on each card's examples
+ * (at most EXAMPLE_COUNT notes per existing rule), whose drafts the grouping
+ * diff already fit under DIFF_SEGMENT_CAP, so they cost far less.
+ */
+export const COVERAGE_CELL_BUDGET = 100_000_000;
+/** Longest change key (JSON [change, before, after]) a card may have; parseChangeKey refuses longer. */
+export const MAX_KEY_LENGTH = 2_000;
 /** A rule card needs at least this many drafts the rule would change. */
 export const MIN_RULE_FIRES = 10;
 
@@ -191,11 +210,15 @@ export interface Suggestion {
   rule: SuggestedRule | null;
   /** For a change one of the rule shapes covers: how the rule did on this book's drafts (null otherwise). */
   precision: RulePrecision | null;
-  /** Why a rule-shaped card is not a house-style card: its precision, or its examples (the rule does not make the editor's change on each). */
+  /** Why a rule-shaped card is not a house-style card: its precision, its examples (the rule does not make the editor's change on each), or a check that could not finish. */
   ruleBlocked: RuleBlocked;
 }
 
-export type RuleBlocked = "precision" | "examples" | null;
+/**
+ * "unchecked": a check ran out of its cap or budget, and what it did measure
+ * would pass, so the honest reason is "could not be fully checked in time".
+ */
+export type RuleBlocked = "precision" | "examples" | "unchecked" | null;
 
 export interface InboxRow {
   id: string;
@@ -287,7 +310,7 @@ export function changeKey(change: ChangeKind, before: string, after: string): st
 
 /** A key from the client, checked: [change, before, after] with a known change and some text. */
 export function parseChangeKey(key: unknown): { change: ChangeKind; before: string; after: string } | null {
-  if (typeof key !== "string" || key.length === 0 || key.length > 2000) return null;
+  if (typeof key !== "string" || key.length === 0 || key.length > MAX_KEY_LENGTH) return null;
   let v: unknown;
   try {
     v = JSON.parse(key);
@@ -586,8 +609,8 @@ export function ruleReproduces(
 /**
  * ruleReproduces with the third answer kept: null when a diff did not fit the
  * per-pair cap or the budget, so the question could not be answered. Every
- * caller treats null as a failure (fail closed); approve reports it as
- * rule_imprecise rather than rule_mismatch.
+ * caller treats null as a failure (fail closed); the card reports it as
+ * ruleBlocked "unchecked" and approve as rule_unchecked, never rule_mismatch.
  */
 export function reproduceCheck(
   fn: (t: string) => string,
@@ -650,16 +673,18 @@ export interface RulePrecision {
   fires: number;
   /** Of those, the drafts where it makes exactly the editor's change (ruleReproduces). */
   correct: number;
+  /** Of those, the drafts whose check could not finish (per-pair cap or budget): neither correct nor measured wrong. */
+  unchecked: number;
   /** The share it must reach to be offered as a rule (0.8 or 0.9). */
   minPrecision: number;
 }
 
 /**
  * Run the rule over every compared draft of the book. A draft it changes is a
- * fire; a fire is correct only when ruleReproduces holds against that row's
+ * fire; a fire is correct only when reproduceCheck holds against that row's
  * final within the budget. Rows the grouping diff skipped are run too: when
- * their check cannot finish, they count as fired and not correct, so unknown
- * rows never raise precision.
+ * their check cannot finish, they count as fired, not correct, and unchecked,
+ * so unknown rows never raise precision and the card can say why.
  */
 function measurePrecision(
   fn: (t: string) => string,
@@ -670,18 +695,38 @@ function measurePrecision(
 ): RulePrecision {
   let fires = 0;
   let correct = 0;
+  let unchecked = 0;
   for (const p of rows) {
     if (fn(p.draft) === p.draft) continue;
     fires++;
-    if (ruleReproduces(fn, key, p.draft, p.final, budget)) correct++;
+    const r = reproduceCheck(fn, key, p.draft, p.final, budget);
+    if (r === true) correct++;
+    else if (r === null) unchecked++;
   }
-  return { fires, correct, minPrecision };
+  return { fires, correct, unchecked, minPrecision };
 }
 
-/** At least MIN_RULE_FIRES fires, and correct / fires at least the shape's bar. */
+// Integer percent compare: 0.9 * 10 is 9.000000000000002 in floating point, which would refuse 9 of 10.
+const meetsBar = (correct: number, of: number, minPrecision: number) => correct * 100 >= Math.round(minPrecision * 100) * of;
+
+/**
+ * At least MIN_RULE_FIRES fires, nothing unchecked, and correct / fires at
+ * least the shape's bar. An unchecked draft never passes (fail closed).
+ */
 export function precisionPasses(p: RulePrecision): boolean {
-  // Integer percent compare: 0.9 * 10 is 9.000000000000002 in floating point, which would refuse 9 of 10.
-  return p.fires >= MIN_RULE_FIRES && p.correct * 100 >= Math.round(p.minPrecision * 100) * p.fires;
+  return p.fires >= MIN_RULE_FIRES && p.unchecked === 0 && meetsBar(p.correct, p.fires, p.minPrecision);
+}
+
+/**
+ * Why the precision gate refused, for the card: "unchecked" when some drafts
+ * could not be checked and the ones that were (correct / (fires - unchecked))
+ * would pass, so the honest answer is "could not be fully checked in time";
+ * else "precision". null when it passes. The rule is refused either way.
+ */
+export function precisionBlock(p: RulePrecision): "precision" | "unchecked" | null {
+  if (precisionPasses(p)) return null;
+  if (p.fires < MIN_RULE_FIRES || p.unchecked === 0) return "precision";
+  return meetsBar(p.correct, p.fires - p.unchecked, p.minPrecision) ? "unchecked" : "precision";
 }
 
 // Budgeted like every check: an exhausted budget answers "no" (fail closed),
@@ -709,11 +754,15 @@ function coveredByLesson(_s: { before: string; after: string }): boolean {
   return false;
 }
 
-// A live term that is not deprecated or forbidden already gives the approved words.
+// A live term already gives the approved words: a term that is not deprecated or
+// forbidden whose target is them, or a forbidden term whose replacement (the
+// "use instead") is them. A forbidden term's own target is never a cover.
 function coveredByTerm(s: { after: string }, terms: InboxTerm[]): boolean {
   if (wordsOf(s.after).length === 0) return false;
   const after = norm(s.after);
-  return terms.some((t) => t.status !== "deprecated" && t.status !== "forbidden" && norm(t.target) === after);
+  return terms.some((t) =>
+    t.status === "forbidden" ? norm(t.replacement) === after : t.status !== "deprecated" && norm(t.target) === after,
+  );
 }
 
 function coveredByTemplate(s: { after: string }, templates: string[]): boolean {
@@ -768,8 +817,10 @@ export function buildInbox(
   budget: CellBudget = { cells: DIFF_CELL_BUDGET },
   /** When given, receives each card's example notes in full (for approve). */
   exampleNotes?: Map<string, ExampleNote[]>,
-  /** One request-scoped budget for every rule check (precision, covered-by-rule, examples). */
+  /** Request-scoped budget for the precision checks and the examples gate. */
   checkBudget: CellBudget = { cells: PRECISION_CELL_BUDGET },
+  /** Request-scoped budget for the covered-by-rule checks, apart from checkBudget (#856). */
+  coverageBudget: CellBudget = { cells: COVERAGE_CELL_BUDGET },
 ): Omit<SuggestionInboxResponse, "book" | "notMigrated"> {
   const scanned = { validated: rows.length, noDraft: 0, compared: 0, skippedLong: 0 };
   const prepared: Prepared[] = [];
@@ -807,6 +858,9 @@ export function buildInbox(
   for (const [key, g] of groups) {
     const chapters = [...new Set(g.hits.map((p) => p.row.chapter))].sort((a, b) => a - b);
     if (g.hits.length < MIN_HITS || chapters.length < MIN_CHAPTERS) continue;
+    // A key the routes would refuse (parseChangeKey) could be shown but never
+    // approved or rejected, so it is not shown at all.
+    if (key.length > MAX_KEY_LENGTH) continue;
     const s = g.first;
     if (ctx.rejected.has(key)) {
       excluded.rejected++;
@@ -814,7 +868,7 @@ export function buildInbox(
     }
     const examples = pickExamples(g.hits);
     // Covered only when the rule makes exactly this change on an example.
-    if (ctx.rules.some((r) => ruleReproducesOn(r, key, examples, false, checkBudget))) {
+    if (ctx.rules.some((r) => ruleReproducesOn(r, key, examples, false, coverageBudget))) {
       excluded.rule++;
       continue;
     }
@@ -850,9 +904,14 @@ export function buildInbox(
     if (cand && candFn) precision = measurePrecision(candFn, key, prepared, cand.minPrecision, precisionBudget);
     // Why a rule-shaped card is not offered as a rule (null when it is, or has no rule shape).
     let ruleBlocked: RuleBlocked = null;
-    if (cand && precision) {
-      if (!precisionPasses(precision)) ruleBlocked = "precision";
-      else if (!ruleReproducesOn(asRule(cand.rule), key, examples, true, checkBudget)) ruleBlocked = "examples";
+    if (cand && candFn && precision) {
+      ruleBlocked = precisionBlock(precision);
+      if (ruleBlocked === null) {
+        // The same check approve runs; one that cannot finish is "unchecked", not a miss.
+        const verdict = checkExamples(candFn, key, examples, precisionBudget);
+        if (verdict === "mismatch") ruleBlocked = "examples";
+        else if (verdict === "unknown") ruleBlocked = "unchecked";
+      }
     }
     if (cand && precision && ruleBlocked === null) {
       home = "house_style";
@@ -935,7 +994,7 @@ export async function computeInbox(
     allOrEmpty<{ target_term: string | null; replacement: string | null; status: string }>(
       db,
       `SELECT target_term, replacement, status FROM terminology
-        WHERE deleted_at IS NULL AND status NOT IN ('deprecated', 'forbidden')`,
+        WHERE deleted_at IS NULL AND status <> 'deprecated'`,
       "terminology",
     ),
     allOrEmpty<{ target_md: string }>(
@@ -1019,6 +1078,8 @@ suggestionInbox.post("/:book/approve", requireAdmin, async (c) => {
   const card = inbox.suggestions.find((s) => s.key === body.key);
   if (!card) return c.json({ error: "suggestion_not_found" }, 404);
   // The same precision gate the card was built with, recomputed on today's data.
+  // A check that could not finish is its own answer (#856), never a pass.
+  if (card.ruleBlocked === "unchecked") return c.json({ error: "rule_unchecked", precision: card.precision }, 409);
   if (card.precision && !precisionPasses(card.precision)) {
     return c.json({ error: "rule_imprecise", precision: card.precision }, 409);
   }
@@ -1031,7 +1092,7 @@ suggestionInbox.post("/:book/approve", requireAdmin, async (c) => {
   const notes = exampleNotes.get(card.key) ?? [];
   // Budgeted like the card's own checks; a check that cannot finish fails closed.
   const verdict = checkExamples(fn, card.key, notes, { cells: PRECISION_CELL_BUDGET });
-  if (verdict === "unknown") return c.json({ error: "rule_imprecise", precision: card.precision }, 409);
+  if (verdict === "unknown") return c.json({ error: "rule_unchecked", precision: card.precision }, 409);
   if (verdict === "mismatch") return c.json({ error: "rule_mismatch" }, 409);
   // Stored examples are real pairs: the whole line of the draft that holds the
   // change (no "…"), and what the rule makes of that line.
