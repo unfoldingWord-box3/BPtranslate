@@ -151,10 +151,37 @@ test("parseActions: fenced JSON accepted; prose and empty are failures", () => {
   assert.equal(parseActions("```json\n" + reply({}) + "\n```", ctx).ok, true);
   assert.equal(parseActions("```\n" + reply({}) + "\n```", ctx).ok, true);
   assert.deepEqual(parseActions("Sure! I changed the notes.", ctx), { ok: false, kind: "unparseable" });
-  assert.deepEqual(parseActions('Here: {"reply":"x"}', ctx), { ok: false, kind: "unparseable" });
   assert.deepEqual(parseActions("[1,2]", ctx), { ok: false, kind: "unparseable" });
   assert.deepEqual(parseActions("", ctx), { ok: false, kind: "empty_answer" });
   assert.deepEqual(parseActions(JSON.stringify({ reply: "  ", edits: [] }), ctx), { ok: false, kind: "empty_answer" });
+});
+
+test("parseActions: text before or after a fence, or prose around a bare object, still parses (#860)", () => {
+  const body = reply({ approve: ["n1"] });
+  for (const text of [
+    "Here you go:\n```json\n" + body + "\n```",
+    "```json\n" + body + "\n```\nLet me know if you want more.",
+    "Sure.\n```\n" + body + "\n```\nDone.",
+    "Here: " + body + " Hope that helps.",
+  ]) {
+    const r = parseActions(text, ctx);
+    assert.equal(r.ok, true, text);
+    assert.deepEqual(r.actions.approve, ["n1"], text);
+  }
+  // Braces that are not JSON, or an array, are still failures.
+  assert.deepEqual(parseActions("I {think} so {maybe}", ctx), { ok: false, kind: "unparseable" });
+  assert.deepEqual(parseActions("```json\n{ not json }\n```", ctx), { ok: false, kind: "unparseable" });
+  assert.deepEqual(parseActions('Result: [1, {"reply": "x"}]', ctx), { ok: false, kind: "unparseable" });
+});
+
+test("parseActions: a sent note stored with a real line break is not an edit when returned unchanged (#863)", () => {
+  // Legacy rows can hold a real line break instead of the two characters \n.
+  const legacy = { ...ctx, notes: [{ ...NOTES[0], id: "m1", note: "line one\nline two" }] };
+  // Returned with a real line break, or with the stored \n: not an edit.
+  assert.deepEqual(parseActions(reply({ edits: [{ id: "m1", note: "line one\nline two" }] }), legacy).actions.edits, []);
+  assert.deepEqual(parseActions(reply({ edits: [{ id: "m1", note: "line one\\nline two" }] }), legacy).actions.edits, []);
+  // A real change still comes back as an edit, in the stored convention.
+  assert.deepEqual(parseActions(reply({ edits: [{ id: "m1", note: "line 1\nline two" }] }), legacy).actions.edits, [{ id: "m1", note: "line 1\\nline two" }]);
 });
 
 test("parseActions: malformed action fields are ignored, not fatal", () => {
