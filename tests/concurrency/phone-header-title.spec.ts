@@ -173,6 +173,7 @@ for (const [uiLang, width, update] of WIDE_CASES) {
           // An unsaved draft, written through the app's own drafts store (the
           // Vite dev server serves the same module instance the app uses).
           await page.evaluate(async () => {
+            // @ts-expect-error — a Vite dev-server URL the browser resolves; tsc cannot
             const m = await import(/* @vite-ignore */ "/src/sync/drafts.ts");
             await m.drafts.set(m.rowKey("tn", "ZEC", "phone-header-draft"), { note: "draft" }, 1, {
               kind: "row",
