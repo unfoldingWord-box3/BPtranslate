@@ -312,10 +312,8 @@ export function useRapidBulk(a: RapidBulkArgs) {
           // Pinned to the version and state on screen (#837): a peer's edit
           // or approval that lands after the re-read above is refused, not
           // set aside unseen.
-          const shownState =
-            r.translation_state === "ai_draft" || r.translation_state === "edited" || r.translation_state === "validated"
-              ? r.translation_state
-              : undefined;
+          // Always sent, null included: null pins "still has no state".
+          const shownState = r.translation_state ?? null;
           const updated = await api.trashNote(id, book, { expectedVersion: r.version, expectedState: shownState });
           prev[id] = a.statuses[id];
           a.applyLocalRowReplacement("tn", updated);

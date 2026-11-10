@@ -236,6 +236,40 @@ test("expected_state: a matching state (and version) sets the note aside", async
   assert.equal(trashLog("approved"), 1, "the audit entry still lands: it runs after the UPDATE sets trashed_at");
 });
 
+// expected_state: null (#837 review round 2). A note the translate pipeline
+// never drafted has no state; a peer's approval gives it one without bumping
+// the version, so "shown with no state" has to be a pin of its own, distinct
+// from leaving the field out.
+test("expected_state null: a no-state note a peer approved since it was shown is refused with 409", async () => {
+  const { trash, row, trashLog, sqlite } = fresh();
+  sqlite.prepare(`UPDATE tn_rows SET translation_state = 'validated' WHERE id = 'plain'`).run();
+  const res = await trash("plain", "3", { expected_state: null });
+  assert.equal(res.status, 409);
+  const body = await res.json();
+  assert.equal(body.error, "version_mismatch");
+  assert.equal(body.current?.translation_state, "validated");
+  assert.equal(row("plain").trashed_at, null, "the approved note was not set aside");
+  assert.equal(trashLog("plain"), 0, "no audit entry");
+  // The null pin alone, with no If-Match, refuses too.
+  assert.equal((await trash("plain", undefined, { expected_state: null })).status, 409);
+  assert.equal(row("plain").trashed_at, null);
+});
+
+test("expected_state null: an unchanged no-state note is set aside, with its audit entry", async () => {
+  const { trash, row, trashLog } = fresh();
+  const res = await trash("plain", "3", { expected_state: null });
+  assert.equal(res.status, 200);
+  assert.notEqual(row("plain").trashed_at, null);
+  assert.equal(trashLog("plain"), 1);
+});
+
+test("expected_state null on a drafted note is a 409: null pins 'no state', it is not 'no check'", async () => {
+  const { trash, row } = fresh();
+  const res = await trash("draft", undefined, { expected_state: null });
+  assert.equal(res.status, 409);
+  assert.equal(row("draft").trashed_at, null);
+});
+
 test("no expected_state keeps today's behavior, with an empty JSON body or none", async () => {
   const { trash, row } = fresh();
   assert.equal((await trash("approved", undefined, {})).status, 200);

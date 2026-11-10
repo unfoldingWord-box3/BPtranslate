@@ -1696,10 +1696,8 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
       // Pinned to the version and state on screen (#837): a colleague's edit
       // or approval since then is refused with a 409 instead of being set
       // aside unseen.
-      const shownState =
-        row.translation_state === "ai_draft" || row.translation_state === "edited" || row.translation_state === "validated"
-          ? row.translation_state
-          : undefined;
+      // Always sent, null included: null pins "still has no state".
+      const shownState = row.translation_state ?? null;
       const updated = await api.trashNote(row.id, book, { expectedVersion: row.version, expectedState: shownState });
       applyLocalRowReplacement("tn", updated);
       setStatuses((prev) => ({ ...prev, [row.id]: "skipped" }));

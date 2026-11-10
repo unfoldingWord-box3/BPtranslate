@@ -1258,22 +1258,34 @@ async function setTqTranslationState(
 // flips don't surface as duplicate-version rows in the history dialog.
 // pins (#837): the version (If-Match) and translation_state (expected_state)
 // the caller saw; the flip lands only if the row is still at both, and so does
-// the audit entry. Each null = no check. A state flip (approve, un-approve)
-// does not bump the version, so the version pin alone would miss one.
+// the audit entry. expected: null = no check. expectedState: undefined = no
+// check; null = the row must still have no state (a note the translate
+// pipeline never drafted, which a peer's approval would give one). A state
+// flip (approve, un-approve) does not bump the version, so the version pin
+// alone would miss one.
 async function setTnTrashed(
   env: Env,
   id: string,
   book: string,
   userId: number | null,
   trashed: boolean,
-  pins: { expected: number | null; expectedState: TranslationStatePin | null } = { expected: null, expectedState: null },
+  pins: { expected: number | null; expectedState?: TranslationStatePin | null } = { expected: null },
 ): Promise<TnRow | null> {
   const now = Math.floor(Date.now() / 1000);
   const action = trashed ? "trash" : "untrash";
   // statePins binds exactly the parameters it references (D1 rejects an
-  // unreferenced ?N). trash=false: no trashed_at clause, because the audit
-  // INSERT runs after the UPDATE has set trashed_at.
-  const pin = statePins({ ...pins, expectedUpdatedAt: null, source: null }, 5, false);
+  // unreferenced ?N); its null state means "no check", so the IS NULL pin
+  // (no parameter) is added here. trash=false: no trashed_at clause, because
+  // the audit INSERT runs after the UPDATE has set trashed_at.
+  const statePin = statePins(
+    { expected: pins.expected, expectedState: pins.expectedState ?? null, expectedUpdatedAt: null, source: null },
+    5,
+    false,
+  );
+  const pin = {
+    sql: statePin.sql + (pins.expectedState === null ? " AND translation_state IS NULL" : ""),
+    values: statePin.values,
+  };
   const [updateRes] = await env.DB.batch([
     env.DB
       .prepare(
@@ -1546,12 +1558,14 @@ rows.post("/tn/:id/keep", requireEditor, async (c) => {
 // non-version-bumping, like /preserve, and idempotent.
 // Optional pins (#837), as on /validate (#701): If-Match, the version the
 // person was shown, and body { expected_state }, the translation_state they
-// were shown. The note is set aside only if it is still at both; otherwise
-// 409 version_mismatch with the row as it is now (the /validate shape), so a
-// colleague's edit or approval is never set aside unseen. The body may be
-// empty. Omitted: no check, as before. The web app's Not needed buttons send
-// both; the classic editor and Review queue send neither.
-const TrashBody = z.object({ expected_state: z.enum(TRANSLATION_STATES).optional() });
+// were shown. expected_state null pins "still has no state" (a peer's
+// approval would give it one); an absent field is no check. The note is set
+// aside only if it is still at both; otherwise 409 version_mismatch with the
+// row as it is now (the /validate shape), so a colleague's edit or approval is
+// never set aside unseen. The body may be empty. Omitted: no check, as
+// before. The web app's Not needed buttons send both, the state even when it
+// is null; the classic editor and Review queue send neither.
+const TrashBody = z.object({ expected_state: z.enum(TRANSLATION_STATES).nullable().optional() });
 
 rows.post("/tn/:id/trash", requireEditor, async (c) => {
   const id = c.req.param("id");
@@ -1573,19 +1587,20 @@ rows.post("/tn/:id/trash", requireEditor, async (c) => {
   if (!parsed.success) {
     return c.json({ error: "validation_failed", issues: parsed.error.issues }, 400);
   }
-  const expectedState = parsed.data.expected_state ?? null;
+  // undefined: no state check; null: the row must still have no state.
+  const expectedState = parsed.data.expected_state;
   const userId = currentUserId(c);
   const lock = await translateLockForTnId(c.env, id, book);
   if (lock) return c.json(lockedResponseBody(lock), 409);
   const updated = await setTnTrashed(c.env, id, book, userId, true, { expected, expectedState });
   if (!updated) {
-    if (expected !== null || expectedState !== null) {
+    if (expected !== null || expectedState !== undefined) {
       // With latest_source, so the client can put the row straight on screen.
       const fresh = (await selectRowWithLatestSource(c.env, "tn", id, book)) as TnRow | null;
       const moved =
         !!fresh &&
         ((expected !== null && fresh.version !== expected) ||
-          (expectedState !== null && fresh.translation_state !== expectedState));
+          (expectedState !== undefined && (fresh.translation_state ?? null) !== expectedState));
       if (fresh && !fresh.deleted_at && moved) {
         logRowConflict(c, {
           kind: "tn",

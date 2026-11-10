@@ -2497,13 +2497,13 @@ export const api = {
   // deleted_at tombstone by the nightly job. Refused (409 chapter_locked)
   // while a translate run will write the note (#602); so is restoreNote.
   // opts pin the set-aside to the version and translation_state on screen
-  // (#837), as on validateNote: a stale one is a 409 `version_mismatch` with
+  // (#837), as on validateNote (expectedState null = the note had no state): a stale one is a 409 `version_mismatch` with
   // `current`, and the note stays live. Omitted: no check (the classic editor
   // and Review queue).
   trashNote: (
     id: string,
     book: string,
-    opts?: { expectedVersion?: number; expectedState?: "ai_draft" | "edited" | "validated" },
+    opts?: { expectedVersion?: number; expectedState?: "ai_draft" | "edited" | "validated" | null },
   ) =>
     request<TnRow>(`/api/rows/tn/${encodeURIComponent(id)}/trash?book=${encodeURIComponent(book)}`, {
       method: "POST",
@@ -2513,7 +2513,9 @@ export const api = {
               "Content-Type": "application/json",
               ...(opts.expectedVersion != null ? { "If-Match": String(opts.expectedVersion) } : {}),
             },
-            body: JSON.stringify(opts.expectedState ? { expected_state: opts.expectedState } : {}),
+            // null is sent as null: it pins "still has no state". Only an
+            // absent expectedState skips the state check.
+            body: JSON.stringify(opts.expectedState !== undefined ? { expected_state: opts.expectedState } : {}),
           }
         : {}),
     }),
