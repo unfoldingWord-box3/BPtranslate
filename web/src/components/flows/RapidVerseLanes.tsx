@@ -16,6 +16,7 @@ import type { VerseDto } from "../../sync/api";
 import { coveredLaneSlices } from "../../lib/verseRange";
 import { flowLaneSegmentsForQuotes, type FlowQuote, type FlowSegment } from "../../lib/flowHighlight";
 import { SCRIPTURE_FONT_STACK } from "../../theme";
+import { arabicFontSize, startsArabicScript } from "../../lib/arabicScriptSize";
 
 export interface RapidLaneSpec {
   key: string;
@@ -52,6 +53,7 @@ export const RapidVerseLanes = memo(function RapidVerseLanes({
           key: lane.key,
           label: lane.label,
           text: plainText,
+          arabic: startsArabicScript(plainText),
           segments: plainText ? flowLaneSegmentsForQuotes(slices, quotes) : [],
         };
       }),
@@ -88,7 +90,8 @@ export const RapidVerseLanes = memo(function RapidVerseLanes({
           {lane.text ? (
             // dir="auto" follows the content, as in the pinned block: an
             // Arabic literal lays out RTL with its punctuation on the
-            // correct side, the English ULT stays LTR.
+            // correct side, the English ULT stays LTR. Arabic is drawn a
+            // size larger to match the English.
             <Box
               component="p"
               dir="auto"
@@ -97,7 +100,7 @@ export const RapidVerseLanes = memo(function RapidVerseLanes({
                 m: 0,
                 textAlign: "start",
                 fontFamily: SCRIPTURE_FONT_STACK,
-                fontSize: "0.9375rem",
+                fontSize: arabicFontSize("0.9375rem", lane.arabic),
                 lineHeight: 1.5,
                 minWidth: 0,
               }}

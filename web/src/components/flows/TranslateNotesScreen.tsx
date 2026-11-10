@@ -202,6 +202,7 @@ import {
   type TqRow,
 } from "../../sync/api";
 import { SCRIPTURE_FONT_STACK } from "../../theme";
+import { arabicFontSize, editsArabicScript, startsArabicScript } from "../../lib/arabicScriptSize";
 
 export interface TranslateNotesScreenProps extends FlowScreenContext {
   book: string;
@@ -296,8 +297,13 @@ function Lane({ label, text, segments, labelFontFamily, mark }: LaneProps) {
       {text ? (
         // dir="auto" follows the *content*: Arabic lane text lays out RTL with
         // trailing punctuation on the correct side, English stays LTR. The
-        // label above keeps the container's direction.
-        <Box component="span" dir="auto" sx={{ display: "block", textAlign: "start" }}>
+        // label above keeps the container's direction. Arabic is drawn a size
+        // larger to match the English (arabicScriptSize).
+        <Box
+          component="span"
+          dir="auto"
+          sx={{ display: "block", textAlign: "start", fontSize: arabicFontSize("1em", startsArabicScript(text)) }}
+        >
           {mark(segments)}
         </Box>
       ) : (
@@ -2338,7 +2344,8 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
           "& .MuiOutlinedInput-root": {
             bgcolor: "action.hover",
             borderRadius: "9px",
-            fontSize: "0.97rem",
+            // Arabic a size larger, as in the read-only note (arabicScriptSize).
+            fontSize: arabicFontSize("0.97rem", editsArabicScript(draftValue, projectConfig?.languageCode)),
             lineHeight: 1.55,
           },
           "& .MuiOutlinedInput-notchedOutline": {
@@ -2641,7 +2648,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
                       paddingInline: 0.5,
                       marginBlock: -0.25,
                       marginInline: -0.5,
-                      fontSize: "0.97rem",
+                      fontSize: arabicFontSize("0.97rem", startsArabicScript(draftValue)),
                       lineHeight: 1.55,
                       whiteSpace: "pre-wrap",
                       textAlign: "start",
