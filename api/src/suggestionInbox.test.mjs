@@ -643,3 +643,11 @@ test("realExamples: no pair when the rule changes nothing on the example line, s
   const t = draft.indexOf("ثان");
   assert.deepEqual(realExamples(fn, [{ draft, change: { draftStart: t, draftEnd: t + 3 } }]), []);
 });
+
+test("precisionPasses: exactly the bar passes (9 of 10 at 90%, 8 of 10 at 80%)", async () => {
+  const { precisionPasses } = await import("./suggestionInbox.ts");
+  assert.equal(precisionPasses({ fires: 10, correct: 9, minPrecision: 0.9 }), true);
+  assert.equal(precisionPasses({ fires: 10, correct: 8, minPrecision: 0.9 }), false);
+  assert.equal(precisionPasses({ fires: 10, correct: 8, minPrecision: 0.8 }), true);
+  assert.equal(precisionPasses({ fires: 9, correct: 9, minPrecision: 0.8 }), false);
+});

@@ -680,7 +680,8 @@ function measurePrecision(
 
 /** At least MIN_RULE_FIRES fires, and correct / fires at least the shape's bar. */
 export function precisionPasses(p: RulePrecision): boolean {
-  return p.fires >= MIN_RULE_FIRES && p.correct >= p.minPrecision * p.fires;
+  // Integer percent compare: 0.9 * 10 is 9.000000000000002 in floating point, which would refuse 9 of 10.
+  return p.fires >= MIN_RULE_FIRES && p.correct * 100 >= Math.round(p.minPrecision * 100) * p.fires;
 }
 
 // Budgeted like every check: an exhausted budget answers "no" (fail closed),
