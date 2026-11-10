@@ -78,6 +78,7 @@ const nearMisses = [
   ["#/admin/workflow?tab=x", "#/admin/workflow"],
   ["#/admin/PROGRESS", "#/admin/progress"],
   ["#/admin/review/", "#/admin/review"],
+  ["#/admin/Scorecard/", "#/admin/scorecard"],
   ["#/admin/Style?x=1", "#/admin/style"],
   ["#/Admin/ai", "#/admin/ai"],
   ["#/admin/curate/", "#/admin/curate"],
@@ -118,6 +119,7 @@ const kept = [
   "#/admin/workflow",
   "#/admin/progress",
   "#/admin/review",
+  "#/admin/scorecard",
   "#/admin/curate/Some-ID",
   "#/admin/curate/a%20b%2Fc",
   // Unknown admin sections are left as they behave today (#544).

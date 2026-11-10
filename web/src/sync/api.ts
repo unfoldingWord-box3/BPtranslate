@@ -1008,6 +1008,41 @@ export interface ReimportResponse {
   totals: ReimportCounts;
 }
 
+// Response of GET /api/books/:book/draft-scorecard (api/src/draftScorecard.ts,
+// issue #816; the exact metric rules are written up there).
+export interface DraftScorecardChapter {
+  /** null on the book total. */
+  chapter: number | null;
+  validated: number;
+  noDraft: number;
+  englishSource: number;
+  compared: number;
+  unchanged: number;
+  /** 0–100, null when nothing was compared. */
+  unchangedPct: number | null;
+  /** 0–1, null when nothing was compared. */
+  medianSimilarity: number | null;
+  /** Compared rows whose similarity is approximate (very long rewritten notes). */
+  approximateSimilarity: number;
+  closingPeriod: { eligible: number; made: number };
+  /** ref null = the run was not pinned (latest pack at run time, if any). */
+  contextPacks: { ref: string | null; count: number }[];
+  /** Compared drafts whose translate run is no longer on record. */
+  untracedDrafts: number;
+  /** "none" when the English source could not be read; "some" only on the book total. */
+  englishCheck: "all" | "some" | "none";
+}
+
+export interface DraftScorecardResponse {
+  book: string;
+  chapters: DraftScorecardChapter[];
+  total: DraftScorecardChapter;
+  /** Chapters whose English source could not be read. */
+  englishUncheckedChapters: number[];
+  /** Each distinct reason the English source could not be read, with its chapters. */
+  englishProblems: { reason: string; chapters: number[] }[];
+}
+
 // Responses of POST /api/books/:book/review-state (api/src/reviewState.ts).
 export interface ReviewSweepDryRunResponse {
   ok: true;
@@ -2001,6 +2036,14 @@ export const api = {
     request<ReviewSweepApplyResponse>(
       `/api/books/${encodeURIComponent(book)}/review-state`,
       { method: "POST", body: JSON.stringify(body), timeoutMs: 120_000 },
+    ),
+
+  // Admin draft quality scorecard (#816): per-chapter AI draft vs approved note
+  // for one book. Read-only; api/src/draftScorecard.ts (admin only, 403 otherwise).
+  getDraftScorecard: (book: string, signal?: AbortSignal) =>
+    request<DraftScorecardResponse>(
+      `/api/books/${encodeURIComponent(book)}/draft-scorecard`,
+      { signal, timeoutMs: 60_000 },
     ),
 
   setVerseDone: (book: string, chapter: number, verse: number, done: boolean) =>

@@ -22,6 +22,7 @@ import { requireAuth, requireEditor, requireAdmin, currentUserId, currentUserRol
 import { aquiferDrafts, AQUIFER_SOURCE, pickId } from "./aquiferImport.ts";
 import { aquiferRepairFormatting } from "./aquiferRepair.ts";
 import { bulkReviewState } from "./reviewState.ts";
+import { draftScorecard } from "./draftScorecard.ts";
 import { convertAquiferBook, type EnRow, type ResolvedNote } from "./aquiferConvert.ts";
 import { loadEnglishLinks } from "./aquiferLinks.ts";
 import { aquiferJsonUrl, aquiferLangFor } from "./aquiferSources.ts";
@@ -144,6 +145,13 @@ books.post("/:book/aquifer-repair", requireAdmin, aquiferRepairFormatting);
 // Every swept row is stamped `admin_bulk_state` so the AI few-shot selectors
 // exclude it — see the decisions written up in reviewState.ts.
 books.post("/:book/review-state", requireAdmin, bulkReviewState);
+
+// GET /api/books/:book/draft-scorecard — per-chapter AI draft quality for the
+// book's approved translation notes: share approved unchanged, median
+// draft-vs-final similarity, the closing-period correction, and the context
+// pack each draft was made with (admin-only, read-only; issue #816). The rules
+// are written up in draftScorecard.ts.
+books.get("/:book/draft-scorecard", requireAdmin, draftScorecard);
 
 // ── Per-book / per-chapter-range source overrides (issue #103) ─────────────
 // GET  /api/books/:book/sources — list this book's per-resource source ranges.

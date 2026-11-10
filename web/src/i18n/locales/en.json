@@ -1487,7 +1487,8 @@
       "style": "Style",
       "templates": "Templates",
       "observe": "Observe",
-      "review": "Review state"
+      "review": "Review state",
+      "scorecard": "Draft scorecard"
     },
     "groups": {
       "admin": "Admin",
@@ -2822,6 +2823,43 @@
       "errForbidden": "Only admins can change review state in bulk.",
       "errLockedByTranslate": "An AI translation is rewriting notes in this range, so they can't be approved yet. Try again after it finishes.",
       "errMaybeApplied": "The change could not be confirmed ({{detail}}). It may have been partly or fully applied, so check the counts below before trying again."
+    },
+    "scorecard": {
+      "title": "Draft quality scorecard",
+      "subtitle": "How close the AI's translation-note drafts came to the notes people approved, chapter by chapter. Read-only: nothing here changes a note.",
+      "adminOnlyBody": "The draft quality scorecard is for admins only.",
+      "errForbidden": "Only an admin can see the draft quality scorecard.",
+      "noBooks": "No books have been added to this workspace yet.",
+      "bookLabel": "Book",
+      "loading": "Loading the scorecard…",
+      "englishUncheckedAll": "The English source notes could not be read, so no draft was left out as untranslated English. Counts marked * were not checked.",
+      "englishUncheckedSome": "The English source notes could not be read for chapters {{chapters}}, so no draft in those chapters was left out as untranslated English. Counts marked * were not checked, or, on the whole-book row, only partly checked.",
+      "noValidated": "No translation notes in this book have been approved yet.",
+      "bookTotal": "Whole book",
+      "intro": "Intro",
+      "colChapter": "Chapter",
+      "colValidated": "Approved notes",
+      "colNoDraft": "No draft logged",
+      "colEnglish": "Draft was English",
+      "colCompared": "Compared",
+      "colUnchanged": "Approved unchanged",
+      "colSimilarity": "Median similarity",
+      "colClosingPeriod": "Period added after ]",
+      "colContextPack": "Context pack",
+      "pctCount": "{{pct}}% ({{n}})",
+      "pctOf": "{{pct}}% ({{made}} of {{eligible}})",
+      "notPinned": "Not pinned (latest pack at run time, if any) · {{n}}",
+      "problemChapters": "Chapters {{chapters}}:",
+      "approxTooltip": "Approximate: {{n}} notes too long to compare exactly",
+      "runNotOnRecord": "Run not on record · {{n}}",
+      "howTitle": "How these numbers work",
+      "howScope": "Only translation notes a person has approved are counted. Each one is compared with the last AI draft written to it.",
+      "howNoDraft": "No draft logged: the note has no AI draft on record. Edit history older than 180 days can be cleared, so older chapters may show many of these.",
+      "howEnglish": "Draft was English: the AI draft was the English source note, not translated. These notes are left out of every column to the right. A note that is the same as the English for a good reason, such as one that holds only links, is counted here too.",
+      "howUnchanged": "Approved unchanged: the approved note is exactly the AI draft, character for character.",
+      "howSimilarity": "Median similarity: how much of the draft was kept, from 0 (all rewritten) to 1 (unchanged), counted in characters. Half the notes score above this number and half below. When the changed part of a note is longer than 2,000 characters, only its first 2,000 characters are compared, so that note's similarity is approximate and the chapter's median is marked ≈.",
+      "howClosingPeriod": "Period added after ]: of the drafts that end with ] and no period, the share where the editor still had to add the period.",
+      "howContextPack": "Context pack: the version (commit) of the guidance the AI was given for these drafts, with how many notes used it. Not pinned means the run was not tied to one version: it used the latest pack when it ran, or none if no guidance had been exported yet. Each draft is matched to its AI run by time, so in rare cases where runs overlapped a draft can be credited to the wrong run. Finished AI runs can be cleared after 7 days; drafts from a cleared run show as Run not on record."
     }
   },
   "widgets": {
