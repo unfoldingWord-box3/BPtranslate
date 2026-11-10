@@ -3,7 +3,7 @@
 //
 // GET  /api/suggestion-inbox/:book          the cards for one book (admin only)
 // POST /api/suggestion-inbox/:book/approve  {key} → an enabled house-style rule
-// POST /api/suggestion-inbox/reject         {key} → never suggested again
+// POST /api/suggestion-inbox/:book/reject   {key} → never suggested again
 //
 // The issue says "nightly". There is no cron: the inbox is computed when an
 // admin opens it, for ONE book per request (the bound), with no AI call. The
@@ -52,32 +52,39 @@
 //             note where a deletion came first, like "[x] (مُكيَّف)" → "[x].",
 //             only ends in "]" once the tag is gone). So hits ≤ opportunities.
 //   excluded  rejected (0083); covered by a house-style rule, ENABLED OR NOT:
-//             running the rule on one of the card's example drafts makes the
-//             change disappear; covered by a term: after equals a live term's
-//             target or replacement, or before equals a deprecated/forbidden
-//             term's target (only when that side has a word); covered by a
+//             run on the FULL draft of one of the card's examples, the rule
+//             makes exactly this change and nothing else (ruleReproduces);
+//             covered by a term: after (with a word) equals the target of a
+//             live term that is not deprecated or forbidden; covered by a
 //             template: some note template's text contains after (two words
-//             or more); already a Common issues line: the Common issues text
-//             contains before (with a word) and after, or the line the page
-//             copies («before» → «after»); already a lesson:
-//             stubbed until lessons exist (#817), see coveredByLesson.
-//   home      (suggestedHome) house_style when the change is mechanical (at
-//             most one word on each side; when both have one, the same word
-//             respelled: equal without combining marks, or one letter
-//             different; a word deleted alone, with no punctuation around
-//             it, is wording, not mechanics), a rule can express it (candidateRule, compileRule
-//             accepts it, and it reproduces the change on an example), and
-//             editors made it in at least half its opportunities (a rule fires
-//             on every one). Else template when before (two words or more)
-//             appears in a note template. Else term when both sides are one to
-//             three words with no punctuation. Else common_issues.
+//             or more); already a Common issues line: one line of that text is
+//             exactly the line the page copies ("- «before» → «after»", either
+//             arrow, ∅ for a deletion), or holds before and after (both with a
+//             word) as whole words; already a lesson: stubbed until lessons
+//             exist (#817), see coveredByLesson.
+//   home      house_style ONLY for the three shapes candidateRule allows (the
+//             closing period after a final "]"; deleting a tag fully enclosed
+//             in () or []; one whole word whose only change is its combining
+//             marks), when hits reach that shape's share of opportunities (50%,
+//             50%, 90%) and the rule reproduces the change exactly on every
+//             example's full draft. Else template when before (two words or
+//             more) appears in a note template. Else term when both sides are
+//             one to three words with no punctuation. Else common_issues.
 //
 // Approve exists only for house_style cards and takes just the key: the server
 // recomputes the book's inbox and builds the rule from its own card, so no
-// text an admin sends becomes a pattern (the #815 stance). The rule is a
-// literal / whole_word rule, or for the closing period the existing
-// final_bracket_period kind: a literal "]" → "]." is refused by compileRule's
-// idempotency guard, as is any pure insertion.
+// text an admin sends becomes a pattern (the #815 stance). It re-checks that
+// the rule reproduces the change exactly on every example's full draft (else
+// 409 rule_mismatch) and stores real pairs (the draft line holding the change,
+// and what the rule makes of it) as the rule's examples. The closing period
+// uses the existing final_bracket_period kind: a literal "]" → "]." is refused
+// by compileRule's idempotency guard, as is any pure insertion.
+//
+// Reject also takes the book: only a card currently shown for that book can be
+// rejected (else 404), so no arbitrary key is stored.
+//
+// Cost, measured in node on this box: 3,000 rows with small changes, about
+// 0.6 s; 3,000 fully rewritten 200-token notes, about 1.9 s.
 
 import { Hono } from "hono";
 import { z } from "zod";
@@ -132,6 +139,9 @@ export interface NoteChange {
   before: string;
   after: string;
   beforeTokens: string[];
+  /** Where the change's before text sits in the (NFC) draft. */
+  draftStart: number;
+  draftEnd: number;
   draftExcerpt: string;
   finalExcerpt: string;
 }
@@ -209,8 +219,11 @@ export interface SuggestionInboxResponse {
 
 // ── Tokens and changes ──────────────────────────────────────────────────────
 
-const WORD = /^[\p{L}\p{M}\p{N}]$/u;
-const SPACE = /^[\s‎‏؜]$/u;
+// Word characters: letters, combining marks, digits, and ZWNJ / ZWJ
+// (U+200C, U+200D), which sit inside Persian and Arabic words.
+const WORD = /^[\p{L}\p{M}\p{N}\p{Join_Control}]$/u;
+// Separators: whitespace and bidi controls (U+200E, U+200F, U+061C, embeddings and isolates).
+const SPACE = /^[\s\p{Bidi_Control}]$/u;
 const nfc = (s: string) => s.normalize("NFC");
 
 export function tokenize(text: string): Token[] {
@@ -294,6 +307,7 @@ function diffTokens(a: string[], b: string[], budget: CellBudget): Hunk[] | null
   if (n > DIFF_SEGMENT_CAP || m > DIFF_SEGMENT_CAP || n * m > budget.cells) return null;
   budget.cells -= n * m;
   const W = m + 1;
+  // Uint16 is safe: an LCS length is at most DIFF_SEGMENT_CAP (400) < 65,535.
   const L = new Uint16Array((n + 1) * W);
   for (let i = n - 1; i >= 0; i--) {
     for (let j = m - 1; j >= 0; j--) {
@@ -326,7 +340,9 @@ function diffTokens(a: string[], b: string[], budget: CellBudget): Hunk[] | null
 }
 
 const LINE_BREAK = /\\n|\n/;
-const collapse = (s: string) => s.replace(/[ \t ]+/g, " ");
+// Bidi controls dropped (so "]" + RLM + "." groups with "]."), runs of spaces, tabs and
+// no-break spaces made one space.
+const collapse = (s: string) => s.replace(/\p{Bidi_Control}/gu, "").replace(/[\p{Zs}\t]+/gu, " ");
 
 function slice(text: string, toks: Token[], a: number, b: number): string {
   return a < b ? text.slice(toks[a].start, toks[b - 1].end) : "";
@@ -347,32 +363,39 @@ function buildChange(
   ft: Token[],
   h: Hunk,
   bold: Array<[number, number]>,
+  filter: boolean,
 ): NoteChange | null {
   let { d0, d1, f0, f1 } = h;
   const insertion = d0 === d1;
+  let leftAnchored = false;
   if (insertion) {
     if (d0 > 0) {
       d0--;
       f0--;
+      leftAnchored = true;
     } else if (d1 < dt.length && f1 < ft.length) {
       d1++;
       f1++;
     } else return null;
   }
-  if (d1 - d0 > MAX_CHANGE_TOKENS || f1 - f0 > MAX_CHANGE_TOKENS) return null;
+  if (filter && (d1 - d0 > MAX_CHANGE_TOKENS || f1 - f0 > MAX_CHANGE_TOKENS)) return null;
   const rawBefore = slice(draft, dt, d0, d1);
   const rawAfter = slice(final, ft, f0, f1);
-  if (LINE_BREAK.test(rawBefore) || LINE_BREAK.test(rawAfter)) return null;
-  if (d1 > d0 && bold.some(([a, b]) => dt[d0].start < b && dt[d1 - 1].end > a)) return null;
+  if (filter && (LINE_BREAK.test(rawBefore) || LINE_BREAK.test(rawAfter))) return null;
+  if (filter && d1 > d0 && bold.some(([a, b]) => dt[d0].start < b && dt[d1 - 1].end > a)) return null;
   const before = collapse(rawBefore);
   const after = collapse(rawAfter);
-  const change: ChangeKind = insertion ? (f1 === ft.length ? "insert-end" : "insert") : "change";
+  // "insert-end" only when the inserted text itself ends the note: an insertion
+  // anchored on the token AFTER it (at the very start) never does.
+  const change: ChangeKind = insertion ? (leftAnchored && f1 === ft.length ? "insert-end" : "insert") : "change";
   return {
     key: changeKey(change, before, after),
     change,
     before,
     after,
     beforeTokens: dt.slice(d0, d1).map((t) => t.text),
+    draftStart: dt[d0].start,
+    draftEnd: dt[d1 - 1].end,
     draftExcerpt: excerpt(draft, dt, d0, d1),
     finalExcerpt: excerpt(final, ft, f0, f1),
   };
@@ -380,9 +403,17 @@ function buildChange(
 
 /**
  * The word-level changes between one draft and its final note (both NFC'd
- * here), or null when the pair is too long to diff within the budget.
+ * here), or null when the pair is too long to diff within the budget. With
+ * `filter` false nothing is dropped (long, line-crossing, bold), and a change
+ * that cannot be anchored gets the key "?": the exactness check
+ * (ruleReproduces) must see every difference.
  */
-export function noteChanges(draftIn: string, finalIn: string, budget: CellBudget = { cells: Infinity }): NoteChange[] | null {
+export function noteChanges(
+  draftIn: string,
+  finalIn: string,
+  budget: CellBudget = { cells: Infinity },
+  filter = true,
+): NoteChange[] | null {
   const draft = nfc(draftIn);
   const final = nfc(finalIn);
   if (draft === final) return [];
@@ -409,14 +440,22 @@ export function noteChanges(draftIn: string, finalIn: string, budget: CellBudget
       }
     }
     for (const p of parts) {
-      const c = buildChange(draft, final, dt, ft, p, bold);
+      const c = buildChange(draft, final, dt, ft, p, bold, filter);
       if (c) out.push(c);
+      else if (!filter) out.push({ key: "?", change: "change", before: "", after: "", beforeTokens: [], draftStart: 0, draftEnd: 0, draftExcerpt: "", finalExcerpt: "" });
     }
   }
   return out;
 }
 
 // ── Grouping, exclusions and homes ──────────────────────────────────────────
+
+/** A card's example note in full (NFC), with its change: what approve checks the rule on. */
+export interface ExampleNote {
+  draft: string;
+  final: string;
+  change: NoteChange;
+}
 
 interface Prepared {
   row: InboxRow;
@@ -441,49 +480,52 @@ const allWords = (s: string) => tokenize(s).every((t) => t.word);
 const norm = (s: string | null | undefined) => (s == null ? "" : collapse(nfc(s)).trim().toLowerCase());
 const stripMarks = (s: string) => s.replace(/\p{M}/gu, "");
 
-function editDistance(a: string[], b: string[]): number {
-  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
-  for (let i = 1; i <= a.length; i++) {
-    const cur = [i];
-    for (let j = 1; j <= b.length; j++) {
-      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
-    }
-    prev = cur;
-  }
-  return prev[b.length];
+const CLOSER: Record<string, string> = { "(": ")", "[": "]" };
+
+/** A tag fully enclosed in one pair of parentheses or brackets, with a letter inside: "(مُكيَّف)". */
+export function isEnclosedTag(s: string): boolean {
+  const close = CLOSER[s[0]];
+  if (!close || s.length < 3 || s[s.length - 1] !== close) return false;
+  const inner = s.slice(1, -1);
+  return /\p{L}/u.test(inner) && !/[()[\]]/.test(inner);
 }
 
-/** The same word respelled: equal without combining marks, or one letter different. */
-export function isRespelling(a: string, b: string): boolean {
-  const x = Array.from(stripMarks(a));
-  const y = Array.from(stripMarks(b));
-  if (x.join("") === y.join("")) return true;
-  return Math.min(x.length, y.length) >= 3 && editDistance(x, y) <= 1;
+/** One word whose only change is its combining marks (tanween, vowels): "مفيدا" → "مفيدًا". */
+export function isMarksOnly(before: string, after: string): boolean {
+  const b = tokenize(before);
+  const a = tokenize(after);
+  return (
+    b.length === 1 && a.length === 1 && b[0].word && a[0].word && before !== after && stripMarks(before) === stripMarks(after)
+  );
 }
 
-function isMechanical(s: { change: ChangeKind; before: string; after: string }): boolean {
-  if (s.change !== "change") return s.change === "insert-end" && s.before === "]" && s.after === "].";
-  const bw = wordsOf(s.before);
-  const aw = wordsOf(s.after);
-  if (bw.length > 1 || aw.length > 1) return false;
-  // A bare word deleted or inserted is wording, not mechanics; a word with
-  // punctuation around it (a tag like "(مُكيَّف)") is.
-  if (bw.length !== aw.length) return (bw.length ? !allWords(s.before) : !allWords(s.after));
-  return bw.length === 0 || isRespelling(bw[0], aw[0]);
-}
-
-/** The house-style rule that would make this change, before checking it runs. */
-export function candidateRule(s: { change: ChangeKind; before: string; after: string }): SuggestedRule | null {
+/**
+ * The house-style rule for a change, offered ONLY for the three shapes that are
+ * safe to run on every future draft (every book, notes and questions), with the
+ * share of opportunities its hits must reach:
+ *   - the closing period after the note's final "]" (final_bracket_period), 50%;
+ *   - deleting a tag fully enclosed in () or [] with a letter inside (literal;
+ *     the brackets bound the match), 50%;
+ *   - one whole word whose only change is its combining marks (whole_word),
+ *     90%, because a mark change can be grammar and right only in context.
+ * Everything else (punctuation swaps, word+punctuation literals with no letter
+ * boundary, respellings, bare word deletions) is never an automatic rule.
+ */
+export function candidateRule(s: { change: ChangeKind; before: string; after: string }): { rule: SuggestedRule; minShare: number } | null {
   if (s.change === "insert-end" && s.before === "]" && s.after === "].") {
-    return { kind: "final_bracket_period", find: "]", replace: "].", scope: "end-of-note" };
+    return { rule: { kind: "final_bracket_period", find: "]", replace: "].", scope: "end-of-note" }, minShare: 0.5 };
   }
   if (s.change !== "change") return null;
-  const toks = tokenize(s.before);
-  const kind: HouseStyleKind = toks.length === 1 && toks[0].word ? "whole_word" : "literal";
-  return { kind, find: s.before, replace: s.after, scope: "note" };
+  if (s.after === "" && isEnclosedTag(s.before)) {
+    return { rule: { kind: "literal", find: s.before, replace: "", scope: "note" }, minShare: 0.5 };
+  }
+  if (isMarksOnly(s.before, s.after)) {
+    return { rule: { kind: "whole_word", find: s.before, replace: s.after, scope: "note" }, minShare: 0.9 };
+  }
+  return null;
 }
 
-const asRule = (r: SuggestedRule, id = "suggested"): HouseStyleRule => ({
+export const asRule = (r: SuggestedRule, id = "suggested"): HouseStyleRule => ({
   id,
   ...r,
   examples: [],
@@ -492,17 +534,46 @@ const asRule = (r: SuggestedRule, id = "suggested"): HouseStyleRule => ({
   sortOrder: 0,
 });
 
-// Running the rule on one of these drafts makes the change go away.
-function ruleMakesChange(rule: HouseStyleRule, key: string, rows: Prepared[]): boolean {
+const sameKeys = (a: NoteChange[], b: string[]) => {
+  const x = a.map((c) => c.key).sort();
+  const y = [...b].sort();
+  return x.length === y.length && x.every((k, i) => k === y[i]);
+};
+
+/**
+ * The rule makes exactly the editor's change in this note. Run on the FULL
+ * draft: everything the rule changed is this change (nothing else rewritten),
+ * and against the final, this change is gone while every other difference is
+ * untouched. Unfiltered diffs, so a long or bold-adjacent edit cannot hide.
+ */
+export function ruleReproduces(fn: (t: string) => string, key: string, draftIn: string, finalIn: string): boolean {
+  const draft = nfc(draftIn);
+  const final = nfc(finalIn);
+  const ruled = fn(draft);
+  if (ruled === draft) return false;
+  const inf = { cells: Infinity };
+  const edits = noteChanges(draft, ruled, inf, false);
+  if (!edits || edits.length === 0 || edits.some((c) => c.key !== key)) return false;
+  const had = noteChanges(draft, final, inf, false);
+  const left = noteChanges(ruled, final, inf, false);
+  if (!had || !left) return false;
+  return sameKeys(left, had.filter((c) => c.key !== key).map((c) => c.key));
+}
+
+function ruleReproducesOn(rule: HouseStyleRule, key: string, rows: Prepared[], every: boolean): boolean {
   const fn = compileRule(rule);
-  if (!fn) return false;
-  for (const p of rows) {
-    const ruled = fn(p.draft);
-    if (ruled === p.draft) continue;
-    const after = noteChanges(ruled, p.final);
-    if (after && !after.some((c) => c.key === key)) return true;
-  }
-  return false;
+  if (!fn || rows.length === 0) return false;
+  const ok = (p: Prepared) => ruleReproduces(fn, key, p.draft, p.final);
+  return every ? rows.every(ok) : rows.some(ok);
+}
+
+/** The line of the draft (between stored line breaks) that holds a change: a real, uncut pair for a rule's examples. */
+export function draftLine(draft: string, start: number, end: number): string {
+  const esc = start >= 2 ? draft.lastIndexOf("\\n", start - 2) : -1;
+  const from = Math.max(esc >= 0 ? esc + 2 : 0, draft.lastIndexOf("\n", start - 1) + 1);
+  const ends = [draft.indexOf("\\n", end), draft.indexOf("\n", end)].filter((i) => i >= 0);
+  const to = ends.length ? Math.min(...ends) : draft.length;
+  return draft.slice(from, to).trim();
 }
 
 // TODO(#817): lessons do not exist yet. When they do, return true when a
@@ -512,16 +583,11 @@ function coveredByLesson(_s: { before: string; after: string }): boolean {
   return false;
 }
 
-function coveredByTerm(s: { before: string; after: string }, terms: InboxTerm[]): boolean {
-  const before = norm(s.before);
+// A live term that is not deprecated or forbidden already gives the approved words.
+function coveredByTerm(s: { after: string }, terms: InboxTerm[]): boolean {
+  if (wordsOf(s.after).length === 0) return false;
   const after = norm(s.after);
-  const afterHasWord = wordsOf(s.after).length > 0;
-  const beforeHasWord = wordsOf(s.before).length > 0;
-  return terms.some(
-    (t) =>
-      (afterHasWord && (norm(t.target) === after || norm(t.replacement) === after)) ||
-      (beforeHasWord && (t.status === "deprecated" || t.status === "forbidden") && norm(t.target) === before),
-  );
+  return terms.some((t) => t.status !== "deprecated" && t.status !== "forbidden" && norm(t.target) === after);
 }
 
 function coveredByTemplate(s: { after: string }, templates: string[]): boolean {
@@ -530,13 +596,23 @@ function coveredByTemplate(s: { after: string }, templates: string[]): boolean {
   return templates.some((t) => t.includes(after));
 }
 
-// Either both texts appear (when before has a word, so punctuation alone never
-// matches), or the line the page copies for a Common issues card does:
-// «before» and «after» (or nothing, for a deletion) in guillemets.
+const escapeRe = (s: string) => s.replace(/[\\^$.*+?()[\]{}|/]/g, "\\$&");
+const hasWholeWord = (line: string, w: string) =>
+  new RegExp(`(?<![\\p{L}\\p{M}\\p{N}])${escapeRe(w)}(?![\\p{L}\\p{M}\\p{N}])`, "u").test(line);
+
+// One line of the Common issues text is either exactly the line the page copies
+// ("- «before» → «after»", either arrow, ∅ for a deletion), or holds before and
+// after (both with a word) as whole words. No bare substring matching.
 function coveredByCommonIssues(s: { before: string; after: string }, commonIssues: string): boolean {
-  const has = (x: string) => commonIssues.includes(norm(x));
-  if (wordsOf(s.before).length > 0 && has(s.before) && (s.after === "" || has(s.after))) return true;
-  return has(`«${s.before}»`) && (s.after === "" || has(`«${s.after}»`));
+  const before = norm(s.before);
+  const after = norm(s.after);
+  const target = after === "" ? "∅" : `«${after}»`;
+  const wordy = wordsOf(s.before).length > 0 && wordsOf(s.after).length > 0;
+  return commonIssues.split(/\r?\n/).some((raw) => {
+    const line = norm(raw);
+    if (line === `- «${before}» → ${target}` || line === `- «${before}» ← ${target}`) return true;
+    return wordy && hasWholeWord(line, before) && hasWholeWord(line, after);
+  });
 }
 
 /** Pick examples: notes with the fewest other changes first, one per chapter first. */
@@ -564,6 +640,8 @@ export function buildInbox(
   rows: InboxRow[],
   ctx: InboxContext,
   budget: CellBudget = { cells: DIFF_CELL_BUDGET },
+  /** When given, receives each card's example notes in full (for approve). */
+  exampleNotes?: Map<string, ExampleNote[]>,
 ): Omit<SuggestionInboxResponse, "book" | "notMigrated"> {
   const scanned = { validated: rows.length, noDraft: 0, compared: 0, skippedLong: 0 };
   const prepared: Prepared[] = [];
@@ -594,7 +672,7 @@ export function buildInbox(
   }
 
   const excluded: InboxExcluded = { rejected: 0, rule: 0, term: 0, template: 0, commonIssues: 0, lesson: 0 };
-  const commonIssues = norm(ctx.commonIssues);
+  const commonIssues = ctx.commonIssues;
   const templates = ctx.templates.map(norm);
   const suggestions: Suggestion[] = [];
   for (const [key, g] of groups) {
@@ -606,7 +684,8 @@ export function buildInbox(
       continue;
     }
     const examples = pickExamples(g.hits);
-    if (ctx.rules.some((r) => ruleMakesChange(r, key, examples))) {
+    // Covered only when the rule makes exactly this change on an example.
+    if (ctx.rules.some((r) => ruleReproducesOn(r, key, examples, false))) {
       excluded.rule++;
       continue;
     }
@@ -636,13 +715,11 @@ export function buildInbox(
     const cand = candidateRule(s);
     if (
       cand &&
-      isMechanical(s) &&
-      g.hits.length * 2 >= opportunities &&
-      compileRule(asRule(cand)) &&
-      ruleMakesChange(asRule(cand), key, examples)
+      g.hits.length >= cand.minShare * opportunities &&
+      ruleReproducesOn(asRule(cand.rule), key, examples, true)
     ) {
       home = "house_style";
-      rule = cand;
+      rule = cand.rule;
     } else if (wordsOf(s.before).length >= 2 && templates.some((t) => t.includes(norm(s.before)))) {
       home = "template";
     } else if (
@@ -672,6 +749,10 @@ export function buildInbox(
       home,
       rule,
     });
+    exampleNotes?.set(
+      key,
+      examples.map((p) => ({ draft: p.draft, final: p.final, change: p.changes.find((x) => x.key === key) as NoteChange })),
+    );
   }
   suggestions.sort((a, b) => b.hits - a.hits || (a.key < b.key ? -1 : 1));
   return { minHits: MIN_HITS, minChapters: MIN_CHAPTERS, scanned, excluded, suggestions };
@@ -694,7 +775,11 @@ async function allOrEmpty<T>(db: Db, sql: string, table: string): Promise<{ rows
   }
 }
 
-export async function computeInbox(db: Db, book: string): Promise<SuggestionInboxResponse> {
+export async function computeInbox(
+  db: Db,
+  book: string,
+  exampleNotes?: Map<string, ExampleNote[]>,
+): Promise<SuggestionInboxResponse> {
   const [rowRes, rules, terms, templates, prefs, rejected] = await Promise.all([
     db.prepare(SCORECARD_ROWS_SQL).bind(book).all<{
       id: string;
@@ -710,7 +795,8 @@ export async function computeInbox(db: Db, book: string): Promise<SuggestionInbo
     ),
     allOrEmpty<{ target_term: string | null; replacement: string | null; status: string }>(
       db,
-      `SELECT target_term, replacement, status FROM terminology WHERE deleted_at IS NULL`,
+      `SELECT target_term, replacement, status FROM terminology
+        WHERE deleted_at IS NULL AND status NOT IN ('deprecated', 'forbidden')`,
       "terminology",
     ),
     allOrEmpty<{ target_md: string }>(
@@ -741,7 +827,7 @@ export async function computeInbox(db: Db, book: string): Promise<SuggestionInbo
     commonIssues: prefs.rows[0]?.common_issues_md ?? "",
     rejected: new Set(rejected.rows.map((r) => r.key)),
   };
-  return { book, ...buildInbox(rows, ctx), notMigrated: rejected.missing };
+  return { book, ...buildInbox(rows, ctx, undefined, exampleNotes), notMigrated: rejected.missing };
 }
 
 // ── Routes ──────────────────────────────────────────────────────────────────
@@ -789,17 +875,25 @@ suggestionInbox.post("/:book/approve", requireAdmin, async (c) => {
   const body = await readKey(c);
   if (!body) return c.json({ error: "bad_key" }, 400);
   // Rebuild the card from the data; never from text in the request.
-  const inbox = await computeInbox(c.env.DB, book);
+  const exampleNotes = new Map<string, ExampleNote[]>();
+  const inbox = await computeInbox(c.env.DB, book, exampleNotes);
   const card = inbox.suggestions.find((s) => s.key === body.key);
   if (!card) return c.json({ error: "suggestion_not_found" }, 404);
   if (card.home !== "house_style" || !card.rule) return c.json({ error: "not_a_rule", home: card.home }, 409);
   const id = await ruleId(card.key);
   const fn = compileRule(asRule(card.rule, id));
   if (!fn) return c.json({ error: "rule_unsupported" }, 409);
-  // Examples hold by construction: before is a real draft excerpt, after is
-  // what the rule makes of it.
-  const examples = card.examples
-    .map((e) => ({ before: e.draft, after: fn(e.draft) }))
+  // The rule must make exactly the editor's change on every example's FULL
+  // draft, and nothing else.
+  const notes = exampleNotes.get(card.key) ?? [];
+  if (notes.length === 0 || !notes.every((n) => ruleReproduces(fn, card.key, n.draft, n.final))) {
+    return c.json({ error: "rule_mismatch" }, 409);
+  }
+  // Stored examples are real pairs: the whole line of the draft that holds the
+  // change (no "…"), and what the rule makes of that line.
+  const examples = notes
+    .map((n) => draftLine(n.draft, n.change.draftStart, n.change.draftEnd))
+    .map((before) => ({ before, after: fn(before) }))
     .filter((e) => e.after !== e.before)
     .slice(0, EXAMPLE_COUNT);
   try {
@@ -821,9 +915,15 @@ suggestionInbox.post("/:book/approve", requireAdmin, async (c) => {
   return c.json({ rule: { id, ...card.rule, examples, enabled: true } }, 201);
 });
 
-suggestionInbox.post("/reject", requireAdmin, async (c) => {
+suggestionInbox.post("/:book/reject", requireAdmin, async (c) => {
+  const book = bookParam(c.req.param("book"));
+  if (!book) return c.json({ error: "unknown_book" }, 400);
   const body = await readKey(c);
   if (!body) return c.json({ error: "bad_key" }, 400);
+  // Only a card the admin can see now in this book can be rejected.
+  const inbox = await computeInbox(c.env.DB, book);
+  if (inbox.notMigrated) return c.json({ error: "not_migrated" }, 503);
+  if (!inbox.suggestions.some((s) => s.key === body.key)) return c.json({ error: "suggestion_not_found" }, 404);
   try {
     await c.env.DB.prepare(
       `INSERT OR IGNORE INTO suggestion_rejections (key, before_text, after_text, rejected_by) VALUES (?1, ?2, ?3, ?4)`,

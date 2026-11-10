@@ -21,8 +21,18 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 
-import { tokenize, noteChanges, changeKey, buildInbox, MIN_HITS, MIN_CHAPTERS, suggestionInbox } from "./suggestionInbox.ts";
-import { houseStyleForProposal, loadEnabledHouseStyleRules } from "./houseStyle.ts";
+import {
+  tokenize,
+  noteChanges,
+  changeKey,
+  buildInbox,
+  ruleReproduces,
+  draftLine,
+  MIN_HITS,
+  MIN_CHAPTERS,
+  suggestionInbox,
+} from "./suggestionInbox.ts";
+import { compileRule, houseStyleForProposal, loadEnabledHouseStyleRules } from "./houseStyle.ts";
 
 // (مُكيَّف) with its marks in both orders: NFC puts the fatha before the shadda.
 const MUK_NFC = "(مُكيَّف)";
@@ -133,7 +143,7 @@ function addNote(sqlite, { chapter, draft, final }) {
 // (plus 2 left alone), 2 notes with both changes, a one-off rewrite, a
 // substitution repeated 12x but only in 2 chapters, and a word substitution
 // 10x across 3 chapters (a term, not a mechanical rule).
-function fixture({ keepSeedRules = false } = {}) {
+function fixture({ keepSeedRules = false, notes = null } = {}) {
   const sqlite = new DatabaseSync(":memory:");
   const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations");
   for (const f of readdirSync(dir).filter((f) => f.endsWith(".sql")).sort()) {
@@ -144,6 +154,12 @@ function fixture({ keepSeedRules = false } = {}) {
   // is the inbox before any rule exists.
   if (!keepSeedRules) sqlite.exec(`DELETE FROM house_style_rules`);
 
+  if (notes) for (const n of notes) addNote(sqlite, n);
+  else seedDefault(sqlite);
+  return route(sqlite);
+}
+
+function seedDefault(sqlite) {
   for (let i = 0; i < 30; i++) {
     const d = `ترجمة بديلة: [${WORDS[i % WORDS.length]} ${i}]`;
     addNote(sqlite, { chapter: 1 + (i % 4), draft: d, final: `${d}.` });
@@ -171,7 +187,9 @@ function fixture({ keepSeedRules = false } = {}) {
     addNote(sqlite, { chapter: 9 + (i % 3), draft: `الرب يتكلم ${i}`, final: `السيد يتكلم ${i}` });
   }
   addNote(sqlite, { chapter: 1, draft: null, final: "بلا مسودة" });
+}
 
+function route(sqlite) {
   const app = new Hono();
   let role = "admin";
   app.use("*", async (c, next) => {
@@ -281,9 +299,14 @@ test("approving the period card creates an enabled rule that fixes the next impo
   assert.equal(row.enabled, 1);
   assert.equal(row.scope, "end-of-note");
   assert.equal(row.updated_by, 1);
+  // Stored examples are real pairs: whole draft lines, no "…".
   const examples = JSON.parse(row.examples_json);
-  assert.ok(examples.length >= 1 && examples.length <= 3);
-  for (const e of examples) assert.equal(`${e.before}.`, e.after);
+  assert.equal(examples.length, 3);
+  for (const e of examples) {
+    assert.match(e.before, /^ترجمة بديلة: \[.*\]$/);
+    assert.ok(!e.before.includes("…"));
+    assert.equal(`${e.before}.`, e.after);
+  }
 
   // The #815 import engine now applies it.
   const rules = await loadEnabledHouseStyleRules(h.env.DB);
@@ -302,9 +325,101 @@ test("approving the (مُكيَّف) card creates an enabled literal rule that d
   const ok = await h.call("POST", `/${BOOK}/approve`, { key: MUK_KEY });
   assert.equal(ok.status, 201);
   assert.equal(ok.body.rule.kind, "literal");
+  const row = h.sqlite.prepare(`SELECT examples_json FROM house_style_rules WHERE id = ?`).get(ok.body.rule.id);
+  const examples = JSON.parse(row.examples_json);
+  assert.equal(examples.length, 3);
+  for (const e of examples) {
+    assert.match(e.before, /^هنا \(.+\) تعني /);
+    assert.equal(e.after, e.before.replace(/ \(.+\)/, ""));
+  }
+  // It fires on a non-NFC draft too (marks in the other order): the #815
+  // engine matches combining marks in any order.
   const rules = await loadEnabledHouseStyleRules(h.env.DB);
   const out = houseStyleForProposal({ note: `ترجمة بديلة: [وكان معهم] ${MUK_RAW}` }, ["note"], rules);
   assert.equal(out.values.note, "ترجمة بديلة: [وكان معهم]");
+});
+
+test("only safe shapes become rules: punctuation swaps, word+punctuation, respellings and bare word deletions do not", async () => {
+  const notes = [];
+  const add = (draft, final) => {
+    for (let i = 0; i < 10; i++) notes.push({ chapter: 1 + (i % 3), draft: draft(i), final: final(i) });
+  };
+  add((i) => `قال "نعم ${i}`, (i) => `قال «نعم ${i}`); // " → «
+  add((i) => `أولا، ثم ${i}`, (i) => `أولا ثم ${i}`); // delete ،
+  add((i) => `هنا أي: كلمة ${i}`, (i) => `هنا كلمة ${i}`); // word+punctuation literal
+  add((i) => `قد يكون ذلك ${i}`, (i) => `قد تكون ذلك ${i}`); // one-letter respelling
+  add((i) => `مهم جدا ${i}`, (i) => `مهم ${i}`); // bare word deletion
+  const h = fixture({ notes });
+  const r = await h.call("GET", `/${BOOK}`);
+  const keys = [
+    changeKey("change", '"', "«"),
+    changeKey("change", "،", ""),
+    changeKey("change", "أي:", ""),
+    changeKey("change", "يكون", "تكون"),
+    changeKey("change", "جدا", ""),
+  ];
+  for (const key of keys) {
+    const card = r.body.suggestions.find((s) => s.key === key);
+    assert.ok(card, key);
+    assert.notEqual(card.home, "house_style", key);
+    assert.equal(card.rule, null, key);
+    const approve = await h.call("POST", `/${BOOK}/approve`, { key });
+    assert.equal(approve.status, 409, key);
+    assert.equal(approve.body.error, "not_a_rule", key);
+  }
+  assert.equal(h.sqlite.prepare(`SELECT COUNT(*) AS n FROM house_style_rules`).get().n, 0);
+});
+
+test("a marks-only respelling becomes a whole_word rule only at 90% of opportunities", async () => {
+  const notes = (kept) => {
+    const out = [];
+    for (let i = 0; i < 10; i++) out.push({ chapter: 1 + (i % 3), draft: `قد يكون مفيدا هنا ${i}`, final: `قد يكون مفيدًا هنا ${i}` });
+    for (let i = 0; i < kept; i++) out.push({ chapter: 4, draft: `كان مفيدا ${i}`, final: `كان مفيدا ${i}` });
+    return out;
+  };
+  const key = changeKey("change", "مفيدا", "مفيدًا");
+  const high = await fixture({ notes: notes(1) }).call("GET", `/${BOOK}`); // 10 of 11
+  const card = high.body.suggestions.find((s) => s.key === key);
+  assert.equal(card.home, "house_style");
+  assert.deepEqual(card.rule, { kind: "whole_word", find: "مفيدا", replace: "مفيدًا", scope: "note" });
+  const low = await fixture({ notes: notes(2) }).call("GET", `/${BOOK}`); // 10 of 12
+  assert.notEqual(low.body.suggestions.find((s) => s.key === key).home, "house_style");
+});
+
+test("an existing rule that removes the text but writes something else does not cover the card", async () => {
+  const h = fixture();
+  h.sqlite
+    .prepare(`INSERT INTO house_style_rules (id, kind, find, replace, scope, enabled) VALUES ('other', 'literal', ?, 'مكيف', 'note', 0)`)
+    .run(MUK_NFC);
+  const r = await h.call("GET", `/${BOOK}`);
+  assert.ok(r.body.suggestions.some((s) => s.key === MUK_KEY));
+  assert.equal(r.body.excluded.rule, 0);
+});
+
+test("ruleReproduces: exactly the editor's change, nothing more", () => {
+  const fn = compileRule({ id: "t", kind: "literal", find: MUK_NFC, replace: "", scope: "note", examples: [], counterExamples: [], enabled: true, sortOrder: 0 });
+  assert.equal(ruleReproduces(fn, MUK_KEY, `أ ${MUK_NFC} ب`, "أ ب"), true);
+  // The editor removed only one of two tags: the rule would remove both.
+  assert.equal(ruleReproduces(fn, MUK_KEY, `أ ${MUK_NFC} ب ${MUK_NFC} ج`, `أ ب ${MUK_NFC} ج`), false);
+  // Nothing to do.
+  assert.equal(ruleReproduces(fn, MUK_KEY, "أ ب", "أ ب"), false);
+});
+
+test("draftLine: the stored line break bounds an example", () => {
+  const d = `أول سطر\\nهنا ${MUK_NFC} تعني\\nآخر`;
+  const s = d.indexOf("(");
+  assert.equal(draftLine(d, s, s + MUK_NFC.length), `هنا ${MUK_NFC} تعني`);
+  assert.equal(draftLine("كلمة وحيدة", 0, 4), "كلمة وحيدة");
+});
+
+test("tokens: bidi marks drop out of change text; ZWNJ stays inside a word; an insertion before a one-token draft is not insert-end", () => {
+  const rlm = String.fromCharCode(0x200f);
+  assert.deepEqual(noteChanges("[x]", `[x]${rlm}.`).map((c) => c.key), [changeKey("insert-end", "]", "].")]);
+  const zwnj = String.fromCharCode(0x200c);
+  assert.deepEqual(tokenize(`می${zwnj}خواهم`).map((t) => t.text), [`می${zwnj}خواهم`]);
+  const ch = noteChanges("كلمة", "«كلمة");
+  assert.equal(ch.length, 1);
+  assert.equal(ch[0].change, "insert");
 });
 
 test("a card whose home is not a house-style rule cannot be approved as one", async () => {
@@ -317,14 +432,15 @@ test("a card whose home is not a house-style rule cannot be approved as one", as
 
 test("a rejected card never comes back", async () => {
   const h = fixture();
-  const r = await h.call("POST", "/reject", { key: MUK_KEY });
+  const r = await h.call("POST", `/${BOOK}/reject`, { key: MUK_KEY });
   assert.equal(r.status, 200);
   const row = h.sqlite.prepare(`SELECT * FROM suggestion_rejections WHERE key = ?`).get(MUK_KEY);
   assert.equal(row.before_text, MUK_NFC);
   assert.equal(row.after_text, "");
   assert.equal(row.rejected_by, 1);
-  const again = await h.call("POST", "/reject", { key: MUK_KEY });
-  assert.equal(again.status, 200);
+  // Gone from the inbox, so a second reject finds no card.
+  const again = await h.call("POST", `/${BOOK}/reject`, { key: MUK_KEY });
+  assert.equal(again.status, 404);
   const list = await h.call("GET", `/${BOOK}`);
   assert.deepEqual(list.body.suggestions.map((s) => s.key), [PERIOD_KEY, TERM_KEY]);
   assert.equal(list.body.excluded.rejected, 1);
@@ -336,9 +452,15 @@ test("a rejected card never comes back", async () => {
 test("reject refuses a key that is not a suggestion key", async () => {
   const h = fixture();
   for (const key of ["", "nope", JSON.stringify(["other", "a", "b"]), JSON.stringify(["change", "", ""])]) {
-    const r = await h.call("POST", "/reject", { key });
+    const r = await h.call("POST", `/${BOOK}/reject`, { key });
     assert.equal(r.status, 400, key);
   }
+  // Well-formed, but not a card shown for this book: refused, nothing stored.
+  const stray = await h.call("POST", `/${BOOK}/reject`, { key: changeKey("change", "ليس", "بطاقة") });
+  assert.equal(stray.status, 404);
+  const other = await h.call("POST", "/MRK/reject", { key: MUK_KEY });
+  assert.equal(other.status, 404);
+  assert.equal(h.sqlite.prepare(`SELECT COUNT(*) AS n FROM suggestion_rejections`).get().n, 0);
 });
 
 test("an editor gets 403 on every inbox route", async () => {
@@ -346,7 +468,7 @@ test("an editor gets 403 on every inbox route", async () => {
   h.setRole("editor");
   assert.equal((await h.call("GET", `/${BOOK}`)).status, 403);
   assert.equal((await h.call("POST", `/${BOOK}/approve`, { key: PERIOD_KEY })).status, 403);
-  assert.equal((await h.call("POST", "/reject", { key: PERIOD_KEY })).status, 403);
+  assert.equal((await h.call("POST", `/${BOOK}/reject`, { key: PERIOD_KEY })).status, 403);
   assert.equal(h.sqlite.prepare(`SELECT COUNT(*) AS n FROM house_style_rules`).get().n, 0);
 });
 
