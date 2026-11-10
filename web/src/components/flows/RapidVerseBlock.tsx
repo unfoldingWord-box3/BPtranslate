@@ -9,7 +9,10 @@
 //
 // Below that, each shown lane is one compact line: a small label at the
 // inline start, the verse text beside it (no grey box). Like the card view,
-// the note's quote is highlighted with `mark`.
+// the note's quote is highlighted with `mark`. In the "verses inline"
+// placement (be:rapidVersePlacement) the lines are left out (`showLanes`) and
+// each verse group in the list draws its own (RapidVerseLanes); the control
+// line and the lane chips stay here.
 //
 // This component only draws. The lanes' text, the highlight, the verse list
 // and every toggle come from TranslateNotesScreen. The card view keeps its
@@ -69,6 +72,9 @@ export interface RapidVerseBlockProps {
   controls?: ReactNode;
   /** A line under the lanes (the bridged-verse clamp hint). */
   footnote?: ReactNode;
+  /** False in the "verses inline" placement: the lanes' text lines and the
+   *  footnote are left out; the control line and the lane chips stay. */
+  showLanes?: boolean;
 }
 
 const REF_LIGHT = "#014263"; // Ocean
@@ -83,6 +89,7 @@ export function RapidVerseBlock({
   mark,
   controls,
   footnote,
+  showLanes = true,
 }: RapidVerseBlockProps) {
   const { t } = useTranslation();
   const theme = useTheme();
@@ -92,7 +99,7 @@ export function RapidVerseBlock({
   const at = currentKey == null ? -1 : stops.findIndex((s) => s.key === currentKey);
   const prev = at > 0 ? stops[at - 1] : null;
   const next = at >= 0 && at < stops.length - 1 ? stops[at + 1] : null;
-  const shown = lanes.filter((l) => l.shown);
+  const shown = showLanes ? lanes.filter((l) => l.shown) : [];
 
   return (
     <Box
@@ -235,7 +242,7 @@ export function RapidVerseBlock({
           ))}
         </Box>
       )}
-      {footnote}
+      {showLanes && footnote}
     </Box>
   );
 }

@@ -148,6 +148,7 @@ import {
   useNotesRapidCheck,
   useRapidHiddenColumns,
   useRapidHiddenLanes,
+  useRapidVersePlacement,
   useShowSourceUlt,
   useShowSourceUltAlignment,
 } from "../../lib/editorPrefs";
@@ -176,6 +177,7 @@ import {
 import { resolveFlowChipStatus, flowChipKind, type FlowChipStatus } from "../../lib/flowStatusChip";
 import { flowLaneSegmentsAcross, type FlowQuote, type FlowSegment } from "../../lib/flowHighlight";
 import { RapidVerseLanes, type RapidLaneSpec } from "./RapidVerseLanes";
+import { RapidVersePlacementToggle } from "./RapidVersePlacementToggle";
 import { isHebrewBook } from "../../lib/sourceSearch";
 import { realChapters } from "../../lib/bookSummary";
 import { drafts, rowKey } from "../../sync/drafts";
@@ -896,6 +898,11 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
   // the declutter round): see RapidColumnHeader and RapidVerseBlock.
   const [rapidHiddenCols, setRapidHiddenCol] = useRapidHiddenColumns();
   const [rapidHiddenLanes, setRapidHiddenLane] = useRapidHiddenLanes();
+  // Where the verse text shows (be:rapidVersePlacement): pinned at the top
+  // (default) or inline above each verse group's notes. Never both, so a
+  // type filter no longer draws the open note's verse twice.
+  const [rapidPlacement, setRapidPlacement] = useRapidVersePlacement();
+  const rapidInline = rapidPlacement === "inline";
   // Clicking another row's note text moves the cursor AND opens its editor.
   // The hydration effect closes the editor when the row changes, so the open
   // waits until that row has settled (its draft is loaded), then applies.
@@ -1114,9 +1121,9 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
     (projectConfig?.repos?.[role] || `${role}:${label}`).toLowerCase();
   const litLaneId = laneId("lit", litLabel);
   const simLaneId = laneId("sim", simLabel);
-  // Rapid check, type-filter mode: each verse group draws its own compact
-  // lanes (RapidVerseLanes, #831). Same lanes, order and toggles as the
-  // pinned verse block: the source ULT while U / its chip is on and it has
+  // Rapid check, "verses inline" placement: each verse group draws its own
+  // compact lanes (RapidVerseLanes, #831). Same lanes, order and toggles as
+  // the pinned verse block: the source ULT while U / its chip is on and it has
   // loaded, then the project's literal and simplified lanes unless hidden.
   // Built once per data change, not per keystroke.
   const rapidGroupLanes = useMemo<RapidLaneSpec[]>(() => {
@@ -1140,9 +1147,19 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
     simLabel,
     ustIndex,
   ]);
+  // The quotes each inline group marks. With a type filter, every listed
+  // note's quote in its verse (#831). Without one there is a single group,
+  // the open note's verse, and it marks the open note's quote only, as the
+  // pinned block does: marking every note of the verse would paint most of it.
+  const rowVerse = row?.verse ?? 0;
   const rapidGroupQuotes = useMemo(() => {
     const byVerse = new Map<number, FlowQuote[]>();
-    if (!rapid || !typeFilter || !queueIds) return byVerse;
+    if (!rapid || !rapidInline) return byVerse;
+    if (!typeFilter) {
+      if (rowVerse > 0) byVerse.set(rowVerse, [{ quote: rowQuote, occurrence: rowOccurrence }]);
+      return byVerse;
+    }
+    if (!queueIds) return byVerse;
     for (const i of visibleIdx) {
       const r = rowById.get(queueIds[i]);
       if (!r || r.verse <= 0) continue;
@@ -1151,7 +1168,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
       byVerse.set(r.verse, list);
     }
     return byVerse;
-  }, [rapid, typeFilter, queueIds, visibleIdx, rowById]);
+  }, [rapid, rapidInline, typeFilter, queueIds, visibleIdx, rowById, rowVerse, rowQuote, rowOccurrence]);
 
   const englishNote = row ? (sourceNotes.get(row.id)?.note ?? null) : null;
 
@@ -3078,14 +3095,16 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
         onGoTo={rapidGoStop}
         lanes={rapidLanes}
         mark={mark}
+        showLanes={!rapidInline}
         controls={
           <>
             {typeFilterControl && (
               <Box sx={{ width: 220, "& .MuiSelect-select": { paddingBlock: "4px" } }}>{typeFilterControl}</Box>
             )}
-            {sourceUltOn && (
+            {sourceUltOn && !rapidInline && (
               // The card view's alignment-strip toggle (#431), offered while
-              // the source lane shows.
+              // the source lane shows. The inline lanes draw plain text, so
+              // the strip (and this chip) belong to the pinned placement.
               <Chip
                 size="small"
                 clickable
@@ -3098,6 +3117,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
                 sx={{ flex: "none", fontWeight: 700 }}
               />
             )}
+            <RapidVersePlacementToggle value={rapidPlacement} onChange={setRapidPlacement} />
           </>
         }
         footnote={
@@ -3245,16 +3265,25 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
         <NotesRapidCheck
           rows={rapidRows}
           groupByVerse={typeFilter != null}
-          renderGroupLanes={(v, refLabel) => (
-            <RapidVerseLanes
-              verse={v}
-              refLabel={refLabel}
-              lanes={rapidGroupLanes}
-              sourceIndex={sourceIndex}
-              quotes={rapidGroupQuotes.get(v) ?? NO_QUOTES}
-              mark={mark}
-            />
-          )}
+          renderGroupLanes={
+            rapidInline
+              ? (v, refLabel) => (
+                  <RapidVerseLanes
+                    verse={v}
+                    // Without a filter the one group is the open note's verse:
+                    // a bridged note ("13:26-27") shows every verse it covers,
+                    // as the pinned block does (#341).
+                    verses={typeFilter ? undefined : renderCovered.verses}
+                    refLabel={refLabel}
+                    lanes={rapidGroupLanes}
+                    sourceIndex={sourceIndex}
+                    quotes={rapidGroupQuotes.get(v) ?? NO_QUOTES}
+                    mark={mark}
+                  />
+                )
+              : undefined
+          }
+          onTogglePlacement={() => setRapidPlacement(rapidInline ? "top" : "inline")}
           book={book}
           sourceLabel={sourceLabel}
           sourceDir={sourceDir}

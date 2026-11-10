@@ -326,3 +326,47 @@ function makeHiddenSetPref(key: string) {
 
 export const useRapidHiddenLanes = makeHiddenSetPref("be:rapidHiddenLanes");
 export const useRapidHiddenColumns = makeHiddenSetPref("be:rapidHiddenColumns");
+
+// ── Where rapid check draws the verse text ──────────────────────────────────
+//
+//   "top"    — the open note's verse is pinned in the sticky header (the
+//              layout rapid check shipped with, so it is the DEFAULT). With a
+//              type filter, only the pinned verse shows: the verse groups get
+//              no lanes of their own, so no verse is drawn twice.
+//   "inline" — no verse text in the sticky header (its controls stay); each
+//              verse group's lanes sit above that verse's notes and scroll
+//              with them, with or without a type filter.
+// Anything stored other than "inline" reads as "top".
+export type RapidVersePlacement = "top" | "inline";
+
+const RAPID_VERSE_PLACEMENT_KEY = "be:rapidVersePlacement";
+
+export function getRapidVersePlacement(): RapidVersePlacement {
+  try {
+    return localStorage.getItem(RAPID_VERSE_PLACEMENT_KEY) === "inline" ? "inline" : "top";
+  } catch {
+    return "top";
+  }
+}
+
+const rapidVersePlacementListeners = new Set<(p: RapidVersePlacement) => void>();
+
+export function setRapidVersePlacement(next: RapidVersePlacement): void {
+  try {
+    localStorage.setItem(RAPID_VERSE_PLACEMENT_KEY, next);
+  } catch {
+    /* quota or private mode — soft fail, still notify so the UI stays live */
+  }
+  for (const listener of rapidVersePlacementListeners) listener(next);
+}
+
+export function useRapidVersePlacement(): [RapidVersePlacement, (next: RapidVersePlacement) => void] {
+  const [placement, setPlacementState] = useState<RapidVersePlacement>(getRapidVersePlacement);
+  useEffect(() => {
+    rapidVersePlacementListeners.add(setPlacementState);
+    return () => {
+      rapidVersePlacementListeners.delete(setPlacementState);
+    };
+  }, []);
+  return [placement, setRapidVersePlacement];
+}
