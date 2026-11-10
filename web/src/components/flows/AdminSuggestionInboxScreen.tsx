@@ -46,6 +46,7 @@ import {
   type SuggestionInboxResponse,
 } from "../../sync/api";
 import { bookName, BOOKS } from "../../lib/bookNames";
+import { approveErrorKey, precisionLine } from "../../lib/suggestionInbox";
 
 const CANON_INDEX = new Map(BOOKS.map((b, i) => [b.code, i]));
 const canonSort = (a: BookListEntry, b: BookListEntry) =>
@@ -199,19 +200,19 @@ export default function AdminSuggestionInboxScreen({ role, me }: FlowScreenConte
         setNotice(i18n.t("adminPages.suggestions.ruleAdded", { before: s.before }));
         setReloadGen((g) => g + 1);
       } catch (err) {
+        // By the body's error code, not the status: not_migrated comes back as 503.
         const code = err instanceof ApiError ? (err.body as { error?: string } | null)?.error : null;
+        if (code === "rule_exists") {
+          // A double click: the first request already stored the rule. Done, not a failure.
+          setNotice(i18n.t("adminPages.suggestions.ruleExists", { before: s.before }));
+          setReloadGen((g) => g + 1);
+          return;
+        }
+        const msgKey = approveErrorKey(code);
         setMsg(
           s.key,
           "error",
-          code === "suggestion_not_found"
-            ? i18n.t("adminPages.suggestions.errGone")
-            : code === "rule_mismatch"
-              ? i18n.t("adminPages.suggestions.errMismatch")
-              : code === "rule_imprecise"
-                ? i18n.t("adminPages.suggestions.errImprecise")
-                : err instanceof Error
-              ? err.message
-              : i18n.t("adminPages.common.loadFailed"),
+          msgKey ? i18n.t(msgKey) : err instanceof Error ? err.message : i18n.t("adminPages.common.loadFailed"),
         );
       } finally {
         markBusy(s.key, false);
@@ -316,16 +317,17 @@ export default function AdminSuggestionInboxScreen({ role, me }: FlowScreenConte
           </Stack>
           {s.precision && (
             <Typography variant="body2" data-testid="rule-precision">
-              {t("adminPages.suggestions.precision", {
-                fires: s.precision.fires,
-                correct: s.precision.correct,
-                // Floor, so 79.6% never shows as 80% next to an 80% bar.
-                pct: s.precision.fires ? Math.floor((s.precision.correct / s.precision.fires) * 100) : 0,
-              })}
+              {/* Floored integer percent, so 79.6% never shows as 80% next to an 80% bar.
+                  With drafts left unchecked, the share is of the drafts that were checked. */}
+              {(() => {
+                const line = precisionLine(s.precision);
+                return t(line.key, line.values);
+              })()}
               {/* Say why it is not a rule only with the real reason. */}
               {s.ruleBlocked === "precision" &&
                 ` ${t("adminPages.suggestions.precisionBelow", { min: Math.round(s.precision.minPrecision * 100) })}`}
               {s.ruleBlocked === "examples" && ` ${t("adminPages.suggestions.examplesBlocked")}`}
+              {s.ruleBlocked === "unchecked" && ` ${t("adminPages.suggestions.uncheckedBlocked")}`}
             </Typography>
           )}
           <Box component="ul" sx={{ m: 0, paddingInlineStart: 2.5, "& li": { mb: 0.75 } }}>

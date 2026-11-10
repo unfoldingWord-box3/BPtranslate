@@ -1064,11 +1064,12 @@ export interface Suggestion {
   /**
    * For a change a rule shape covers: of this book's drafts the rule would
    * change (fires), how many it changes exactly as the editor did (correct),
-   * and the share needed (minPrecision) with at least 10 fires. Else null.
+   * how many could not be checked in time (unchecked, never a pass), and the
+   * share needed (minPrecision) with at least 10 fires. Else null.
    */
-  precision: { fires: number; correct: number; minPrecision: number } | null;
-  /** Why a rule-shaped card is not a rule: its precision, or its examples. null otherwise. */
-  ruleBlocked: "precision" | "examples" | null;
+  precision: { fires: number; correct: number; unchecked: number; minPrecision: number } | null;
+  /** Why a rule-shaped card is not a rule: its precision, its examples, or a check that could not finish. null otherwise. */
+  ruleBlocked: "precision" | "examples" | "unchecked" | null;
 }
 
 export interface SuggestionInboxResponse {

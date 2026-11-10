@@ -30,6 +30,10 @@ import {
   checkExamples,
   realExamples,
   draftLine,
+  parseChangeKey,
+  precisionPasses,
+  MAX_KEY_LENGTH,
+  COVERAGE_CELL_BUDGET,
   MIN_HITS,
   MIN_CHAPTERS,
   suggestionInbox,
@@ -241,7 +245,7 @@ test("GET lists the period and (مُكيَّف) cards with hit/opportunity count
   // Precision: the rule fires on the 30 drafts ending in a plain "]" and is
   // right on all of them. It skips the rc-link "]]" drafts and the two drafts
   // that end with the tag, so neither counts for or against it.
-  assert.deepEqual(period.precision, { fires: 30, correct: 30, minPrecision: 0.8 });
+  assert.deepEqual(period.precision, { fires: 30, correct: 30, unchecked: 0, minPrecision: 0.8 });
   assert.equal(period.examples.length, 3);
   // Examples come from different chapters and show the draft and the final.
   assert.equal(new Set(period.examples.map((e) => e.chapter)).size, 3);
@@ -257,7 +261,7 @@ test("GET lists the period and (مُكيَّف) cards with hit/opportunity count
   assert.equal(muk.home, "house_style");
   assert.deepEqual(muk.rule, { kind: "literal", find: MUK_NFC, replace: "", scope: "note" });
   // It would also delete the tag in the 2 drafts the editor left alone: 14 of 16.
-  assert.deepEqual(muk.precision, { fires: 16, correct: 14, minPrecision: 0.8 });
+  assert.deepEqual(muk.precision, { fires: 16, correct: 14, unchecked: 0, minPrecision: 0.8 });
 
   const term = r.body.suggestions[2];
   assert.equal(term.hits, 10);
@@ -279,7 +283,7 @@ test("precision: a marks-only rule that would also fire inside ZWNJ compounds th
   const card = (await h.call("GET", `/${BOOK}`)).body.suggestions.find((s) => s.key === key);
   assert.equal(card.hits, 10);
   assert.equal(card.opportunities, 10); // the diff alone sees no other chance
-  assert.deepEqual(card.precision, { fires: 13, correct: 10, minPrecision: 0.9 });
+  assert.deepEqual(card.precision, { fires: 13, correct: 10, unchecked: 0, minPrecision: 0.9 });
   assert.equal(card.ruleBlocked, "precision");
   assert.notEqual(card.home, "house_style");
   const approve = await h.call("POST", `/${BOOK}/approve`, { key });
@@ -305,7 +309,7 @@ test("precision: drafts the diff cap skipped still count as correct when the rul
   // is right on all 13 drafts it changes.
   assert.equal(card.hits, 10);
   assert.equal(card.opportunities, 13);
-  assert.deepEqual(card.precision, { fires: 13, correct: 13, minPrecision: 0.9 });
+  assert.deepEqual(card.precision, { fires: 13, correct: 13, unchecked: 0, minPrecision: 0.9 });
   assert.equal(card.home, "house_style");
 });
 
@@ -602,7 +606,7 @@ const mufidRule = (enabled) => ({
   sortOrder: 0,
 });
 
-test("budget: with the check budget spent, a card is not hidden as covered and is not offered as a rule", () => {
+test("budget: with both check budgets spent, a card is not hidden as covered and is not offered as a rule", () => {
   const rows = repeated((i) => `قد يكون مفيدا هنا ${i}`, (i) => `قد يكون مفيدًا هنا ${i}`);
   const ctx = { ...emptyCtx(), rules: [mufidRule(false)] };
   // Normal budget: the existing (switched-off) rule covers it.
@@ -610,14 +614,15 @@ test("budget: with the check budget spent, a card is not hidden as covered and i
   assert.equal(normal.suggestions.length, 0);
   assert.equal(normal.excluded.rule, 1);
   // No budget left: nothing can be checked, so the card stays and is no rule.
-  const starved = buildInbox(rows, ctx, undefined, undefined, { cells: 0 });
+  const starved = buildInbox(rows, ctx, undefined, undefined, { cells: 0 }, { cells: 0 });
   assert.equal(starved.excluded.rule, 0);
   assert.equal(starved.suggestions.length, 1);
   const card = starved.suggestions[0];
   assert.notEqual(card.home, "house_style");
   assert.equal(card.rule, null);
-  assert.deepEqual(card.precision, { fires: 10, correct: 0, minPrecision: 0.9 });
-  assert.equal(card.ruleBlocked, "precision");
+  // Nothing was measured: "could not be checked", not "precision below".
+  assert.deepEqual(card.precision, { fires: 10, correct: 0, unchecked: 10, minPrecision: 0.9 });
+  assert.equal(card.ruleBlocked, "unchecked");
   // With a normal budget and no covering rule, it is a rule card.
   assert.equal(buildInbox(rows, emptyCtx()).suggestions[0].home, "house_style");
 });
@@ -644,10 +649,122 @@ test("realExamples: no pair when the rule changes nothing on the example line, s
   assert.deepEqual(realExamples(fn, [{ draft, change: { draftStart: t, draftEnd: t + 3 } }]), []);
 });
 
-test("precisionPasses: exactly the bar passes (9 of 10 at 90%, 8 of 10 at 80%)", async () => {
-  const { precisionPasses } = await import("./suggestionInbox.ts");
-  assert.equal(precisionPasses({ fires: 10, correct: 9, minPrecision: 0.9 }), true);
-  assert.equal(precisionPasses({ fires: 10, correct: 8, minPrecision: 0.9 }), false);
-  assert.equal(precisionPasses({ fires: 10, correct: 8, minPrecision: 0.8 }), true);
-  assert.equal(precisionPasses({ fires: 9, correct: 9, minPrecision: 0.8 }), false);
+test("precisionPasses: exactly the bar passes (9 of 10 at 90%, 8 of 10 at 80%)", () => {
+  assert.equal(precisionPasses({ fires: 10, correct: 9, unchecked: 0, minPrecision: 0.9 }), true);
+  assert.equal(precisionPasses({ fires: 10, correct: 8, unchecked: 0, minPrecision: 0.9 }), false);
+  assert.equal(precisionPasses({ fires: 10, correct: 8, unchecked: 0, minPrecision: 0.8 }), true);
+  assert.equal(precisionPasses({ fires: 9, correct: 9, unchecked: 0, minPrecision: 0.8 }), false);
+});
+
+// ── 5. Follow-ups from the #819 review (issue #856) ─────────────────────────
+
+const MUFID_KEY = changeKey("change", "مفيدا", "مفيدًا");
+const mufidNotes = (n = 10) =>
+  Array.from({ length: n }, (_, i) => ({ chapter: 1 + (i % 3), draft: `قد يكون مفيدا هنا ${i}`, final: `قد يكون مفيدًا هنا ${i}` }));
+// A note the rule fires on whose rest was rewritten past PRECISION_SEGMENT_CAP
+// (2,000 tokens): its precision check can never finish.
+const longWords = (p, i) => Array.from({ length: 2100 }, (_, k) => `${p}${i}x${k}`).join(" ");
+const uncheckable = (i) => ({ chapter: 5, draft: `هنا مفيدا تعني ${longWords("أ", i)}`, final: `هنا مفيدًا تعني ${longWords("ب", i)}` });
+
+test("#856 1: the covered-by-rule check has its own budget; a spent precision budget cannot bring a covered card back", () => {
+  const rows = repeated((i) => `قد يكون مفيدا هنا ${i}`, (i) => `قد يكون مفيدًا هنا ${i}`);
+  const ctx = { ...emptyCtx(), rules: [mufidRule(false)] };
+  const r = buildInbox(rows, ctx, undefined, undefined, { cells: 0 }, { cells: COVERAGE_CELL_BUDGET });
+  assert.equal(r.excluded.rule, 1);
+  assert.equal(r.suggestions.length, 0);
+  // The default coverage budget is its own, too.
+  assert.equal(buildInbox(rows, ctx, undefined, undefined, { cells: 0 }).excluded.rule, 1);
+  // Only a spent COVERAGE budget shows the card (fail closed: never hidden unchecked).
+  assert.equal(buildInbox(rows, ctx, undefined, undefined, undefined, { cells: 0 }).suggestions.length, 1);
+});
+
+test("#856 2: precisionPasses never passes while any draft is unchecked", () => {
+  // 10 of 11 clears 90% only if the unknown draft is counted as checked.
+  assert.equal(precisionPasses({ fires: 11, correct: 10, unchecked: 1, minPrecision: 0.9 }), false);
+  assert.equal(precisionPasses({ fires: 11, correct: 10, unchecked: 0, minPrecision: 0.9 }), true);
+});
+
+test("#856 2: a rule whose checked drafts pass but one could not be checked says so, and approve answers rule_unchecked", async () => {
+  const h = fixture({ notes: [...mufidNotes(), uncheckable(0)] });
+  const card = (await h.call("GET", `/${BOOK}`)).body.suggestions.find((s) => s.key === MUFID_KEY);
+  assert.deepEqual(card.precision, { fires: 11, correct: 10, unchecked: 1, minPrecision: 0.9 });
+  assert.equal(card.ruleBlocked, "unchecked");
+  assert.notEqual(card.home, "house_style");
+  assert.equal(card.rule, null);
+  const approve = await h.call("POST", `/${BOOK}/approve`, { key: MUFID_KEY });
+  assert.equal(approve.status, 409);
+  assert.equal(approve.body.error, "rule_unchecked");
+  assert.equal(h.sqlite.prepare(`SELECT COUNT(*) AS n FROM house_style_rules`).get().n, 0);
+});
+
+test("#856 2: when the checked drafts already fail the bar, the reason stays precision", () => {
+  const zwnj = String.fromCharCode(0x200c);
+  const u = uncheckable(0);
+  const rows = [
+    ...repeated((i) => `قد يكون مفيدا هنا ${i}`, (i) => `قد يكون مفيدًا هنا ${i}`),
+    // Three drafts the rule changes that the editor left alone: 10 of 13 measured.
+    ...[0, 1, 2].map((i) => ({ id: `z${i}`, chapter: 4, draftNote: `هذه مفيدا${zwnj}ها ${i}`, finalNote: `هذه مفيدا${zwnj}ها ${i}` })),
+    { id: "u0", chapter: u.chapter, draftNote: u.draft, finalNote: u.final },
+  ];
+  const card = buildInbox(rows, emptyCtx()).suggestions.find((s) => s.key === MUFID_KEY);
+  assert.deepEqual(card.precision, { fires: 14, correct: 10, unchecked: 1, minPrecision: 0.9 });
+  assert.equal(card.ruleBlocked, "precision");
+});
+
+test("#856 2: an examples check that runs out of budget says unchecked, not that the rule misses an example", () => {
+  const rows = repeated((i) => `قد يكون مفيدا هنا ${i}`, (i) => `قد يكون مفيدًا هنا ${i}`);
+  // Each correct marks-only fire costs 2 cells (draft→ruled, draft→final); 10
+  // fires spend 20, the three examples 6 more.
+  const short = buildInbox(rows, emptyCtx(), undefined, undefined, { cells: 20 }).suggestions[0];
+  assert.deepEqual(short.precision, { fires: 10, correct: 10, unchecked: 0, minPrecision: 0.9 });
+  assert.equal(short.ruleBlocked, "unchecked");
+  assert.notEqual(short.home, "house_style");
+  const enough = buildInbox(rows, emptyCtx(), undefined, undefined, { cells: 26 }).suggestions[0];
+  assert.equal(enough.ruleBlocked, null);
+  assert.equal(enough.home, "house_style");
+});
+
+test("#856 3: a change whose key would exceed the parse cap is not shown; one just under it is, and can be rejected", async () => {
+  const long = (n) => {
+    const notes = [];
+    for (let i = 0; i < 10; i++) notes.push({ chapter: 1 + (i % 3), draft: `قال ${"ب".repeat(n)} ${i}`, final: `قال ${"ت".repeat(n)} ${i}` });
+    return notes;
+  };
+  const over = fixture({ notes: long(1100) });
+  assert.equal((await over.call("GET", `/${BOOK}`)).body.suggestions.length, 0);
+  const under = fixture({ notes: long(980) });
+  const cards = (await under.call("GET", `/${BOOK}`)).body.suggestions;
+  assert.equal(cards.length, 1);
+  assert.ok(cards[0].key.length <= MAX_KEY_LENGTH && cards[0].key.length > 1900, String(cards[0].key.length));
+  assert.ok(parseChangeKey(cards[0].key));
+  assert.equal((await under.call("POST", `/${BOOK}/reject`, { key: cards[0].key })).status, 200);
+});
+
+test("#856 4: approve answers rule_exists when a rule with the card's id is already stored", async () => {
+  const h = fixture();
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(PERIOD_KEY));
+  const id = `suggested-${[...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 12)}`;
+  // Same id (a double click's first request), but not a rule that covers the card.
+  h.sqlite.prepare(`INSERT INTO house_style_rules (id, kind, find, replace, scope, enabled) VALUES (?, 'literal', 'zzz', 'yyy', 'note', 0)`).run(id);
+  const r = await h.call("POST", `/${BOOK}/approve`, { key: PERIOD_KEY });
+  assert.equal(r.status, 409);
+  assert.equal(r.body.error, "rule_exists");
+});
+
+test("#856 5: a forbidden term whose replacement is the approved word covers the card; its forbidden target does not", async () => {
+  const h = fixture();
+  h.sqlite
+    .prepare(`INSERT INTO terminology (concept_id, source_term, target_term, status, replacement) VALUES ('lord', 'Lord', 'الرب', 'forbidden', 'السيد')`)
+    .run();
+  const r = await h.call("GET", `/${BOOK}`);
+  assert.deepEqual(r.body.suggestions.map((s) => s.key), [PERIOD_KEY, MUK_KEY]);
+  assert.equal(r.body.excluded.term, 1);
+  // A forbidden term whose target is the approved word forbids it: no cover.
+  const g = fixture();
+  g.sqlite
+    .prepare(`INSERT INTO terminology (concept_id, source_term, target_term, status, replacement) VALUES ('lord', 'Lord', 'السيد', 'forbidden', 'المولى')`)
+    .run();
+  const r2 = await g.call("GET", `/${BOOK}`);
+  assert.ok(r2.body.suggestions.some((s) => s.key === TERM_KEY));
+  assert.equal(r2.body.excluded.term, 0);
 });
