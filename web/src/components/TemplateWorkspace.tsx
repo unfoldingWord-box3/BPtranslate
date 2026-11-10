@@ -616,14 +616,26 @@ function TemplateEditor({ templateId, direction, onServerChange }: EditorProps) 
     async (value: boolean) => {
       if (!unit) return;
       try {
-        const updated = await api.validateTemplate(templateId, value);
+        const updated = await api.validateTemplate(templateId, value, { version: unit.version, state: unit.translation_state });
         applyServerUnit(updated);
         onServerChange();
       } catch (e) {
+        if (e instanceof ApiError && e.status === 409) {
+          const fresh = (e.body as { error?: string; current?: TemplateUnit } | undefined)?.current;
+          if (fresh) {
+            // The unit changed since this editor loaded it. Show what is there
+            // now (keeping unsaved typing, if any) and say so; nothing was approved.
+            if (dirty) setUnit(fresh);
+            else applyServerUnit(fresh);
+          }
+          onServerChange();
+          setErrorMsg(t("templates.approveStale"));
+          return;
+        }
         setErrorMsg(e instanceof Error ? e.message : String(e));
       }
     },
-    [unit, templateId, applyServerUnit, onServerChange],
+    [unit, templateId, applyServerUnit, onServerChange, dirty, t],
   );
 
   if (loading && !unit) {

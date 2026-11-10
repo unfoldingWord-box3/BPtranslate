@@ -72,6 +72,7 @@ const FAILURE_CODES = new Set([
   "unreadable_output",
   "not_written",
   "partial_output",
+  "placeholder_missing",
   "internal_error",
 ]);
 
@@ -92,6 +93,7 @@ export function DraftMissingTemplatesButton({ onRun }: { onRun: (written: string
   const { t } = useTranslation();
   const admin = isAdmin();
   const [preview, setPreview] = useState<DraftMissingPreview | null>(null);
+  const [previewFailed, setPreviewFailed] = useState(false);
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<DraftMissingResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -103,8 +105,11 @@ export function DraftMissingTemplatesButton({ onRun }: { onRun: (written: string
   const load = useCallback(() => {
     api
       .getDraftMissingTemplates()
-      .then(setPreview)
-      .catch(() => setPreview(null));
+      .then((p) => {
+        setPreview(p);
+        setPreviewFailed(false);
+      })
+      .catch(() => setPreviewFailed(true));
   }, []);
 
   useEffect(() => {
@@ -129,7 +134,20 @@ export function DraftMissingTemplatesButton({ onRun }: { onRun: (written: string
     }
   }, [skipSlugs, onRun, load, t]);
 
-  if (!admin || !preview) return null;
+  if (!admin) return null;
+  if (!preview) {
+    // Say why the control is missing instead of hiding it silently.
+    return previewFailed ? (
+      <Stack direction="row" alignItems="center" spacing={1} data-testid="draft-missing-templates">
+        <Typography variant="caption" color="text.secondary" sx={{ flex: 1 }}>
+          {t("templates.draftMissing.previewFailed")}
+        </Typography>
+        <Button size="small" onClick={load} sx={{ fontSize: 11, minWidth: 0 }}>
+          {t("common.retry")}
+        </Button>
+      </Stack>
+    ) : null;
+  }
 
   // The server's own count, the same query as the run's `remaining`: the
   // button is enabled whenever the server says work remains.

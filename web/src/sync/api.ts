@@ -2309,11 +2309,25 @@ export const api = {
 
   // "Approve" — value=true → 'validated'; value=false → 'edited'. Non-version-
   // bumping; 404 if the unit has no translation to (un)validate.
-  validateTemplate: (id: string, value: boolean) =>
+  // `pin` is the version and state the editor is showing. With it the server
+  // refuses (409 version_mismatch, body.current = the unit now) when the unit
+  // changed underneath the editor, e.g. a "Draft missing templates" run wrote
+  // a new AI draft: Approve must never publish text the person did not see.
+  validateTemplate: (
+    id: string,
+    value: boolean,
+    pin?: { version: number; state: TemplateUnit["translation_state"] },
+  ) =>
     request<TemplateUnit>(`/api/templates/unit/validate?id=${encodeURIComponent(id)}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ value: value ? 1 : 0 }),
+      headers: {
+        "Content-Type": "application/json",
+        ...(pin ? { "If-Match": String(pin.version) } : {}),
+      },
+      body: JSON.stringify({
+        value: value ? 1 : 0,
+        ...(pin?.state ? { expected_state: pin.state } : {}),
+      }),
     }),
 
   // Source revisions + word-diff-ready target history for the history dialog.

@@ -86,6 +86,7 @@
     "draftAllFailed": "Stopped after repeated failures ({{code}}). Drafted {{n}} template(s).",
     "draftAllDisabled": "AI isn't set up on this server. Whoever runs the server needs to connect the AI service.",
     "draftDisabledValidated": "Un-approve first to draft over an approved translation.",
+    "approveStale": "This template changed since you opened it, so it was not approved. It now shows the current text: review it, then approve.",
     "draftMissing": {
       "button": "Draft missing templates from approved notes",
       "running": "Drafting templates…",
@@ -99,7 +100,8 @@
       "cost": "Estimated cost: ${{cost}}.",
       "notDrafted": "Not drafted:",
       "builtFrom": "AI draft written from {{used}} of the {{total}} approved notes",
-      "runInProgress": "Another run is drafting templates, or one stopped in the last few minutes. Try again in a few minutes.",
+      "runInProgress": "Another run is drafting templates, or one stopped in the last 10 minutes. Try again in up to 10 minutes.",
+      "previewFailed": "Could not check which note types are ready to draft.",
       "reason": {
         "not_migrated": "the workspace database needs an update first; ask whoever runs the server",
         "model_missing": "no AI model is chosen for this organization; an admin can choose one under AI service",
@@ -123,6 +125,7 @@
         "unreadable_output": "the AI answer could not be used",
         "not_written": "someone changed or approved these templates in the meantime",
         "partial_output": "only some of its templates were written",
+        "placeholder_missing": "the AI dropped or changed a placeholder from the English template, such as [ALT]",
         "internal_error": "an error on our side",
         "other": "error {{code}}"
       }
