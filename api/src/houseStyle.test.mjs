@@ -109,9 +109,41 @@ test("final-bracket period: stated edge cases", () => {
   assert.equal(ap(`${ALT} [نص …  ]`), `${ALT} [نص …  ]`, "… before trailing space inside the bracket");
   assert.equal(ap("no bracket here ]"), "no bracket here ]", "a ] without an opening [ is left");
   assert.equal(ap("[]"), "[]", "empty bracket is left");
-  // Not exempt, as the issue states only … and ؟ (reported as an open question):
-  assert.equal(ap("[what?]"), "[what?].");
-  assert.equal(ap("[and so...]"), "[and so...].");
+  // Bracket text already ending in punctuation gets no second mark.
+  for (const t of [`${ALT} [وكان معهم.]`, "[ثم ...]", "[what?]", "[stop!]", "[قال؛]", "[نص…]", "[ماذا؟]"]) {
+    assert.equal(ap(t), t, `no double punctuation: ${t}`);
+  }
+  assert.equal(ap("[and so]"), "[and so].");
+  // Trailing bidi marks after the ] count as ignorable, like whitespace.
+  for (const mark of ["‎", "‏", "؜"]) {
+    assert.equal(ap(`${ALT} [نص]${mark}`), `${ALT} [نص].${mark}`, `bidi mark U+${mark.codePointAt(0).toString(16)}`);
+  }
+  assert.equal(ap(`[نص ‏]`), `[نص ‏].`, "bidi mark inside the bracket is not punctuation");
+});
+
+test("line breaks: tN's stored backslash-n is treated like a newline", () => {
+  const all = seeds.map(on);
+  const ap = (t) => applyHouseStyle(t, all).text;
+  const BR = "\\n"; // the two characters tN stores, not a real newline
+  assert.equal(ap(`سطر${BR}${MUK_NFC} هنا`), `سطر${BR}هنا`, "delete at a line start takes the following space");
+  assert.equal(ap(`سطر\n${MUK_NFC} هنا`), `سطر\nهنا`, "same for a real newline");
+  assert.equal(ap(`${ALT} [نص]${BR}`), `${ALT} [نص].${BR}`, "period rule looks past a trailing backslash-n");
+  assert.equal(ap(`${ALT} [نص]${BR}${BR} `), `${ALT} [نص].${BR}${BR} `);
+  assert.equal(ap(`${ALT} [نص]\n`), `${ALT} [نص].\n`);
+  const base = { kind: "literal", scope: "end-of-note", examples: [], counterExamples: [], enabled: true, sortOrder: 0 };
+  const endOnly = { ...base, id: "end", find: "foo", replace: "bar" };
+  assert.equal(applyHouseStyle(`foo foo${BR}`, [endOnly]).text, `foo bar${BR}`, "end-of-note ignores a trailing backslash-n");
+  assert.equal(applyHouseStyle(`foo${BR}x`, [endOnly]).text, `foo${BR}x`, "text after the break is not the end");
+  for (const t of [`سطر${BR}${MUK_NFC} هنا`, `${ALT} [نص]${BR}`]) assert.equal(ap(ap(t)), ap(t), `idempotent: ${t}`);
+});
+
+test("delete right after an opening [ or ( takes the following spaces; NBSP counts as a space", () => {
+  const tag = on(seeds[0]);
+  const ap = (t) => applyHouseStyle(t, [tag]).text;
+  assert.equal(ap(`[${MUK_NFC} وكان]`), "[وكان]");
+  assert.equal(ap(`(${MUK_NFC} وكان)`), "(وكان)");
+  assert.equal(ap(`كلمة ${MUK_NFC} هنا`), "كلمة هنا", "NBSP before the tag goes with it");
+  assert.equal(ap(`${MUK_NFC} هنا`), "هنا", "NBSP after a leading tag goes with it");
 });
 
 test("whole_word: a letter, mark or digit on either side blocks the match", () => {
@@ -162,4 +194,35 @@ test("houseStyleForProposal: raw text and applied rule ids only when something c
   assert.deepEqual(r.logPayload.applied_rules, ["ar-drop-mukayyaf-tag", "ar-final-bracket-period"]);
   assert.equal(r.logPayload.quote, payload.quote, "quote column is copied through untouched");
   assert.equal(r.draftMetaJson, JSON.stringify({ model: "m" }));
+});
+
+test("houseStyleForProposal: only changed fields get a new value and raw_<field>; absent keys stay absent", () => {
+  const all = seeds.map(on);
+  const onlyQ = houseStyleForProposal({ id: "q1", question: `ماذا ${MUK_NFC}؟` }, ["question", "response"], all);
+  assert.equal(onlyQ.logPayload.question, "ماذا؟");
+  assert.equal(onlyQ.logPayload.raw_question, `ماذا ${MUK_NFC}؟`);
+  assert.equal("response" in onlyQ.logPayload, false, "no response key invented");
+  assert.equal("raw_response" in onlyQ.logPayload, false);
+  const unchangedR = houseStyleForProposal(
+    { id: "q2", question: `ماذا ${MUK_NFC}؟`, response: "جواب." },
+    ["question", "response"],
+    all,
+  );
+  assert.equal(unchangedR.logPayload.response, "جواب.");
+  assert.equal("raw_response" in unchangedR.logPayload, false, "unchanged field gets no raw_ copy");
+  const nonString = houseStyleForProposal({ id: "q3", question: `ماذا ${MUK_NFC}؟`, response: 7 }, ["question", "response"], all);
+  assert.equal(nonString.logPayload.response, 7, "a non-string field is left as it was");
+  assert.equal("raw_response" in nonString.logPayload, false);
+});
+
+test("houseStyleForProposal: a draft_meta that is not a plain object is kept, without the flag", () => {
+  const note = "If it would be helpful in your language, قل";
+  for (const meta of ["text", ["a"], 3]) {
+    const r = houseStyleForProposal({ id: "x", note, draft_meta: meta }, ["note"], []);
+    assert.equal(r.draftMetaJson, JSON.stringify(meta));
+  }
+  assert.equal(
+    houseStyleForProposal({ id: "x", note }, ["note"], []).draftMetaJson,
+    JSON.stringify({ leftover_english: ["If it would be helpful in your language"] }),
+  );
 });

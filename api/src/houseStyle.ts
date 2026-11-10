@@ -13,23 +13,33 @@
 //                        ignored (Arabic text arrives with the vowel before or
 //                        after the shadda), and a match never ends with a base
 //                        letter whose own marks follow it. An empty `replace`
-//                        deletes the match plus one adjacent run of spaces.
+//                        deletes the match plus one adjacent run of spaces:
+//                        the spaces after it when it starts the text or a line
+//                        or follows an opening "[" or "(", else the spaces
+//                        before it.
 //   whole_word           The same, but the match must not touch a letter, a
 //                        combining mark or a digit on either side.
-//   final_bracket_period Append "." after the note's final "]" (trailing
-//                        whitespace ignored), unless the bracket's content ends
-//                        in "…" or "؟", the note ends in "]]" (an rc link), the
-//                        "]" has no opening "[", or it sits in a bold span.
+//   final_bracket_period Append "." after the note's final "]", unless the
+//                        bracket's content already ends in punctuation
+//                        (… ؟ . ! ? ؛, so "..." too), the note ends in "]]" (an
+//                        rc link), the "]" has no opening "[", or it sits in a
+//                        bold span.
 //
-// Scope "note" matches anywhere; "end-of-note" only where nothing but
-// whitespace follows the match. Note-scope rules run before end-of-note ones,
-// so deleting a trailing tag can expose the final "]" for the period rule.
+// Scope "note" matches anywhere; "end-of-note" only where nothing ignorable
+// follows the match. Ignorable at the end: whitespace, bidi marks (U+200E,
+// U+200F, U+061C) and line breaks, which tN stores as the two characters
+// backslash-n (importParsers.ts normalizeNoteWhitespace), not a real newline.
+// Note-scope rules run before end-of-note ones, so deleting a trailing tag can
+// expose the final "]" for the period rule.
 //
 // Bold spans: text between a pair of `**` is a Scripture quote and is never
 // changed. An unpaired `**` protects everything after it.
 //
-// Every rule must be idempotent: a literal/whole_word rule whose `replace`
-// would match its own `find` again is refused when compiled.
+// Idempotency: the shipped kinds and the seed rules are tested idempotent
+// (houseStyle.test.mjs). The compile-time guard is narrower: it only refuses a
+// literal/whole_word rule whose `replace` contains a match of its own `find`.
+// It does not catch every case (e.g. find "ab" → replace "a" applied to "aab"),
+// which is one reason rules arrive by migration with tests, not by a form.
 
 import type { Env } from "./index";
 
@@ -67,8 +77,9 @@ export interface HouseStyleRuleRow {
   sort_order: number;
 }
 
-// The bracket content endings the Arabic editor keeps without a closing period.
-const PERIOD_EXEMPT_ENDINGS = new Set(["…", "؟"]); // … ؟
+// Bracket content endings that get no closing period: the issue's "…" and "؟",
+// plus punctuation that would otherwise double up ("." covers "...").
+const PERIOD_EXEMPT_ENDINGS = new Set(["…", "؟", ".", "!", "?", "؛"]); // … ؟ . ! ? ؛
 
 // Leftover English the model sometimes forgets to translate. Flagged in
 // draft_meta_json (leftover_english), never rewritten.
@@ -176,7 +187,29 @@ function overlaps(ranges: Array<[number, number]>, s: number, e: number): boolea
   return ranges.some(([a, b]) => s < b && e > a);
 }
 
-const isSpace = (ch: string | undefined) => ch === " " || ch === "\t";
+const isSpace = (ch: string | undefined) => ch === " " || ch === "\t" || ch === " ";
+const BIDI_MARKS = new Set(["‎", "‏", "؜"]);
+
+// True when a line break ends at index i: a real newline, or tN's stored
+// two-character escape backslash-n.
+function lineBreakEndsAt(text: string, i: number): boolean {
+  return text[i - 1] === "\n" || (i >= 2 && text[i - 2] === "\\" && text[i - 1] === "n");
+}
+
+// Index where the ignorable tail of the text begins: whitespace, bidi marks
+// and line breaks (real or backslash-n) at the very end.
+function ignorableTailStart(text: string): number {
+  let end = text.length;
+  for (;;) {
+    if (end > 0 && (/\s/.test(text[end - 1]) || BIDI_MARKS.has(text[end - 1]))) end--;
+    else if (end >= 2 && text[end - 2] === "\\" && text[end - 1] === "n") end -= 2;
+    else return end;
+  }
+}
+
+function trimIgnorableEnd(s: string): string {
+  return s.slice(0, ignorableTailStart(s));
+}
 
 type Compiled = (text: string) => string;
 
@@ -195,20 +228,25 @@ function compileLiteral(rule: HouseStyleRule): Compiled | null {
   const endOnly = rule.scope === "end-of-note";
   return (text) => {
     const prot = boldRanges(text);
+    const tail = endOnly ? ignorableTailStart(text) : text.length;
     let out = "";
     let last = 0;
     for (const m of text.matchAll(re)) {
       let s = m.index ?? 0;
       let e = s + m[0].length;
       if (s < last || overlaps(prot, s, e)) continue;
-      if (endOnly && text.slice(e).trim() !== "") continue;
+      if (endOnly && e < tail) continue;
       if (rule.replace === "") {
-        // Deleting: take the spaces before the match, or (at the start of the
-        // text or a line) the spaces after it, so no double space is left.
+        // Deleting: so no double space (or "[ word") is left, take the spaces
+        // after the match when it follows an opening bracket or starts the
+        // text or a line; otherwise the spaces before it.
+        const takeAfter = text[s - 1] === "[" || text[s - 1] === "(";
         let s2 = s;
-        while (s2 > last && isSpace(text[s2 - 1])) s2--;
+        if (!takeAfter) while (s2 > last && isSpace(text[s2 - 1])) s2--;
         if (s2 < s) s = s2;
-        else if (s === 0 || text[s - 1] === "\n") while (e < text.length && isSpace(text[e])) e++;
+        else if (takeAfter || s === 0 || lineBreakEndsAt(text, s)) {
+          while (e < text.length && isSpace(text[e])) e++;
+        }
       }
       out += text.slice(last, s) + rule.replace;
       last = e;
@@ -218,15 +256,14 @@ function compileLiteral(rule: HouseStyleRule): Compiled | null {
 }
 
 function finalBracketPeriod(text: string): string {
-  let end = text.length;
-  while (end > 0 && /\s/.test(text[end - 1])) end--;
+  const end = ignorableTailStart(text);
   if (end === 0 || text[end - 1] !== "]") return text;
   const close = end - 1;
   if (text[close - 1] === "]") return text; // "]]" ends an rc link
   if (overlaps(boldRanges(text), close, close + 1)) return text;
   const open = text.lastIndexOf("[", close - 1);
   if (open === -1) return text;
-  const content = text.slice(open + 1, close).trimEnd();
+  const content = trimIgnorableEnd(text.slice(open + 1, close));
   if (content === "" || content.includes("]")) return text;
   if (PERIOD_EXEMPT_ENDINGS.has(content[content.length - 1])) return text;
   return text.slice(0, end) + "." + text.slice(end);
@@ -280,6 +317,7 @@ export function houseStyleForProposal(
   rules: HouseStyleRule[],
 ): { values: Record<string, string | null>; logPayload: Record<string, unknown>; draftMetaJson: string | null } {
   const values: Record<string, string | null> = {};
+  const changed: Record<string, string> = {};
   const appliedSet = new Set<string>();
   for (const f of fields) {
     const raw = payload[f];
@@ -289,21 +327,24 @@ export function houseStyleForProposal(
     }
     const r = applyHouseStyle(raw, rules);
     values[f] = r.text;
+    if (r.text !== raw) changed[f] = r.text;
     for (const id of r.applied) appliedSet.add(id);
   }
   let logPayload: Record<string, unknown> = payload;
   if (appliedSet.size > 0) {
-    // Ids in the order the rules ran.
+    // Ids in the order the rules ran. Only fields a rule actually changed get
+    // a new value and a raw_<field>; keys absent before stay absent.
     const appliedRules = ordered(rules).map((r) => r.id).filter((id) => appliedSet.has(id));
-    logPayload = { ...payload, ...values, applied_rules: appliedRules };
-    for (const f of fields) logPayload[`raw_${f}`] = payload[f] ?? null;
+    logPayload = { ...payload, ...changed, applied_rules: appliedRules };
+    for (const f of Object.keys(changed)) logPayload[`raw_${f}`] = payload[f];
   }
   const leftover = findLeftoverEnglish(fields.map((f) => values[f]));
   const meta = payload.draft_meta;
   let draftMetaJson: string | null = meta != null ? JSON.stringify(meta) : null;
-  if (leftover.length > 0) {
-    const base = meta && typeof meta === "object" && !Array.isArray(meta) ? (meta as Record<string, unknown>) : {};
-    draftMetaJson = JSON.stringify({ ...base, leftover_english: leftover });
+  // A draft_meta that is not a plain object is kept as is, without the flag.
+  const metaIsObject = meta == null || (typeof meta === "object" && !Array.isArray(meta));
+  if (leftover.length > 0 && metaIsObject) {
+    draftMetaJson = JSON.stringify({ ...((meta ?? {}) as Record<string, unknown>), leftover_english: leftover });
   }
   return { values, logPayload, draftMetaJson };
 }

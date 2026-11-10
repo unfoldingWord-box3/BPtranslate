@@ -15,8 +15,9 @@
 --   whole_word           like literal, but find must not touch a letter, mark or
 --                        digit on either side.
 --   final_bracket_period appends "." after a note's final "]" unless the
---                        bracket's content ends in "…" or "؟" (find and
---                        replace are descriptive only).
+--                        bracket's content already ends in punctuation
+--                        (… ؟ . ! ? ؛, so "..." too); find and replace are
+--                        descriptive only.
 -- An unknown kind or scope is skipped by the engine. It is validated in code, not
 -- by a CHECK, so adding a kind never needs a table rebuild.
 --
@@ -81,7 +82,7 @@ VALUES (
   '].',
   'end-of-note',
   '[{"before": "ترجمة بديلة: [وكان معهم]", "after": "ترجمة بديلة: [وكان معهم]."}, {"before": "ترجمة بديلة: [هذا] أو [ذلك]", "after": "ترجمة بديلة: [هذا] أو [ذلك]."}]',
-  '["ترجمة بديلة: [وكان معهم].", "ترجمة بديلة: [ماذا نفعل؟]", "ترجمة بديلة: [ثم …]", "(انظر: [[rc://*/ta/man/translate/figs-metaphor]])", "[[rc://*/ta/man/translate/figs-metaphor]]", "يقول **[وكان معهم]**"]',
+  '["ترجمة بديلة: [وكان معهم].", "ترجمة بديلة: [ماذا نفعل؟]", "ترجمة بديلة: [ثم …]", "ترجمة بديلة: [وكان معهم.]", "ترجمة بديلة: [ثم ...]", "(انظر: [[rc://*/ta/man/translate/figs-metaphor]])", "[[rc://*/ta/man/translate/figs-metaphor]]", "يقول **[وكان معهم]**"]',
   0,
   30
 );
