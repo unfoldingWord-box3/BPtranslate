@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Box,
   Button,
@@ -34,6 +34,7 @@ import { AI_NEEDS_ORG_KEY, QUICK_DRAFTS_NEED_ORG_KEY } from "../lib/aiProviderEr
 import { MarkdownView } from "./MarkdownView";
 import { TemplateHistoryDialog } from "./TemplateHistoryDialog";
 import { HelpButton } from "../help/HelpButton";
+import { DraftMissingTemplatesButton, SlotWarningLine, draftNoteCount } from "./DraftMissingTemplatesButton";
 
 type TemplateState = "ai_draft" | "edited" | "validated" | null;
 
@@ -120,6 +121,11 @@ export function TemplateWorkspace({ templateId, onNavigate, onBack }: Props) {
   // NOTE: must stay above the `!isTranslation` early return — a hook below it
   // would be conditional.
   const [draftList, setDraftList] = useState<DraftRecord[]>([]);
+  // Bumped after a "Draft missing templates" run that wrote the open unit:
+  // remounts the editor so it refetches, instead of keeping a stale copy that
+  // Approve would publish unseen. The remount restores unsaved typing from the
+  // drafts store (and flags it as stale).
+  const [editorReload, setEditorReload] = useState(0);
   useEffect(() => draftStore.subscribe(setDraftList), []);
   const dirtyTemplateIds = useMemo(() => {
     const ids = new Set<string>();
@@ -219,6 +225,13 @@ export function TemplateWorkspace({ templateId, onNavigate, onBack }: Props) {
           <Typography variant="caption" color="text.secondary">
             {t("templates.approved", { n: validatedCount, total })}
           </Typography>
+          {/* #818: admin-only; renders nothing for editors. */}
+          <DraftMissingTemplatesButton
+            onRun={(written) => {
+              refetch();
+              if (templateId && written.includes(templateId)) setEditorReload((k) => k + 1);
+            }}
+          />
           {bulkRunning ? (
             <Stack direction="row" alignItems="center" spacing={1}>
               <CircularProgress size={14} />
@@ -402,7 +415,7 @@ export function TemplateWorkspace({ templateId, onNavigate, onBack }: Props) {
           </Stack>
         ) : (
           <TemplateEditor
-            key={templateId}
+            key={`${templateId}#${editorReload}`}
             templateId={templateId}
             direction={cfg?.direction ?? "ltr"}
             onServerChange={refetch}
@@ -435,6 +448,7 @@ function TemplateEditor({ templateId, direction, onServerChange }: EditorProps) 
   const [conflict, setConflict] = useState(false);
   const [staleDraft, setStaleDraft] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const validatingRef = useRef(false);
 
   // Fetch the unit, then restore any unsaved typing persisted for it. Template
   // drafts used to live only in this component's state, so every exit (Back,
@@ -601,16 +615,40 @@ function TemplateEditor({ templateId, direction, onServerChange }: EditorProps) 
 
   const handleValidate = useCallback(
     async (value: boolean) => {
-      if (!unit) return;
+      // One Approve / Un-approve at a time: a double click would otherwise send
+      // the second with the version the first just changed and get a false
+      // "changed" refusal.
+      if (!unit || validatingRef.current) return;
+      validatingRef.current = true;
       try {
-        const updated = await api.validateTemplate(templateId, value);
+        const updated = await api.validateTemplate(templateId, value, { version: unit.version, state: unit.translation_state });
         applyServerUnit(updated);
         onServerChange();
       } catch (e) {
+        const fresh =
+          e instanceof ApiError && e.status === 409
+            ? (e.body as { error?: string; current?: TemplateUnit } | undefined)?.current
+            : undefined;
+        if (fresh) {
+          // The unit changed since this editor loaded it; nothing was approved.
+          onServerChange();
+          if (dirty) {
+            // Keep the unsaved text AND the version it was typed against, so the
+            // next Save gets the normal conflict prompt instead of silently
+            // overwriting the new text.
+            setErrorMsg(t("templates.approveStaleDirty"));
+          } else {
+            applyServerUnit(fresh);
+            setErrorMsg(t("templates.approveStale"));
+          }
+          return;
+        }
         setErrorMsg(e instanceof Error ? e.message : String(e));
+      } finally {
+        validatingRef.current = false;
       }
     },
-    [unit, templateId, applyServerUnit, onServerChange],
+    [unit, templateId, applyServerUnit, onServerChange, dirty, t],
   );
 
   if (loading && !unit) {
@@ -636,6 +674,12 @@ function TemplateEditor({ templateId, direction, onServerChange }: EditorProps) 
           sx={{ height: 20, fontFamily: "monospace" }}
         />
         <StateChip state={state} />
+        {state === "ai_draft" && draftNoteCount(unit.draft_meta_json) != null ? (
+          <Typography variant="caption" color="text.secondary">
+            {t("templates.draftMissing.builtFrom", draftNoteCount(unit.draft_meta_json)!)}
+          </Typography>
+        ) : null}
+        {state === "ai_draft" ? <SlotWarningLine draftMetaJson={unit.draft_meta_json} /> : null}
         <Box sx={{ flexGrow: 1 }} />
         <Tooltip title={t("templates.history")}>
           <IconButton size="small" onClick={() => setHistoryOpen(true)} sx={{ color: "text.secondary" }}>

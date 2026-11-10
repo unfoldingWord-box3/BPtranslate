@@ -46,6 +46,7 @@ import { useUnsavedGuard } from "../../hooks/useUnsavedGuard";
 import { drafts as draftStore, type DraftRecord } from "../../sync/drafts";
 import type { TemplateUnitMeta } from "../../sync/api";
 import { AI_NEEDS_ORG_KEY, QUICK_DRAFTS_NEED_ORG_KEY } from "../../lib/aiProviderErrors";
+import { DraftMissingTemplatesButton } from "../DraftMissingTemplatesButton";
 
 export interface CurateScreenProps extends FlowScreenContext {
   templateId: string | null;
@@ -283,6 +284,17 @@ export default function CurateScreen({ role, templateId }: CurateScreenProps) {
               <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1 }}>
                 {approvedTally}
               </Typography>
+              <Box sx={{ mt: 1.25 }}>
+                <DraftMissingTemplatesButton
+                  onRun={(written) => {
+                    refetch();
+                    // Same remount as "Draft all" above: the open editor must not
+                    // keep (and let Approve publish) a copy the run replaced.
+                    // A remount restores any unsaved typing from the drafts store.
+                    if (templateId && written.includes(templateId)) setEditorReload((k) => k + 1);
+                  }}
+                />
+              </Box>
             </Box>
 
             <Box sx={{ flex: 1, overflowY: "auto", minHeight: 0 }} role="list" aria-label={t("moreTools.curate.templateList")}>

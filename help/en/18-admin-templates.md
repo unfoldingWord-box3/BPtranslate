@@ -3,7 +3,7 @@ id: admin-templates
 title: Note templates (admin)
 routes: [curate, templates]
 roles: [admin]
-keywords: [templates, note templates, curate, curation, support reference, draft, approve, ai draft, history, version, gateway language, tn]
+keywords: [templates, note templates, curate, curation, support reference, draft, approve, ai draft, history, version, gateway language, tn, approved notes, draft missing templates]
 screenshots:
   - admin-templates-1 #/admin/curate
 ---
@@ -28,6 +28,19 @@ To undo an approval, press **Un-approve**. An approved template cannot be re-dra
 - **Draft with AI** drafts the open template. Review the draft against the English source before you approve it.
 - **Draft all with AI (N)** drafts every template that can be drafted. A counter shows the progress, and **Cancel** stops it. The run also stops by itself after repeated failures.
 - If the page says AI is not configured, drafting is not available. Editing and approving still work.
+
+## Draft missing templates from approved notes
+Admins see the button **Draft missing templates from approved notes** above the template list, on both template pages. It writes templates from notes your editors have already approved, so the template uses the wording they prefer.
+
+- It works on note types (SupportReference) that have at least 20 approved notes, no approved template yet, and a template that is not started or holds an older AI draft. The line under the button says how many note types are ready.
+- Each press drafts up to 6 note types and says how many are still to draft. Press it again to continue.
+- Only one run can draft at a time. If another run is still going, or one stopped in the last 5 minutes (for example because its page was closed), the page says so. Try again in up to 5 minutes.
+- If a note type fails, the page says why. The next press tries the other note types first, and the press after that tries it again. Keep the page open until the run finishes.
+- It uses your organization's own AI key (see **AI service**), with Claude or Gemini. With no key, or with another provider, the line under the button says so and nothing is sent.
+- The AI translates the example wording in square brackets. It must keep links exactly; a draft that drops or changes a link is thrown away and the note type is listed as not drafted. Slot words in capitals, such as SPEAKER, should stay as they are; a draft that drops one is kept, and the editor shows **This AI draft may be missing:** with those words. Check them before you approve.
+- If a template changed after you opened it, **Approve** does not approve it: the page shows the current text and asks you to review it first. **Approve** is not available while you have unsaved changes. If the template changed while you were typing, **Save** says someone else saved it first and keeps your text; press **Save** again to apply it on top.
+- It never changes a template that is approved or that someone has edited. It replaces an older AI draft nobody has worked on, but not a draft it wrote itself.
+- The AI reads the 30 most recent approved notes of each type. Each draft shows how many it was written from, out of how many the type has. A draft is not used to guide the AI until an editor approves it.
 
 ## Other things to know
 - A template marked **Stale source** has an English source that changed after the draft. Review its translation again.

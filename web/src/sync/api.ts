@@ -1394,6 +1394,26 @@ export interface TemplateUnitMeta {
   stale_source: 0 | 1;
 }
 
+// GET /api/templates/draft-missing (#818). `reason` is set when it cannot run.
+export interface DraftMissingPreview {
+  available: boolean;
+  reason?: string;
+  provider: string | null;
+  qualifying: { slug: string; approvedNotes: number; units: number }[];
+  minApprovedNotes: number;
+  batchSize: number;
+}
+
+// POST /api/templates/draft-missing (#818).
+export interface DraftMissingResult {
+  drafted: { slug: string; approvedNotes: number; units: number }[];
+  failed: { slug: string; code: string }[];
+  remaining: number;
+  estimatedCostUsd: number | null;
+  /** Every template_id the run wrote (partial note types included). */
+  written: string[];
+}
+
 // One English-source revision (newest first).
 export interface TemplateSourceRevision {
   source_hash: string;
@@ -2289,16 +2309,43 @@ export const api = {
 
   // "Approve" — value=true → 'validated'; value=false → 'edited'. Non-version-
   // bumping; 404 if the unit has no translation to (un)validate.
-  validateTemplate: (id: string, value: boolean) =>
+  // `pin` is the version and state the editor is showing. With it the server
+  // refuses (409 version_mismatch, body.current = the unit now) when the unit
+  // changed underneath the editor, e.g. a "Draft missing templates" run wrote
+  // a new AI draft: Approve must never publish text the person did not see.
+  validateTemplate: (
+    id: string,
+    value: boolean,
+    pin?: { version: number; state: TemplateUnit["translation_state"] },
+  ) =>
     request<TemplateUnit>(`/api/templates/unit/validate?id=${encodeURIComponent(id)}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ value: value ? 1 : 0 }),
+      headers: {
+        "Content-Type": "application/json",
+        ...(pin ? { "If-Match": String(pin.version) } : {}),
+      },
+      body: JSON.stringify({
+        value: value ? 1 : 0,
+        ...(pin?.state ? { expected_state: pin.state } : {}),
+      }),
     }),
 
   // Source revisions + word-diff-ready target history for the history dialog.
   getTemplateHistory: (id: string) =>
     request<TemplateHistory>(`/api/templates/unit/history?id=${encodeURIComponent(id)}`),
+
+  // "Draft missing templates from approved notes" (#818, admin only). The GET
+  // says whether it can run and which slugs qualify; the POST drafts one
+  // bounded batch on the org's own key. A run makes several model calls, so
+  // the timeout is long.
+  getDraftMissingTemplates: () => request<DraftMissingPreview>(`/api/templates/draft-missing`),
+  draftMissingTemplates: (skipSlugs: string[]) =>
+    request<DraftMissingResult>(`/api/templates/draft-missing`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ skipSlugs }),
+      timeoutMs: 600_000,
+    }),
 
   // ── UI localization overrides (migration 0052) ──
   // No workspace claim: overrides live in the shared DB, the same for every

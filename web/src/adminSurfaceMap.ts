@@ -192,6 +192,14 @@ export const ADMIN_SURFACES: AdminSurfaceEntry[] = [
     notes: "Desk key \"templates\", hash #/admin/curate[/{templateId}] (#/curate until #537). Not the classic #/templates note-template workspace.",
   },
   {
+    id: "draftMissingTemplates",
+    label: "Draft missing templates from approved notes",
+    classic: null,
+    desk: { page: "templates", file: "src/components/flows/CurateScreen.tsx", anchor: "<DraftMissingTemplatesButton" },
+    notes:
+      "#818. Shared DraftMissingTemplatesButton (components/DraftMissingTemplatesButton.tsx), also mounted in the classic #/templates workspace (TemplateWorkspace.tsx), which is not a PreferencesWorkspace section. Admin only.",
+  },
+  {
     id: "observe",
     label: "Observe (health / exports / crons)",
     classic: null,
