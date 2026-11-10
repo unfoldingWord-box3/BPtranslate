@@ -88,7 +88,9 @@ function RuleCard({
           control={
             <Switch
               checked={rule.enabled}
-              disabled={busy || !rule.supported}
+              // An unsupported rule may not be switched ON (the API refuses),
+              // but one that is somehow on can always be switched off.
+              disabled={busy || (!rule.supported && !rule.enabled)}
               onChange={(e) => onToggle(e.target.checked)}
               inputProps={{ "aria-label": t("houseStyle.toggleAria", { rule: t(kindLabelKey(rule)) }) }}
             />
@@ -147,6 +149,8 @@ export function HouseStyleRulesSection({ heading = true }: { heading?: boolean }
   const { t } = useTranslation();
   const [rules, setRules] = useState<HouseStyleRule[] | null>(null);
   const [loadError, setLoadError] = useState(false);
+  // The server's database has not had migration 0082 yet (no rules table).
+  const [notMigrated, setNotMigrated] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [toggleError, setToggleError] = useState(false);
 
@@ -155,7 +159,9 @@ export function HouseStyleRulesSection({ heading = true }: { heading?: boolean }
     api
       .getHouseStyleRules()
       .then((r) => {
-        if (!cancelled) setRules(r.rules);
+        if (cancelled) return;
+        setRules(r.rules);
+        setNotMigrated(r.notMigrated === true);
       })
       .catch(() => {
         if (!cancelled) setLoadError(true);
@@ -200,6 +206,10 @@ export function HouseStyleRulesSection({ heading = true }: { heading?: boolean }
         <Alert severity="error">{t("houseStyle.loadFailed")}</Alert>
       ) : rules === null ? (
         <CircularProgress size={22} />
+      ) : notMigrated ? (
+        <Alert severity="warning" variant="outlined">
+          {t("houseStyle.notMigrated")}
+        </Alert>
       ) : rules.length === 0 ? (
         <Typography variant="body2" color="text.secondary">
           {t("houseStyle.empty")}

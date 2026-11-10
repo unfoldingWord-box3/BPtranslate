@@ -592,7 +592,8 @@
     "changedBy": "Last switched by {{name}}, {{when}}",
     "toggleFailed": "Could not save the change. Check your connection and try again.",
     "loadFailed": "Could not load the house-style rules. Reload to try again.",
-    "empty": "This project has no house-style rules."
+    "empty": "This project has no house-style rules.",
+    "notMigrated": "House-style rules are not set up on this server yet. Drafts are imported without them until the server is updated."
   },
   "prefsHistory": {
     "button": "History",

@@ -2336,7 +2336,7 @@ export const api = {
   },
   // House-style rules applied to AI translate drafts at import (issue #815).
   // Admin-only; the only change allowed is switching a rule on or off.
-  getHouseStyleRules: () => request<{ rules: HouseStyleRule[] }>(`/api/translation-memory/house-style-rules`),
+  getHouseStyleRules: () => request<{ rules: HouseStyleRule[]; notMigrated?: boolean }>(`/api/translation-memory/house-style-rules`),
   setHouseStyleRuleEnabled: (id: string, enabled: boolean) =>
     request<{ rule: HouseStyleRule }>(`/api/translation-memory/house-style-rules/${encodeURIComponent(id)}`, {
       method: "PATCH",

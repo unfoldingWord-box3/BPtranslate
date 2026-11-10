@@ -115,6 +115,19 @@ test("a rule this build cannot run can be switched off but not on", async () => 
   assert.equal((await h.call("PATCH", "/grows", { enabled: true })).status, 409);
 });
 
+test("before migration 0082 runs: GET lists nothing with notMigrated, PATCH answers 503", async () => {
+  const h = fresh("admin");
+  h.sqlite.exec("DROP TABLE house_style_rules");
+  const list = await h.call("GET", "");
+  assert.equal(list.status, 200);
+  assert.deepEqual(list.body, { rules: [], notMigrated: true });
+  for (const enabled of [true, false]) {
+    const r = await h.call("PATCH", "/ar-mufidan-tanween", { enabled });
+    assert.equal(r.status, 503);
+    assert.equal(r.body.error, "not_migrated");
+  }
+});
+
 test("editors can neither list nor switch rules", async () => {
   const h = fresh("editor");
   assert.equal((await h.call("GET", "")).status, 403);

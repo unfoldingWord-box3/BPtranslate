@@ -1015,8 +1015,20 @@ async function readHouseStyleRules(db: Env["DB"], id: string | null) {
   return out;
 }
 
+// Before migration 0082 has run on this database the table is missing. The
+// import already fails soft then (loadEnabledHouseStyleRules); the routes say so
+// plainly instead of answering 500.
+function houseStyleTableMissing(err: unknown): boolean {
+  return err instanceof Error && /no such table:\s*house_style_rules/i.test(err.message);
+}
+
 translationMemory.get("/house-style-rules", requireAdmin, async (c) => {
-  return c.json({ rules: await readHouseStyleRules(c.env.DB, null) });
+  try {
+    return c.json({ rules: await readHouseStyleRules(c.env.DB, null), notMigrated: false });
+  } catch (err) {
+    if (houseStyleTableMissing(err)) return c.json({ rules: [], notMigrated: true });
+    throw err;
+  }
 });
 
 const PatchHouseStyleBody = z.object({ enabled: z.boolean() }).strict();
@@ -1031,19 +1043,24 @@ translationMemory.patch("/house-style-rules/:id", requireAdmin, async (c) => {
   const parsed = PatchHouseStyleBody.safeParse(body);
   if (!parsed.success) return c.json({ error: "validation_failed", issues: parsed.error.issues }, 400);
   const id = c.req.param("id");
-  // Switching ON a rule this build cannot run would show "On" while the
-  // import silently skips it, so refuse. Switching it off is always allowed.
-  if (parsed.data.enabled) {
-    const [current] = await readHouseStyleRules(c.env.DB, id);
-    if (!current) return c.json({ error: "not_found" }, 404);
-    if (!current.supported) return c.json({ error: "rule_unsupported" }, 409);
+  try {
+    // Switching ON a rule this build cannot run would show "On" while the
+    // import silently skips it, so refuse. Switching it off is always allowed.
+    if (parsed.data.enabled) {
+      const [current] = await readHouseStyleRules(c.env.DB, id);
+      if (!current) return c.json({ error: "not_found" }, 404);
+      if (!current.supported) return c.json({ error: "rule_unsupported" }, 409);
+    }
+    const res = await c.env.DB.prepare(
+      `UPDATE house_style_rules SET enabled = ?1, updated_at = unixepoch(), updated_by = ?2 WHERE id = ?3`,
+    )
+      .bind(parsed.data.enabled ? 1 : 0, currentUserId(c), id)
+      .run();
+    if ((res.meta?.changes ?? 0) === 0) return c.json({ error: "not_found" }, 404);
+    const [rule] = await readHouseStyleRules(c.env.DB, id);
+    return c.json({ rule });
+  } catch (err) {
+    if (houseStyleTableMissing(err)) return c.json({ error: "not_migrated" }, 503);
+    throw err;
   }
-  const res = await c.env.DB.prepare(
-    `UPDATE house_style_rules SET enabled = ?1, updated_at = unixepoch(), updated_by = ?2 WHERE id = ?3`,
-  )
-    .bind(parsed.data.enabled ? 1 : 0, currentUserId(c), id)
-    .run();
-  if ((res.meta?.changes ?? 0) === 0) return c.json({ error: "not_found" }, 404);
-  const [rule] = await readHouseStyleRules(c.env.DB, id);
-  return c.json({ rule });
 });
