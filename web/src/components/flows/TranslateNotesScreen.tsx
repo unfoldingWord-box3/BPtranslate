@@ -2859,8 +2859,9 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
   // Action bar — the three verbs. Phone: fixed to the viewport bottom; md+:
   // anchored inside the detail pane (sticky at its bottom, pinned there by
   // margin-block-start:auto when the content is short — the words screen's
-  // pane pattern).
-  const actionBar =
+  // pane pattern). `trailing` lets Rapid check put its Assistant button at
+  // the end of the same row.
+  const renderActionBar = (trailing?: ReactNode) =>
     !done && total > 0 && row ? (
         <Box
           component="footer"
@@ -2966,9 +2967,11 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
             >
               {t("flowTranslate.saveApprove")}
             </Button>
+            {trailing}
           </Stack>
         </Box>
     ) : null;
+  const actionBar = renderActionBar();
 
   // Rapid check rows: the open note's verse, or with a type filter every
   // matching note in the chapter (grouped by verse in the list). Both come
@@ -3343,7 +3346,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
           editor={editorField}
           editing={editing}
           editorContainerRef={editorContainerRef}
-          footer={actionBar}
+          footer={renderActionBar}
           busy={busy || redoing}
           editLocked={editLocked}
           onSelect={(idx) => {

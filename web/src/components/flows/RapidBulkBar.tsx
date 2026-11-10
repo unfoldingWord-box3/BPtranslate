@@ -12,6 +12,7 @@ import CheckIcon from "@mui/icons-material/Check";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import { useTheme } from "@mui/material/styles";
 import { useTranslation } from "react-i18next";
+import type { ReactNode } from "react";
 import type { RapidBulkResult } from "./useRapidBulk";
 
 export interface RapidBulkProps {
@@ -62,6 +63,7 @@ export function RapidBulkBar({
   onRedo,
   onNotNeeded,
   onClear,
+  trailing,
 }: {
   count: number;
   disabled: boolean;
@@ -70,6 +72,8 @@ export function RapidBulkBar({
   onRedo: () => void;
   onNotNeeded: () => void;
   onClear: () => void;
+  /** Drawn at the end of the row (Rapid check's Assistant button). */
+  trailing?: ReactNode;
 }) {
   const { t } = useTranslation();
   const theme = useTheme();
@@ -125,6 +129,7 @@ export function RapidBulkBar({
         >
           {t("flowTranslate.rapid.bulk.hint")}
         </Typography>
+        {trailing}
       </Stack>
     </Box>
   );

@@ -14,6 +14,8 @@ import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
 import IconButton from "@mui/material/IconButton";
 import EditOutlinedIcon from "@mui/icons-material/EditOutlined";
+import AssistantIcon from "@mui/icons-material/Assistant";
+import Tooltip from "@mui/material/Tooltip";
 import { alpha, useTheme } from "@mui/material/styles";
 import { useTranslation } from "react-i18next";
 import { FlowStatusChip, type FlowStatusKind } from "./FlowStatusChip";
@@ -21,7 +23,6 @@ import { RapidColumnHeader } from "./RapidColumnHeader";
 import { SCRIPTURE_FONT_STACK } from "../../theme";
 import { arabicFontSize, startsArabicScript } from "../../lib/arabicScriptSize";
 import { RapidBulkBar, RapidBulkResultLine, type RapidBulkProps } from "./RapidBulkBar";
-import Button from "@mui/material/Button";
 import AssistantPanel, { type AssistantApplyResult } from "../../assistant/AssistantPanel";
 import { assistantVisible, useAssistantStatus } from "../../assistant/useAssistantStatus";
 import type { NoteInfo } from "../../assistant/ProposalCard";
@@ -91,8 +92,9 @@ export interface NotesRapidCheckProps {
   editor: ReactNode;
   editing: boolean;
   editorContainerRef: Ref<HTMLDivElement>;
-  /** The screen's action bar (Redo / Not needed / Save & approve). */
-  footer: ReactNode;
+  /** The screen's action bar (Redo / Not needed / Save & approve), drawn with
+   *  `trailing` at the end of its row; null when there is no open note. */
+  footer: (trailing?: ReactNode) => ReactNode;
   busy: boolean;
   editLocked: boolean;
   onSelect: (idx: number) => void;
@@ -278,6 +280,32 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
   const [assistantOpen, setAssistantOpen] = useState(false);
   const assistantStatus = useAssistantStatus(i18n.language, assistantOpen);
   const assistantOn = assistant != null && assistantVisible(assistantStatus.status);
+  // A round chat-bubble button at the end of the action bar's row, the usual
+  // look of a chat assistant launcher; filled while the chat is open.
+  const assistantButton = assistantOn ? (
+    <Tooltip title={t("assistant.label")}>
+      <IconButton
+        onClick={() => setAssistantOpen((o) => !o)}
+        aria-label={t("assistant.open")}
+        aria-pressed={assistantOpen}
+        data-rapid-assistant-button=""
+        sx={{
+          flex: "none",
+          alignSelf: "center",
+          width: 40,
+          height: 40,
+          border: "1.5px solid",
+          borderColor: INSPIRE,
+          color: assistantOpen ? "#fff" : INSPIRE,
+          bgcolor: assistantOpen ? INSPIRE : "transparent",
+          "&:hover": { bgcolor: assistantOpen ? INSPIRE : alpha(INSPIRE, 0.1) },
+        }}
+      >
+        <AssistantIcon fontSize="small" />
+      </IconButton>
+    </Tooltip>
+  ) : null;
+  const footerNode = footer(assistantButton);
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (e.defaultPrevented) return;
@@ -716,20 +744,6 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
           })}
         </Box>
       </Box>
-      {assistantOn && (
-        <Box sx={{ display: "flex", justifyContent: "flex-end", paddingInline: 2.5, paddingBlock: 0.5, bgcolor: "background.paper", borderBlockStart: "1px solid", borderColor: "divider" }}>
-          <Button
-            size="small"
-            variant={assistantOpen ? "contained" : "outlined"}
-            onClick={() => setAssistantOpen((o) => !o)}
-            aria-pressed={assistantOpen}
-            data-rapid-assistant-button=""
-            sx={{ minHeight: 32, borderRadius: "12px", fontWeight: 700 }}
-          >
-            {t("assistant.open")}
-          </Button>
-        </Box>
-      )}
       {bulk.result && (
         <RapidBulkResultLine
           result={bulk.result}
@@ -750,9 +764,16 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
             setSelected([], null);
             scrollRef.current?.focus({ preventScroll: true });
           }}
+          trailing={assistantButton}
         />
       ) : (
-        footer
+        footerNode ??
+        (assistantButton && (
+          // No open note (chapter done): the button keeps a row of its own.
+          <Box sx={{ display: "flex", justifyContent: "flex-end", paddingInline: 2.5, paddingBlock: 1, bgcolor: "background.paper", borderBlockStart: "1px solid", borderColor: "divider" }}>
+            {assistantButton}
+          </Box>
+        ))
       )}
     </Box>
     {assistant && (
