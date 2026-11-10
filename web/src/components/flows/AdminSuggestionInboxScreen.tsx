@@ -113,7 +113,17 @@ export default function AdminSuggestionInboxScreen({ role, me }: FlowScreenConte
   const [data, setData] = useState<SuggestionInboxResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reloadGen, setReloadGen] = useState(0);
-  const [busyKey, setBusyKey] = useState<string | null>(null);
+  // Cards with an action in flight, one entry per card, so two actions running
+  // at once cannot re-enable each other's buttons.
+  const [busyKeys, setBusyKeys] = useState<ReadonlySet<string>>(() => new Set());
+  const markBusy = useCallback((key: string, on: boolean) => {
+    setBusyKeys((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(key);
+      else next.delete(key);
+      return next;
+    });
+  }, []);
   // Per-card outcome: a done message, an error, or the copied line for a non-rule home.
   const [cardMsg, setCardMsg] = useState<Record<string, { severity: "success" | "error" | "info"; text: string }>>({});
   const [notice, setNotice] = useState<string | null>(null);
@@ -183,7 +193,7 @@ export default function AdminSuggestionInboxScreen({ role, me }: FlowScreenConte
         setMsg(s.key, "info", i18n.t(copied ? "adminPages.suggestions.copied" : "adminPages.suggestions.copyFailed"));
         return;
       }
-      setBusyKey(s.key);
+      markBusy(s.key, true);
       try {
         await api.approveSuggestion(book, s.key);
         setNotice(i18n.t("adminPages.suggestions.ruleAdded", { before: s.before }));
@@ -204,19 +214,22 @@ export default function AdminSuggestionInboxScreen({ role, me }: FlowScreenConte
               : i18n.t("adminPages.common.loadFailed"),
         );
       } finally {
-        setBusyKey(null);
+        markBusy(s.key, false);
       }
     },
-    [book],
+    [book, markBusy],
   );
 
   const reject = useCallback(async (s: Suggestion) => {
-    setBusyKey(s.key);
+    // The book this request is for: if the admin switches book while it runs,
+    // the other book's cards and footer are left alone.
+    const reqBook = book;
+    markBusy(s.key, true);
     try {
-      await api.rejectSuggestion(book, s.key);
+      await api.rejectSuggestion(reqBook, s.key);
       // Drop the card and count it in the "Not shown" footer, as a reload would.
       setData((d) =>
-        d
+        d && d.book === reqBook
           ? {
               ...d,
               suggestions: d.suggestions.filter((x) => x.key !== s.key),
@@ -233,9 +246,9 @@ export default function AdminSuggestionInboxScreen({ role, me }: FlowScreenConte
         gone ? i18n.t("adminPages.suggestions.errGone") : err instanceof Error ? err.message : i18n.t("adminPages.common.loadFailed"),
       );
     } finally {
-      setBusyKey(null);
+      markBusy(s.key, false);
     }
-  }, [book]);
+  }, [book, markBusy]);
 
   if (!isAdmin) {
     return (
@@ -306,10 +319,13 @@ export default function AdminSuggestionInboxScreen({ role, me }: FlowScreenConte
               {t("adminPages.suggestions.precision", {
                 fires: s.precision.fires,
                 correct: s.precision.correct,
-                pct: s.precision.fires ? Math.round((s.precision.correct / s.precision.fires) * 100) : 0,
+                // Floor, so 79.6% never shows as 80% next to an 80% bar.
+                pct: s.precision.fires ? Math.floor((s.precision.correct / s.precision.fires) * 100) : 0,
               })}
-              {s.home !== "house_style" &&
+              {/* Say why it is not a rule only with the real reason. */}
+              {s.ruleBlocked === "precision" &&
                 ` ${t("adminPages.suggestions.precisionBelow", { min: Math.round(s.precision.minPrecision * 100) })}`}
+              {s.ruleBlocked === "examples" && ` ${t("adminPages.suggestions.examplesBlocked")}`}
             </Typography>
           )}
           <Box component="ul" sx={{ m: 0, paddingInlineStart: 2.5, "& li": { mb: 0.75 } }}>
@@ -357,7 +373,7 @@ export default function AdminSuggestionInboxScreen({ role, me }: FlowScreenConte
             <Button
               size="small"
               variant="contained"
-              disabled={busyKey === s.key}
+              disabled={busyKeys.has(s.key)}
               onClick={() => (s.home === "house_style" ? setConfirming(s) : void approve(s))}
             >
               {s.home === "house_style"
@@ -368,7 +384,7 @@ export default function AdminSuggestionInboxScreen({ role, me }: FlowScreenConte
               size="small"
               variant="outlined"
               color="inherit"
-              disabled={busyKey === s.key || data?.notMigrated}
+              disabled={busyKeys.has(s.key) || data?.notMigrated}
               onClick={() => void reject(s)}
             >
               {t("adminPages.suggestions.reject")}

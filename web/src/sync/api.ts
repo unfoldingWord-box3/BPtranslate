@@ -1067,6 +1067,8 @@ export interface Suggestion {
    * and the share needed (minPrecision) with at least 10 fires. Else null.
    */
   precision: { fires: number; correct: number; minPrecision: number } | null;
+  /** Why a rule-shaped card is not a rule: its precision, or its examples. null otherwise. */
+  ruleBlocked: "precision" | "examples" | null;
 }
 
 export interface SuggestionInboxResponse {
