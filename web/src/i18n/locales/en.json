@@ -4052,6 +4052,7 @@
     },
     "apply": {
       "edited": "Edited: {{count}} (they still need approval).",
+      "stillSaving": "Still saving: {{count}} (not confirmed yet, they may still save).",
       "busy": "Another action is still running. Try again in a moment.",
       "failed": "Applying the changes failed. Check the notes before trying again."
     }

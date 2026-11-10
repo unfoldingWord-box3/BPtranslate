@@ -57,6 +57,8 @@ interface RunOut {
   stopped: boolean;
   /** Another bulk action (or a save) was running: nothing was tried. */
   blocked?: boolean;
+  /** Edits sent to the outbox but not confirmed before the wait ran out: they may still save. */
+  unconfirmed?: number;
 }
 
 /** What the assistant's Apply sends (issue #858): edits carry the version the proposal was made against. */
@@ -412,6 +414,7 @@ export function useRapidBulk(a: RapidBulkArgs) {
     const skipped = emptySkips();
     const left: string[] = [];
     let saved = 0;
+    let unconfirmed = 0;
     let refetchNeeded = false;
     let openChanged = false;
     try {
@@ -452,8 +455,10 @@ export function useRapidBulk(a: RapidBulkArgs) {
           const op = await outbox.enqueueRow("tn", e.id, r.version, patch, { book, baseline: { note: r.note } });
           const res = await waitForOp(op.id);
           if (res === null) {
-            // Still queued (or the lane is read-only): not confirmed, so not counted.
-            skipped.pending++;
+            // Still queued (or the lane is read-only): not confirmed, so not
+            // counted as edited. It is not a skip either, since the outbox may
+            // still send it, so it gets its own line (#860).
+            unconfirmed++;
             left.push(e.id);
           } else if (res.kind === "ok") {
             const u = res.updated as TnRow | null;
@@ -495,7 +500,7 @@ export function useRapidBulk(a: RapidBulkArgs) {
     // plain refetch would leave it showing the old text: reload re-seeds it.
     if (openChanged) a.reload();
     else if (refetchNeeded || saved > 0) void a.refetch();
-    return { left, count: saved, skipped, stopped: false };
+    return { left, count: saved, skipped, stopped: false, unconfirmed };
   }
 
   /**
@@ -546,6 +551,7 @@ export function useRapidBulk(a: RapidBulkArgs) {
     if (sel.edits.length > 0) {
       merge(edits);
       parts.push(t("assistant.apply.edited", { count: edits.count }));
+      if (edits.unconfirmed) parts.push(t("assistant.apply.stillSaving", { count: edits.unconfirmed }));
     }
     if (!stopped && sel.approve.length > 0) {
       // All of them skipped above: still report the count (0) with the reasons.
@@ -564,6 +570,7 @@ export function useRapidBulk(a: RapidBulkArgs) {
       parts.push(t("flowTranslate.rapid.bulk.notNeededDone", { count: r.count }));
     }
     const out = summarize(parts.join(" "), skipped, stopped);
+    if (edits.unconfirmed) out.severity = "warning";
     show(out);
     return out;
   }
