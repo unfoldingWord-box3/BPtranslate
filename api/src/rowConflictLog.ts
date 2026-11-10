@@ -1,5 +1,6 @@
 // Diagnostic record of a rejected row write (409 version_mismatch), including
-// a pinned validate whose version or state moved on (#701). See
+// a pinned validate whose version or state moved on (#701) and a pinned trash
+// whose version moved on (#837). See
 // migrations/0074_row_conflict_log.sql for why it exists and what each column
 // answers. Best-effort: a logging failure must never change the 409 the client
 // gets, so the insert runs under waitUntil and swallows its own errors.
