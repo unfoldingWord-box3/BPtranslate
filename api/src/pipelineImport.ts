@@ -37,6 +37,7 @@ import { selectRows } from "./translate/core.ts";
 import { rawUrlOriginError } from "./rawUrlPin.ts";
 import { sameDcsName } from "./repoUrl.ts";
 import { HUMAN_TOUCH_ACTIONS, HUMAN_TOUCH_SOURCES } from "./pipelineDedupSql.ts";
+import { houseStyleForProposal, loadEnabledHouseStyleRules, type HouseStyleRule } from "./houseStyle.ts";
 
 interface OutputEntry {
   type?: string;
@@ -672,6 +673,10 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
     const requested = new Set(
       (tnProposals.length > 0 || tqProposals.length > 0 ? (await translateSelection(env, job.jobId))?.rowIds : null) ?? [],
     );
+    // #815: this workspace's enabled house-style rules, read once per job (not
+    // per row) and applied to every drafted note / question below.
+    const houseRules =
+      tnProposals.length > 0 || tqProposals.length > 0 ? await loadEnabledHouseStyleRules(env.DB) : [];
     // Returns, for a proposal, the key it would write (a row id, or an article
     // path) when a person touched it after the enqueue, else null.
     const touchedLookup = async (
@@ -719,7 +724,7 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
         recordSkip("tn", p);
         continue;
       }
-      const outcome = await applyTranslateTnRow(env, p, job, userId);
+      const outcome = await applyTranslateTnRow(env, p, job, userId, houseRules);
       if (outcome === "drafted") {
         affected.add(p.chapter);
         result.tnHintExpanded += 1; // reuses the "updated in place" counter
@@ -741,7 +746,7 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
         recordSkip("tq", p);
         continue;
       }
-      const outcome = await applyTranslateTqRow(env, p, job, userId);
+      const outcome = await applyTranslateTqRow(env, p, job, userId, houseRules);
       if (outcome === "drafted") {
         affected.add(p.chapter);
         result.tqUpdated += 1; // reuses the "updated in place" counter
@@ -1150,6 +1155,7 @@ async function applyTranslateTnRow(
   p: PendingImportRow,
   job: ImportContext,
   userId: number,
+  houseRules: HouseStyleRule[],
 ): Promise<"drafted" | "no_match" | "trashed"> {
   const payload = JSON.parse(p.payload_json) as Record<string, unknown>;
   const proposedId = typeof payload.id === "string" ? payload.id : null;
@@ -1181,10 +1187,15 @@ async function applyTranslateTnRow(
 
   const now = Math.floor(Date.now() / 1000);
   const newVersion = target.version + 1;
-  const note = (payload.note as string | null | undefined) ?? null;
+  // House-style rules (#815) fix the model's note before it is stored. The
+  // staged payload stays raw; the edit_log payload gains raw_note +
+  // applied_rules only when a rule changed something. Leftover English is
+  // flagged in draft_meta_json, not rewritten.
+  const house = houseStyleForProposal(payload, ["note"], houseRules);
+  const note = house.values.note;
   const tags = (payload.tags as string | null | undefined) ?? null;
   const srcHash = (payload.source_row_hash as string | null | undefined) ?? null;
-  const draftMeta = payload.draft_meta != null ? JSON.stringify(payload.draft_meta) : null;
+  const draftMeta = house.draftMetaJson;
   // Snapshot of the last PUBLISHED content, so the export can keep shipping it
   // until this draft is validated (docs/plan Design 2). Fresh on NULL/'validated'
   // prior state; carried through unchanged on draft-over-draft.
@@ -1227,7 +1238,7 @@ async function applyTranslateTnRow(
              WHERE id = ?1 AND book = ?2 AND version = ?5 AND updated_at = ?8
           )`,
       )
-      .bind(target.id, job.book, userId, target.version, newVersion, JSON.stringify(payload), AI_SOURCE, now),
+      .bind(target.id, job.book, userId, target.version, newVersion, JSON.stringify(house.logPayload), AI_SOURCE, now),
     env.DB
       .prepare(
         `UPDATE pending_imports
@@ -1256,6 +1267,7 @@ async function applyTranslateTqRow(
   p: PendingImportRow,
   job: ImportContext,
   userId: number,
+  houseRules: HouseStyleRule[],
 ): Promise<"drafted" | "no_match"> {
   const payload = JSON.parse(p.payload_json) as Record<string, unknown>;
   const proposedId = typeof payload.id === "string" ? payload.id : null;
@@ -1279,10 +1291,13 @@ async function applyTranslateTqRow(
 
   const now = Math.floor(Date.now() / 1000);
   const newVersion = target.version + 1;
-  const question = (payload.question as string | null | undefined) ?? null;
-  const response = (payload.response as string | null | undefined) ?? null;
+  // House-style rules (#815), as in applyTranslateTnRow, on both the question
+  // and the response (raw_question / raw_response in the edit_log payload).
+  const house = houseStyleForProposal(payload, ["question", "response"], houseRules);
+  const question = house.values.question;
+  const response = house.values.response;
   const srcHash = (payload.source_row_hash as string | null | undefined) ?? null;
-  const draftMeta = payload.draft_meta != null ? JSON.stringify(payload.draft_meta) : null;
+  const draftMeta = house.draftMetaJson;
   // Last-published snapshot for export gating — see applyTranslateTnRow.
   const preDraftJson = nextPreDraftJson(target.translation_state, target.pre_draft_json, {
     question: target.question,
@@ -1321,7 +1336,7 @@ async function applyTranslateTqRow(
              WHERE id = ?1 AND book = ?2 AND version = ?5 AND updated_at = ?8
           )`,
       )
-      .bind(target.id, job.book, userId, target.version, newVersion, JSON.stringify(payload), AI_SOURCE, now),
+      .bind(target.id, job.book, userId, target.version, newVersion, JSON.stringify(house.logPayload), AI_SOURCE, now),
     env.DB
       .prepare(
         `UPDATE pending_imports
