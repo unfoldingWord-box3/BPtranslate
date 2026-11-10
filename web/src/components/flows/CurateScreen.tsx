@@ -285,7 +285,15 @@ export default function CurateScreen({ role, templateId }: CurateScreenProps) {
                 {approvedTally}
               </Typography>
               <Box sx={{ mt: 1.25 }}>
-                <DraftMissingTemplatesButton onDrafted={refetch} />
+                <DraftMissingTemplatesButton
+                  onRun={(written) => {
+                    refetch();
+                    // Same remount as "Draft all" above: the open editor must not
+                    // keep (and let Approve publish) a copy the run replaced.
+                    // A remount restores any unsaved typing from the drafts store.
+                    if (templateId && written.includes(templateId)) setEditorReload((k) => k + 1);
+                  }}
+                />
               </Box>
             </Box>
 

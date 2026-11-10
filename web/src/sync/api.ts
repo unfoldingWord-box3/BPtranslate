@@ -1410,6 +1410,8 @@ export interface DraftMissingResult {
   failed: { slug: string; code: string }[];
   remaining: number;
   estimatedCostUsd: number | null;
+  /** Every template_id the run wrote (partial note types included). */
+  written: string[];
 }
 
 // One English-source revision (newest first).

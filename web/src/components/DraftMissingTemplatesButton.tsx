@@ -45,6 +45,12 @@ function reasonText(reason: string, provider: string | null, t: TFunction): stri
       return t("templates.draftMissing.unsupported", { provider: isolate(provider ?? "") });
     case "run_in_progress":
       return t("templates.draftMissing.runInProgress");
+    case "not_migrated":
+    case "model_missing":
+    case "ai_provider_key_decrypt_failed":
+    case "ai_key_encryption_unavailable":
+    case "not_translation_project":
+      return t("templates.draftMissing.unavailable", { reason: t(`templates.draftMissing.reason.${reason}`) });
     default:
       return t("templates.draftMissing.unavailable", { reason: isolate(reason) });
   }
@@ -75,7 +81,14 @@ function failureText(code: string, t: TFunction): string {
     : t("templates.draftMissing.code.other", { code: isolate(code) });
 }
 
-export function DraftMissingTemplatesButton({ onDrafted }: { onDrafted: () => void }) {
+/**
+ * `onRun` is called after every run that got an answer, with the template ids
+ * it wrote. The screen refetches its list and reloads an open editor whose unit
+ * is in `written`: the editor holds its own copy of the unit, and an Approve
+ * on a stale copy would publish AI text nobody saw (the web app's validate
+ * call sends no If-Match).
+ */
+export function DraftMissingTemplatesButton({ onRun }: { onRun: (written: string[]) => void }) {
   const { t } = useTranslation();
   const admin = isAdmin();
   const [preview, setPreview] = useState<DraftMissingPreview | null>(null);
@@ -106,8 +119,7 @@ export function DraftMissingTemplatesButton({ onDrafted }: { onDrafted: () => vo
       const r = await api.draftMissingTemplates(skipSlugs);
       setResult(r);
       setSkipSlugs(r.failed.filter((f) => f.code !== "not_started").map((f) => f.slug));
-      // Partial results write units too, so refresh whenever anything may have changed.
-      if (r.drafted.length > 0 || r.failed.length > 0) onDrafted();
+      onRun(r.written ?? []);
     } catch (e) {
       const body = e instanceof ApiError ? (e.body as { error?: string; provider?: string | null } | undefined) : undefined;
       setError(body?.error ? reasonText(body.error, body.provider ?? null, t) : t("templates.draftMissing.failed"));
@@ -115,7 +127,7 @@ export function DraftMissingTemplatesButton({ onDrafted }: { onDrafted: () => vo
       setRunning(false);
       load();
     }
-  }, [skipSlugs, onDrafted, load, t]);
+  }, [skipSlugs, onRun, load, t]);
 
   if (!admin || !preview) return null;
 

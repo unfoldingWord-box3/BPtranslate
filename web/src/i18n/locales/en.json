@@ -99,7 +99,14 @@
       "cost": "Estimated cost: ${{cost}}.",
       "notDrafted": "Not drafted:",
       "builtFrom": "AI draft written from {{used}} of the {{total}} approved notes",
-      "runInProgress": "Another run is already drafting templates. Wait for it to finish, then press again.",
+      "runInProgress": "Another run is drafting templates, or one stopped in the last few minutes. Try again in a few minutes.",
+      "reason": {
+        "not_migrated": "the workspace database needs an update first; ask whoever runs the server",
+        "model_missing": "no AI model is chosen for this organization; an admin can choose one under AI service",
+        "ai_provider_key_decrypt_failed": "the saved AI key can no longer be read; an admin needs to enter it again under AI service",
+        "ai_key_encryption_unavailable": "saving an organization's AI key is not set up on this server; ask whoever runs the server",
+        "not_translation_project": "this works only in gateway-language projects"
+      },
       "failedItem": "{{slug}}: {{reason}}",
       "code": {
         "rate_limited": "the AI provider is limiting requests; try again in a few minutes",

@@ -121,6 +121,11 @@ export function TemplateWorkspace({ templateId, onNavigate, onBack }: Props) {
   // NOTE: must stay above the `!isTranslation` early return — a hook below it
   // would be conditional.
   const [draftList, setDraftList] = useState<DraftRecord[]>([]);
+  // Bumped after a "Draft missing templates" run that wrote the open unit:
+  // remounts the editor so it refetches, instead of keeping a stale copy that
+  // Approve would publish unseen. The remount restores unsaved typing from the
+  // drafts store (and flags it as stale).
+  const [editorReload, setEditorReload] = useState(0);
   useEffect(() => draftStore.subscribe(setDraftList), []);
   const dirtyTemplateIds = useMemo(() => {
     const ids = new Set<string>();
@@ -221,7 +226,12 @@ export function TemplateWorkspace({ templateId, onNavigate, onBack }: Props) {
             {t("templates.approved", { n: validatedCount, total })}
           </Typography>
           {/* #818: admin-only; renders nothing for editors. */}
-          <DraftMissingTemplatesButton onDrafted={refetch} />
+          <DraftMissingTemplatesButton
+            onRun={(written) => {
+              refetch();
+              if (templateId && written.includes(templateId)) setEditorReload((k) => k + 1);
+            }}
+          />
           {bulkRunning ? (
             <Stack direction="row" alignItems="center" spacing={1}>
               <CircularProgress size={14} />
@@ -405,7 +415,7 @@ export function TemplateWorkspace({ templateId, onNavigate, onBack }: Props) {
           </Stack>
         ) : (
           <TemplateEditor
-            key={templateId}
+            key={`${templateId}#${editorReload}`}
             templateId={templateId}
             direction={cfg?.direction ?? "ltr"}
             onServerChange={refetch}
