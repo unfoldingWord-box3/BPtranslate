@@ -106,13 +106,15 @@ test("rapid check: Arabic lanes, group lanes, note and editor are drawn larger",
     "pinned lane",
   );
 
-  // Type-filter mode: the verse group's own lanes.
+  // Type-filter mode: the verse group's own lanes, drawn in the "verses
+  // inline" placement (the default, "top", keeps the verse pinned only).
   const slug = (rows.find((r) => r.verse === RTL_FIXTURE.verse && r.support_reference)?.support_reference ?? "")
     .split("/")
     .pop();
   expect(slug, `ZEC ${CHAPTER}:${RTL_FIXTURE.verse} needs a note with a type`).toBeTruthy();
   await page.locator('[aria-label="Filter notes by type"] [role="combobox"]').click();
   await page.locator(`li[role="option"][title="${slug}"]`).click();
+  await page.locator('[data-rapid-verse-placement-option="inline"]').click();
   const group = list.locator(`[data-rapid-lanes="${RTL_FIXTURE.verse}"]`);
   await expectScaled(
     group.locator('[data-rapid-group-lane-text="lit"]'),
