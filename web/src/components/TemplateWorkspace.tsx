@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   Box,
   Button,
@@ -31,6 +31,7 @@ import { useTemplates } from "../hooks/useTemplates";
 import { useTemplateAiDraft } from "../hooks/useTemplateAiDraft";
 import { useTemplateBulkDraft } from "../hooks/useTemplateBulkDraft";
 import { AI_NEEDS_ORG_KEY, QUICK_DRAFTS_NEED_ORG_KEY } from "../lib/aiProviderErrors";
+import { openEditorNeedsReload } from "../lib/bulkDraft";
 import { MarkdownView } from "./MarkdownView";
 import { TemplateHistoryDialog } from "./TemplateHistoryDialog";
 import { HelpButton } from "../help/HelpButton";
@@ -121,11 +122,18 @@ export function TemplateWorkspace({ templateId, onNavigate, onBack }: Props) {
   // NOTE: must stay above the `!isTranslation` early return — a hook below it
   // would be conditional.
   const [draftList, setDraftList] = useState<DraftRecord[]>([]);
-  // Bumped after a "Draft missing templates" run that wrote the open unit:
-  // remounts the editor so it refetches, instead of keeping a stale copy that
-  // Approve would publish unseen. The remount restores unsaved typing from the
-  // drafts store (and flags it as stale).
+  // Bumped after a "Draft missing templates" or "Draft all with AI" run that
+  // wrote the open unit: remounts the editor so it refetches, instead of
+  // keeping a stale copy that Approve would publish unseen. The remount
+  // restores unsaved typing from the drafts store (and flags it as stale).
   const [editorReload, setEditorReload] = useState(0);
+  // The unit open right now, for code that finishes after an await: a "Draft
+  // all" run takes a while and the user can open another unit meanwhile.
+  // Synced after every commit (no deps), before any effect or response reads it.
+  const openTemplateIdRef = useRef(templateId);
+  useLayoutEffect(() => {
+    openTemplateIdRef.current = templateId;
+  });
   useEffect(() => draftStore.subscribe(setDraftList), []);
   const dirtyTemplateIds = useMemo(() => {
     const ids = new Set<string>();
@@ -163,11 +171,15 @@ export function TemplateWorkspace({ templateId, onNavigate, onBack }: Props) {
   );
   const handleDraftAll = useCallback(async () => {
     if (bulkRunning || draftableUnits.length === 0) return;
+    const targeted = new Set(draftableUnits.map((u) => u.template_id));
     await draftAll(draftableUnits);
     // Versions moved server-side for every drafted unit, so the rail list must
     // be refetched before another run can send correct If-Match values.
     refetch();
-  }, [bulkRunning, draftableUnits, draftAll, refetch]);
+    // #843: the open editor fetched its unit on mount, so it would keep showing
+    // the pre-run text. Same rule as the admin desk's CurateScreen.
+    if (openEditorNeedsReload(openTemplateIdRef.current, targeted)) setEditorReload((k) => k + 1);
+  }, [bulkRunning, draftableUnits, draftAll, refetch, setEditorReload]);
 
   const bulkMessage = useMemo(() => {
     if (!bulkResult) return null;

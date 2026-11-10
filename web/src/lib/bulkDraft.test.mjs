@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { reduceBulkDraftOutcome, CONSECUTIVE_FAILURE_LIMIT } from "./bulkDraft.ts";
+import { reduceBulkDraftOutcome, CONSECUTIVE_FAILURE_LIMIT, openEditorNeedsReload } from "./bulkDraft.ts";
 
 const fresh = () => ({ done: 0, failed: 0, consecutiveFailures: 0 });
 
@@ -52,4 +52,33 @@ test("disabled stops mid-run even after successes", () => {
   assert.equal(stopReason, "disabled");
   assert.equal(state.done, 3);
   assert.equal(state.failed, 1);
+});
+
+// #843: after "Draft all with AI", the open template editor remounts (so it
+// refetches) when the run targeted the unit that is open at the end of the run.
+test("reload: nothing open never reloads", () => {
+  assert.equal(openEditorNeedsReload(null, new Set(["a", "b"])), false);
+});
+
+test("reload: open unit not in the run does not reload", () => {
+  // Covers a unit skipped because it held unsaved typing: the caller's
+  // draftable list leaves it out, so it is never targeted.
+  assert.equal(openEditorNeedsReload("c", new Set(["a", "b"])), false);
+});
+
+test("reload: open unit in the run reloads", () => {
+  assert.equal(openEditorNeedsReload("b", new Set(["a", "b"])), true);
+});
+
+test("reload: an empty run never reloads", () => {
+  assert.equal(openEditorNeedsReload("a", new Set()), false);
+});
+
+// The rule is "targeted", not "counted as drafted": a cancelled or fail-fast
+// run aborts in-flight requests the server may still have written, so the
+// helper takes no run result on purpose. A targeted unit that the run counted
+// as failed (or never reached) still reloads; that costs one refetch.
+test("reload: does not take the run's drafted count into account", () => {
+  assert.equal(openEditorNeedsReload.length, 2);
+  assert.equal(openEditorNeedsReload("a", new Set(["a"])), true);
 });
