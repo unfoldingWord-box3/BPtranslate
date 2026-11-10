@@ -20,8 +20,9 @@
 //   whole_word           The same, but the match must not touch a letter, a
 //                        combining mark or a digit on either side.
 //   final_bracket_period Append "." after the note's final "]", unless the
-//                        bracket's content already ends in punctuation
-//                        (… ؟ . ! ? ؛, so "..." too), the note ends in "]]" (an
+//                        bracket's content is blank or already ends in
+//                        punctuation (… ؟ . ! ? ؛, so "..." too; closing quotes
+//                        and brackets are looked through), the note ends in "]]" (an
 //                        rc link), the "]" has no opening "[", or it sits in a
 //                        bold span.
 //
@@ -80,6 +81,8 @@ export interface HouseStyleRuleRow {
 // Bracket content endings that get no closing period: the issue's "…" and "؟",
 // plus punctuation that would otherwise double up ("." covers "...").
 const PERIOD_EXEMPT_ENDINGS = new Set(["…", "؟", ".", "!", "?", "؛"]); // … ؟ . ! ? ؛
+// Closing quotes and brackets looked through before that check: » " ' ) ” ’
+const CLOSERS = new Set(["»", '"', "'", ")", "”", "’"]);
 
 // Leftover English the model sometimes forgets to translate. Flagged in
 // draft_meta_json (leftover_english), never rewritten.
@@ -216,7 +219,11 @@ type Compiled = (text: string) => string;
 function compileLiteral(rule: HouseStyleRule): Compiled | null {
   const src = findSource(rule.find);
   const pattern =
-    rule.kind === "whole_word" ? `(?<!${WORDISH})${src}(?!${WORDISH})` : `${src}(?!\\p{M})`;
+    // whole_word: a stored backslash-n line break before the word is a
+    // boundary too, although its "n" is a letter.
+    rule.kind === "whole_word"
+      ? `(?:(?<=\\\\n)|(?<!${WORDISH}))${src}(?!${WORDISH})`
+      : `${src}(?!\\p{M})`;
   let re: RegExp;
   try {
     re = new RegExp(pattern, "gu");
@@ -243,8 +250,11 @@ function compileLiteral(rule: HouseStyleRule): Compiled | null {
         const takeAfter = text[s - 1] === "[" || text[s - 1] === "(";
         let s2 = s;
         if (!takeAfter) while (s2 > last && isSpace(text[s2 - 1])) s2--;
+        // Line start, looking past any bidi marks right after the break.
+        let ls = s;
+        while (ls > 0 && BIDI_MARKS.has(text[ls - 1])) ls--;
         if (s2 < s) s = s2;
-        else if (takeAfter || s === 0 || lineBreakEndsAt(text, s)) {
+        else if (takeAfter || ls === 0 || lineBreakEndsAt(text, ls)) {
           while (e < text.length && isSpace(text[e])) e++;
         }
       }
@@ -263,8 +273,15 @@ function finalBracketPeriod(text: string): string {
   if (overlaps(boldRanges(text), close, close + 1)) return text;
   const open = text.lastIndexOf("[", close - 1);
   if (open === -1) return text;
-  const content = trimIgnorableEnd(text.slice(open + 1, close));
-  if (content === "" || content.includes("]")) return text;
+  const raw = text.slice(open + 1, close);
+  if (raw.includes("]")) return text;
+  // Look through closing quotes and brackets: [قال: «اذهب.»] already ends in
+  // a period. Content that is empty or only spaces gets none.
+  let content = trimIgnorableEnd(raw);
+  while (content !== "" && CLOSERS.has(content[content.length - 1])) {
+    content = trimIgnorableEnd(content.slice(0, -1));
+  }
+  if (content === "") return text;
   if (PERIOD_EXEMPT_ENDINGS.has(content[content.length - 1])) return text;
   return text.slice(0, end) + "." + text.slice(end);
 }

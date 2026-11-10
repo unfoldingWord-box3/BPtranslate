@@ -114,6 +114,14 @@ test("final-bracket period: stated edge cases", () => {
     assert.equal(ap(t), t, `no double punctuation: ${t}`);
   }
   assert.equal(ap("[and so]"), "[and so].");
+  // Closing quotes and brackets are looked through before that check.
+  for (const t of ["[قال: «اذهب.»]", "[... (نعم!)]", "[he said, “go.”]", "[‘really?’]", '[say "stop!"]', "[x؟) ]"]) {
+    assert.equal(ap(t), t, `punctuation behind closers: ${t}`);
+  }
+  assert.equal(ap("[قال: «اذهب»]"), "[قال: «اذهب»].", "a quote with no punctuation inside still gets the period");
+  assert.equal(ap("[نص (مثال)]"), "[نص (مثال)].");
+  // Blank content is treated like empty.
+  for (const t of ["[   ]", "[ ]", "[»]", "[ ) ]"]) assert.equal(ap(t), t, `blank: ${JSON.stringify(t)}`);
   // Trailing bidi marks after the ] count as ignorable, like whitespace.
   for (const mark of ["‎", "‏", "؜"]) {
     assert.equal(ap(`${ALT} [نص]${mark}`), `${ALT} [نص].${mark}`, `bidi mark U+${mark.codePointAt(0).toString(16)}`);
@@ -135,6 +143,14 @@ test("line breaks: tN's stored backslash-n is treated like a newline", () => {
   assert.equal(applyHouseStyle(`foo foo${BR}`, [endOnly]).text, `foo bar${BR}`, "end-of-note ignores a trailing backslash-n");
   assert.equal(applyHouseStyle(`foo${BR}x`, [endOnly]).text, `foo${BR}x`, "text after the break is not the end");
   for (const t of [`سطر${BR}${MUK_NFC} هنا`, `${ALT} [نص]${BR}`]) assert.equal(ap(ap(t)), ap(t), `idempotent: ${t}`);
+  // A bidi mark between the break and the deleted tag still counts as a line start.
+  for (const mark of ["‎", "‏", "؜"]) {
+    assert.equal(ap(`سطر${BR}${mark}${MUK_NFC} هنا`), `سطر${BR}${mark}هنا`);
+  }
+  // whole_word: the stored backslash-n's "n" is not part of the word.
+  assert.equal(ap(`سطر${BR}مفيدا أن`), `سطر${BR}مفيدًا أن`);
+  assert.equal(ap(`مفيدا${BR}مفيدا`), `مفيدًا${BR}مفيدًا`);
+  assert.equal(ap("nمفيدا"), "nمفيدا", "a plain letter n before it still blocks the match");
 });
 
 test("delete right after an opening [ or ( takes the following spaces; NBSP counts as a space", () => {
