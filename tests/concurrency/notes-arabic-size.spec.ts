@@ -137,6 +137,8 @@ test("rapid check: Arabic lanes, group lanes, note and editor are drawn larger",
   await expect(editor).toHaveValue(RTL_FIXTURE.arabicNote);
   expect(await px(editor)).toBeCloseTo(15.52 * SCALE, 2);
   await englishCell.click();
-  await expect(editor).not.toHaveValue(RTL_FIXTURE.arabicNote);
+  // The editor moved to the English row and holds its (Latin) text.
+  await expect(list.locator(`[data-rapid-row="${other!.id}"]`)).toHaveAttribute("aria-current", "true");
+  await expect(editor).toHaveValue(/^[^\p{Script=Arabic}]*[A-Za-z]/u);
   expect(await px(editor), "English editor unchanged").toBeCloseTo(15.52, 2);
 });
