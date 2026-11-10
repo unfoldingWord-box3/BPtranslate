@@ -11,10 +11,12 @@
 // transports: those return no cache-token usage and are shaped for one-shot
 // batch output. Error classification and secret scrubbing ARE reused.
 //
-// UNTESTED AGAINST A LIVE KEY: the openai and xai chat-completions adapter and
-// the gemini adapter have only been exercised against stubbed responses. Claude
-// is the same SDK the translate runner already uses. Run each provider once
-// with a real key before turning the assistant on for an org that uses it.
+// LIVE-KEY STATUS: the gemini adapter ran against a real key on 2026-11-10
+// (gemini-3.8-flash, the editing assistant's json mode, issue #858); help's
+// plain-text gemini call has not. The openai and xai chat-completions adapter
+// have only been exercised against stubbed responses. Claude is the same SDK
+// the translate runner already uses. Run each untested provider once with a
+// real key before turning an assistant on for an org that uses it.
 
 import Anthropic from "@anthropic-ai/sdk";
 import { classifyProviderError, scrubSecrets, GEMINI_API_BASE } from "../translate/llm.ts";
@@ -25,8 +27,19 @@ export { costMicros, priceFor, maxOutputFor, normalizeUsage, usageIsComplete } f
 export type { HelpUsage } from "./helpPrices.ts";
 
 export type HelpMessage = { role: "user" | "assistant"; content: string };
-export type HelpRequest = { model: string; system: string; messages: HelpMessage[]; apiKey: string; timeoutMs: number };
-export type HelpResult = { text: string; usage: HelpUsage };
+export type HelpRequest = {
+  model: string;
+  system: string;
+  messages: HelpMessage[];
+  apiKey: string;
+  timeoutMs: number;
+  /** Overrides maxOutputFor(provider). Help never sets it. */
+  maxOutputTokens?: number;
+  /** Ask for a JSON object reply where the provider supports it (gemini, openai). Help never sets it. */
+  json?: boolean;
+};
+/** `truncated`: the model stopped because it hit the output cap, so `text` is cut off. */
+export type HelpResult = { text: string; usage: HelpUsage; truncated: boolean };
 export type HelpAdapter = (req: HelpRequest) => Promise<HelpResult>;
 
 export const HELP_TIMEOUT_MS = 45_000;
@@ -40,7 +53,7 @@ type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 
 export type HelpClaudeClient = {
   messages: {
-    create(params: Anthropic.MessageCreateParamsNonStreaming): Promise<Pick<Anthropic.Message, "content" | "usage">>;
+    create(params: Anthropic.MessageCreateParamsNonStreaming): Promise<Pick<Anthropic.Message, "content" | "usage"> & { stop_reason?: Anthropic.Message["stop_reason"] }>;
   };
 };
 export type HelpClaudeClientFactory = (opts: { apiKey: string; timeout: number; maxRetries: 0 }) => HelpClaudeClient;
@@ -48,12 +61,12 @@ export type HelpClaudeClientFactory = (opts: { apiKey: string; timeout: number; 
 const defaultClaudeClient: HelpClaudeClientFactory = (opts) => new Anthropic(opts) as unknown as HelpClaudeClient;
 
 export function makeClaudeHelpAdapter(clientFactory: HelpClaudeClientFactory = defaultClaudeClient): HelpAdapter {
-  return async ({ model, system, messages, apiKey, timeoutMs }) => {
+  return async ({ model, system, messages, apiKey, timeoutMs, maxOutputTokens }) => {
     const client = clientFactory({ apiKey, timeout: timeoutMs, maxRetries: 0 });
     // No thinking parameter: Haiku 4.5 rejects the adaptive shape.
     const res = await client.messages.create({
       model,
-      max_tokens: maxOutputFor("claude"),
+      max_tokens: maxOutputTokens ?? maxOutputFor("claude"),
       system: [{ type: "text", text: system, cache_control: { type: "ephemeral" } }],
       messages,
     });
@@ -63,6 +76,7 @@ export function makeClaudeHelpAdapter(clientFactory: HelpClaudeClientFactory = d
     const u = res.usage as Anthropic.Usage;
     return {
       text,
+      truncated: res.stop_reason === "max_tokens",
       usage: {
         inputTokens: u.input_tokens || 0,
         outputTokens: u.output_tokens || 0,
@@ -111,14 +125,20 @@ async function postJson(fetchImpl: FetchLike, url: string, headers: Record<strin
 // Gemini
 // ---------------------------------------------------------------------------
 
-export function buildHelpGeminiRequest(model: string, system: string, messages: HelpMessage[]) {
+export function buildHelpGeminiRequest(
+  model: string,
+  system: string,
+  messages: HelpMessage[],
+  opts: { maxOutputTokens?: number; json?: boolean } = {},
+) {
   return {
     systemInstruction: { parts: [{ text: system }] },
     contents: messages.map((m) => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] })),
     generationConfig: {
-      maxOutputTokens: maxOutputFor("gemini"),
+      maxOutputTokens: opts.maxOutputTokens ?? maxOutputFor("gemini"),
       // Lowest thinking setting, same nesting llm.ts uses (inside generationConfig).
       thinkingConfig: model.startsWith("gemini-3") ? { thinkingLevel: "low" } : { thinkingBudget: 0 },
+      ...(opts.json ? { responseMimeType: "application/json" } : {}),
     },
   };
 }
@@ -128,12 +148,12 @@ export function buildHelpGeminiRequest(model: string, system: string, messages: 
 const GEMINI_BLOCKED_FINISH_REASONS = new Set(["SAFETY", "PROHIBITED_CONTENT", "RECITATION", "BLOCKLIST", "SPII", "IMAGE_SAFETY"]);
 
 export function makeGeminiHelpAdapter(fetchImpl: FetchLike = fetch): HelpAdapter {
-  return async ({ model, system, messages, apiKey, timeoutMs }) => {
+  return async ({ model, system, messages, apiKey, timeoutMs, maxOutputTokens, json }) => {
     const body = await postJson(
       fetchImpl,
       `${GEMINI_API_BASE}/models/${encodeURIComponent(model)}:generateContent`,
       { "x-goog-api-key": apiKey },
-      buildHelpGeminiRequest(model, system, messages),
+      buildHelpGeminiRequest(model, system, messages, { maxOutputTokens, json }),
       timeoutMs,
     );
     const cand = body.candidates?.[0];
@@ -150,7 +170,7 @@ export function makeGeminiHelpAdapter(fetchImpl: FetchLike = fetch): HelpAdapter
       // The 200 was billed: carry the usage so the route settles the real cost.
       throw Object.assign(new Error("blocked by Gemini content filters"), { usage });
     }
-    return { text, usage };
+    return { text, usage, truncated: cand?.finishReason === "MAX_TOKENS" };
   };
 }
 
@@ -174,17 +194,19 @@ export function makeChatCompletionsHelpAdapter(
   baseUrl: string,
   fetchImpl: FetchLike = fetch,
 ): HelpAdapter {
-  return async ({ model, system, messages, apiKey, timeoutMs }) => {
+  return async ({ model, system, messages, apiKey, timeoutMs, maxOutputTokens, json }) => {
     // The output cap is what bounds the reservation, so send the field each
     // provider documents: OpenAI's reasoning models take max_completion_tokens
     // (they reject max_tokens); xAI's Chat Completions documents max_tokens.
     const capField = provider === "openai" ? "max_completion_tokens" : "max_tokens";
     const body: Record<string, unknown> = {
       model,
-      [capField]: maxOutputFor(provider),
+      [capField]: maxOutputTokens ?? maxOutputFor(provider),
       messages: [{ role: "system", content: system }, ...messages],
     };
     if (provider === "openai") body.reasoning_effort = "low";
+    // xAI: prompt-only JSON (the system prompt asks for it).
+    if (json && provider === "openai") body.response_format = { type: "json_object" };
     const res = await postJson(fetchImpl, `${baseUrl}/chat/completions`, { authorization: `Bearer ${apiKey}` }, body, timeoutMs);
     const prompt = res.usage?.prompt_tokens || 0;
     const completion = res.usage?.completion_tokens || 0;
@@ -192,6 +214,7 @@ export function makeChatCompletionsHelpAdapter(
     const total = typeof res.usage?.total_tokens === "number" ? res.usage.total_tokens : 0;
     return {
       text: contentText(res.choices?.[0]?.message?.content),
+      truncated: res.choices?.[0]?.finish_reason === "length",
       usage: {
         inputTokens: prompt,
         outputTokens: Math.max(completion, total - prompt),
@@ -241,7 +264,7 @@ export function articleIdsOf(kb: string): Set<string> {
   return new Set([...kb.matchAll(/<article id="([^"]+)"/g)].map((m) => m[1]));
 }
 
-function languageName(lang: string): string {
+export function languageName(lang: string): string {
   if (!/^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/.test(lang)) return "English";
   try {
     return new Intl.DisplayNames(["en"], { type: "language" }).of(lang) ?? "English";
