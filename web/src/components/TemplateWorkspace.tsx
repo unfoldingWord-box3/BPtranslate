@@ -241,7 +241,8 @@ export function TemplateWorkspace({ templateId, onNavigate, onBack }: Props) {
           <DraftMissingTemplatesButton
             onRun={(written) => {
               refetch();
-              if (templateId && written.includes(templateId)) setEditorReload((k) => k + 1);
+              // #847: the unit open when the run ends, not when it started.
+              if (openEditorNeedsReload(openTemplateIdRef.current, new Set(written))) setEditorReload((k) => k + 1);
             }}
           />
           {bulkRunning ? (
