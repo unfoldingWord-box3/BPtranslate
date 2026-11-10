@@ -21,6 +21,8 @@ import {
   buildTemplatePrompt,
   MAX_EXAMPLES_PER_SLUG,
   MAX_SLUGS_PER_RUN,
+  placeholderTokens,
+  missingPlaceholders,
 } from "./templateDraftMissing.ts";
 import { templates } from "./templates.ts";
 import { loadContextPackInputs } from "./contextExport.ts";
@@ -554,7 +556,7 @@ test("a partial answer writes what came back and reports the slug as partial, no
   setBehaviour(async (r) =>
     r.user.includes("SupportReference: figs-metaphor")
       ? {
-          text: `${BEGIN_OUTPUT}\n${JSON.stringify({ "figs-metaphor-01": "قالب أول" })}\n${END_OUTPUT}`,
+          text: `${BEGIN_OUTPUT}\n${JSON.stringify({ "figs-metaphor-01": "قالب أول [ALT]" })}\n${END_OUTPUT}`,
           usage: { inputTokens: 10, outputTokens: 10 },
           stopReason: "end_turn",
         }
@@ -651,4 +653,107 @@ test("the real templates router, mounted as index.ts mounts it, reaches /draft-m
   const res = await app.request("/api/templates/draft-missing", { method: "POST" }, env);
   assert.equal(res.status, 409);
   assert.equal((await json(res)).error, "provider_not_supported");
+});
+
+// ── Review round 3 ────────────────────────────────────────────────────────
+
+test("placeholderTokens: brackets, ALL-CAPS slot words and link targets, with repeats", () => {
+  assert.deepEqual(
+    placeholderTokens("This could mean: (1) NOTE Alternate translation: [ALT] (2) NOTE Alternate translation: [ALT]"),
+    ["[ALT]", "[ALT]", "NOTE", "NOTE"],
+  );
+  assert.deepEqual(placeholderTokens("See [Genesis 1:1](../01/01.md). Alternate translation: [ALT]"), [
+    "[Genesis 1:1]",
+    "[ALT]",
+    "(../01/01.md)",
+  ]);
+  assert.deepEqual(missingPlaceholders("x [ALT] [ALT]", "س [ALT]"), ["[ALT]"], "a repeat counts");
+  assert.deepEqual(missingPlaceholders("x NOTE [ALT]", "س NOTE [ALT]"), []);
+});
+
+test("the prompt lists each template's placeholders", async () => {
+  const { post, calls } = await fresh();
+  await post();
+  const names = calls.find((c) => c.user.includes("# SupportReference: translate-names"));
+  assert.match(names.user, /## Template translate-names-01 \(type: note\)\n\nEnglish template for translate-names \[ALT\]\n\nPlaceholders to keep exactly: \[ALT\]/);
+});
+
+for (const [label, bad] of [
+  ["dropped", "قالب بلا خانة"],
+  ["altered", "قالب [alt] معدّل"],
+]) {
+  test(`a draft with a ${label} placeholder is never written and is reported as placeholder_missing`, async () => {
+    const { post, unitRow, setBehaviour } = await fresh();
+    setBehaviour(async (r) =>
+      r.user.includes("SupportReference: translate-names")
+        ? {
+            text: `${BEGIN_OUTPUT}\n${JSON.stringify({ "translate-names-01": bad })}\n${END_OUTPUT}`,
+            usage: { inputTokens: 10, outputTokens: 10 },
+            stopReason: "end_turn",
+          }
+        : null,
+    );
+    const body = await json(await post());
+    assert.deepEqual(body.failed, [{ slug: "translate-names", code: "placeholder_missing" }]);
+    assert.equal(unitRow("translate-names-01").translation_state, null);
+    assert.ok(!body.written.includes("translate-names-01"));
+  });
+}
+
+test("one unit with a bad placeholder: its sibling is written, the note type is reported placeholder_missing", async () => {
+  const { post, unitRow, setBehaviour } = await fresh();
+  setBehaviour(async (r) =>
+    r.user.includes("SupportReference: figs-metaphor")
+      ? {
+          text: `${BEGIN_OUTPUT}\n${JSON.stringify({ "figs-metaphor-01": "قالب [ALT]", "figs-metaphor-02": "قالب بلا خانة" })}\n${END_OUTPUT}`,
+          usage: { inputTokens: 10, outputTokens: 10 },
+          stopReason: "end_turn",
+        }
+      : null,
+  );
+  const body = await json(await post());
+  assert.deepEqual(body.failed, [{ slug: "figs-metaphor", code: "placeholder_missing" }]);
+  assert.equal(unitRow("figs-metaphor-01").translation_state, "ai_draft");
+  assert.equal(unitRow("figs-metaphor-02").translation_state, null);
+});
+
+test("when some of a note type's writes lose their pin, it is reported as partial_output, not drafted", async () => {
+  const { post, unitRow, setBehaviour } = await fresh();
+  setBehaviour(async (r, sqlite) => {
+    if (r.user.includes("SupportReference: figs-metaphor")) {
+      sqlite
+        .prepare(`UPDATE template_units SET target_md = 'كتبه شخص', translation_state = 'edited', version = version + 1 WHERE template_id = 'figs-metaphor-02'`)
+        .run();
+    }
+    return null;
+  });
+  const body = await json(await post());
+  assert.deepEqual(body.failed, [{ slug: "figs-metaphor", code: "partial_output" }]);
+  assert.ok(!body.drafted.some((d) => d.slug === "figs-metaphor"));
+  assert.equal(unitRow("figs-metaphor-01").translation_state, "ai_draft");
+  assert.equal(unitRow("figs-metaphor-02").target_md, "كتبه شخص");
+});
+
+test("an Approve pinned to the version the editor showed is refused after a run overwrote the unit", async () => {
+  const { post, req, unitRow } = await fresh();
+  // The editor opened grammar-connect-logic-result-01 holding the older AI draft (version 1).
+  assert.equal(unitRow("grammar-connect-logic-result-01").version, 1);
+  await post();
+  assert.equal(unitRow("grammar-connect-logic-result-01").version, 2);
+  const validate = (headers, body) =>
+    req("/api/templates/unit/validate?id=grammar-connect-logic-result-01", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify(body),
+    });
+  const stale = await validate({ "If-Match": "1" }, { value: 1, expected_state: "ai_draft" });
+  assert.equal(stale.status, 409);
+  const sb = await json(stale);
+  assert.equal(sb.error, "version_mismatch");
+  assert.ok(sb.current.target_md.includes("قالب grammar-connect-logic-result-01"), "the 409 carries the new text to reload");
+  assert.equal(unitRow("grammar-connect-logic-result-01").translation_state, "ai_draft", "nothing was approved");
+  // A pin on the version and state now on screen is accepted.
+  const fresh2 = await validate({ "If-Match": "2" }, { value: 1, expected_state: "ai_draft" });
+  assert.equal(fresh2.status, 200);
+  assert.equal(unitRow("grammar-connect-logic-result-01").translation_state, "validated");
 });

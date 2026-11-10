@@ -268,6 +268,46 @@ export async function loadExamples(db: Db, slug: string): Promise<ExampleNote[]>
 // Prompt
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Placeholders
+// ---------------------------------------------------------------------------
+
+// What the prompt tells the model to keep exactly, and what the output is
+// checked for. One definition for both, so they cannot drift:
+//   - text in square brackets: [ALT], [thing], [Zechariah 1:1]
+//   - ALL-CAPS slot words of two or more letters: NOTE, ALT, REF
+//   - link targets: the (../01/01.md) after a ](
+const BRACKETED = /\[[^\[\]\n]*\]/g;
+const ALL_CAPS = /(?<![\p{L}\p{N}_])[A-Z][A-Z0-9_]+(?![\p{L}\p{N}_])/gu;
+const LINK_TARGET = /\]\(([^()\s]+)\)/g;
+
+/** Every placeholder token in `md`, with repeats, in the order found per kind. */
+export function placeholderTokens(md: string): string[] {
+  const out: string[] = [];
+  for (const m of md.matchAll(BRACKETED)) out.push(m[0]);
+  // Caps words inside a bracket or link target are already covered by that token.
+  const bare = md.replace(BRACKETED, " ").replace(/\]\([^()\s]+\)/g, " ");
+  for (const m of bare.matchAll(ALL_CAPS)) out.push(m[0]);
+  for (const m of md.matchAll(LINK_TARGET)) out.push(`(${m[1]})`);
+  return out;
+}
+
+function countTokens(tokens: string[]): Map<string, number> {
+  const m = new Map<string, number>();
+  for (const t of tokens) m.set(t, (m.get(t) ?? 0) + 1);
+  return m;
+}
+
+/** The English placeholders `output` dropped or altered (empty when it kept them all). */
+export function missingPlaceholders(sourceMd: string, output: string): string[] {
+  const have = countTokens(placeholderTokens(output));
+  const missing: string[] = [];
+  for (const [tok, n] of countTokens(placeholderTokens(sourceMd))) {
+    if ((have.get(tok) ?? 0) < n) missing.push(tok);
+  }
+  return missing;
+}
+
 export type TemplatePromptInput = {
   languageName: string;
   languageCode: string;
@@ -285,13 +325,17 @@ export function buildTemplatePrompt(input: TemplatePromptInput): { system: strin
     "A note template is the standard wording translators reuse for one kind of note. Each kind is named by a SupportReference slug such as figs-metaphor.",
     "You are given the English template(s) for one slug and notes in the target language that editors have already approved for that slug. Where a note began as an AI draft, the draft is shown next to the approved wording: the editor's changes show the phrasing they prefer.",
     "Write each template in the target language so that it reads like the approved notes: use their recurring wording, connectives and terms, and avoid wording the editors kept changing.",
-    "Keep the structure of the English template. Keep every placeholder exactly as the English template writes it (text in square brackets, ALL-CAPS slot words, link targets) and in the matching place.",
+    "Keep the structure of the English template. Keep every placeholder exactly as the English template writes it (text in square brackets, ALL-CAPS slot words, link targets) and in the matching place. Each template lists its placeholders; a draft that drops or changes one is thrown away.",
     "Do not copy verse-specific content from the notes into a template.",
     `Reply with one JSON object that maps each template id to its template text, between the lines ${BEGIN_OUTPUT} and ${END_OUTPUT}. Nothing else is read.`,
   ].join("\n");
 
   const units = input.units
-    .map((u) => `## Template ${u.template_id}${u.type ? ` (type: ${u.type})` : ""}\n\n${u.source_md.trim()}`)
+    .map((u) => {
+      const tokens = [...new Set(placeholderTokens(u.source_md))];
+      const keep = tokens.length ? `\n\nPlaceholders to keep exactly: ${tokens.join(" ")}` : "";
+      return `## Template ${u.template_id}${u.type ? ` (type: ${u.type})` : ""}\n\n${u.source_md.trim()}${keep}`;
+    })
     .join("\n\n");
   const examples = input.examples
     .map((e, i) => {
@@ -583,13 +627,26 @@ async function runBatch(
     }
     const parsed = parseTemplateOutput(text, cand.units.map((u) => u.template_id));
     // Missing, empty, or far longer than its English source: not a template.
+    // Readable but missing or changing an English placeholder: never written.
     const sane = new Map<string, string>();
+    let readable = 0;
+    let badPlaceholders = 0;
     for (const u of cand.units) {
       const md = parsed.get(u.template_id);
-      if (md && !tooLong(md, u.source_md)) sane.set(u.template_id, md);
+      if (!md || tooLong(md, u.source_md)) continue;
+      readable++;
+      if (missingPlaceholders(u.source_md, md).length > 0) {
+        badPlaceholders++;
+        continue;
+      }
+      sane.set(u.template_id, md);
+    }
+    if (readable === 0) {
+      failed.push({ slug: cand.slug, code: "unreadable_output" });
+      return;
     }
     if (sane.size === 0) {
-      failed.push({ slug: cand.slug, code: "unreadable_output" });
+      failed.push({ slug: cand.slug, code: "placeholder_missing" });
       return;
     }
     const meta = {
@@ -614,10 +671,12 @@ async function runBatch(
         writtenIds.push(unit.template_id);
       }
     }
+    // Anything short of every unit written is reported, not counted as done:
+    // the units written stay written, and the next press skips the slug once.
     if (written === 0) failed.push({ slug: cand.slug, code: "not_written" });
-    // Some units came back unusable: the units written stay written, and the
-    // slug is reported (and skipped by the next press) rather than counted done.
-    else if (sane.size < cand.units.length) failed.push({ slug: cand.slug, code: "partial_output" });
+    else if (badPlaceholders > 0) failed.push({ slug: cand.slug, code: "placeholder_missing" });
+    // Unusable output for some units, or some writes lost their pin to a person.
+    else if (written < cand.units.length) failed.push({ slug: cand.slug, code: "partial_output" });
     else drafted.push({ slug: cand.slug, approvedNotes: cand.approvedNotes, units: written });
   };
 
