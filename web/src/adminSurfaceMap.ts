@@ -172,6 +172,18 @@ export const ADMIN_SURFACES: AdminSurfaceEntry[] = [
       "Desk-only by design (#816), like Review state: new admin features land on the desk and classic #/preferences is slated to retire (#173). Read-only; calls GET /api/books/:book/draft-scorecard.",
   },
   {
+    id: "suggestionInbox",
+    label: "Suggestion inbox (repeated editor corrections → house-style rule / term / template / Common issues)",
+    classic: null,
+    desk: {
+      page: "suggestions",
+      file: "src/components/flows/AdminSuggestionInboxScreen.tsx",
+      anchor: "function AdminSuggestionInboxScreen",
+    },
+    notes:
+      "Desk-only by design (#819), like the scorecard: classic #/preferences is slated to retire (#173). Calls GET /api/suggestion-inbox/:book, POST /api/suggestion-inbox/:book/approve (creates an enabled house_style_rules row) and POST /api/suggestion-inbox/:book/reject (only a card currently shown for that book).",
+  },
+  {
     id: "aiPipelines",
     label: "AI studio (run AI pipelines)",
     classic: null,

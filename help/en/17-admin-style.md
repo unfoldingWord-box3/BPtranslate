@@ -28,14 +28,14 @@ Use the list on the left to jump to a section. After you change a section, press
 **House style** lists small fixes the app makes to every AI translation draft when the draft arrives, so editors do not have to make the same correction on every note. They apply to notes and to questions and their answers. For example, a rule can add the closing period after an alternate translation in brackets, or delete a tag the AI keeps adding.
 
 - Each rule shows what it fixes (**Before** and **After**) and what it leaves alone.
-- Every rule is **Off** until an admin switches it **On**. Switch a rule on only after the language's editor has confirmed it.
+- Every rule the development team adds is **Off** until an admin switches it **On**. Switch a rule on only after the language's editor has confirmed it. A rule made by approving a card in the [suggestion inbox](#help:admin-progress) starts **On**.
 - A rule changes drafts that arrive after you switch it on. Drafts already in the project stay as they are.
 - Scripture quotes in bold and the Quote column are never changed.
 - The closing-period rule adds nothing when the words inside the final brackets already end with a punctuation mark (… ؟ . ! ? or ؛, so ... too), so the rule never adds a second mark.
 - The AI's original wording is saved with each draft's record, so the fixes can be checked later.
 - If a draft still contains the English phrase "If it would be helpful in your language", the app notes this in the draft's record for later review. It does not rewrite the phrase, and nothing on screen shows this yet.
 
-You cannot add or edit rules on this page. New rules are added by the development team.
+You cannot add or edit rules on this page. New rules are added by the development team, or by approving a card in the suggestion inbox.
 
 ## See who changed the preferences, and undo a change
 Every save of **Brief**, **Instructions** and **Common issues** is kept, whether it was made here or by the chat assistant. Press **History** above the Brief section to see the list, newest first.

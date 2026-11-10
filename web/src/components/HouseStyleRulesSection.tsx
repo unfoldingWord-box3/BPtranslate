@@ -7,7 +7,8 @@ import { formatEpochSecondsDateTime } from "../lib/formatDate";
 // ── House-style rules (issue #815, admin-only) ──────────────────────────────
 // Mechanical fixes made to AI translate drafts when they are imported (the
 // engine is api/src/houseStyle.ts). Rules arrive by migration with their
-// examples; an admin can only switch each one on or off here. Mounted in
+// examples, or switched on from an approved suggestion-inbox card (#819,
+// #/admin/suggestions); an admin can only switch each one on or off here. Mounted in
 // classic Preferences (section "houseStyle") and on the desk's Style page.
 // `heading` is false where the host already renders a title (the desk Panel).
 

@@ -1042,6 +1042,46 @@ export interface DraftScorecardResponse {
   englishProblems: { reason: string; chapters: number[] }[];
 }
 
+// Response of GET /api/suggestion-inbox/:book (api/src/suggestionInbox.ts,
+// issue #819; the grouping, exclusion and home rules are written up there).
+export type SuggestionHome = "house_style" | "template" | "term" | "common_issues";
+
+export interface Suggestion {
+  /** Stable identity: JSON [change, before, after]. Sent back on approve/reject. */
+  key: string;
+  /** "insert-end": inserted at the very end of the note. */
+  change: "change" | "insert" | "insert-end";
+  before: string;
+  /** "" = the editors deleted `before`. */
+  after: string;
+  hits: number;
+  opportunities: number;
+  chapters: number[];
+  examples: { rowId: string; chapter: number; draft: string; final: string }[];
+  home: SuggestionHome;
+  /** The rule Approve creates; set only when home is house_style. */
+  rule: { kind: HouseStyleRule["kind"]; find: string; replace: string; scope: HouseStyleRule["scope"] } | null;
+  /**
+   * For a change a rule shape covers: of this book's drafts the rule would
+   * change (fires), how many it changes exactly as the editor did (correct),
+   * and the share needed (minPrecision) with at least 10 fires. Else null.
+   */
+  precision: { fires: number; correct: number; minPrecision: number } | null;
+  /** Why a rule-shaped card is not a rule: its precision, or its examples. null otherwise. */
+  ruleBlocked: "precision" | "examples" | null;
+}
+
+export interface SuggestionInboxResponse {
+  book: string;
+  minHits: number;
+  minChapters: number;
+  scanned: { validated: number; noDraft: number; compared: number; skippedLong: number };
+  excluded: { rejected: number; rule: number; term: number; template: number; commonIssues: number; lesson: number };
+  suggestions: Suggestion[];
+  /** The server has not had migration 0083 yet: Reject is unavailable. */
+  notMigrated: boolean;
+}
+
 // Responses of POST /api/books/:book/review-state (api/src/reviewState.ts).
 export interface ReviewSweepDryRunResponse {
   ok: true;
@@ -2081,6 +2121,27 @@ export const api = {
       `/api/books/${encodeURIComponent(book)}/draft-scorecard`,
       { signal, timeoutMs: 60_000 },
     ),
+
+  // Admin suggestion inbox (#819): repeated editor corrections to AI drafts,
+  // computed per book on request. Approve only for house-style cards; the
+  // server rebuilds the rule from its own card, so only the key is sent.
+  getSuggestionInbox: (book: string, signal?: AbortSignal) =>
+    request<SuggestionInboxResponse>(`/api/suggestion-inbox/${encodeURIComponent(book)}`, { signal, timeoutMs: 60_000 }),
+  approveSuggestion: (book: string, key: string) =>
+    request<{ rule: { id: string } }>(`/api/suggestion-inbox/${encodeURIComponent(book)}/approve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key }),
+      timeoutMs: 60_000,
+    }),
+  // The book is the one the admin is viewing: only a card shown there can be rejected.
+  rejectSuggestion: (book: string, key: string) =>
+    request<{ ok: true }>(`/api/suggestion-inbox/${encodeURIComponent(book)}/reject`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key }),
+      timeoutMs: 60_000,
+    }),
 
   setVerseDone: (book: string, chapter: number, verse: number, done: boolean) =>
     request<VerseStatus>(
