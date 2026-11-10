@@ -128,6 +128,14 @@ test("parseActions: an edit later reverted to the sent text is dropped", () => {
   assert.deepEqual(r.actions.edits, []);
 });
 
+test("parseActions: a real line break is stored as the two characters \\n", () => {
+  const multi = { ...ctx, notes: [{ ...NOTES[0], id: "m1", note: "line one\\nline two" }] };
+  // Same text with a real line break: not an edit.
+  assert.deepEqual(parseActions(reply({ edits: [{ id: "m1", note: "line one\nline two" }] }), multi).actions.edits, []);
+  // A real change keeps the stored convention.
+  assert.deepEqual(parseActions(reply({ edits: [{ id: "m1", note: "line 1\r\nline two" }] }), multi).actions.edits, [{ id: "m1", note: "line 1\\nline two" }]);
+});
+
 test("parseActions: an id in both approve and not_needed is dropped from both", () => {
   const r = parseActions(reply({ approve: ["n1", "n2"], not_needed: ["n1"] }), ctx);
   assert.deepEqual(r.actions.approve, ["n2"]);

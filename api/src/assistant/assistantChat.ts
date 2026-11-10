@@ -100,8 +100,12 @@ export function parseActions(text: string, context: AssistantContext): ParsedAct
       const note = (e as { note?: unknown } | null)?.note;
       if (typeof id !== "string" || typeof note !== "string" || !known.has(id)) continue;
       edits.delete(id); // last edit wins
-      if (note === sent.get(id)) continue;
-      edits.set(id, note);
+      // Notes store a line break as the two characters \n. A model that writes
+      // a real line break means the same thing, so store it the stored way;
+      // otherwise an untouched multi-line note would come back as an "edit".
+      const stored = note.replace(/\r\n|\r|\n/g, "\\n");
+      if (stored === sent.get(id)) continue;
+      edits.set(id, stored);
     }
   }
   const approve = idList(obj.approve, known);
