@@ -259,3 +259,59 @@ test("rapid check bulk: Not needed skips a note a peer edited just before its tr
   await expect(result).toContainText("Restored: 1.", { timeout: 20_000 });
   expect((await serverRows(context, auth.token)).get(kept)?.trashed_at).toBeNull();
 });
+
+// #837, the single-note button: Not needed on the open note is pinned the same
+// way. A colleague's edit that lands as the request leaves is refused, the
+// changed-elsewhere notice shows, and the open note reloads with their text.
+test("notes screen: single Not needed refuses a note a peer just edited and reloads it", async ({ browser }) => {
+  const { context, auth } = await newUserContext(browser, "rapid-single-pin");
+  openContexts.push(context);
+  await context.addInitScript(() => {
+    try {
+      localStorage.setItem("be:notesRapidCheck", "true");
+    } catch {
+      /* private mode */
+    }
+  });
+  const peer = await newUserContext(browser, "rapid-single-peer");
+  openContexts.push(peer.context);
+  const peerApi = authedRequest(peer.context.request, peer.auth.token, peer.auth.csrf);
+
+  // A verse neither test above uses: not the first with 4+ notes, not the
+  // last with 2+.
+  const chap = await fetchChapter(context.request, auth.token, BOOK, CHAPTER);
+  const live = (chap.tn as Row[]).filter((r) => r.trashed_at == null && r.verse > 0);
+  const byVerse = new Map<number, Row[]>();
+  for (const r of live) byVerse.set(r.verse, [...(byVerse.get(r.verse) ?? []), r]);
+  const asc = [...byVerse.keys()].sort((a, b) => a - b);
+  const taken = new Set([asc.find((v) => byVerse.get(v)!.length >= 4), [...asc].reverse().find((v) => byVerse.get(v)!.length >= 2)]);
+  const verse = asc.find((v) => !taken.has(v));
+  expect(verse, `ZEC ${CHAPTER} needs a third verse with notes`).toBeDefined();
+  const target = byVerse.get(verse!)![0];
+
+  const page = await context.newPage();
+  const list = await openRapid(page, verse!, target.id);
+  await expect(list.locator('[data-rapid-row][aria-current="true"]')).toHaveAttribute("data-rapid-row", target.id);
+
+  let sentIfMatch: string | undefined;
+  await page.route(`**/api/rows/tn/${target.id}/trash*`, async (route) => {
+    sentIfMatch = route.request().headers()["if-match"];
+    const res = await peerApi.patch(`/api/rows/tn/${target.id}?book=${BOOK}`, { note: `${target.note} single peer edit` }, target.version);
+    expect(res.status(), "peer PATCH").toBe(200);
+    await route.continue();
+  });
+
+  // No note is checked, so the only Not needed button is the open note's.
+  await expect(page.locator("[data-rapid-bulk-bar]")).toHaveCount(0);
+  await page.getByRole("button", { name: "Not needed", exact: true }).click();
+  await expect(page.getByText("Someone changed this note since it was shown. It has been reloaded")).toBeVisible({
+    timeout: 20_000,
+  });
+  expect(sentIfMatch, "the trash request carried the version on screen").toBe(String(target.version));
+  const server = (await serverRows(context, auth.token)).get(target.id);
+  expect(server?.trashed_at, "the peer-edited note was not set aside").toBeNull();
+  expect(server?.note).toBe(`${target.note} single peer edit`);
+  // The reload brings the colleague's text onto the open note.
+  await expect(list.locator(`[data-rapid-row="${target.id}"]`)).toContainText("single peer edit", { timeout: 20_000 });
+  await page.screenshot({ path: test.info().outputPath("rapid-single-pin-1366x768.png") });
+});
