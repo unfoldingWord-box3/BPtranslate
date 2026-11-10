@@ -122,9 +122,14 @@ test("rapid check: with a type filter, each placement draws the verse once", asy
   await page.locator(`li[role="option"][title="${slug}"]`).click();
   await expect(list.locator("[data-rapid-group]")).toHaveCount(groupHeads);
 
-  // Top: only the pinned block; the verse groups carry labels, no lanes.
+  // Top: only the pinned block; the verse groups are thin dividing lines
+  // (the ref stays for screen readers), no lanes.
   await expect(pinnedLanes(page).first()).toBeVisible();
   await expect(inlineGroups(page)).toHaveCount(0);
+  const head = list.locator("[data-rapid-group]").first();
+  expect((await head.boundingBox())?.height ?? 99).toBeLessThanOrEqual(6);
+  await expect(head).toContainText("ZEC");
+  await page.screenshot({ path: test.info().outputPath("rapid-top-filter-1366x768.png") });
 
   // Inline (by the V key, from the list): every group gets its lanes, the
   // pinned block none.

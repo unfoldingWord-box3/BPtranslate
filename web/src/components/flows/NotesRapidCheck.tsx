@@ -423,17 +423,16 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
                   role="listitem"
                   data-rapid-group={r.verse}
                   sx={{
-                    paddingInline: 1.5,
-                    paddingBlock: 0.5,
                     bgcolor: skip.soft,
                     color: skip.ink,
                     fontSize: "0.75rem",
                     fontWeight: 700,
-                    borderBottom: "1px solid",
-                    borderColor: "divider",
                     scrollMarginTop: `${stickyH + 4}px`,
                     ...(groupLanes
                       ? {
+                          paddingBlock: 0.5,
+                          borderBottom: "1px solid",
+                          borderColor: "divider",
                           // The rows' first three columns (checkbox, circle,
                           // status/type) and their 3px current-row bar, so the
                           // lanes start where the rows' quote column does.
@@ -445,10 +444,20 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
                           paddingInlineEnd: 1,
                           borderInlineStart: "3px solid transparent",
                         }
-                      : {}),
+                      : // No lanes: just a dividing line. Each row already
+                        // shows its verse beside the status, so the label is
+                        // kept only for screen readers.
+                        { position: "relative", height: "4px", overflow: "hidden" }),
                   }}
                 >
-                  <Box component="span" sx={groupLanes ? { gridColumn: "1 / 4", paddingInlineStart: 1.5 } : undefined}>
+                  <Box
+                    component="span"
+                    sx={
+                      groupLanes
+                        ? { gridColumn: "1 / 4", paddingInlineStart: 1.5 }
+                        : { position: "absolute", width: "1px", height: "1px", overflow: "hidden", clip: "rect(0 0 0 0)", whiteSpace: "nowrap" }
+                    }
+                  >
                     {book} {r.refLabel}
                   </Box>
                   {groupLanes}
