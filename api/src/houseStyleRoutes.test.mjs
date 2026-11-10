@@ -56,7 +56,7 @@ function fresh(role) {
     return { status: res.status, body: await res.json().catch(() => null) };
   };
   const enabled = (id) => sqlite.prepare(`SELECT enabled FROM house_style_rules WHERE id = ?`).get(id).enabled;
-  return { call, enabled };
+  return { call, enabled, sqlite };
 }
 
 test("admin lists the seed rules with examples, all switched off", async () => {
@@ -92,6 +92,27 @@ test("PATCH accepts only {enabled}; an unknown id is 404", async () => {
   assert.equal((await h.call("PATCH", "/ar-mufidan-tanween", { enabled: "yes" })).status, 400);
   assert.equal(h.enabled("ar-mufidan-tanween"), 0);
   assert.equal((await h.call("PATCH", "/no-such-rule", { enabled: true })).status, 404);
+});
+
+test("a rule this build cannot run can be switched off but not on", async () => {
+  const h = fresh("admin");
+  h.sqlite
+    .prepare(
+      `INSERT INTO house_style_rules (id, kind, find, replace, scope, enabled, sort_order)
+       VALUES ('future-kind', 'regex', '.*', '', 'note', 0, 99), ('grows', 'literal', 'a', 'aa', 'note', 1, 98)`,
+    )
+    .run();
+  const list = await h.call("GET", "");
+  assert.equal(list.body.rules.find((r) => r.id === "future-kind").supported, false);
+  const on = await h.call("PATCH", "/future-kind", { enabled: true });
+  assert.equal(on.status, 409);
+  assert.equal(on.body.error, "rule_unsupported");
+  assert.equal(h.enabled("future-kind"), 0);
+  // A non-idempotent rule that is somehow on can still be switched off.
+  const off = await h.call("PATCH", "/grows", { enabled: false });
+  assert.equal(off.status, 200);
+  assert.equal(h.enabled("grows"), 0);
+  assert.equal((await h.call("PATCH", "/grows", { enabled: true })).status, 409);
 });
 
 test("editors can neither list nor switch rules", async () => {

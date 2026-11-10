@@ -1031,6 +1031,13 @@ translationMemory.patch("/house-style-rules/:id", requireAdmin, async (c) => {
   const parsed = PatchHouseStyleBody.safeParse(body);
   if (!parsed.success) return c.json({ error: "validation_failed", issues: parsed.error.issues }, 400);
   const id = c.req.param("id");
+  // Switching ON a rule this build cannot run would show "On" while the
+  // import silently skips it, so refuse. Switching it off is always allowed.
+  if (parsed.data.enabled) {
+    const [current] = await readHouseStyleRules(c.env.DB, id);
+    if (!current) return c.json({ error: "not_found" }, 404);
+    if (!current.supported) return c.json({ error: "rule_unsupported" }, 409);
+  }
   const res = await c.env.DB.prepare(
     `UPDATE house_style_rules SET enabled = ?1, updated_at = unixepoch(), updated_by = ?2 WHERE id = ?3`,
   )
