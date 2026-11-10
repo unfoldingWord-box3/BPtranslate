@@ -181,6 +181,7 @@ export function useRapidBulk(a: RapidBulkArgs) {
     let approved = 0;
     let stopped = false;
     let refetchNeeded = false;
+    let openChanged = false;
     try {
       let others = ids;
       // The open note with an unsaved edit: Save & approve, as Ctrl+Enter
@@ -247,15 +248,21 @@ export function useRapidBulk(a: RapidBulkArgs) {
             break;
           }
           skipped[kind]++;
-          if (kind === "changed") refetchNeeded = true;
+          if (kind === "changed") {
+            refetchNeeded = true;
+            if (id === a.currentId) openChanged = true;
+          }
         }
       }
     } finally {
       a.setBusy(false);
       setRunning(false);
     }
-    // One refetch for the whole run, not one per 409.
-    if (refetchNeeded) void a.refetch();
+    // One refetch for the whole run, not one per 409. The open note's editor
+    // is keyed on its id plus a reload counter, so a plain refetch would leave
+    // it showing the old text: reload re-seeds it (#850, as Not needed does).
+    if (openChanged) a.reload();
+    else if (refetchNeeded) void a.refetch();
     show(summarize(t("flowTranslate.rapid.bulk.approved", { count: approved }), skipped, stopped));
     return left;
   }
