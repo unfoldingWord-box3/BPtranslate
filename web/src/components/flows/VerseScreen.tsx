@@ -110,6 +110,8 @@ const LAYOUT_KEY = "be:verseViewLayout";
 // address bar, and before the rest of the app is told (which costs a render).
 const URL_WRITE_MS = 300;
 const ROUTE_SYNC_MS = 2000;
+// How long an arrow press counts as still gliding to its verse.
+const GLIDE_MS = 700;
 
 function readLayout(): Layout {
   try {
@@ -273,6 +275,12 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
   const [article, setArticle] = useState<VerseArticle | null>(null);
   // Scroll layout: the first verse of the section at the top of the view.
   const [currentStart, setCurrentStart] = useState(verse);
+  // The list's latest report, ahead of the render that carries it.
+  const latestCurrentRef = useRef(verse);
+  const onCurrentChange = useCallback((start: number) => {
+    latestCurrentRef.current = start;
+    setCurrentStart(start);
+  }, []);
   // A request for the scrolling list to bring a verse into view. `n` makes a
   // repeat request for the same verse count as new.
   const [scrollRequest, setScrollRequest] = useState<ScrollRequest>({ start: verse, smooth: false, n: 0 });
@@ -290,9 +298,9 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
     setPrevVerseKey(verseKey);
     // While scrolling, this screen writes the verse at the top of the list into
     // the route, which comes back here as a new `verse`. That is not a move:
-    // the verse is already in view.
-    const echo =
-      scrolling && verse === currentStart && prevVerseKey.startsWith(`${book}|${chapter}|`);
+    // the verse is already in view. (Leaving the scroll layout reports the
+    // verse being read the same way, and keeps the selection made in it.)
+    const echo = verse === currentStart && prevVerseKey.startsWith(`${book}|${chapter}|`);
     if (!echo) {
       setSelection(null);
       setSelectionStart(null);
@@ -300,6 +308,15 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
       setCurrentStart(verse);
       if (scrolling) setScrollRequest((prev) => ({ start: verse, smooth: false, n: prev.n + 1 }));
     }
+  }
+
+  // Crossing the desk breakpoint swaps what scrolls the list (the text column
+  // on the desk, the page on a phone), and the new scroller starts at its top.
+  // Bring the verse being read back into view.
+  const [prevIsDesktop, setPrevIsDesktop] = useState(isDesktop);
+  if (isDesktop !== prevIsDesktop) {
+    setPrevIsDesktop(isDesktop);
+    if (scrolling) setScrollRequest((prev) => ({ start: currentStart, smooth: false, n: prev.n + 1 }));
   }
 
   // The article belongs to the selection it was opened from: picking any other
@@ -433,9 +450,17 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
     [writeVerseUrl],
   );
   useEffect(() => {
-    if (!scrolling || (currentStart >= span.start && currentStart <= span.end)) return;
+    if (!scrolling) return;
     const url = window.setTimeout(() => writeVerseUrl(currentStart), URL_WRITE_MS);
-    const route = window.setTimeout(() => reportVerse(currentStart), ROUTE_SYNC_MS);
+    const moved = currentStart < span.start || currentStart > span.end;
+    // The list may already have moved on (its update not yet rendered) when
+    // the timer fires; telling the router a verse the reader has left would
+    // read as navigation and pull the list back to it.
+    const route = moved
+      ? window.setTimeout(() => {
+          if (latestCurrentRef.current === currentStart) reportVerse(currentStart);
+        }, ROUTE_SYNC_MS)
+      : 0;
     return () => {
       window.clearTimeout(url);
       window.clearTimeout(route);
@@ -455,24 +480,38 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
       // Land the one-verse layout on the verse being read (or the one the
       // selection was made in, so the selection stays meaningful).
       const target = selectionStart ?? currentStart;
-      if (target < span.start || target > span.end) reportVerse(target);
+      if (target < span.start || target > span.end) {
+        setCurrentStart(target);
+        reportVerse(target);
+      }
     }
   };
+
+  // Scroll layout: the verse the arrows last asked for. A glide takes a moment
+  // to bring it to the top, and a second press in that time steps on from it.
+  const lastGoRef = useRef<{ start: number; at: number } | null>(null);
 
   // Step off the SPAN, not the routed verse: on a bridged 15-16 row, "next"
   // from 15 must reach 17, not 16 — 16 renders the identical span.
   const go = useCallback(
     (delta: number) => {
       if (verseNums.length === 0) return;
+      let from = shown;
+      const last = lastGoRef.current;
+      if (scrolling && last && performance.now() - last.at < GLIDE_MS) {
+        from = spans[spanIndexOf(spans, last.start)] ?? shown;
+      }
       const next =
         delta < 0
-          ? [...verseNums].reverse().find((n) => n < shown.start)
-          : verseNums.find((n) => n > shown.end);
+          ? [...verseNums].reverse().find((n) => n < from.start)
+          : verseNums.find((n) => n > from.end);
       if (next == null) return;
-      if (scrolling) requestScroll(next, true);
-      else location.hash = `#/verse/${book}/${chapter}/${next}`;
+      if (scrolling) {
+        lastGoRef.current = { start: next, at: performance.now() };
+        requestScroll(next, true);
+      } else location.hash = `#/verse/${book}/${chapter}/${next}`;
     },
-    [verseNums, shown, scrolling, requestScroll, book, chapter],
+    [verseNums, shown, spans, scrolling, requestScroll, book, chapter],
   );
 
   const clearSelection = useCallback(() => {
@@ -887,6 +926,7 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
 
     const textColumn = scrolling ? (
       <Box
+        data-verse-scroller={isDesktop ? "" : undefined}
         sx={{
           minInlineSize: 0,
           overflowY: "auto",
@@ -899,7 +939,7 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
         <VerseScrollList
           spans={spans}
           request={scrollRequest}
-          onCurrentChange={setCurrentStart}
+          onCurrentChange={onCurrentChange}
           ctx={sectionCtx}
           selection={selection}
           selectionStart={selectionStart}
@@ -1855,14 +1895,10 @@ const PIN_MS = 1000;
 // Height of a section never yet built, until real ones have been measured.
 const INITIAL_ESTIMATE_PX = 420;
 
-// The nearest ancestor that actually scrolls, or null for the page. On the desk
-// that is the text column; on a phone the column grows and the page scrolls.
+// What scrolls the list: on the desk the text column (marked
+// data-verse-scroller), on a phone the page (null).
 function scrollParentOf(el: HTMLElement | null): HTMLElement | null {
-  for (let p = el?.parentElement ?? null; p; p = p.parentElement) {
-    const oy = getComputedStyle(p).overflowY;
-    if ((oy === "auto" || oy === "scroll") && p.scrollHeight > p.clientHeight) return p;
-  }
-  return null;
+  return el?.closest<HTMLElement>("[data-verse-scroller]") ?? null;
 }
 
 function VerseScrollList({
@@ -1955,7 +1991,8 @@ function VerseScrollList({
       target.removeEventListener("scroll", onScroll);
       if (raf) cancelAnimationFrame(raf);
     };
-  }, [spans, onCurrentChange]);
+    // `ctx.stacked` flips at the desk breakpoint, which swaps what scrolls.
+  }, [spans, onCurrentChange, ctx.stacked]);
 
   // Bring a requested verse into view: once on arrival, and again for each
   // stepper / picker use. Held until the chapter's sections exist.
@@ -2002,6 +2039,10 @@ function VerseScrollList({
       for (const t of ["wheel", "touchstart", "keydown", "mousedown"]) window.removeEventListener(t, stop, true);
     };
     const hold = () => {
+      if (!el.isConnected) {
+        stop();
+        return;
+      }
       const off = offset();
       if (Math.abs(off) > 1) target.scrollBy({ top: off });
       if (performance.now() < until) raf = requestAnimationFrame(hold);
@@ -2031,6 +2072,9 @@ function VerseScrollList({
           />
         );
       })}
+      {/* Room after the last verse, so it too can scroll up to the top and
+          count as the verse being read. */}
+      <Box aria-hidden sx={{ minBlockSize: "calc(100dvh - 200px)" }} />
     </Box>
   );
 }
