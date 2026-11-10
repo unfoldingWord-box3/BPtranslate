@@ -87,6 +87,7 @@
     "draftAllDisabled": "AI isn't set up on this server. Whoever runs the server needs to connect the AI service.",
     "draftDisabledValidated": "Un-approve first to draft over an approved translation.",
     "approveStale": "This template changed since you opened it, so it was not approved. It now shows the current text: review it, then approve.",
+    "approveStaleDirty": "This template changed since you opened it, so it was not approved. Your unsaved text is kept; when you save, you will be asked how to handle the newer version.",
     "draftMissing": {
       "button": "Draft missing templates from approved notes",
       "running": "Drafting templates…",
@@ -100,7 +101,7 @@
       "cost": "Estimated cost: ${{cost}}.",
       "notDrafted": "Not drafted:",
       "builtFrom": "AI draft written from {{used}} of the {{total}} approved notes",
-      "runInProgress": "Another run is drafting templates, or one stopped in the last 10 minutes. Try again in up to 10 minutes.",
+      "runInProgress": "Another run is drafting templates, or one stopped in the last 5 minutes. Try again in up to 5 minutes.",
       "previewFailed": "Could not check which note types are ready to draft.",
       "reason": {
         "not_migrated": "the workspace database needs an update first; ask whoever runs the server",
@@ -125,7 +126,7 @@
         "unreadable_output": "the AI answer could not be used",
         "not_written": "someone changed or approved these templates in the meantime",
         "partial_output": "only some of its templates were written",
-        "placeholder_missing": "the AI dropped or changed a placeholder from the English template, such as [ALT]",
+        "placeholder_missing": "the AI dropped or changed a link from the English template",
         "internal_error": "an error on our side",
         "other": "error {{code}}"
       }

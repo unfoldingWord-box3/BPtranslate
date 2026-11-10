@@ -8,7 +8,7 @@
 // on the org's own AI key, and reports how many remain. Drafts land as AI
 // drafts that an editor still has to approve.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Box, Button, CircularProgress, Stack, Typography } from "@mui/material";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import { useTranslation } from "react-i18next";
@@ -95,6 +95,9 @@ export function DraftMissingTemplatesButton({ onRun }: { onRun: (written: string
   const [preview, setPreview] = useState<DraftMissingPreview | null>(null);
   const [previewFailed, setPreviewFailed] = useState(false);
   const [running, setRunning] = useState(false);
+  // Set synchronously on press, so a second click before React re-renders the
+  // disabled button cannot start (and then clear the state of) another run.
+  const runningRef = useRef(false);
   const [result, setResult] = useState<DraftMissingResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Note types the LAST press reported as failed. The next press sends them
@@ -117,6 +120,8 @@ export function DraftMissingTemplatesButton({ onRun }: { onRun: (written: string
   }, [admin, load]);
 
   const run = useCallback(async () => {
+    if (runningRef.current) return;
+    runningRef.current = true;
     setRunning(true);
     setError(null);
     setResult(null);
@@ -129,6 +134,7 @@ export function DraftMissingTemplatesButton({ onRun }: { onRun: (written: string
       const body = e instanceof ApiError ? (e.body as { error?: string; provider?: string | null } | undefined) : undefined;
       setError(body?.error ? reasonText(body.error, body.provider ?? null, t) : t("templates.draftMissing.failed"));
     } finally {
+      runningRef.current = false;
       setRunning(false);
       load();
     }
@@ -150,9 +156,11 @@ export function DraftMissingTemplatesButton({ onRun }: { onRun: (written: string
   }
 
   // The server's own count, the same query as the run's `remaining`: the
-  // button is enabled whenever the server says work remains.
+  // button is enabled whenever the server says work remains. A failed
+  // refresh leaves those counts stale, so it disables the button and shows
+  // the error with Retry until a refresh succeeds.
   const ready = preview.qualifying.length;
-  const disabled = running || !preview.available || ready === 0;
+  const disabled = running || previewFailed || !preview.available || ready === 0;
 
   return (
     <Stack spacing={0.75} data-testid="draft-missing-templates">
@@ -168,13 +176,24 @@ export function DraftMissingTemplatesButton({ onRun }: { onRun: (written: string
           {running ? t("templates.draftMissing.running") : t("templates.draftMissing.button")}
         </Button>
       </Box>
-      <Typography variant="caption" color="text.secondary">
-        {!preview.available
-          ? reasonText(preview.reason ?? "", preview.provider, t)
-          : ready > 0
-            ? t("templates.draftMissing.ready", { n: ready, min: preview.minApprovedNotes, batch: preview.batchSize })
-            : t("templates.draftMissing.none", { min: preview.minApprovedNotes })}
-      </Typography>
+      {previewFailed ? (
+        <Stack direction="row" alignItems="center" spacing={1}>
+          <Typography variant="caption" color="text.secondary" sx={{ flex: 1 }}>
+            {t("templates.draftMissing.previewFailed")}
+          </Typography>
+          <Button size="small" onClick={load} sx={{ fontSize: 11, minWidth: 0 }}>
+            {t("common.retry")}
+          </Button>
+        </Stack>
+      ) : (
+        <Typography variant="caption" color="text.secondary">
+          {!preview.available
+            ? reasonText(preview.reason ?? "", preview.provider, t)
+            : ready > 0
+              ? t("templates.draftMissing.ready", { n: ready, min: preview.minApprovedNotes, batch: preview.batchSize })
+              : t("templates.draftMissing.none", { min: preview.minApprovedNotes })}
+        </Typography>
+      )}
       {result ? (
         <Alert
           severity={result.failed.length > 0 ? "warning" : "success"}

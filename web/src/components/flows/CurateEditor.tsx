@@ -10,7 +10,7 @@
 // reload — never silently discards typing. Templates are book-agnostic
 // (DraftMeta carries no book/chapter/verse), same as tW/tA articles.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Alert,
   Box,
@@ -102,6 +102,7 @@ export function CurateEditor({
   const [conflict, setConflict] = useState(false);
   const [staleDraft, setStaleDraft] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const validatingRef = useRef(false);
 
   // Fetch the unit, then restore any unsaved typing persisted for it — same
   // hydrate-on-mount pattern as TemplateWorkspace.tsx, so nothing is lost by
@@ -244,28 +245,40 @@ export function CurateEditor({
 
   const handleValidate = useCallback(
     async (value: boolean) => {
-      if (!unit) return;
+      // One Approve / Un-approve at a time: a double click would otherwise send
+      // the second with the version the first just changed and get a false
+      // "changed" refusal.
+      if (!unit || validatingRef.current) return;
+      validatingRef.current = true;
       try {
         const updated = await api.validateTemplate(templateId, value, { version: unit.version, state: unit.translation_state });
         applyServerUnit(updated);
         onServerChange();
       } catch (e) {
-        if (e instanceof ApiError && e.status === 409) {
-          const fresh = (e.body as { error?: string; current?: TemplateUnit } | undefined)?.current;
-          if (fresh) {
-            // The unit changed since this editor loaded it. Show what is there
-            // now (keeping unsaved typing, if any) and say so; nothing was approved.
-            if (dirty) setUnit(fresh);
-            else applyServerUnit(fresh);
-          }
+        const fresh =
+          e instanceof ApiError && e.status === 409
+            ? (e.body as { error?: string; current?: TemplateUnit } | undefined)?.current
+            : undefined;
+        if (fresh) {
+          // The unit changed since this editor loaded it; nothing was approved.
           onServerChange();
-          setErrorMsg(t("templates.approveStale"));
+          if (dirty) {
+            // Keep the unsaved text AND the version it was typed against, so the
+            // next Save gets the normal conflict prompt instead of silently
+            // overwriting the new text.
+            setErrorMsg(t("templates.approveStaleDirty"));
+          } else {
+            applyServerUnit(fresh);
+            setErrorMsg(t("templates.approveStale"));
+          }
           return;
         }
         // The 404 case (translation_state NULL) is prevented client-side by
         // disabling the button below — a 404 reaching here would mean the
         // unit changed server-side between render and click.
         setErrorMsg(e instanceof Error ? e.message : String(e));
+      } finally {
+        validatingRef.current = false;
       }
     },
     [unit, templateId, applyServerUnit, onServerChange, dirty, t],

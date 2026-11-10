@@ -34,11 +34,11 @@ Admins see the button **Draft missing templates from approved notes** above the 
 
 - It works on note types (SupportReference) that have at least 20 approved notes, no approved template yet, and a template that is not started or holds an older AI draft. The line under the button says how many note types are ready.
 - Each press drafts up to 6 note types and says how many are still to draft. Press it again to continue.
-- Only one run can draft at a time. If another run is still going, or one stopped in the last 10 minutes (for example because its page was closed), the page says so. Try again in up to 10 minutes.
+- Only one run can draft at a time. If another run is still going, or one stopped in the last 5 minutes (for example because its page was closed), the page says so. Try again in up to 5 minutes.
 - If a note type fails, the page says why. The next press tries the other note types first, and the press after that tries it again. Keep the page open until the run finishes.
 - It uses your organization's own AI key (see **AI service**), with Claude or Gemini. With no key, or with another provider, the line under the button says so and nothing is sent.
-- A draft that drops or changes a placeholder from the English template, such as [ALT], is thrown away and the note type is listed as not drafted.
-- If a template changed after you opened it, **Approve** does not approve it: the page shows the current text and asks you to review it first.
+- The AI translates the example wording in square brackets. It must keep links exactly; a draft that drops or changes a link is thrown away and the note type is listed as not drafted. Slot words in capitals, such as SPEAKER, should stay as they are; a draft that drops one is kept, with a note on the draft.
+- If a template changed after you opened it, **Approve** does not approve it: the page shows the current text and asks you to review it first. If you have unsaved changes, they are kept, and **Save** then asks how to handle the newer version.
 - It never changes a template that is approved or that someone has edited. It replaces an older AI draft nobody has worked on, but not a draft it wrote itself.
 - The AI reads the 30 most recent approved notes of each type. Each draft shows how many it was written from, out of how many the type has. A draft is not used to guide the AI until an editor approves it.
 

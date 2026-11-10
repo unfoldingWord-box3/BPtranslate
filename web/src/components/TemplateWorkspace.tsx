@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Box,
   Button,
@@ -448,6 +448,7 @@ function TemplateEditor({ templateId, direction, onServerChange }: EditorProps) 
   const [conflict, setConflict] = useState(false);
   const [staleDraft, setStaleDraft] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const validatingRef = useRef(false);
 
   // Fetch the unit, then restore any unsaved typing persisted for it. Template
   // drafts used to live only in this component's state, so every exit (Back,
@@ -614,25 +615,37 @@ function TemplateEditor({ templateId, direction, onServerChange }: EditorProps) 
 
   const handleValidate = useCallback(
     async (value: boolean) => {
-      if (!unit) return;
+      // One Approve / Un-approve at a time: a double click would otherwise send
+      // the second with the version the first just changed and get a false
+      // "changed" refusal.
+      if (!unit || validatingRef.current) return;
+      validatingRef.current = true;
       try {
         const updated = await api.validateTemplate(templateId, value, { version: unit.version, state: unit.translation_state });
         applyServerUnit(updated);
         onServerChange();
       } catch (e) {
-        if (e instanceof ApiError && e.status === 409) {
-          const fresh = (e.body as { error?: string; current?: TemplateUnit } | undefined)?.current;
-          if (fresh) {
-            // The unit changed since this editor loaded it. Show what is there
-            // now (keeping unsaved typing, if any) and say so; nothing was approved.
-            if (dirty) setUnit(fresh);
-            else applyServerUnit(fresh);
-          }
+        const fresh =
+          e instanceof ApiError && e.status === 409
+            ? (e.body as { error?: string; current?: TemplateUnit } | undefined)?.current
+            : undefined;
+        if (fresh) {
+          // The unit changed since this editor loaded it; nothing was approved.
           onServerChange();
-          setErrorMsg(t("templates.approveStale"));
+          if (dirty) {
+            // Keep the unsaved text AND the version it was typed against, so the
+            // next Save gets the normal conflict prompt instead of silently
+            // overwriting the new text.
+            setErrorMsg(t("templates.approveStaleDirty"));
+          } else {
+            applyServerUnit(fresh);
+            setErrorMsg(t("templates.approveStale"));
+          }
           return;
         }
         setErrorMsg(e instanceof Error ? e.message : String(e));
+      } finally {
+        validatingRef.current = false;
       }
     },
     [unit, templateId, applyServerUnit, onServerChange, dirty, t],
