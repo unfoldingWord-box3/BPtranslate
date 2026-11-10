@@ -285,7 +285,8 @@
       "examples": "Examples",
       "localization": "Localization",
       "users": "Users",
-      "aiService": "AI service"
+      "aiService": "AI service",
+      "houseStyle": "House style"
     },
     "aiService": {
       "title": "AI service",
@@ -561,6 +562,37 @@
       },
       "saved": "Lane config saved."
     }
+  },
+  "houseStyle": {
+    "title": "House style",
+    "intro": "Fixes made automatically to AI translation drafts when they are imported, so editors do not have to make the same correction on every note. They apply to notes and to questions and their answers.",
+    "safety": "Each rule is off until an admin switches it on. Switching a rule on changes drafts imported from then on; drafts already in the project stay as they are. Scripture quotes in bold and the Quote column are never changed. The AI's original wording is saved with each draft's record.",
+    "kind": {
+      "delete": "Delete this text",
+      "literal": "Replace this text",
+      "wholeWord": "Replace this whole word",
+      "finalBracketPeriod": "Add a period after a final ]",
+      "unknown": "Rule this version of the app cannot run"
+    },
+    "find": "Find",
+    "replaceWith": "Replace with",
+    "scope": {
+      "note": "Anywhere in the text.",
+      "endOfNote": "Only at the end of the text."
+    },
+    "finalBracketPeriodDetail": "When the text ends with ] (for example an alternate translation), a period is added after it, unless the words inside the brackets end with … or ؟.",
+    "on": "On",
+    "off": "Off",
+    "toggleAria": "Switch rule on or off: {{rule}}",
+    "unsupported": "This version of the app does not know how to run this rule, so it is never applied.",
+    "examples": "What it fixes",
+    "before": "Before",
+    "after": "After",
+    "counterExamples": "What it leaves alone",
+    "changedBy": "Last switched by {{name}}, {{when}}",
+    "toggleFailed": "Could not save the change. Check your connection and try again.",
+    "loadFailed": "Could not load the house-style rules. Reload to try again.",
+    "empty": "This project has no house-style rules."
   },
   "prefsHistory": {
     "button": "History",
@@ -2217,6 +2249,8 @@
       "sectionCommonIssues": "Common issues",
       "sectionTerminology": "Terminology",
       "sectionExamples": "Examples",
+      "sectionHouseStyle": "House style",
+      "houseStyleIntro": "Fixes made automatically to AI translation drafts when they are imported, so editors do not have to make the same correction on every note. They apply to notes and to questions and their answers.",
       "sectionQaRules": "QA rules",
       "sectionTemplates": "Templates",
       "sourceProjectOnly": "Translation preferences (brief, instructions, terminology, examples) apply to translation projects only — this workspace is a source project.",

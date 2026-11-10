@@ -1185,6 +1185,23 @@ export type TermStatus = (typeof TERM_STATUSES)[number];
 export const REGISTERS = ["default", "formal", "informal"] as const;
 export type Register = (typeof REGISTERS)[number];
 
+// One house-style rule (issue #815, api/src/houseStyle.ts). `kind` is one of a
+// fixed set of matchers; `supported` is false for a row this server build
+// cannot run (it is then never applied).
+export interface HouseStyleRule {
+  id: string;
+  kind: "literal" | "whole_word" | "final_bracket_period" | string;
+  find: string;
+  replace: string;
+  scope: "note" | "end-of-note" | string;
+  examples: Array<{ before: string; after: string }>;
+  counterExamples: string[];
+  enabled: boolean;
+  supported: boolean;
+  updatedAt: number;
+  updatedBy: string | null;
+}
+
 export interface TranslationPrefs {
   id: number;
   audience: string | null;
@@ -2317,6 +2334,15 @@ export const api = {
       `/api/translation-memory/prefs/history${q ? `?${q}` : ""}`,
     );
   },
+  // House-style rules applied to AI translate drafts at import (issue #815).
+  // Admin-only; the only change allowed is switching a rule on or off.
+  getHouseStyleRules: () => request<{ rules: HouseStyleRule[] }>(`/api/translation-memory/house-style-rules`),
+  setHouseStyleRuleEnabled: (id: string, enabled: boolean) =>
+    request<{ rule: HouseStyleRule }>(`/api/translation-memory/house-style-rules/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    }),
 
   // ── Org-wide AI provider config (migration 0065) ──
   getAiProvider: () => request<AiProviderSettings>(`/api/ai-provider`),

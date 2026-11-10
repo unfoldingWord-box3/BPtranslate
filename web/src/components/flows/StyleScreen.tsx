@@ -51,12 +51,21 @@ import {
 import { MarkdownView } from "../MarkdownView";
 import { PrefsHistoryButton } from "../PrefsHistoryDialog";
 import { TerminologySection } from "../TerminologySection";
+import { HouseStyleRulesSection } from "../HouseStyleRulesSection";
 import { bookName } from "../../lib/bookNames";
 import { formatNumber } from "../../lib/formatDate";
 
 export interface StyleScreenProps extends FlowScreenContext {}
 
-type SectionKey = "brief" | "instructions" | "commonIssues" | "terminology" | "examples" | "qa" | "templates";
+type SectionKey =
+  | "brief"
+  | "instructions"
+  | "commonIssues"
+  | "terminology"
+  | "examples"
+  | "houseStyle"
+  | "qa"
+  | "templates";
 
 const MEMORY_SECTION_LABELS: Array<{ key: SectionKey; labelKey: string }> = [
   { key: "brief", labelKey: "moreTools.style.sectionBrief" },
@@ -64,6 +73,7 @@ const MEMORY_SECTION_LABELS: Array<{ key: SectionKey; labelKey: string }> = [
   { key: "commonIssues", labelKey: "moreTools.style.sectionCommonIssues" },
   { key: "terminology", labelKey: "moreTools.style.sectionTerminology" },
   { key: "examples", labelKey: "moreTools.style.sectionExamples" },
+  { key: "houseStyle", labelKey: "moreTools.style.sectionHouseStyle" },
 ];
 
 const ALWAYS_SECTION_LABELS: Array<{ key: SectionKey; labelKey: string }> = [
@@ -722,6 +732,15 @@ export default function StyleScreen({ role, me }: StyleScreenProps) {
                   <TerminologySection direction={cfg?.direction ?? "ltr"} />
                 </Panel>
                 <ExamplesPanel enabled={memoryAvailable} status={exportStatusState.status} />
+                {/* #815: memoryAvailable already implies admin, which the
+                    house-style routes require. */}
+                <Panel
+                  id="houseStyle"
+                  title={t("moreTools.style.sectionHouseStyle")}
+                  intro={t("moreTools.style.houseStyleIntro")}
+                >
+                  <HouseStyleRulesSection heading={false} />
+                </Panel>
               </>
             )}
 

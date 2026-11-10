@@ -89,6 +89,14 @@ export const ADMIN_SURFACES: AdminSurfaceEntry[] = [
     desk: { page: "style", file: STYLE, anchor: "<ExamplesPanel" },
   },
   {
+    id: "houseStyleRules",
+    label: "House-style rules (fixes applied to AI translate drafts at import; enable / disable)",
+    classic: { section: "houseStyle", file: PREFS },
+    desk: { page: "style", file: STYLE, anchor: "<HouseStyleRulesSection" },
+    notes:
+      "#815. Both sides mount the shared HouseStyleRulesSection (components/HouseStyleRulesSection.tsx); admin-only, like GET/PATCH /api/translation-memory/house-style-rules. Rules arrive by migration; there is no add/edit form.",
+  },
+  {
     id: "setupWizard",
     label: "Setup wizard (org / sources / lanes)",
     classic: { section: "setup", file: PREFS },
