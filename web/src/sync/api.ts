@@ -2126,11 +2126,13 @@ export const api = {
       body: JSON.stringify({ key }),
       timeoutMs: 60_000,
     }),
-  rejectSuggestion: (key: string) =>
-    request<{ ok: true }>(`/api/suggestion-inbox/reject`, {
+  // The book is the one the admin is viewing: only a card shown there can be rejected.
+  rejectSuggestion: (book: string, key: string) =>
+    request<{ ok: true }>(`/api/suggestion-inbox/${encodeURIComponent(book)}/reject`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key }),
+      timeoutMs: 60_000,
     }),
 
   setVerseDone: (book: string, chapter: number, verse: number, done: boolean) =>

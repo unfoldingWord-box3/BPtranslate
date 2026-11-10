@@ -68,10 +68,10 @@ If the English notes cannot be read for some chapters, a message names those cha
    - the change: the AI's words, then the approved words (**deleted** when the editors removed them). **at the end of the note** means the change was made only at the very end.
    - **Made in X of Y drafts that had it**: X notes had this change made. Y drafts contained the words it changes, including those X.
    - **Chapters**: where the change was made.
-   - **Suggested home**: where the fix belongs. **House-style rule** is for a small mechanical change, such as punctuation, a tag or the spelling of one word, that editors made in at least half the drafts that had it. **Note template** is for words that come from a template. **Term** is for a change of one to three words. Everything else is a **Common issues line**.
+   - **Suggested home**: where the fix belongs. **House-style rule** is offered only for three kinds of change that are safe in every note: the period after a final ], deleting a tag in parentheses or brackets such as (مُكيَّف), and changing only the marks (vowels, tanween) on one word. Editors must have made it in at least half the drafts that had it (nine in ten for marks), and the rule must give exactly the approved text on the examples. The card also says what kind of rule it would create. **Note template** is for words that come from a template. **Term** is for a change of one to three words. Everything else is a **Common issues line**.
    - three examples: the AI draft and the approved note around the change.
 4. Choose what to do:
-   - **Approve** on a house-style card adds the rule to [Style: House style](#help:admin-style), switched on. It fixes drafts that arrive after that.
+   - **Approve** on a house-style card asks you to confirm, then adds the rule to [Style: House style](#help:admin-style), switched on. It changes every AI draft that arrives after that, in every book, for notes and for questions and answers. Its examples there are real lines from the drafts.
    - **Approve** on any other card copies a line for you. The term, template and Common issues editors cannot be filled in from here, so open the editor with the button and paste the line.
    - **Reject** hides the card for good, in every book.
 

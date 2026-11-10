@@ -5,7 +5,8 @@
 // the corrections editors keep making to the AI's translation-note drafts
 // (the same change, at least 10 times across at least 3 chapters), each as a
 // card with a suggested home for it:
-//   - house-style rule: Approve creates the rule, switched on, on the server
+//   - house-style rule: after a confirmation (the rule changes every future
+//     draft, all books, notes and questions), Approve creates the rule, switched on, on the server
 //     (POST /api/suggestion-inbox/:book/approve, which rebuilds it from its
 //     own data);
 //   - term / template / Common issues: those editors have no prefill, so
@@ -17,7 +18,21 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
-import { Alert, Box, Button, Chip, MenuItem, Stack, TextField, Typography, useTheme } from "@mui/material";
+import {
+  Alert,
+  Box,
+  Button,
+  Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  MenuItem,
+  Stack,
+  TextField,
+  Typography,
+  useTheme,
+} from "@mui/material";
 
 import { AdminDesk } from "./AdminDesk";
 import { AdminPageHeader } from "./AdminPageHeader";
@@ -55,6 +70,13 @@ const HOME_LABEL: Record<SuggestionHome, string> = {
 };
 
 // Where Approve sends a non-rule card, and the label of that link.
+// The kind of house-style rule a card would create (api/src/houseStyle.ts kinds).
+const KIND_LABEL: Record<string, string> = {
+  literal: "adminPages.suggestions.kindLiteral",
+  whole_word: "adminPages.suggestions.kindWholeWord",
+  final_bracket_period: "adminPages.suggestions.kindFinalBracketPeriod",
+};
+
 const HOME_EDITOR: Record<Exclude<SuggestionHome, "house_style">, { hash: string; labelKey: string }> = {
   template: { hash: "#/admin/curate", labelKey: "adminPages.suggestions.openTemplates" },
   term: { hash: "#/admin/style", labelKey: "adminPages.suggestions.openTerms" },
@@ -65,9 +87,13 @@ const HOME_EDITOR: Record<Exclude<SuggestionHome, "house_style">, { hash: string
 // it is pasted into the workspace's own guidance. A Common issues line holds
 // both texts, which is what hides the card once it is saved there.
 // Arrows are not mirrored in right-to-left text, so an Arabic or Hebrew line
-// gets "←" to keep pointing from the old words to the new ones.
+// gets "←" to keep pointing from the old words to the new ones. Right-to-left
+// is decided by Unicode script: Hebrew (U+0590–05FF), Arabic (U+0600–06FF and
+// its supplements and presentation forms), Syriac, Thaana, N'Ko.
+const RTL_SCRIPT = /[\p{Script=Hebrew}\p{Script=Arabic}\p{Script=Syriac}\p{Script=Thaana}\p{Script=Nko}]/u;
+
 function copyText(s: Suggestion): string {
-  const arrow = /[֐-ࣿיִ-﷿ﹰ-﻿]/.test(s.before + s.after) ? "←" : "→";
+  const arrow = RTL_SCRIPT.test(s.before + s.after) ? "←" : "→";
   const after = s.after === "" ? "∅" : `«${s.after}»`;
   return s.home === "common_issues" ? `- «${s.before}» ${arrow} ${after}` : `${s.before} ${arrow} ${s.after}`;
 }
@@ -91,6 +117,8 @@ export default function AdminSuggestionInboxScreen({ role, me }: FlowScreenConte
   // Per-card outcome: a done message, an error, or the copied line for a non-rule home.
   const [cardMsg, setCardMsg] = useState<Record<string, { severity: "success" | "error" | "info"; text: string }>>({});
   const [notice, setNotice] = useState<string | null>(null);
+  // The rule card waiting for the admin to confirm (a rule changes every future draft).
+  const [confirming, setConfirming] = useState<Suggestion | null>(null);
 
   // Workspace books — one request (GET /api/books).
   useEffect(() => {
@@ -167,7 +195,9 @@ export default function AdminSuggestionInboxScreen({ role, me }: FlowScreenConte
           "error",
           code === "suggestion_not_found"
             ? i18n.t("adminPages.suggestions.errGone")
-            : err instanceof Error
+            : code === "rule_mismatch"
+              ? i18n.t("adminPages.suggestions.errMismatch")
+              : err instanceof Error
               ? err.message
               : i18n.t("adminPages.common.loadFailed"),
         );
@@ -181,15 +211,20 @@ export default function AdminSuggestionInboxScreen({ role, me }: FlowScreenConte
   const reject = useCallback(async (s: Suggestion) => {
     setBusyKey(s.key);
     try {
-      await api.rejectSuggestion(s.key);
+      await api.rejectSuggestion(book, s.key);
       setData((d) => (d ? { ...d, suggestions: d.suggestions.filter((x) => x.key !== s.key) } : d));
       setNotice(i18n.t("adminPages.suggestions.rejected"));
     } catch (err) {
-      setMsg(s.key, "error", err instanceof Error ? err.message : i18n.t("adminPages.common.loadFailed"));
+      const gone = err instanceof ApiError && err.status === 404;
+      setMsg(
+        s.key,
+        "error",
+        gone ? i18n.t("adminPages.suggestions.errGone") : err instanceof Error ? err.message : i18n.t("adminPages.common.loadFailed"),
+      );
     } finally {
       setBusyKey(null);
     }
-  }, []);
+  }, [book]);
 
   if (!isAdmin) {
     return (
@@ -247,6 +282,13 @@ export default function AdminSuggestionInboxScreen({ role, me }: FlowScreenConte
               {t("adminPages.suggestions.suggestedHome")}
             </Typography>
             <Chip size="small" color="primary" variant="outlined" label={t(HOME_LABEL[s.home])} />
+            {s.rule && (
+              <Typography variant="body2" color="text.secondary">
+                {t("adminPages.suggestions.ruleKind", {
+                  kind: t(KIND_LABEL[s.rule.kind] ?? "adminPages.suggestions.kindLiteral"),
+                })}
+              </Typography>
+            )}
           </Stack>
           <Box component="ul" sx={{ m: 0, paddingInlineStart: 2.5, "& li": { mb: 0.75 } }}>
             {s.examples.map((e) => (
@@ -294,7 +336,7 @@ export default function AdminSuggestionInboxScreen({ role, me }: FlowScreenConte
               size="small"
               variant="contained"
               disabled={busyKey === s.key}
-              onClick={() => void approve(s)}
+              onClick={() => (s.home === "house_style" ? setConfirming(s) : void approve(s))}
             >
               {s.home === "house_style"
                 ? t("adminPages.suggestions.approveRule")
@@ -366,6 +408,36 @@ export default function AdminSuggestionInboxScreen({ role, me }: FlowScreenConte
             </Typography>
           )}
         </Box>
+
+        {/* A rule changes every AI draft that arrives from now on, so it is confirmed first. */}
+        <Dialog open={confirming != null} onClose={() => setConfirming(null)} maxWidth="sm" fullWidth>
+          <DialogTitle>{t("adminPages.suggestions.confirmTitle")}</DialogTitle>
+          <DialogContent>
+            {confirming && (
+              <Stack spacing={1.5}>
+                {changeLine(confirming)}
+                <Typography variant="body2">
+                  {t("adminPages.suggestions.confirmBody", {
+                    kind: t(KIND_LABEL[confirming.rule?.kind ?? "literal"] ?? "adminPages.suggestions.kindLiteral"),
+                  })}
+                </Typography>
+              </Stack>
+            )}
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setConfirming(null)}>{t("adminPages.suggestions.confirmCancel")}</Button>
+            <Button
+              variant="contained"
+              onClick={() => {
+                const s = confirming;
+                setConfirming(null);
+                if (s) void approve(s);
+              }}
+            >
+              {t("adminPages.suggestions.confirmOk")}
+            </Button>
+          </DialogActions>
+        </Dialog>
 
         {notice && (
           <Alert severity="success" onClose={() => setNotice(null)}>
