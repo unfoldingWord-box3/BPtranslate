@@ -23,6 +23,7 @@ import { translationMemory } from "./translationMemory";
 import { suggestionInbox } from "./suggestionInbox";
 import { aiProvider } from "./aiProvider";
 import { helpRoutes } from "./help/helpRoutes";
+import { assistantRoutes } from "./assistant/assistantRoutes";
 import { l10n } from "./l10n";
 import { books } from "./bookImport";
 import { populateReferencedArticles } from "./articlePopulate";
@@ -98,6 +99,8 @@ export interface Env {
   // Daily per-user spend cap in USD for the help assistant (api/src/help).
   // Missing or invalid falls back to "2".
   HELP_CHAT_DAILY_CAP_USD?: string;
+  // Daily per-user spend cap in USD for the editing assistant (api/src/assistant). Default 7.
+  ASSISTANT_DAILY_CAP_USD?: string;
   // Override the bot URL (defaults to https://uw-bt-bot.fly.dev/api/tn-quick
   // when unset). Useful for staging / local bot dev.
   TN_QUICK_URL?: string;
@@ -335,6 +338,7 @@ app.route("/api/translation-memory", translationMemory);
 app.route("/api/suggestion-inbox", suggestionInbox);
 app.route("/api/ai-provider", aiProvider);
 app.route("/api/help", helpRoutes);
+app.route("/api/assistant", assistantRoutes);
 app.route("/api/l10n", l10n);
 app.route("/api/chat-links", chatLinkRoutes);
 
