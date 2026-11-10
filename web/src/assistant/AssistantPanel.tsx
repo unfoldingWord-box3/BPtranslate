@@ -88,8 +88,11 @@ export default function AssistantPanel(props: Props) {
   const [busy, setBusy] = useState(false);
   const [applyingIdx, setApplyingIdx] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Every note was left out, so nothing was sent (the server would refuse an empty list).
-  const [unsent, setUnsent] = useState<Omitted | null>(null);
+  // No note could go with the question, so nothing was sent (the server would refuse
+  // an empty list). Keyed like the chat, so another chapter starts without it.
+  const [unsentState, setUnsentState] = useState<{ key: string; omitted: Omitted } | null>(null);
+  const unsent = unsentState?.key === resetKey ? unsentState.omitted : null;
+  const setUnsent = (o: Omitted | null) => setUnsentState(o ? { key: resetKey, omitted: o } : null);
   const inFlight = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
@@ -142,7 +145,13 @@ export default function AssistantPanel(props: Props) {
     if (!canSend || inFlight.current) return;
     setError(null);
     setUnsent(null);
-    const ctx = buildContext();
+    let ctx: AssistantContext;
+    try {
+      ctx = buildContext();
+    } catch (e) {
+      setError(describeError(e));
+      return;
+    }
     if (ctx.notes.length === 0) {
       setUnsent(ctx.omitted ?? { tooLong: 0, tooMany: 0 });
       return;
@@ -230,6 +239,7 @@ export default function AssistantPanel(props: Props) {
   const omittedNotice = (o: Omitted, nothingSent = false) => (
     <Typography variant="caption" color="text.secondary" component="p" data-assistant-omitted="" sx={{ mt: 0.5, mb: 0, textAlign: "start" }}>
       {[
+        nothingSent && o.tooLong + o.tooMany === 0 && t("assistant.omitted.noNotes"),
         o.tooLong > 0 && t("assistant.omitted.tooLong", { count: o.tooLong }),
         o.tooMany > 0 && t("assistant.omitted.tooMany", { count: o.tooMany }),
         nothingSent && t("assistant.omitted.nothingSent"),
