@@ -1256,38 +1256,40 @@ async function setTqTranslationState(
 // (standing authorship is whoever wrote the note content). The audit action is
 // 'trash'/'untrash' — deliberately NOT in the history version filter, so these
 // flips don't surface as duplicate-version rows in the history dialog.
-// expected: the version the caller saw (from If-Match, #837); the flip lands
-// only if the row is still at it, and so does the audit entry. null = no check.
+// pins (#837): the version (If-Match) and translation_state (expected_state)
+// the caller saw; the flip lands only if the row is still at both, and so does
+// the audit entry. Each null = no check. A state flip (approve, un-approve)
+// does not bump the version, so the version pin alone would miss one.
 async function setTnTrashed(
   env: Env,
   id: string,
   book: string,
   userId: number | null,
   trashed: boolean,
-  expected: number | null = null,
+  pins: { expected: number | null; expectedState: TranslationStatePin | null } = { expected: null, expectedState: null },
 ): Promise<TnRow | null> {
   const now = Math.floor(Date.now() / 1000);
   const action = trashed ? "trash" : "untrash";
-  // Each statement binds exactly the parameters it references (D1 rejects an
-  // unreferenced ?N), so the pin and its value come and go together.
-  const pin = (n: number) => (expected !== null ? ` AND version = ?${n}` : "");
-  const pinValue = expected !== null ? [expected] : [];
+  // statePins binds exactly the parameters it references (D1 rejects an
+  // unreferenced ?N). trash=false: no trashed_at clause, because the audit
+  // INSERT runs after the UPDATE has set trashed_at.
+  const pin = statePins({ ...pins, expectedUpdatedAt: null, source: null }, 5, false);
   const [updateRes] = await env.DB.batch([
     env.DB
       .prepare(
         `UPDATE tn_rows
            SET trashed_at = ?1, updated_at = ?2
-         WHERE id = ?3 AND deleted_at IS NULL${bookClause(4)}${pin(5)}`,
+         WHERE id = ?3 AND deleted_at IS NULL${bookClause(4)}${pin.sql}`,
       )
-      .bind(trashed ? now : null, now, id, book, ...pinValue),
+      .bind(trashed ? now : null, now, id, book, ...pin.values),
     env.DB
       .prepare(
         `INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action)
          SELECT 'tn', ?1, book, ?2, version, version, ?3
            FROM tn_rows
-          WHERE id = ?1 AND deleted_at IS NULL${bookClause(4)}${pin(5)}`,
+          WHERE id = ?1 AND deleted_at IS NULL${bookClause(4)}${pin.sql}`,
       )
-      .bind(id, userId ?? null, action, book, ...pinValue),
+      .bind(id, userId ?? null, action, book, ...pin.values),
   ]);
   if (!updateRes.meta.changes) return null;
   return env.DB.prepare(`SELECT * FROM tn_rows WHERE id = ?1${bookClause(2)}`).bind(id, book).first<TnRow>();
@@ -1542,11 +1544,15 @@ rows.post("/tn/:id/keep", requireEditor, async (c) => {
 // permanent deleted_at tombstone by the nightly 06:00 UTC job. Refused while a
 // translate run will write this note (#602); otherwise
 // non-version-bumping, like /preserve, and idempotent.
-// Optional If-Match (#837): the version the person was shown. The note is set
-// aside only if it is still at that version; otherwise 409 version_mismatch
-// with the row as it is now (the /validate shape), so a colleague's edit is
-// never set aside unseen. Omitted: no check, as before. The web app's Not
-// needed buttons send it; the classic editor and Review queue do not.
+// Optional pins (#837), as on /validate (#701): If-Match, the version the
+// person was shown, and body { expected_state }, the translation_state they
+// were shown. The note is set aside only if it is still at both; otherwise
+// 409 version_mismatch with the row as it is now (the /validate shape), so a
+// colleague's edit or approval is never set aside unseen. The body may be
+// empty. Omitted: no check, as before. The web app's Not needed buttons send
+// both; the classic editor and Review queue send neither.
+const TrashBody = z.object({ expected_state: z.enum(TRANSLATION_STATES).optional() });
+
 rows.post("/tn/:id/trash", requireEditor, async (c) => {
   const id = c.req.param("id");
   const book = c.req.query("book");
@@ -1554,16 +1560,33 @@ rows.post("/tn/:id/trash", requireEditor, async (c) => {
   const ifMatch = c.req.header("if-match");
   const expected = parseIfMatch(ifMatch);
   if (ifMatch !== undefined && expected === null) return c.json({ error: "invalid_if_match" }, 400);
+  let body: unknown = {};
+  const raw = await c.req.text();
+  if (raw.trim()) {
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      return c.json({ error: "invalid_json" }, 400);
+    }
+  }
+  const parsed = TrashBody.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: "validation_failed", issues: parsed.error.issues }, 400);
+  }
+  const expectedState = parsed.data.expected_state ?? null;
   const userId = currentUserId(c);
   const lock = await translateLockForTnId(c.env, id, book);
   if (lock) return c.json(lockedResponseBody(lock), 409);
-  const updated = await setTnTrashed(c.env, id, book, userId, true, expected);
+  const updated = await setTnTrashed(c.env, id, book, userId, true, { expected, expectedState });
   if (!updated) {
-    if (expected !== null) {
-      const fresh = await c.env.DB.prepare(`SELECT * FROM tn_rows WHERE id = ?1${bookClause(2)}`)
-        .bind(id, book)
-        .first<TnRow>();
-      if (fresh && !fresh.deleted_at && fresh.version !== expected) {
+    if (expected !== null || expectedState !== null) {
+      // With latest_source, so the client can put the row straight on screen.
+      const fresh = (await selectRowWithLatestSource(c.env, "tn", id, book)) as TnRow | null;
+      const moved =
+        !!fresh &&
+        ((expected !== null && fresh.version !== expected) ||
+          (expectedState !== null && fresh.translation_state !== expectedState));
+      if (fresh && !fresh.deleted_at && moved) {
         logRowConflict(c, {
           kind: "tn",
           rowId: id,
