@@ -970,7 +970,9 @@ translationMemory.get("/export-status", requireEditor, async (c) => {
 // House-style rules (issue #815, migration 0082): the fixes applied to AI
 // translate drafts at import (api/src/houseStyle.ts). Admin-only, both ways:
 // switching a rule on changes every draft imported after it. There is no route
-// to add or edit a rule's text; rules arrive by migration, so nothing an admin
+// to edit a rule's text. Rules arrive by migration, or (#819) from approving a
+// suggestion-inbox card, where the server builds the rule from the editors'
+// own repeated corrections (api/src/suggestionInbox.ts), so nothing an admin
 // types can become a pattern that rewrites drafts.
 // ---------------------------------------------------------------------------
 
