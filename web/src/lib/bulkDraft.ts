@@ -49,3 +49,16 @@ export function reduceBulkDraftOutcome(input: {
     stopReason: consecutiveFailures >= CONSECUTIVE_FAILURE_LIMIT ? "aborted_failures" : null,
   };
 }
+
+/** Whether the open template editor must remount after a "Draft all" run
+ *  (#843). The editor fetched its unit once, on mount, so a run that rewrote
+ *  that unit leaves it showing old text at an old version. Pass the unit open
+ *  NOW (when the run ends, not when it started: the user can switch units
+ *  mid-run) and the ids the run was given. The run's drafted count is ignored
+ *  on purpose: a cancelled or fail-fast run aborts requests the server may
+ *  still have completed, and a needless remount only costs a refetch. Callers
+ *  leave units with unsaved typing out of the run, and the remounted editor
+ *  restores any typing from the drafts store either way. */
+export function openEditorNeedsReload(openId: string | null, targetedIds: ReadonlySet<string>): boolean {
+  return openId != null && targetedIds.has(openId);
+}
