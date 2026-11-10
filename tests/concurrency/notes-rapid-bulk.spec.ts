@@ -344,3 +344,80 @@ test("notes screen: single Not needed refuses a note a peer just edited and relo
   await restoreNoteText(peerApi, target.id, target.note, now.version);
   expect((await serverRows(context, auth.token)).get(target.id)?.note).toBe(target.note);
 });
+
+// #850: bulk Approve reloads the open note when it skips it as changed, as
+// bulk Not needed does (#837). The open note's editor re-seeds only on a
+// reload, so a plain refetch left it showing the old text while its version
+// moved to the peer's edit. The peer PATCH runs inside the route handler for
+// that note's validate request, so the 409 comes from the server's pin.
+test("rapid check bulk: Approve reloads the open note a peer edited just before its approval", async ({ browser }) => {
+  const { context, auth } = await newUserContext(browser, "rapid-bulk-approve-pin");
+  openContexts.push(context);
+  await context.addInitScript(() => {
+    try {
+      localStorage.setItem("be:notesRapidCheck", "true");
+    } catch {
+      /* private mode */
+    }
+  });
+  const peer = await newUserContext(browser, "rapid-bulk-approve-peer");
+  openContexts.push(peer.context);
+  const peerApi = authedRequest(peer.context.request, peer.auth.token, peer.auth.csrf);
+
+  // A verse with 2+ notes that none of the tests above uses: not the first
+  // with 4+, not the last with 2+, not the single-button test's verse.
+  const chap = await fetchChapter(context.request, auth.token, BOOK, CHAPTER);
+  const live = (chap.tn as Row[]).filter((r) => r.trashed_at == null && r.verse > 0);
+  const byVerse = new Map<number, Row[]>();
+  for (const r of live) byVerse.set(r.verse, [...(byVerse.get(r.verse) ?? []), r]);
+  const asc = [...byVerse.keys()].sort((a, b) => a - b);
+  const taken = new Set([asc.find((v) => byVerse.get(v)!.length >= 4), [...asc].reverse().find((v) => byVerse.get(v)!.length >= 2)]);
+  taken.add(asc.find((v) => !taken.has(v)));
+  const verse = asc.find((v) => !taken.has(v) && byVerse.get(v)!.length >= 2);
+  expect(verse, `ZEC ${CHAPTER} needs a fourth verse with 2+ notes`).toBeDefined();
+  for (const r of byVerse.get(verse!)!) expect(r.translation_state, `seeded ai_draft for ${r.id}`).toBe("ai_draft");
+
+  const page = await context.newPage();
+  const list = await openRapid(page, verse!, byVerse.get(verse!)![0].id);
+  const ids = (await list.locator("[data-rapid-row]").evaluateAll((els) => els.map((el) => el.getAttribute("data-rapid-row")))) as string[];
+  const [kept, edited] = ids;
+  const shown = (await serverRows(context, auth.token)).get(edited)!;
+  // Make `edited` the open note, with no typing, so bulk Approve sends its
+  // pinned validate request rather than Save & approve.
+  await list.locator(`[data-rapid-select="${edited}"]`).click();
+  await expect(list.locator('[data-rapid-row][aria-current="true"]')).toHaveAttribute("data-rapid-row", edited);
+
+  // The peer edits `edited` the moment its validate request leaves the browser.
+  let sentIfMatch: string | undefined;
+  await page.route(`**/api/rows/tn/${edited}/validate*`, async (route) => {
+    sentIfMatch = route.request().headers()["if-match"];
+    const res = await peerApi.patch(`/api/rows/tn/${edited}?book=${BOOK}`, { note: `${shown.note} approve peer edit` }, shown.version);
+    expect(res.status(), "peer PATCH").toBe(200);
+    await route.continue();
+  });
+
+  await list.locator(`[data-rapid-checkbox="${kept}"]`).click();
+  await list.locator(`[data-rapid-checkbox="${edited}"]`).click({ modifiers: ["Shift"] });
+  const bar = page.locator("[data-rapid-bulk-bar]");
+  await expect(bar).toContainText("Checked: 2");
+  await bar.getByRole("button", { name: "Approve", exact: true }).click();
+
+  const result = page.locator("[data-rapid-bulk-result]");
+  await expect(result).toContainText("Approved: 1. Skipped: 1 (changed by someone else, reloaded: 1).", { timeout: 20_000 });
+  expect(sentIfMatch, "the validate request carried the version on screen").toBe(String(shown.version));
+  const server = await serverRows(context, auth.token);
+  expect(server.get(kept)?.translation_state, "the untouched note was approved").toBe("validated");
+  expect(server.get(edited)?.translation_state, "the peer-edited note was not approved").not.toBe("validated");
+  expect(server.get(edited)?.note).toBe(`${shown.note} approve peer edit`);
+  // The open note was reloaded: it shows the peer's text, not the old text.
+  await expect(list.locator(`[data-rapid-row="${edited}"]`)).toContainText("approve peer edit", { timeout: 20_000 });
+  // The skipped note stays checked, so a second press acts on it once seen.
+  await expect(bar).toContainText("Checked: 1");
+  await expect(list.locator(`[data-rapid-checkbox="${edited}"]`)).toHaveAttribute("aria-checked", "true");
+  await page.screenshot({ path: test.info().outputPath("rapid-bulk-approve-pin-1366x768.png") });
+
+  // Leave the chapter's text as found: the peer puts the edited note's text
+  // back. Approve has no Undo; global-setup reseeds ZEC 4 as AI drafts.
+  await restoreNoteText(peerApi, edited, shown.note, server.get(edited)!.version);
+  expect((await serverRows(context, auth.token)).get(edited)?.note).toBe(shown.note);
+});
