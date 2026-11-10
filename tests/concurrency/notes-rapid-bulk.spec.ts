@@ -522,3 +522,115 @@ test("rapid check bulk: Redo with AI reloads the open note a peer edited just be
   await restoreNoteText(peerApi, target.id, target.note, server.version);
   expect((await serverRows(context, auth.token)).get(target.id)?.note).toBe(target.note);
 });
+
+// #867 / #875: with the status filter hiding Approved, a bulk Approve takes the
+// approved notes out of the list. The skipped note (unsaved typing) must stay
+// checked, and Shift+J off the approved open note (which then leaves the list)
+// must extend the selection, not clear it. Before #872 the selection was keyed
+// on the exact rows shown, so either change cleared every checkmark.
+test("rapid check bulk: checked notes survive the status filter hiding approved notes", async ({ browser }) => {
+  const { context, auth } = await newUserContext(browser, "rapid-bulk-filter");
+  openContexts.push(context);
+  await context.addInitScript(() => {
+    try {
+      localStorage.setItem("be:notesRapidCheck", "true");
+    } catch {
+      /* private mode */
+    }
+  });
+
+  // A verse with 5+ notes that none of the tests above uses: not the first
+  // with 4+, not the last with 2+, not the single-button test's verse, not the
+  // bulk Approve test's, not the bulk Redo test's.
+  const chap = await fetchChapter(context.request, auth.token, BOOK, CHAPTER);
+  const live = (chap.tn as Row[]).filter((r) => r.trashed_at == null && r.verse > 0);
+  const byVerse = new Map<number, Row[]>();
+  for (const r of live) byVerse.set(r.verse, [...(byVerse.get(r.verse) ?? []), r]);
+  const asc = [...byVerse.keys()].sort((a, b) => a - b);
+  const taken = new Set([asc.find((v) => byVerse.get(v)!.length >= 4), [...asc].reverse().find((v) => byVerse.get(v)!.length >= 2)]);
+  taken.add(asc.find((v) => !taken.has(v)));
+  taken.add(asc.find((v) => !taken.has(v) && byVerse.get(v)!.length >= 2));
+  taken.add(asc.find((v) => !taken.has(v)));
+  const verse = asc.find((v) => !taken.has(v) && byVerse.get(v)!.length >= 5);
+  expect(verse, `ZEC ${CHAPTER} needs a sixth verse with 5+ notes`).toBeDefined();
+  const verseRows = byVerse.get(verse!)!;
+  for (const r of verseRows) expect(r.translation_state, `seeded ai_draft for ${r.id}`).toBe("ai_draft");
+
+  const page = await context.newPage();
+  const list = await openRapid(page, verse!, verseRows[0].id);
+  const listRows = list.locator("[data-rapid-row]");
+  await expect(listRows).toHaveCount(verseRows.length);
+  const ids = (await listRows.evaluateAll((els) => els.map((el) => el.getAttribute("data-rapid-row")))) as string[];
+  const box = (id: string) => list.locator(`[data-rapid-checkbox="${id}"]`);
+  const row = (id: string) => list.locator(`[data-rapid-row="${id}"]`);
+  const current = list.locator('[data-rapid-row][aria-current="true"]');
+  // ids[0] is the open note, ids[1] and ids[2] are clean, ids[4] gets unsaved
+  // typing. ids[3] stays unchecked: after the approvals it is the row below the
+  // open note, so Shift+J lands on it.
+  const [open, clean1, clean2, below, drafted] = ids;
+
+  // A stored draft on `drafted`: open it, type, close the editor, and move
+  // the cursor back. The typing waits in the drafts store.
+  await list.locator(`[data-rapid-row="${drafted}"] button:not([data-rapid-approve]):not([data-rapid-select]):not([data-rapid-checkbox])`).click();
+  const editor = list.locator('textarea:not([aria-hidden="true"])');
+  await expect(editor).toBeVisible();
+  await editor.click();
+  await page.keyboard.press("End");
+  await page.keyboard.type(" unsaved filter typing");
+  await page.keyboard.press("Escape");
+  await expect(editor).toBeHidden();
+  await list.locator(`[data-rapid-select="${open}"]`).click();
+  await expect(current).toHaveAttribute("data-rapid-row", open);
+  await expect(list.locator(`[data-rapid-approve="${drafted}"]`)).toHaveAttribute(
+    "aria-label",
+    "This note has unsaved typing. Open it and use Save & Approve.",
+  );
+  // The app's "Unsaved: ..." reminder (#372) sits over the bottom bar; close it.
+  const reminder = page.getByRole("status").filter({ hasText: "Unsaved:" });
+  await reminder.getByRole("button", { name: "dismiss" }).click();
+  await expect(reminder).toHaveCount(0);
+
+  // Hide Approved with the status filter. The list turns chapter-wide.
+  await page.locator("[data-rapid-status-filter]").click();
+  const approvedOption = page.locator('[data-rapid-status-option="approved"] input[type="checkbox"]');
+  await expect(approvedOption).toBeChecked();
+  await approvedOption.click();
+  await expect(approvedOption).not.toBeChecked();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("[data-rapid-status-line]")).toBeVisible();
+  await expect(current).toHaveAttribute("data-rapid-row", open);
+  for (const id of ids) await expect(row(id)).toHaveCount(1);
+
+  // Check the open note, two clean notes, and the drafted one.
+  const bar = page.locator("[data-rapid-bulk-bar]");
+  for (const id of [open, clean1, clean2, drafted]) await box(id).click();
+  await expect(bar).toContainText("Checked: 4");
+
+  await bar.getByRole("button", { name: "Approve", exact: true }).click();
+  const result = page.locator("[data-rapid-bulk-result]");
+  await expect(result).toContainText("Approved: 3. Skipped: 1 (unsaved typing: 1).", { timeout: 20_000 });
+  const server = await serverRows(context, auth.token);
+  for (const id of [open, clean1, clean2]) expect(server.get(id)?.translation_state, id).toBe("validated");
+  expect(server.get(drafted)?.translation_state).toBe("ai_draft");
+  // The approved notes left the list, except the open note, which stays while
+  // it is open.
+  await expect(row(clean1)).toHaveCount(0);
+  await expect(row(clean2)).toHaveCount(0);
+  await expect(current).toHaveAttribute("data-rapid-row", open);
+  // The skipped note is still checked, and nothing else is.
+  await expect(bar).toContainText("Checked: 1");
+  await expect(box(drafted)).toHaveAttribute("aria-checked", "true");
+  await expect(box(open)).toHaveAttribute("aria-checked", "false");
+  await page.screenshot({ path: test.info().outputPath("rapid-bulk-filter-approved-1366x768.png") });
+
+  // Shift+J from the approved open note: the cursor moves to the next row
+  // shown, the open note leaves the list, and the selection grows by that row.
+  await list.focus();
+  await page.keyboard.press("Shift+KeyJ");
+  await expect(current).toHaveAttribute("data-rapid-row", below);
+  await expect(row(open)).toHaveCount(0);
+  await expect(bar).toContainText("Checked: 2");
+  await expect(box(below)).toHaveAttribute("aria-checked", "true");
+  await expect(box(drafted)).toHaveAttribute("aria-checked", "true");
+  // Approve has no Undo; global-setup reseeds ZEC 4 as AI drafts.
+});
