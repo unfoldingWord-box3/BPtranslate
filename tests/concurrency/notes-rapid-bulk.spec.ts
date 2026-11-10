@@ -26,6 +26,13 @@ async function serverRows(context: BrowserContext, token: string): Promise<Map<s
   return new Map((c.tn as Row[]).map((r) => [r.id, r]));
 }
 
+// Put a note's text back after a test edited it, pinned to its current
+// version. Its translation_state stays where the edit left it ('edited').
+async function restoreNoteText(api: ReturnType<typeof authedRequest>, id: string, note: string, version: number) {
+  const res = await api.patch(`/api/rows/tn/${id}?book=${BOOK}`, { note }, version);
+  expect(res.status(), `restore ${id}`).toBe(200);
+}
+
 async function openRapid(page: Page, verse: number, rowId: string) {
   await page.setViewportSize({ width: 1366, height: 768 });
   await page.route("https://git.door43.org/**", (route) => route.fulfill({ status: 404, body: "not mocked" }));
@@ -264,10 +271,14 @@ test("rapid check bulk: Not needed skips a note a peer edited just before its tr
   await expect(list.locator(`[data-rapid-checkbox="${edited}"]`)).toHaveAttribute("aria-checked", "true");
   await page.screenshot({ path: test.info().outputPath("rapid-bulk-pin-1366x768.png") });
 
-  // Leave the chapter as found: Undo brings the set-aside note back.
+  // Leave the chapter as found: Undo brings the set-aside note back, and the
+  // peer puts the edited note's text back.
   await result.getByRole("button", { name: "Undo" }).click();
   await expect(result).toContainText("Restored: 1.", { timeout: 20_000 });
-  expect((await serverRows(context, auth.token)).get(kept)?.trashed_at).toBeNull();
+  const after = await serverRows(context, auth.token);
+  expect(after.get(kept)?.trashed_at).toBeNull();
+  await restoreNoteText(peerApi, edited, shown.note, after.get(edited)!.version);
+  expect((await serverRows(context, auth.token)).get(edited)?.note).toBe(shown.note);
 });
 
 // #837, the single-note button: Not needed on the open note is pinned the same
@@ -327,4 +338,9 @@ test("notes screen: single Not needed refuses a note a peer just edited and relo
   // The reload brings the colleague's text onto the open note.
   await expect(list.locator(`[data-rapid-row="${target.id}"]`)).toContainText("single peer edit", { timeout: 20_000 });
   await page.screenshot({ path: test.info().outputPath("rapid-single-pin-1366x768.png") });
+
+  // Leave the chapter as found: the peer puts the note's text back.
+  const now = (await serverRows(context, auth.token)).get(target.id)!;
+  await restoreNoteText(peerApi, target.id, target.note, now.version);
+  expect((await serverRows(context, auth.token)).get(target.id)?.note).toBe(target.note);
 });
