@@ -313,12 +313,6 @@ export function slotWords(md: string): string[] {
   return [...new Set([...bare.matchAll(ALL_CAPS)].map((m) => m[0]))];
 }
 
-function countTokens(tokens: string[]): Map<string, number> {
-  const m = new Map<string, number>();
-  for (const t of tokens) m.set(t, (m.get(t) ?? 0) + 1);
-  return m;
-}
-
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 export type PlaceholderCheck = {
@@ -329,11 +323,11 @@ export type PlaceholderCheck = {
 };
 
 export function checkPlaceholders(sourceMd: string, output: string): PlaceholderCheck {
-  const have = countTokens(enforcedTokens(output));
-  const missing: string[] = [];
-  for (const [tok, n] of countTokens(enforcedTokens(sourceMd))) {
-    if ((have.get(tok) ?? 0) < n) missing.push(tok);
-  }
+  // Each distinct link must appear at least once. The prompt lists each link
+  // once ("Keep exactly"), so a draft that follows it and mentions a repeated
+  // link a single time is not rejected (and paid for again on every press).
+  const have = new Set(enforcedTokens(output));
+  const missing = [...new Set(enforcedTokens(sourceMd))].filter((tok) => !have.has(tok));
   // Any letter may sit directly before a slot word in the draft: Arabic
   // attaches و/ب/ل/ف/ك (and the tatweel) to the next word, as in وSPEAKER.
   // Only a Latin letter, digit or underscore on either side makes it another word.
@@ -749,7 +743,9 @@ async function runBatch(
     }
     // Anything short of every unit written is reported, not counted as done:
     // the units written stay written, and the next press skips the slug once.
-    if (written === 0) failed.push({ slug: cand.slug, code: "not_written" });
+    // Nothing written: if some units were rejected for their links, that is
+    // the cause to report, not a person's edit.
+    if (written === 0) failed.push({ slug: cand.slug, code: badPlaceholders > 0 ? "placeholder_missing" : "not_written" });
     else if (badPlaceholders > 0) failed.push({ slug: cand.slug, code: "placeholder_missing" });
     // Unusable output for some units, or some writes lost their pin to a person.
     else if (written < cand.units.length) failed.push({ slug: cand.slug, code: "partial_output" });

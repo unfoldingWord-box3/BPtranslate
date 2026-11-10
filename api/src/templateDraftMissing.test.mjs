@@ -683,8 +683,13 @@ test("enforcedTokens and slotWords: brackets are not placeholders, links are, sl
   assert.deepEqual(checkPlaceholders(SHEET_SOURCE, GOOD_AR), { missing: [], warnings: [] }, "وSPEAKER counts as present");
   assert.deepEqual(
     checkPlaceholders("x [[rc://*/ta/man/translate/a]] [[rc://*/ta/man/translate/a]]", "س [[rc://*/ta/man/translate/a]]").missing,
+    [],
+    "a link repeated in the source is satisfied by one mention, as the prompt lists it once",
+  );
+  assert.deepEqual(
+    checkPlaceholders("x [[rc://*/ta/man/translate/a]] [[rc://*/ta/man/translate/a]]", "س بلا رابط").missing,
     ["[[rc://*/ta/man/translate/a]]"],
-    "a repeated link counts",
+    "but it must appear at least once",
   );
   assert.deepEqual(checkPlaceholders("x SPEAKER", "س SPEAKERS").warnings, ["SPEAKER"], "a Latin letter after makes it another word");
 });
@@ -871,4 +876,30 @@ test("a renewal that throws stops the run before any call", async () => {
   assert.equal(calls.length, 0);
   assert.equal(body.failed.length, 4);
   assert.ok(body.failed.every((f) => f.code === "not_started"));
+});
+
+test("a link that appears twice in the source and once in the draft is written", async () => {
+  const { post, sqlite, unitRow, setBehaviour } = await fresh();
+  const src = "See [[rc://*/ta/man/translate/figs-x]] and again [[rc://*/ta/man/translate/figs-x]] or [Genesis 1:1](../01/01.md) and [Genesis 1:2](../01/01.md).";
+  const out = "انظر [[rc://*/ta/man/translate/figs-x]] أو [تكوين 1:1](../01/01.md).";
+  setSource(sqlite, "translate-names-01", src);
+  setBehaviour(async (r) => (r.user.includes("SupportReference: translate-names") ? answer({ "translate-names-01": out }) : null));
+  const body = await json(await post());
+  assert.ok(body.drafted.some((d) => d.slug === "translate-names"), JSON.stringify(body.failed));
+  assert.equal(unitRow("translate-names-01").target_md, out);
+});
+
+test("nothing written because some units lost their pin and the rest had bad links: placeholder_missing, not not_written", async () => {
+  const { post, sqlite, unitRow, setBehaviour } = await fresh();
+  setSource(sqlite, "figs-metaphor-02", SHEET_SOURCE);
+  setBehaviour(async (r, db) => {
+    if (!r.user.includes("SupportReference: figs-metaphor")) return null;
+    // A person edits -01 while the model writes: its write loses the pin.
+    db.prepare(`UPDATE template_units SET target_md = 'كتبه شخص', translation_state = 'edited', version = version + 1 WHERE template_id = 'figs-metaphor-01'`).run();
+    return answer({ "figs-metaphor-01": "قالب [بديل]", "figs-metaphor-02": GOOD_AR.replace("(../01/01.md)", "(x)") });
+  });
+  const body = await json(await post());
+  assert.deepEqual(body.failed, [{ slug: "figs-metaphor", code: "placeholder_missing" }]);
+  assert.equal(unitRow("figs-metaphor-01").target_md, "كتبه شخص");
+  assert.equal(unitRow("figs-metaphor-02").translation_state, null);
 });
