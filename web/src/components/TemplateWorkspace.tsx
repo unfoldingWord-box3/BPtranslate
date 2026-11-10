@@ -34,7 +34,7 @@ import { AI_NEEDS_ORG_KEY, QUICK_DRAFTS_NEED_ORG_KEY } from "../lib/aiProviderEr
 import { MarkdownView } from "./MarkdownView";
 import { TemplateHistoryDialog } from "./TemplateHistoryDialog";
 import { HelpButton } from "../help/HelpButton";
-import { DraftMissingTemplatesButton, draftNoteCount } from "./DraftMissingTemplatesButton";
+import { DraftMissingTemplatesButton, SlotWarningLine, draftNoteCount } from "./DraftMissingTemplatesButton";
 
 type TemplateState = "ai_draft" | "edited" | "validated" | null;
 
@@ -679,6 +679,7 @@ function TemplateEditor({ templateId, direction, onServerChange }: EditorProps) 
             {t("templates.draftMissing.builtFrom", draftNoteCount(unit.draft_meta_json)!)}
           </Typography>
         ) : null}
+        {state === "ai_draft" ? <SlotWarningLine draftMetaJson={unit.draft_meta_json} /> : null}
         <Box sx={{ flexGrow: 1 }} />
         <Tooltip title={t("templates.history")}>
           <IconButton size="small" onClick={() => setHistoryOpen(true)} sx={{ color: "text.secondary" }}>

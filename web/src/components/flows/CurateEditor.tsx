@@ -43,7 +43,7 @@ import { useShowDraftEditors } from "../../sync/draftEditors";
 import { ApiError, api, type TemplateUnit } from "../../sync/api";
 import { formatEpochSecondsDateTime } from "../../lib/formatDate";
 import { QUICK_DRAFTS_NEED_ORG_KEY } from "../../lib/aiProviderErrors";
-import { draftNoteCount } from "../DraftMissingTemplatesButton";
+import { SlotWarningLine, draftNoteCount } from "../DraftMissingTemplatesButton";
 
 export const CURATE_STATE_LABEL_KEYS: Record<string, string> = {
   ai_draft: "moreTools.curate.stateAiDraft",
@@ -340,6 +340,7 @@ export function CurateEditor({
                 {t("templates.draftMissing.builtFrom", draftNoteCount(unit.draft_meta_json)!)}
               </Typography>
             ) : null}
+            {state === "ai_draft" ? <SlotWarningLine draftMetaJson={unit.draft_meta_json} /> : null}
           </Stack>
         </Box>
         <Tooltip title={t("moreTools.curate.versionHistory")}>

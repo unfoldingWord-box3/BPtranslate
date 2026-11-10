@@ -34,7 +34,36 @@ export function draftNoteCount(draftMetaJson: string | null | undefined): { used
 
 // Left-to-right isolation for Latin slugs and codes inside Arabic text
 // (U+2066 … U+2069), the same wrapping the `cost` string uses.
-const isolate = (s: string) => `\u2066${s}\u2069`;
+export const isolate = (s: string) => `\u2066${s}\u2069`;
+
+/**
+ * Slot words (SPEAKER, PERSON) that a draft from this feature may have
+ * dropped (draft_meta_json.placeholder_warnings). Empty for any other draft.
+ */
+export function draftSlotWarnings(draftMetaJson: string | null | undefined): string[] {
+  if (!draftMetaJson) return [];
+  try {
+    const meta = JSON.parse(draftMetaJson) as { source?: unknown; placeholder_warnings?: unknown };
+    if (meta.source !== "approved_notes" || !Array.isArray(meta.placeholder_warnings)) return [];
+    return meta.placeholder_warnings.filter((w): w is string => typeof w === "string");
+  } catch {
+    return [];
+  }
+}
+
+/** The warning line both template editors show under an AI draft. */
+export function SlotWarningLine({ draftMetaJson }: { draftMetaJson: string | null | undefined }) {
+  const { t } = useTranslation();
+  const words = draftSlotWarnings(draftMetaJson);
+  if (words.length === 0) return null;
+  return (
+    <Typography variant="caption" sx={{ color: "warning.main", fontWeight: 600 }} data-testid="slot-word-warning">
+      {t("templates.draftMissing.slotWarning", {
+        words: words.map(isolate).join(t("templates.draftMissing.wordSeparator")),
+      })}
+    </Typography>
+  );
+}
 
 function reasonText(reason: string, provider: string | null, t: TFunction): string {
   switch (reason) {
@@ -98,6 +127,9 @@ export function DraftMissingTemplatesButton({ onRun }: { onRun: (written: string
   // Set synchronously on press, so a second click before React re-renders the
   // disabled button cannot start (and then clear the state of) another run.
   const runningRef = useRef(false);
+  // Only the latest preview request may set state: an older one that lands
+  // late must not overwrite a newer success or failure.
+  const loadSeq = useRef(0);
   const [result, setResult] = useState<DraftMissingResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Note types the LAST press reported as failed. The next press sends them
@@ -106,13 +138,18 @@ export function DraftMissingTemplatesButton({ onRun }: { onRun: (written: string
   const [skipSlugs, setSkipSlugs] = useState<string[]>([]);
 
   const load = useCallback(() => {
+    const seq = ++loadSeq.current;
     api
       .getDraftMissingTemplates()
       .then((p) => {
+        if (seq !== loadSeq.current) return;
         setPreview(p);
         setPreviewFailed(false);
       })
-      .catch(() => setPreviewFailed(true));
+      .catch(() => {
+        if (seq !== loadSeq.current) return;
+        setPreviewFailed(true);
+      });
   }, []);
 
   useEffect(() => {

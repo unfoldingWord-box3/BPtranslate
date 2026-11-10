@@ -101,6 +101,8 @@
       "cost": "Estimated cost: ${{cost}}.",
       "notDrafted": "Not drafted:",
       "builtFrom": "AI draft written from {{used}} of the {{total}} approved notes",
+      "slotWarning": "This AI draft may be missing: {{words}}",
+      "wordSeparator": ", ",
       "runInProgress": "Another run is drafting templates, or one stopped in the last 5 minutes. Try again in up to 5 minutes.",
       "previewFailed": "Could not check which note types are ready to draft.",
       "reason": {
