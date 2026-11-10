@@ -197,7 +197,9 @@ export default function AdminSuggestionInboxScreen({ role, me }: FlowScreenConte
             ? i18n.t("adminPages.suggestions.errGone")
             : code === "rule_mismatch"
               ? i18n.t("adminPages.suggestions.errMismatch")
-              : err instanceof Error
+              : code === "rule_imprecise"
+                ? i18n.t("adminPages.suggestions.errImprecise")
+                : err instanceof Error
               ? err.message
               : i18n.t("adminPages.common.loadFailed"),
         );
@@ -212,7 +214,16 @@ export default function AdminSuggestionInboxScreen({ role, me }: FlowScreenConte
     setBusyKey(s.key);
     try {
       await api.rejectSuggestion(book, s.key);
-      setData((d) => (d ? { ...d, suggestions: d.suggestions.filter((x) => x.key !== s.key) } : d));
+      // Drop the card and count it in the "Not shown" footer, as a reload would.
+      setData((d) =>
+        d
+          ? {
+              ...d,
+              suggestions: d.suggestions.filter((x) => x.key !== s.key),
+              excluded: { ...d.excluded, rejected: d.excluded.rejected + 1 },
+            }
+          : d,
+      );
       setNotice(i18n.t("adminPages.suggestions.rejected"));
     } catch (err) {
       const gone = err instanceof ApiError && err.status === 404;
@@ -290,6 +301,17 @@ export default function AdminSuggestionInboxScreen({ role, me }: FlowScreenConte
               </Typography>
             )}
           </Stack>
+          {s.precision && (
+            <Typography variant="body2" data-testid="rule-precision">
+              {t("adminPages.suggestions.precision", {
+                fires: s.precision.fires,
+                correct: s.precision.correct,
+                pct: s.precision.fires ? Math.round((s.precision.correct / s.precision.fires) * 100) : 0,
+              })}
+              {s.home !== "house_style" &&
+                ` ${t("adminPages.suggestions.precisionBelow", { min: Math.round(s.precision.minPrecision * 100) })}`}
+            </Typography>
+          )}
           <Box component="ul" sx={{ m: 0, paddingInlineStart: 2.5, "& li": { mb: 0.75 } }}>
             {s.examples.map((e) => (
               <Typography component="li" variant="body2" key={e.rowId}>

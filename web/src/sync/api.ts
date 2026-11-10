@@ -1061,6 +1061,12 @@ export interface Suggestion {
   home: SuggestionHome;
   /** The rule Approve creates; set only when home is house_style. */
   rule: { kind: HouseStyleRule["kind"]; find: string; replace: string; scope: HouseStyleRule["scope"] } | null;
+  /**
+   * For a change a rule shape covers: of this book's drafts the rule would
+   * change (fires), how many it changes exactly as the editor did (correct),
+   * and the share needed (minPrecision) with at least 10 fires. Else null.
+   */
+  precision: { fires: number; correct: number; minPrecision: number } | null;
 }
 
 export interface SuggestionInboxResponse {

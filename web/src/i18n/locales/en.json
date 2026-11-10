@@ -2973,6 +2973,9 @@
       "final": "Approved:",
       "approveRule": "Approve: add the rule, switched on",
       "ruleKind": "Rule it would create: {{kind}}",
+      "precision": "The rule would change {{fires}} drafts in this book; it matches the editor's change in {{correct}} ({{pct}}%).",
+      "precisionBelow": "Not offered as a rule: it must match in at least {{min}}% of at least 10 drafts.",
+      "errImprecise": "The rule no longer matches the editors' changes often enough, so it was not added. Reload the page.",
       "kindLiteral": "delete this exact text",
       "kindWholeWord": "replace this whole word",
       "kindFinalBracketPeriod": "add a period after the note's final ]",
@@ -2997,7 +3000,7 @@
       "howThreshold": "A card appears when the same change was made in at least 10 notes across at least 3 chapters.",
       "howHits": "Made in X of Y: X notes had the change made; Y drafts contained the words it changes (or, for a change at the end, ended with them), including those X.",
       "howExcluded": "A change is not shown when a house-style rule already makes it (even a rule that is off), a term already gives the approved wording, a note template already contains it, or the Common issues text already lists it.",
-      "howHome": "Suggested home: a house-style rule only for three kinds of change that are safe everywhere: the period after a final ], deleting a tag in parentheses or brackets such as (مُكيَّف), and changing only the marks (vowels, tanween) on one word. Editors must have made it in at least half the drafts that had it (nine in ten for marks), and the rule must give exactly the approved text on the examples. Otherwise a note template when the old words come from a template; a term for a change of one to three words; else a Common issues line.",
+      "howHome": "Suggested home: a house-style rule only for three kinds of change that are safe everywhere: the period after a final ], deleting a tag in parentheses or brackets such as (مُكيَّف), and changing only the marks (vowels, tanween) on one word. The rule is tried on every draft of this book: it must change at least 10 of them, and give exactly the approved text in at least 8 of every 10 it changes (9 of 10 for marks). The card shows these numbers. Otherwise a note template when the old words come from a template; a term for a change of one to three words; else a Common issues line.",
       "howApprove": "Approve on a house-style card asks you to confirm, then adds the rule, switched on, to Style: House style. It changes every AI draft that arrives from then on, in every book, for notes and for questions. On the other cards, Approve copies a line for you to paste into that editor, because those editors cannot be filled in from here. The card goes away once the term, template or Common issues text covers it; if it still shows after your edit, reject it.",
       "howReject": "Reject hides the card for good, in every book."
     }
