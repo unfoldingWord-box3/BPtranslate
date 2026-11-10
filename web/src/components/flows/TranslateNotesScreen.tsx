@@ -3522,6 +3522,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
             onUndo: rapidBulk.undo,
             onDismiss: rapidBulk.dismiss,
           }}
+          selectionScope={chapterKey}
         />
       ) : wide ? (
         /* desk (the words screen's md+ pattern): 1440px centred grid — the
