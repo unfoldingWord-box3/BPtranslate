@@ -81,6 +81,7 @@ const kept: [hash: string, landmark: Landmark][] = [
   ["#/admin/workflow", h1("Workflow")],
   ["#/admin/review", h1("Review state")],
   ["#/admin/scorecard", h1("Draft quality scorecard")],
+  ["#/admin/suggestions", h1("Suggestion inbox")],
   ["#/admin/team", h1("Team & roles")],
   ["#/admin/setup", h1("Setup & preferences")],
   ["#/admin/ai", AI_STUDIO],

@@ -66,7 +66,7 @@ type Location =
   | { view: "translateWords"; book: string }
   | { view: "translateScripture"; book: string; chapter: number; verse: number | null }
   | { view: "translateAlign"; book: string; chapter: number; verse: number; mode: "single" | "dual" }
-  | { view: "admin"; section: "team" | "setup" | "workflow" | "progress" | "review" | "scorecard" };
+  | { view: "admin"; section: "team" | "setup" | "workflow" | "progress" | "review" | "scorecard" | "suggestions" };
 
 // The position (book/chapter/verse) a route represents, for recording the
 // user's last location so the Books "Continue" card can jump them back. Returns
@@ -131,6 +131,7 @@ const AdminWorkflowScreen = lazy(() => import("./components/flows/AdminWorkflowS
 const AdminProgressScreen = lazy(() => import("./components/flows/AdminProgressScreen"));
 const AdminReviewStateScreen = lazy(() => import("./components/flows/AdminReviewStateScreen"));
 const AdminDraftScorecardScreen = lazy(() => import("./components/flows/AdminDraftScorecardScreen"));
+const AdminSuggestionInboxScreen = lazy(() => import("./components/flows/AdminSuggestionInboxScreen"));
 
 // OBA (Obadiah) is the shortest book in the canon — one chapter, 21 verses.
 // Used as the fallback book code for partial routes (e.g. a hash with a
@@ -274,9 +275,12 @@ function parseHash(): Location {
     };
   }
   // Redesigned admin desk (#/admin/{section}); AdminDesk renders the rail.
-  const ad = location.hash.match(/^#\/admin\/(team|setup|workflow|progress|review|scorecard)$/);
+  const ad = location.hash.match(/^#\/admin\/(team|setup|workflow|progress|review|scorecard|suggestions)$/);
   if (ad) {
-    return { view: "admin", section: ad[1] as "team" | "setup" | "workflow" | "progress" | "review" | "scorecard" };
+    return {
+      view: "admin",
+      section: ad[1] as "team" | "setup" | "workflow" | "progress" | "review" | "scorecard" | "suggestions",
+    };
   }
   // The desk More-tools screens, under #/admin/* since #537 (their old
   // #/ai, #/style, #/curate, #/observe hashes redirect via legacyFlowRedirect).
@@ -1156,6 +1160,8 @@ export function App() {
                 <AdminReviewStateScreen role={auth.role} me={auth.me} onNavigate={navigate} />
               ) : loc.section === "scorecard" ? (
                 <AdminDraftScorecardScreen role={auth.role} me={auth.me} onNavigate={navigate} />
+              ) : loc.section === "suggestions" ? (
+                <AdminSuggestionInboxScreen role={auth.role} me={auth.me} onNavigate={navigate} />
               ) : (
                 <AdminProgressScreen role={auth.role} me={auth.me} onNavigate={navigate} />
               )

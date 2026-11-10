@@ -29,7 +29,7 @@
 // #/verse/…, #/articles/{tw|ta}/…), an #/admin/… hash that is already exact,
 // and an unknown #/admin/{section}.
 const ADMIN_SECTIONS = new Set([
-  "team", "setup", "workflow", "progress", "review", "scorecard", "ai", "style", "observe", "curate",
+  "team", "setup", "workflow", "progress", "review", "scorecard", "suggestions", "ai", "style", "observe", "curate",
 ]);
 
 export function legacyFlowRedirect(hash: string): string | null {
