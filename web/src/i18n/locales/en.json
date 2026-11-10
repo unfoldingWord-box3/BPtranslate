@@ -613,7 +613,7 @@
   "houseStyle": {
     "title": "House style",
     "intro": "Fixes made automatically to AI translation drafts when they are imported, so editors do not have to make the same correction on every note. They apply to notes and to questions and their answers.",
-    "safety": "Each rule is off until an admin switches it on. Switching a rule on changes drafts imported from then on; drafts already in the project stay as they are. Scripture quotes in bold and the Quote column are never changed. The AI's original wording is saved with each draft's record.",
+    "safety": "Each rule the development team adds is off until an admin switches it on; a rule added by approving a suggestion-inbox card starts on. Switching a rule on changes drafts imported from then on; drafts already in the project stay as they are. Scripture quotes in bold and the Quote column are never changed. The AI's original wording is saved with each draft's record.",
     "kind": {
       "delete": "Delete this text",
       "literal": "Replace this text",
