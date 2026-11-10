@@ -27,6 +27,7 @@ import {
 } from "./translationMemoryLib.ts";
 import { getLatestSuccessfulContextExport } from "./contextExportResults.ts";
 import { queueContextExport } from "./contextExportQueue.ts";
+import { compileRule, ruleFromRow, type HouseStyleRuleRow } from "./houseStyle.ts";
 
 export const translationMemory = new Hono<{
   Bindings: Env;
@@ -963,4 +964,79 @@ translationMemory.get("/export-status", requireEditor, async (c) => {
     owner: latest.owner,
     failureReason: null,
   });
+});
+
+// ---------------------------------------------------------------------------
+// House-style rules (issue #815, migration 0082): the fixes applied to AI
+// translate drafts at import (api/src/houseStyle.ts). Admin-only, both ways:
+// switching a rule on changes every draft imported after it. There is no route
+// to add or edit a rule's text; rules arrive by migration, so nothing an admin
+// types can become a pattern that rewrites drafts.
+// ---------------------------------------------------------------------------
+
+type HouseStyleListRow = HouseStyleRuleRow & {
+  updated_at: number;
+  updated_by: number | null;
+  updated_by_name: string | null;
+};
+
+async function readHouseStyleRules(db: Env["DB"], id: string | null) {
+  const rs = await db
+    .prepare(
+      `SELECT r.id, r.kind, r.find, r.replace, r.scope, r.examples_json, r.counter_examples_json,
+              r.enabled, r.sort_order, r.updated_at, r.updated_by,
+              COALESCE(u.dcs_full_name, u.dcs_username) AS updated_by_name
+         FROM house_style_rules r
+         LEFT JOIN users u ON u.id = r.updated_by
+        WHERE ?1 IS NULL OR r.id = ?1
+        ORDER BY r.sort_order, r.id`,
+    )
+    .bind(id)
+    .all<HouseStyleListRow>();
+  const out = [];
+  for (const row of rs.results ?? []) {
+    const rule = ruleFromRow(row);
+    // A row this build cannot run (unknown kind, or a replace that would
+    // match again) is listed as unsupported so it is not silently hidden.
+    out.push({
+      id: row.id,
+      kind: row.kind,
+      find: row.find,
+      replace: row.replace ?? "",
+      scope: row.scope,
+      examples: rule?.examples ?? [],
+      counterExamples: rule?.counterExamples ?? [],
+      enabled: row.enabled === 1,
+      supported: !!rule && !!compileRule(rule),
+      updatedAt: row.updated_at,
+      updatedBy: row.updated_by_name,
+    });
+  }
+  return out;
+}
+
+translationMemory.get("/house-style-rules", requireAdmin, async (c) => {
+  return c.json({ rules: await readHouseStyleRules(c.env.DB, null) });
+});
+
+const PatchHouseStyleBody = z.object({ enabled: z.boolean() }).strict();
+
+translationMemory.patch("/house-style-rules/:id", requireAdmin, async (c) => {
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "invalid_json" }, 400);
+  }
+  const parsed = PatchHouseStyleBody.safeParse(body);
+  if (!parsed.success) return c.json({ error: "validation_failed", issues: parsed.error.issues }, 400);
+  const id = c.req.param("id");
+  const res = await c.env.DB.prepare(
+    `UPDATE house_style_rules SET enabled = ?1, updated_at = unixepoch(), updated_by = ?2 WHERE id = ?3`,
+  )
+    .bind(parsed.data.enabled ? 1 : 0, currentUserId(c), id)
+    .run();
+  if ((res.meta?.changes ?? 0) === 0) return c.json({ error: "not_found" }, 404);
+  const [rule] = await readHouseStyleRules(c.env.DB, id);
+  return c.json({ rule });
 });
