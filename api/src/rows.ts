@@ -509,6 +509,31 @@ rows.get("/:kind/:id/history", requireEditor, async (c) => {
   return c.json({ versions: displayVersions });
 });
 
+// The PATCH's refusal of a stale expected_state (#880): 409 with its own code,
+// so the client can tell it from version_mismatch, whose auto-heal would
+// resend the edit. Recorded in row_conflict_log like a version conflict.
+function stateMismatchResponse(
+  c: Context<{ Bindings: Env; Variables: { userId?: number } }>,
+  kind: RowKind,
+  id: string,
+  book: string,
+  expected: number,
+  fields: string[],
+  current: Record<string, unknown> & { version: number },
+) {
+  logRowConflict(c, {
+    kind,
+    rowId: id,
+    book,
+    action: "patch",
+    userId: currentUserId(c),
+    expectedVersion: expected,
+    fields,
+    current,
+  });
+  return c.json({ error: "state_mismatch", current }, 409);
+}
+
 // Single-row PATCH with optimistic concurrency. If-Match is mandatory and
 // the version check is enforced inside the UPDATE itself — a SELECT-then-
 // UPDATE pair would race between two concurrent writers, both seeing the
@@ -546,6 +571,24 @@ rows.patch("/:kind/:id", requireEditor, async (c) => {
     delete (body as Record<string, unknown>).restored_from_version;
   }
 
+  // expected_state (issue #880): the translation_state the caller saw. The
+  // edit lands only if the row is still in it; otherwise 409 state_mismatch.
+  // Approving does not bump `version`, so If-Match alone lets an edit demote a
+  // note approved since the caller looked. Absent = no check (typed edits);
+  // null = the row must still have no state. Only the Rapid check assistant's
+  // Apply sends it. tn/tq only (twl has no translation_state).
+  let statePin: { value: TranslationStatePin | null } | null = null;
+  if (body && typeof body === "object" && "expected_state" in body) {
+    const raw = (body as Record<string, unknown>).expected_state;
+    delete (body as Record<string, unknown>).expected_state;
+    if (kind === "twl" || (raw !== null && !(TRANSLATION_STATES as readonly unknown[]).includes(raw))) {
+      return c.json({ error: "invalid_body", message: "invalid expected_state" }, 400);
+    }
+    statePin = { value: raw as TranslationStatePin | null };
+  }
+  const stateMoved = (r: Record<string, unknown>) =>
+    statePin !== null && ((r.translation_state as string | null | undefined) ?? null) !== statePin.value;
+
   const schema = PATCH_SCHEMA[kind];
   const parsed = schema.safeParse(body);
   if (!parsed.success) {
@@ -573,6 +616,14 @@ rows.patch("/:kind/:id", requireEditor, async (c) => {
       })
     | null;
   if (!current || current.deleted_at) return c.json({ error: "not_found" }, 404);
+
+  // A pinned state that no longer matches, at the version the caller saw. A
+  // moved version is left to the UPDATE below (version_mismatch, as before).
+  // Checked here too so the no-op and reorder paths below cannot return 200
+  // past it; the UPDATE's own clause covers an approval landing after this.
+  if (current.version === expected && stateMoved(current)) {
+    return stateMismatchResponse(c, kind, id, book, expected, Object.keys(patch), current);
+  }
 
   // Enforce the OL-quote occurrence invariant at the source. Only fires when
   // this patch actually touches the quote or occurrence — a reorder, note-only
@@ -847,6 +898,9 @@ rows.patch("/:kind/:id", requireEditor, async (c) => {
     id,
     expected,
     book,
+    // Bound only when the clause below references it (D1 rejects an
+    // unreferenced ?N). IS compares NULL as a value: a null pin means "no state".
+    ...(statePin ? [statePin.value] : []),
   ];
 
   // Atomic: the audit INSERT is conditional on the UPDATE matching, so a
@@ -864,7 +918,7 @@ rows.patch("/:kind/:id", requireEditor, async (c) => {
            SET ${setClauses.join(", ")}
          WHERE id = ?${baseParams + 4}
            AND version = ?${baseParams + 5}
-           AND deleted_at IS NULL${bookClause(baseParams + 6)}`,
+           AND deleted_at IS NULL${bookClause(baseParams + 6)}${statePin ? ` AND translation_state IS ?${baseParams + 7}` : ""}`,
       )
       .bind(...values),
     c.env.DB
@@ -885,6 +939,11 @@ rows.patch("/:kind/:id", requireEditor, async (c) => {
       .bind(id, book)
       .first<{ version: number; deleted_at: number | null }>();
     if (!fresh || fresh.deleted_at) return c.json({ error: "not_found" }, 404);
+    // The version held but the pinned state did not: an approval landed
+    // between the read above and this UPDATE.
+    if (fresh.version === expected && stateMoved(fresh)) {
+      return stateMismatchResponse(c, kind, id, book, expected, fields, fresh);
+    }
     logRowConflict(c, {
       kind,
       rowId: id,

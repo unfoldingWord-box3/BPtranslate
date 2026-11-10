@@ -145,6 +145,10 @@ export interface OutboxOp {
   // The server stores it on the new edit_log entry + the row's column so
   // the UI can label the chip v{N} even though row.version is now N+1.
   restoredFromVersion?: number;
+  // The translation_state the patch was proposed against (#880), sent as the
+  // PATCH's expected_state; null pins "no state". Set only by the Rapid check
+  // assistant's Apply. Kept on the op so an auto-healed resend still carries it.
+  expectedState?: string | null;
   // The row's values for the patched fields at the moment we enqueued (the
   // version we branched from). On a 409 this lets us tell a spurious conflict
   // (the server changed a *different* field, or already has our value) from a
@@ -307,6 +311,7 @@ export const outbox = {
     patch: Record<string, unknown>,
     opts: {
       restoredFromVersion?: number;
+      expectedState?: string | null;
       book: string;
       baseline?: Record<string, unknown>;
       draftRef?: { chapter: number; verse: number };
@@ -328,6 +333,7 @@ export const outbox = {
       ...(opts.restoredFromVersion !== undefined
         ? { restoredFromVersion: opts.restoredFromVersion }
         : {}),
+      ...(opts.expectedState !== undefined ? { expectedState: opts.expectedState } : {}),
       ...(opts.baseline !== undefined ? { baseline: opts.baseline } : {}),
       ...(opts.draftRef !== undefined ? { draftRef: opts.draftRef } : {}),
     };
@@ -789,6 +795,7 @@ async function dispatch(op: OutboxOp): Promise<Result> {
           op.patch,
           {
             ...(op.restoredFromVersion !== undefined ? { restoredFromVersion: op.restoredFromVersion } : {}),
+            ...(op.expectedState !== undefined ? { expectedState: op.expectedState } : {}),
             book: op.target.book,
             queuedAt: op.queuedAt,
           },
@@ -847,6 +854,11 @@ async function dispatch(op: OutboxOp): Promise<Result> {
           // with the server, it drains normally.
           return { kind: "retry", reason: "workspace_mismatch" };
         }
+        // A row patch's expected_state no longer matches (#880): the note's
+        // approval changed since the edit was proposed. Resending (or the
+        // auto-heal a version_mismatch gets) cannot help, and no typing is
+        // held: only the assistant's Apply pins a state.
+        if (errCode === "state_mismatch") return { kind: "fatal", reason: errCode };
         if (
           errCode === "source_generation_mismatch" ||
           errCode === "lane_replacement_required" ||
