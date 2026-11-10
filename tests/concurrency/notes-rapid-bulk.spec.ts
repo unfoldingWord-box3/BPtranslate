@@ -28,7 +28,8 @@ async function serverRows(context: BrowserContext, token: string): Promise<Map<s
 
 // Put a note's text back after a test edited it, pinned to its current
 // version. Its translation_state stays where the edit left it ('edited').
-async function restoreNoteText(api: ReturnType<typeof authedRequest>, id: string, note: string, version: number) {
+// `note` is the row's stored value as read back, so it may be null.
+async function restoreNoteText(api: ReturnType<typeof authedRequest>, id: string, note: TnRow["note"], version: number) {
   const res = await api.patch(`/api/rows/tn/${id}?book=${BOOK}`, { note }, version);
   expect(res.status(), `restore ${id}`).toBe(200);
 }

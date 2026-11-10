@@ -29,13 +29,15 @@ function findDraftRow(rows: TnRow[], requestedId: string): (TnRow & { translatio
   );
 }
 
+type JobStatus = { state: string; [k: string]: unknown };
+
 async function pollJob(request: APIRequestContext, jobId: string, timeoutMs = 90_000) {
   const deadline = Date.now() + timeoutMs;
-  let last: { state: string; [k: string]: unknown } | undefined;
+  let last: JobStatus | undefined;
   while (Date.now() < deadline) {
     const res = await request.get(`/api/pipelines/${encodeURIComponent(jobId)}`);
     expect(res.status(), `poll ${jobId} returned ${res.status()}`).toBeLessThan(500);
-    last = await res.json();
+    last = (await res.json()) as JobStatus;
     if (last.state === "done" || last.state === "failed") return last;
     await new Promise((r) => setTimeout(r, 1000));
   }

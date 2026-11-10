@@ -77,7 +77,7 @@ Run from repo root:
 ```sh
 npm install
 npm run dev          # parallel: wrangler (api, :8787) + vite (web, :5173 with /api proxy)
-npm run typecheck    # tsc --noEmit across both workspaces
+npm run typecheck    # tsc --noEmit across both workspaces + the Playwright specs (tests/tsconfig.json)
 npm run build        # api typecheck + web vite build → web/dist
 npm run deploy       # builds web, then `wrangler deploy` from api/ (bundles SPA as [assets])
 

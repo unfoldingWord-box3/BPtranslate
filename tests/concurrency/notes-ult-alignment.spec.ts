@@ -22,7 +22,7 @@ async function openNotes(
   width: number,
   touch: boolean,
   hash: string,
-  beforeGoto?: (page: Page) => Promise<void>,
+  beforeGoto?: (page: Page) => Promise<unknown>,
 ) {
   const context = await browser.newContext({
     viewport: { width, height: 900 },
