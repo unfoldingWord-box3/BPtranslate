@@ -224,11 +224,18 @@ test("rapid check bulk: Not needed skips a note a peer edited just before its tr
   const ids = (await list.locator("[data-rapid-row]").evaluateAll((els) => els.map((el) => el.getAttribute("data-rapid-row")))) as string[];
   const [kept, edited] = ids;
   const shown = (await serverRows(context, auth.token)).get(edited)!;
+  // Make `edited` the open note: its text in the list is the editor's value,
+  // which only a reload re-seeds (#837 review), so the end check below sees
+  // whether the open note really shows the peer's text.
+  await list.locator(`[data-rapid-select="${edited}"]`).click();
+  await expect(list.locator('[data-rapid-row][aria-current="true"]')).toHaveAttribute("data-rapid-row", edited);
 
   // The peer edits `edited` the moment its trash request leaves the browser.
   let sentIfMatch: string | undefined;
+  let sentBody: unknown;
   await page.route(`**/api/rows/tn/${edited}/trash*`, async (route) => {
     sentIfMatch = route.request().headers()["if-match"];
+    sentBody = route.request().postDataJSON();
     const res = await peerApi.patch(`/api/rows/tn/${edited}?book=${BOOK}`, { note: `${shown.note} peer edit` }, shown.version);
     expect(res.status(), "peer PATCH").toBe(200);
     await route.continue();
@@ -245,10 +252,13 @@ test("rapid check bulk: Not needed skips a note a peer edited just before its tr
     timeout: 20_000,
   });
   expect(sentIfMatch, "the trash request carried the version on screen").toBe(String(shown.version));
+  expect(sentBody, "and the state on screen").toEqual({ expected_state: shown.translation_state });
   const server = await serverRows(context, auth.token);
   expect(server.get(kept)?.trashed_at, "the untouched note was set aside").not.toBeNull();
   expect(server.get(edited)?.trashed_at, "the peer-edited note was not set aside").toBeNull();
   expect(server.get(edited)?.note).toBe(`${shown.note} peer edit`);
+  // The open note was reloaded: it shows the peer's text, not the old text.
+  await expect(list.locator(`[data-rapid-row="${edited}"]`)).toContainText("peer edit", { timeout: 20_000 });
   // The skipped note stays checked, so a second press acts on it once seen.
   await expect(bar).toContainText("Checked: 1");
   await expect(list.locator(`[data-rapid-checkbox="${edited}"]`)).toHaveAttribute("aria-checked", "true");
@@ -294,8 +304,10 @@ test("notes screen: single Not needed refuses a note a peer just edited and relo
   await expect(list.locator('[data-rapid-row][aria-current="true"]')).toHaveAttribute("data-rapid-row", target.id);
 
   let sentIfMatch: string | undefined;
+  let sentBody: unknown;
   await page.route(`**/api/rows/tn/${target.id}/trash*`, async (route) => {
     sentIfMatch = route.request().headers()["if-match"];
+    sentBody = route.request().postDataJSON();
     const res = await peerApi.patch(`/api/rows/tn/${target.id}?book=${BOOK}`, { note: `${target.note} single peer edit` }, target.version);
     expect(res.status(), "peer PATCH").toBe(200);
     await route.continue();
@@ -308,6 +320,7 @@ test("notes screen: single Not needed refuses a note a peer just edited and relo
     timeout: 20_000,
   });
   expect(sentIfMatch, "the trash request carried the version on screen").toBe(String(target.version));
+  expect(sentBody, "and the state on screen").toEqual({ expected_state: target.translation_state });
   const server = (await serverRows(context, auth.token)).get(target.id);
   expect(server?.trashed_at, "the peer-edited note was not set aside").toBeNull();
   expect(server?.note).toBe(`${target.note} single peer edit`);

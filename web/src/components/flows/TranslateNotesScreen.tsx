@@ -203,6 +203,7 @@ import {
   type TnRow,
   type TqRow,
 } from "../../sync/api";
+import { versionMismatchRow } from "../../lib/versionMismatch";
 import { SCRIPTURE_FONT_STACK } from "../../theme";
 import { arabicFontSize, editsArabicScript, startsArabicScript } from "../../lib/arabicScriptSize";
 
@@ -1692,9 +1693,14 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
     setBusy(true);
     setNotice(null);
     try {
-      // Pinned to the version on screen (#837): a colleague's edit since then
-      // is refused with a 409 instead of being set aside unseen.
-      const updated = await api.trashNote(row.id, book, row.version);
+      // Pinned to the version and state on screen (#837): a colleague's edit
+      // or approval since then is refused with a 409 instead of being set
+      // aside unseen.
+      const shownState =
+        row.translation_state === "ai_draft" || row.translation_state === "edited" || row.translation_state === "validated"
+          ? row.translation_state
+          : undefined;
+      const updated = await api.trashNote(row.id, book, { expectedVersion: row.version, expectedState: shownState });
       applyLocalRowReplacement("tn", updated);
       setStatuses((prev) => ({ ...prev, [row.id]: "skipped" }));
       setEditing(false);
@@ -1720,11 +1726,15 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
         say(t("flowTranslate.noteLockedByTranslate"));
         return;
       }
-      if (err instanceof ApiError && err.status === 409) {
-        // The open note: bump the reload nonce too, so the editor re-hydrates
-        // from the reloaded row and shows the colleague's text (reloadRow).
+      // Only a version_mismatch means a colleague changed the note; any other
+      // 409 (workspace_mismatch, say) falls through to the generic failure.
+      const current = versionMismatchRow<TnRow>(err);
+      if (current) {
+        // The row as it is now goes on screen at once, then the open note
+        // reloads: its editor re-hydrates only on a reload-counter bump.
+        applyLocalRowReplacement("tn", current);
         say(t("flowTranslate.rapid.changedElsewhere"));
-        void refetch().then(() => setReloadNonce((n) => n + 1));
+        reloadOpenRow();
         return;
       }
       say(
@@ -1951,6 +1961,15 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
     void refetch().then(() => setReloadNonce((n) => n + 1));
   }
 
+  // Refetch, then re-seed the open note from the new data. The counter bumps
+  // even if the refetch fails (useChapter's refetch reports its own errors),
+  // so no rejection is left unhandled and the editor still re-hydrates.
+  function reloadOpenRow() {
+    void refetch()
+      .catch(() => undefined)
+      .then(() => setReloadNonce((n) => n + 1));
+  }
+
   // AI run for this chapter (#481): top bar on tablet+, account menu on
   // phone; nothing for viewers. After a Door43 import, reload like the
   // conflict path does so the open card re-seeds from the imported text.
@@ -1974,7 +1993,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
     setStatuses,
     applyLocalRowReplacement,
     refetch,
-    reload: () => void refetch().then(() => setReloadNonce((n) => n + 1)),
+    reload: reloadOpenRow,
     busy: busy || redoing,
     setBusy,
     setEditing,

@@ -235,7 +235,6 @@ export function isChapterLockedBody(body: unknown): body is ChapterLockedBody {
   const b = body as Record<string, unknown>;
   return b.error === "chapter_locked" && typeof b.jobId === "string";
 }
-
 // 409 body returned by /api/pipelines/start when the upstream rejects the
 // request because another sessionKey already has this (pipelineType, scope)
 // running. The Worker enriches the bare upstream body with `existing` —
@@ -2497,13 +2496,26 @@ export const api = {
   // updated row with trashed_at set. Reversible via restoreNote; finalized to a
   // deleted_at tombstone by the nightly job. Refused (409 chapter_locked)
   // while a translate run will write the note (#602); so is restoreNote.
-  // expectedVersion pins the set-aside to the version on screen (#837): a
-  // stale one is a 409 `version_mismatch` and the note stays live. Omitted: no
-  // check (the classic editor and Review queue).
-  trashNote: (id: string, book: string, expectedVersion?: number) =>
+  // opts pin the set-aside to the version and translation_state on screen
+  // (#837), as on validateNote: a stale one is a 409 `version_mismatch` with
+  // `current`, and the note stays live. Omitted: no check (the classic editor
+  // and Review queue).
+  trashNote: (
+    id: string,
+    book: string,
+    opts?: { expectedVersion?: number; expectedState?: "ai_draft" | "edited" | "validated" },
+  ) =>
     request<TnRow>(`/api/rows/tn/${encodeURIComponent(id)}/trash?book=${encodeURIComponent(book)}`, {
       method: "POST",
-      ...(expectedVersion !== undefined ? { headers: { "If-Match": String(expectedVersion) } } : {}),
+      ...(opts
+        ? {
+            headers: {
+              "Content-Type": "application/json",
+              ...(opts.expectedVersion != null ? { "If-Match": String(opts.expectedVersion) } : {}),
+            },
+            body: JSON.stringify(opts.expectedState ? { expected_state: opts.expectedState } : {}),
+          }
+        : {}),
     }),
 
   // Bring a trashed note back to the live set (trashed_at cleared).
