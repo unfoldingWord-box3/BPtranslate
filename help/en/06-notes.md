@@ -3,7 +3,7 @@ id: notes
 title: Translating notes
 routes: [notes]
 roles: [editor, admin]
-keywords: [notes, tn, translation notes, translate note, draft, approve, save, redo, ai, not needed, quote, support reference, ta, academy, queue, ai run, import, door43, rapid check, keyboard, shortcuts, laptop, next verse, hide column, hide lane]
+keywords: [assistant, chat, notes, tn, translation notes, translate note, draft, approve, save, redo, ai, not needed, quote, support reference, ta, academy, queue, ai run, import, door43, rapid check, keyboard, shortcuts, laptop, next verse, hide column, hide lane]
 screenshots:
   - notes-1 #/notes/OBA/1/1
   - notes-phone #/notes/OBA/1/1 phone
@@ -77,6 +77,17 @@ Each row starts with a checkbox. Checked notes get a bar at the bottom in place 
 - **Not needed** sets the checked notes aside. Select **Undo** in the message that appears, or press **Ctrl+Z**, to bring them back.
 
 The app skips a note, and tells you how many it skipped and why, when it has unsaved typing, a change still saving, or someone else changed it since you loaded it. **Redo with AI** also skips approved notes. Skipped notes stay checked. Approving has no Undo.
+
+### Ask the assistant
+The **Assistant** button, under the list, opens a chat beside it. Ask in your own words for a change to the notes, for example to use one spelling of a name in the checked notes. It sees the notes of the chapter you have open, and which ones you checked. Ask about the checked notes to keep the answer small.
+
+Nothing changes until you press **Apply**:
+- The assistant answers, and may add a list of proposed changes. Each edit is shown as the note with the changed words marked. Words it would remove are struck through and words it would add are highlighted.
+- Every proposed edit, approval and **Not needed** has a checkbox. Untick any you do not want, then press **Apply** with the number of changes left.
+- Edited notes become **Edited** and still need your approval. The assistant can also propose approving or setting aside notes, but a note it edits is never approved in the same step.
+- The app skips a note, and tells you how many it skipped and why, when it has unsaved typing, a change still saving, or someone else changed it since the assistant looked. Skipped notes are not changed.
+
+Each person can use the assistant up to a daily dollar amount, shown under the box. When it is used up, it comes back the next day. A chat has a length limit, so start a **New chat** when it is full or you change topic. If the assistant says the request was too big, ask about fewer notes. The Assistant button appears only when an admin has turned it on under **AI service**, and only for editors and admins.
 
 ## When you finish a chapter
 You see **OBA 1 notes complete** with a count of approved, edited and not-needed notes. Select **Continue to chapter 2** or **Review again**.
