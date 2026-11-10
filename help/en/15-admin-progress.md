@@ -1,15 +1,15 @@
 ---
 id: admin-progress
-title: Progress, review state and draft scorecard (admin)
-routes: [admin/progress, admin/review, admin/scorecard]
+title: Progress, review state, draft scorecard and suggestion inbox (admin)
+routes: [admin/progress, admin/review, admin/scorecard, admin/suggestions]
 roles: [admin]
-keywords: [progress, review state, approve, approved, validated, bulk, sweep, reopen, needs review, chapter, book, notes, questions, dashboard, percent, scorecard, draft quality, AI draft, unchanged, similarity, context pack, closing period]
+keywords: [progress, review state, approve, approved, validated, bulk, sweep, reopen, needs review, chapter, book, notes, questions, dashboard, percent, scorecard, draft quality, AI draft, unchanged, similarity, context pack, closing period, suggestion inbox, suggestions, repeated corrections, house style, rule, reject]
 screenshots:
   - admin-progress-1 #/admin/progress
   - admin-progress-2 #/admin/review
 ---
 
-Three admin pages show and set how far the review has come. **Progress** shows the numbers. **Review state** changes the review state of many notes or questions at once. **Draft scorecard** shows how good the AI drafts of approved notes were. Only an admin can open them.
+Four admin pages show and set how far the review has come. **Progress** shows the numbers. **Review state** changes the review state of many notes or questions at once. **Draft scorecard** shows how good the AI drafts of approved notes were. **Suggestion inbox** lists corrections editors keep making to those drafts. Only an admin can open them.
 
 ![The Progress page with totals and the book package board](../screenshots/en/admin-progress-1.png)
 
@@ -58,3 +58,21 @@ Good to know:
    - **Context pack**: the version of the guidance the AI was given, with how many notes used it. Hover over it to see the full name. **Not pinned (latest pack at run time, if any)** means the run was not tied to one version: it used the latest guidance when it ran, or none if no guidance had been exported yet. **Run not on record** means the AI run has been cleared. Each draft is matched to its AI run by time, so in rare cases where runs overlapped a draft can be credited to the wrong run.
 
 If the English notes cannot be read for some chapters, a message names those chapters and gives each reason. No draft in them is left out as English, and their counts are marked with *. On the **Whole book** row, * means only part of the book was checked.
+
+## Turn repeated corrections into guidance
+**Suggestion inbox** finds corrections editors made again and again to the AI's translation-note drafts, so you can fix them once. For example, editors may add a period after the final ] of almost every note, or delete a tag the AI keeps adding.
+
+1. Open **Suggestion inbox** in the admin menu.
+2. Choose the **Book**. The app works the cards out now, from that book's approved notes. There is no nightly run, so a large book can take a few seconds.
+3. Each card shows:
+   - the change: the AI's words, then the approved words (**deleted** when the editors removed them). **at the end of the note** means the change was made only at the very end.
+   - **Made in X of Y drafts that had it**: X notes had this change made. Y drafts contained the words it changes, including those X.
+   - **Chapters**: where the change was made.
+   - **Suggested home**: where the fix belongs. **House-style rule** is for a small mechanical change, such as punctuation, a tag or the spelling of one word, that editors made in at least half the drafts that had it. **Note template** is for words that come from a template. **Term** is for a change of one to three words. Everything else is a **Common issues line**.
+   - three examples: the AI draft and the approved note around the change.
+4. Choose what to do:
+   - **Approve** on a house-style card adds the rule to [Style: House style](#help:admin-style), switched on. It fixes drafts that arrive after that.
+   - **Approve** on any other card copies a line for you. The term, template and Common issues editors cannot be filled in from here, so open the editor with the button and paste the line.
+   - **Reject** hides the card for good, in every book.
+
+A card appears only when the same change was made in at least 10 notes across at least 3 chapters. Spaces and line breaks are ignored, and changes inside a bold Scripture quote and rewrites longer than a few words are left out. A change is not shown when a house-style rule already makes it (even a rule that is switched off), a term already gives the approved words, a template already contains them, or the Common issues text already lists them. A card you sent to another editor goes away once that editor's text covers it.
