@@ -52,3 +52,39 @@ test("buildRapidNotes: the budget counts UTF-8 bytes, so Arabic fits the server'
   assert.ok(new TextEncoder().encode(JSON.stringify(notes)).length <= 120_000);
   assert.ok(notes.length > 0 && notes.length < 100);
 });
+
+// Issue #859: the panel tells the user what was left out, so it reports both kinds.
+test("buildRapidNotes: nothing left out reports zero of each", () => {
+  const { omitted } = buildRapidNotes([row("a"), row("b")], new Set());
+  assert.deepEqual(omitted, { tooLong: 0, tooMany: 0, tooLongRefs: [], tooManyRefs: [] });
+});
+
+test("buildRapidNotes: an over-long note is counted as too long, with its ref", () => {
+  const { omitted } = buildRapidNotes(
+    [row("a", { verse: 5, note: "x".repeat(MAX_NOTE_CHARS + 1) }), row("b"), row("c", { verse: 0, note: "z".repeat(MAX_NOTE_CHARS + 50) })],
+    new Set(["a"]),
+  );
+  assert.equal(omitted.tooLong, 2);
+  assert.deepEqual(omitted.tooLongRefs, ["2:5", "2:intro"]);
+  assert.equal(omitted.tooMany, 0);
+});
+
+test("buildRapidNotes: over the note cap, the extra notes are counted as too many", () => {
+  const rows = Array.from({ length: MAX_NOTES + 5 }, (_, i) => row("n" + i, { verse: i + 1 }));
+  const { notes, omitted } = buildRapidNotes(rows, new Set());
+  assert.equal(notes.length, MAX_NOTES);
+  assert.equal(omitted.tooMany, 5);
+  assert.deepEqual(omitted.tooManyRefs, ["2:201", "2:202", "2:203", "2:204", "2:205"]);
+  assert.equal(omitted.tooLong, 0);
+});
+
+test("buildRapidNotes: over the byte budget, a checked note is kept and the rest are counted", () => {
+  const rows = Array.from({ length: 100 }, (_, i) => row("n" + i, { verse: i + 1, note: "y".repeat(5000) }));
+  const { notes, omitted } = buildRapidNotes(rows, new Set(["n99"]));
+  assert.ok(notes.some((n) => n.id === "n99"));
+  assert.equal(notes.length + omitted.tooMany, 100);
+  assert.ok(omitted.tooMany > 0);
+  assert.equal(omitted.tooManyRefs.length, omitted.tooMany);
+  assert.ok(!omitted.tooManyRefs.includes("2:100"));
+  assert.equal(omitted.tooLong, 0);
+});

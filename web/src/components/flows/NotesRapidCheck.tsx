@@ -765,8 +765,8 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
         refreshStatus={assistantStatus.refresh}
         resetKey={`${book}:${assistant.chapter}`}
         buildContext={() => {
-          const { notes, versions } = buildRapidNotes(assistant.rows(), new Set(selectedIds));
-          return { book, chapter: assistant.chapter, notes, snapshot: versions };
+          const { notes, versions, omitted } = buildRapidNotes(assistant.rows(), new Set(selectedIds));
+          return { book, chapter: assistant.chapter, notes, snapshot: versions, omitted };
         }}
         describeId={assistant.describeId}
         onApply={(sel, snapshot) => assistant.onApply(sel, snapshot as ReadonlyMap<string, number>)}

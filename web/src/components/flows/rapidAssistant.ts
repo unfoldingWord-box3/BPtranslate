@@ -12,6 +12,14 @@ export const MAX_NOTE_CHARS = 6000;
 const MAX_NOTES_JSON_BYTES = 120_000;
 const utf8 = new TextEncoder();
 
+/** Notes left out of a request: over the per-note size limit, or past the count/byte budget. */
+export interface RapidOmitted {
+  tooLong: number;
+  tooMany: number;
+  tooLongRefs: string[];
+  tooManyRefs: string[];
+}
+
 export interface RapidAssistantRow {
   id: string;
   chapter: number;
@@ -28,16 +36,20 @@ export interface RapidAssistantRow {
  * over the server's size limit is left out rather than cut, because the model
  * could then "fix" the part it never saw. When the chapter is too big for one
  * request, unchecked notes at the end of the chapter are left out first.
+ * `omitted` says what was left out and why (issue #859), one ref per note, so
+ * the panel can tell the user.
  */
 export function buildRapidNotes(
   rows: readonly RapidAssistantRow[],
   checked: ReadonlySet<string>,
-): { notes: AssistantNote[]; versions: Map<string, number> } {
+): { notes: AssistantNote[]; versions: Map<string, number>; omitted: RapidOmitted } {
+  const refOf = (r: RapidAssistantRow) => (r.verse === 0 ? `${r.chapter}:intro` : `${r.chapter}:${r.verse}`);
+  const tooLongRefs = rows.filter((r) => (r.note ?? "").length > MAX_NOTE_CHARS).map(refOf);
   const all: AssistantNote[] = rows
     .filter((r) => (r.note ?? "").length <= MAX_NOTE_CHARS)
     .map((r) => ({
       id: r.id,
-      ref: r.verse === 0 ? `${r.chapter}:intro` : `${r.chapter}:${r.verse}`,
+      ref: refOf(r),
       quote: r.quote,
       note: r.note ?? "",
       state: r.translation_state ?? null,
@@ -55,8 +67,14 @@ export function buildRapidNotes(
   for (const n of all) if (n.checked) fits(n);
   for (const n of all) if (!n.checked) fits(n);
   const notes = all.filter((n) => keep.has(n.id));
+  // Not a tail slice: a later, smaller note can still fit after a bigger one did not.
+  const tooManyRefs = all.filter((n) => !keep.has(n.id)).map((n) => n.ref);
   const version = new Map(rows.map((r) => [r.id, r.version]));
-  return { notes, versions: new Map(notes.map((n) => [n.id, version.get(n.id) as number])) };
+  return {
+    notes,
+    versions: new Map(notes.map((n) => [n.id, version.get(n.id) as number])),
+    omitted: { tooLong: tooLongRefs.length, tooMany: tooManyRefs.length, tooLongRefs, tooManyRefs },
+  };
 }
 
 /**
