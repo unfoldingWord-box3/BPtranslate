@@ -80,6 +80,7 @@ import {
   type VerseSpan,
 } from "./verseSpans";
 
+import { useBook } from "../../hooks/useBook";
 import { useChapter } from "../../hooks/useChapter";
 import { useLexicon } from "../../hooks/useLexicon";
 import {
@@ -90,6 +91,7 @@ import {
 } from "../../hooks/useProjectConfig";
 import { SCRIPTURE_FONT_STACK } from "../../theme";
 import type { ChapterPayload, VerseDto } from "../../sync/api";
+import { nextRealChapter } from "../../lib/bookSummary";
 import { isHebrewBook } from "../../lib/sourceSearch";
 import { versionDirection, versionLabel } from "../../lib/versionLabels";
 import { buildVerseIndex, noteOverlapsRange, verseObjectsOf } from "../../lib/verseRange";
@@ -264,6 +266,9 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
 
   const [layout, setLayout] = useState<Layout>(readLayout);
   const scrolling = layout === "scroll";
+  // The book's chapter list, only for the scroll layout's "Continue to chapter
+  // N" after the last verse: one summary fetch, none in the one-verse layout.
+  const { summary } = useBook(book, scrolling);
   const [mode, setMode] = useState<Mode>("read");
   const [selection, setSelection] = useState<VerseSelection | null>(null);
   // In the scrolling list every section has its own words, so a selection
@@ -843,6 +848,26 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
     </Box>
   );
 
+  // Scroll layout: after the chapter's last verse, go on to the next chapter,
+  // still scrolling. None after the book's last chapter, nor before the
+  // chapter list has loaded (nextRealChapter is null without it).
+  const nextChapter = scrolling ? nextRealChapter(summary, chapter) : null;
+  const continueNext = nextChapter != null && (
+    <Box sx={{ display: "flex", justifyContent: "center", paddingBlock: 3 }}>
+      <Button
+        variant="contained"
+        disableElevation
+        endIcon={<ChevronRightIcon sx={chevronFlip} />}
+        onClick={() => {
+          location.hash = `#/verse/${book}/${nextChapter}/1`;
+        }}
+        sx={{ fontWeight: 700 }}
+      >
+        {t("flowVerse.verse.continueToChapter", { chapter: nextChapter })}
+      </Button>
+    </Box>
+  );
+
   let body: ReactNode;
   if (status === "loading" || status === "retrying" || (status === "idle" && !data)) {
     body = (
@@ -945,6 +970,7 @@ export default function VerseScreen({ book, chapter, verse }: VerseScreenProps) 
           selectionStart={selectionStart}
           article={article}
           inlineDetail={isDesktop || !selection ? null : detailPane}
+          after={continueNext}
         />
       </Box>
     ) : (
@@ -1910,6 +1936,7 @@ function VerseScrollList({
   selectionStart,
   article,
   inlineDetail,
+  after,
 }: {
   spans: VerseSpan[];
   request: ScrollRequest;
@@ -1920,6 +1947,8 @@ function VerseScrollList({
   article: VerseArticle | null;
   /** Phone only: the detail pane, shown inside the section the selection is in. */
   inlineDetail: ReactNode;
+  /** Shown in the room after the last verse (the way on to the next chapter). */
+  after: ReactNode;
 }) {
   const listRef = useRef<HTMLDivElement | null>(null);
   const elsRef = useRef(new Map<number, HTMLElement>());
@@ -2073,8 +2102,10 @@ function VerseScrollList({
         );
       })}
       {/* Room after the last verse, so it too can scroll up to the top and
-          count as the verse being read. */}
-      <Box aria-hidden sx={{ minBlockSize: "calc(100dvh - 200px)" }} />
+          count as the verse being read. What comes after the chapter sits at
+          its top: the room is shorter than the view, so at the end of the list
+          that is in view (placed before the room, it scrolled out of sight). */}
+      <Box sx={{ minBlockSize: "calc(100dvh - 200px)" }}>{after}</Box>
     </Box>
   );
 }
