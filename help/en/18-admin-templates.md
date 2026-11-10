@@ -34,6 +34,8 @@ Admins see the button **Draft missing templates from approved notes** above the 
 
 - It works on note types (SupportReference) that have at least 20 approved notes, no approved template yet, and a template that is not started or holds an older AI draft. The line under the button says how many note types are ready.
 - Each press drafts up to 6 note types and says how many are still to draft. Press it again to continue.
+- Only one run can draft at a time. If another admin's run is still going, the page says so; wait for it, then press again.
+- If a note type fails, the page says why. The next press tries the other note types first, and the press after that tries it again. Keep the page open until the run finishes.
 - It uses your organization's own AI key (see **AI service**), with Claude or Gemini. With no key, or with another provider, the line under the button says so and nothing is sent.
 - It never changes a template that is approved or that someone has edited. It replaces an older AI draft nobody has worked on, but not a draft it wrote itself.
 - The AI reads the 30 most recent approved notes of each type. Each draft shows how many it was written from, out of how many the type has. A draft is not used to guide the AI until an editor approves it.

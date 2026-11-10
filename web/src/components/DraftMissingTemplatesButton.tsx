@@ -32,16 +32,47 @@ export function draftNoteCount(draftMetaJson: string | null | undefined): { used
   }
 }
 
+// Left-to-right isolation for Latin slugs and codes inside Arabic text
+// (U+2066 … U+2069), the same wrapping the `cost` string uses.
+const isolate = (s: string) => `\u2066${s}\u2069`;
+
 function reasonText(reason: string, provider: string | null, t: TFunction): string {
   switch (reason) {
     case "ai_provider_not_configured":
     case "api_key_missing":
       return t("templates.draftMissing.notConfigured");
     case "provider_not_supported":
-      return t("templates.draftMissing.unsupported", { provider: provider ?? "" });
+      return t("templates.draftMissing.unsupported", { provider: isolate(provider ?? "") });
+    case "run_in_progress":
+      return t("templates.draftMissing.runInProgress");
     default:
-      return t("templates.draftMissing.unavailable", { reason });
+      return t("templates.draftMissing.unavailable", { reason: isolate(reason) });
   }
+}
+
+// Every failure code the server reports for one note type (templateDraftMissing.ts).
+const FAILURE_CODES = new Set([
+  "rate_limited",
+  "provider_overloaded",
+  "timeout",
+  "network_error",
+  "invalid_key",
+  "model_not_found",
+  "context_too_long",
+  "output_too_long",
+  "empty_output",
+  "provider_error",
+  "not_started",
+  "unreadable_output",
+  "not_written",
+  "partial_output",
+  "internal_error",
+]);
+
+function failureText(code: string, t: TFunction): string {
+  return FAILURE_CODES.has(code)
+    ? t(`templates.draftMissing.code.${code}`)
+    : t("templates.draftMissing.code.other", { code: isolate(code) });
 }
 
 export function DraftMissingTemplatesButton({ onDrafted }: { onDrafted: () => void }) {
@@ -51,8 +82,9 @@ export function DraftMissingTemplatesButton({ onDrafted }: { onDrafted: () => vo
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<DraftMissingResult | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Slugs that failed earlier in this session: sent back so one note type that
-  // keeps failing cannot take a place in every later batch.
+  // Note types the LAST press reported as failed. The next press sends them
+  // so they wait that one press (the server retries them anyway when nothing
+  // else is left), then the list is replaced by that press's own failures.
   const [skipSlugs, setSkipSlugs] = useState<string[]>([]);
 
   const load = useCallback(() => {
@@ -73,9 +105,9 @@ export function DraftMissingTemplatesButton({ onDrafted }: { onDrafted: () => vo
     try {
       const r = await api.draftMissingTemplates(skipSlugs);
       setResult(r);
-      const failedSlugs = r.failed.filter((f) => f.code !== "not_started").map((f) => f.slug);
-      if (failedSlugs.length > 0) setSkipSlugs((prev) => Array.from(new Set([...prev, ...failedSlugs])));
-      if (r.drafted.length > 0) onDrafted();
+      setSkipSlugs(r.failed.filter((f) => f.code !== "not_started").map((f) => f.slug));
+      // Partial results write units too, so refresh whenever anything may have changed.
+      if (r.drafted.length > 0 || r.failed.length > 0) onDrafted();
     } catch (e) {
       const body = e instanceof ApiError ? (e.body as { error?: string; provider?: string | null } | undefined) : undefined;
       setError(body?.error ? reasonText(body.error, body.provider ?? null, t) : t("templates.draftMissing.failed"));
@@ -87,7 +119,9 @@ export function DraftMissingTemplatesButton({ onDrafted }: { onDrafted: () => vo
 
   if (!admin || !preview) return null;
 
-  const ready = preview.qualifying.filter((q) => !skipSlugs.includes(q.slug)).length;
+  // The server's own count, the same query as the run's `remaining`: the
+  // button is enabled whenever the server says work remains.
+  const ready = preview.qualifying.length;
   const disabled = running || !preview.available || ready === 0;
 
   return (
@@ -122,10 +156,13 @@ export function DraftMissingTemplatesButton({ onDrafted }: { onDrafted: () => vo
             ? ` ${t("templates.draftMissing.cost", { cost: result.estimatedCostUsd.toFixed(2) })}`
             : ""}
           {result.failed.length > 0 ? (
-            <Box component="span" sx={{ display: "block" }}>
-              {t("templates.draftMissing.notDrafted", {
-                list: result.failed.map((f) => `${f.slug} (${f.code})`).join(", "),
-              })}
+            <Box component="span" sx={{ display: "block", mt: 0.5 }}>
+              {t("templates.draftMissing.notDrafted")}
+              {result.failed.map((f) => (
+                <Box component="span" key={f.slug} sx={{ display: "block" }} data-testid="draft-missing-failure">
+                  {t("templates.draftMissing.failedItem", { slug: isolate(f.slug), reason: failureText(f.code, t) })}
+                </Box>
+              ))}
             </Box>
           ) : null}
         </Alert>

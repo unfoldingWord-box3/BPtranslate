@@ -94,11 +94,31 @@
       "notConfigured": "No AI key is set for this organization. An admin can add one under AI service.",
       "unsupported": "Drafting templates from notes does not work with this AI provider ({{provider}}). It works with Claude and Gemini.",
       "unavailable": "Drafting templates from notes is not available right now ({{reason}}).",
-      "failed": "Drafting stopped because of an error. Nothing more was changed. Try again later.",
+      "failed": "Drafting stopped because of an error. Drafts already written are kept. Check the list, then try again.",
       "done": "Note types drafted: {{n}}. Still to draft: {{remaining}}. Review each AI draft and approve it.",
       "cost": "Estimated cost: ${{cost}}.",
-      "notDrafted": "Not drafted: {{list}}.",
-      "builtFrom": "AI draft written from {{used}} of the {{total}} approved notes"
+      "notDrafted": "Not drafted:",
+      "builtFrom": "AI draft written from {{used}} of the {{total}} approved notes",
+      "runInProgress": "Another run is already drafting templates. Wait for it to finish, then press again.",
+      "failedItem": "{{slug}}: {{reason}}",
+      "code": {
+        "rate_limited": "the AI provider is limiting requests; try again in a few minutes",
+        "provider_overloaded": "the AI provider is busy; try again in a few minutes",
+        "timeout": "the AI provider took too long to answer",
+        "network_error": "the AI provider could not be reached",
+        "invalid_key": "the AI provider rejected the API key",
+        "model_not_found": "the configured AI model is not available",
+        "context_too_long": "too much text for the AI model",
+        "output_too_long": "the AI answer was too long",
+        "empty_output": "the AI returned nothing",
+        "provider_error": "the AI provider returned an error",
+        "not_started": "not tried, because the run stopped early",
+        "unreadable_output": "the AI answer could not be used",
+        "not_written": "someone changed or approved these templates in the meantime",
+        "partial_output": "only some of its templates were written",
+        "internal_error": "an error on our side",
+        "other": "error {{code}}"
+      }
     }
   },
   "import": {
