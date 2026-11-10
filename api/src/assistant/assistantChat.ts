@@ -7,6 +7,8 @@ import { languageName, type HelpMessage } from "../help/helpChat.ts";
 
 export const ASSISTANT_MAX_OUTPUT: Record<string, number> = { claude: 8192, gemini: 16384, openai: 16384, xai: 16384 };
 export const ASSISTANT_TIMEOUT_MS = 120_000;
+/** Same limit as a note sent in the context; a longer proposed note is dropped (the browser diffs it word by word). */
+export const MAX_PROPOSED_NOTE_CHARS = 6000;
 
 export function assistantMaxOutputFor(provider: string): number {
   if (!Object.prototype.hasOwnProperty.call(ASSISTANT_MAX_OUTPUT, provider)) throw new Error(`no assistant output budget for provider ${provider}`);
@@ -106,7 +108,7 @@ export function parseActions(text: string, context: AssistantContext): ParsedAct
       // a real line break means the same thing, so store it the stored way;
       // otherwise an untouched multi-line note would come back as an "edit".
       const stored = note.replace(/\r\n|\r|\n/g, "\\n");
-      if (stored === sent.get(id)) continue;
+      if (stored === sent.get(id) || stored.length > MAX_PROPOSED_NOTE_CHARS) continue;
       edits.set(id, stored);
     }
   }

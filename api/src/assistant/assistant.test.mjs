@@ -136,6 +136,11 @@ test("parseActions: a real line break is stored as the two characters \\n", () =
   assert.deepEqual(parseActions(reply({ edits: [{ id: "m1", note: "line 1\r\nline two" }] }), multi).actions.edits, [{ id: "m1", note: "line 1\\nline two" }]);
 });
 
+test("parseActions: a proposed note over the note size limit is dropped", () => {
+  const r = parseActions(reply({ edits: [{ id: "n1", note: "x".repeat(6001) }, { id: "n2", note: "fine" }] }), ctx);
+  assert.deepEqual(r.actions.edits, [{ id: "n2", note: "fine" }]);
+});
+
 test("parseActions: an id in both approve and not_needed is dropped from both", () => {
   const r = parseActions(reply({ approve: ["n1", "n2"], not_needed: ["n1"] }), ctx);
   assert.deepEqual(r.actions.approve, ["n2"]);
