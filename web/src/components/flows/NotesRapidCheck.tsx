@@ -280,10 +280,12 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
   const [assistantOpen, setAssistantOpen] = useState(false);
   const assistantStatus = useAssistantStatus(i18n.language, assistantOpen);
   const assistantOn = assistant != null && assistantVisible(assistantStatus.status);
+  // Deeper blue on light paper: Inspire on white is under 3:1 for an icon.
+  const ASSIST_INK = dark ? INSPIRE : "#1B84B8";
   // A round chat-bubble button at the end of the action bar's row, the usual
   // look of a chat assistant launcher; filled while the chat is open.
   const assistantButton = assistantOn ? (
-    <Tooltip title={t("assistant.label")}>
+    <Tooltip title={t("assistant.open")}>
       <IconButton
         onClick={() => setAssistantOpen((o) => !o)}
         aria-label={t("assistant.open")}
@@ -292,13 +294,14 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
         sx={{
           flex: "none",
           alignSelf: "center",
-          width: 40,
-          height: 40,
+          // 36px: the Rapid verb buttons' height, so the row does not grow.
+          width: 36,
+          height: 36,
           border: "1.5px solid",
-          borderColor: INSPIRE,
-          color: assistantOpen ? "#fff" : INSPIRE,
-          bgcolor: assistantOpen ? INSPIRE : "transparent",
-          "&:hover": { bgcolor: assistantOpen ? INSPIRE : alpha(INSPIRE, 0.1) },
+          borderColor: ASSIST_INK,
+          color: assistantOpen ? (dark ? "#231F20" : "#fff") : ASSIST_INK,
+          bgcolor: assistantOpen ? ASSIST_INK : "transparent",
+          "&:hover": { bgcolor: assistantOpen ? ASSIST_INK : alpha(ASSIST_INK, 0.1) },
         }}
       >
         <AssistantIcon fontSize="small" />

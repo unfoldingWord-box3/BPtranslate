@@ -79,7 +79,7 @@ Each row starts with a checkbox. Checked notes get a bar at the bottom in place 
 The app skips a note, and tells you how many it skipped and why, when it has unsaved typing, a change still saving, or someone else changed it since you loaded it. **Redo with AI** also skips approved notes. Skipped notes stay checked. Approving has no Undo.
 
 ### Ask the assistant
-The **Assistant** button, the round chat-bubble button at the end of the row with **Save & approve**, opens a chat beside the list. Ask in your own words for a change to the notes, for example to use one spelling of a name in the checked notes. It sees the notes of the chapter you have open, and which ones you checked. Ask about the checked notes to keep the answer small.
+The **Assistant** button, the round chat-bubble button at the end of the row of buttons under the list (beside **Save & approve**, or beside the bulk buttons while notes are checked), opens a chat beside the list. Ask in your own words for a change to the notes, for example to use one spelling of a name in the checked notes. It sees the notes of the chapter you have open, and which ones you checked. Ask about the checked notes to keep the answer small.
 
 Nothing changes until you press **Apply**:
 - The assistant answers, and may add a list of proposed changes. Each edit is shown as the note with the changed words marked. Words it would remove are struck through and words it would add are highlighted.
