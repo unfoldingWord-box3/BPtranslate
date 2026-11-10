@@ -175,6 +175,14 @@ import {
   QUICK_DRAFTS_NEED_ORG_KEY,
 } from "../../lib/aiProviderErrors";
 import { resolveFlowChipStatus, flowChipKind, type FlowChipStatus } from "../../lib/flowStatusChip";
+import {
+  RAPID_STATUS_BUCKETS,
+  rapidStatusBucket,
+  rapidStatusMatches,
+  withOpenNote,
+  type RapidStatusBucket,
+} from "../../lib/rapidStatusFilter";
+import { RapidStatusFilterMenu, RapidStatusFilterLine } from "./RapidStatusFilter";
 import { flowLaneSegmentsAcross, type FlowQuote, type FlowSegment } from "../../lib/flowHighlight";
 import { RapidVerseLanes, type RapidLaneSpec } from "./RapidVerseLanes";
 import { RapidVersePlacementToggle } from "./RapidVersePlacementToggle";
@@ -321,6 +329,7 @@ function Lane({ label, text, segments, labelFontFamily, mark }: LaneProps) {
 
 // A stable empty list, so a verse group with no quotes keeps its memo.
 const NO_QUOTES: readonly FlowQuote[] = [];
+const NO_HIDDEN_STATUSES: ReadonlySet<RapidStatusBucket> = new Set();
 
 export default function TranslateNotesScreen({ book, chapter, verse, rowId, role }: TranslateNotesScreenProps) {
   const { t } = useTranslation();
@@ -589,11 +598,10 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
       .sort((a, b) => a.label.localeCompare(b.label));
   }, [queueIds, rowById]);
 
-  // The filtered traversal: an ascending index list over the FROZEN queue —
-  // the queue itself is never mutated. Every cursor movement while a filter
-  // is active maps through this list; with no filter the original code paths
-  // run untouched (byte-equivalent behavior).
-  const visibleIdx = useMemo(() => {
+  // The type filter's matches: an ascending index list over the FROZEN queue —
+  // the queue itself is never mutated. Rapid check's status filter narrows
+  // this further into `visibleIdx` (below, after `rapid`).
+  const typeMatchIdx = useMemo(() => {
     if (!queueIds || !typeFilter) return [];
     const out: number[] = [];
     queueIds.forEach((id, i) => {
@@ -612,9 +620,9 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
       setTypeFilter(null);
       return;
     }
-    if (visibleIdx.length === 0) return;
-    if (!visibleIdx.includes(cursor)) setCursor(visibleIdx[0]);
-  }, [typeFilter, typeOptions, visibleIdx, cursor, queueIds]);
+    if (typeMatchIdx.length === 0) return;
+    if (!typeMatchIdx.includes(cursor)) setCursor(typeMatchIdx[0]);
+  }, [typeFilter, typeOptions, typeMatchIdx, cursor, queueIds]);
 
   // ── editor state ─────────────────────────────────────────────────────────
   const [draftValue, setDraftValue] = useState("");
@@ -911,6 +919,81 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
   // type filter no longer draws the open note's verse twice.
   const [rapidPlacement, setRapidPlacement] = useRapidVersePlacement();
   const rapidInline = rapidPlacement === "inline";
+
+  // ── status filter (Rapid check only) ─────────────────────────────────────
+  // Statuses the translator hid from the list. Session-local, and kept across
+  // chapters: "hide approved" is how someone works through a book. Only
+  // Rapid check offers it; the card and list views (the done view among
+  // them) ignore it.
+  const [hiddenStatuses, setHiddenStatuses] = useState<ReadonlySet<RapidStatusBucket>>(NO_HIDDEN_STATUSES);
+  const statusFilterOn = rapid && view !== "done" && hiddenStatuses.size > 0;
+  // Either filter turns Rapid check's list chapter-wide; every cursor
+  // movement then maps through visibleIdx. With neither, the original code
+  // paths run untouched.
+  const filterOn = typeFilter != null || statusFilterOn;
+  // The status a note's chip shows, minus the open editor's live diff (the
+  // open note is always listed, so its live state never decides anything).
+  // noteChip below resolves through this too, so filter and chip agree.
+  const noteChipStatus = useCallback(
+    (id: string, r: TnRow, isCurrent: boolean, liveDiff: boolean): FlowChipStatus => {
+      const st = statuses[id];
+      return resolveFlowChipStatus({
+        isCurrent,
+        hasLiveDiff: liveDiff,
+        draftPresent: draftRowIds.has(id),
+        approved: st === "approved",
+        skipped: st === "skipped",
+        pending: editedIds.has(id) || r.translation_state === "edited",
+        aquifer: r.translation_state === "ai_draft" && isAquiferDraftRow(r),
+        aiDrafted: false,
+      });
+    },
+    [statuses, draftRowIds, editedIds],
+  );
+  // The notes the status filter chooses from: the type filter's matches, or
+  // the whole chapter.
+  const statusCandidates = useMemo(
+    () => (typeFilter ? typeMatchIdx : (queueIds ?? []).map((_, i) => i)),
+    [typeFilter, typeMatchIdx, queueIds],
+  );
+  const bucketAt = useCallback(
+    (i: number): RapidStatusBucket => {
+      const id = queueIds?.[i];
+      const r = id ? rowById.get(id) : undefined;
+      return id && r ? rapidStatusBucket(noteChipStatus(id, r, false, false)) : "draft";
+    },
+    [queueIds, rowById, noteChipStatus],
+  );
+  const statusMatchIdx = useMemo(
+    () => (statusFilterOn ? rapidStatusMatches(statusCandidates, bucketAt, hiddenStatuses) : statusCandidates),
+    [statusFilterOn, statusCandidates, bucketAt, hiddenStatuses],
+  );
+  const visibleIdx = useMemo(
+    () =>
+      statusFilterOn
+        ? withOpenNote(statusMatchIdx, cursor, !typeFilter || typeMatchIdx.includes(cursor))
+        : typeMatchIdx,
+    [statusFilterOn, statusMatchIdx, cursor, typeFilter, typeMatchIdx],
+  );
+  // Menu counts: every note the status filter chooses from, by status.
+  const statusCounts = useMemo(() => {
+    const counts = new Map<RapidStatusBucket, number>();
+    if (!rapid) return counts;
+    for (const i of statusCandidates) {
+      const b = bucketAt(i);
+      counts.set(b, (counts.get(b) ?? 0) + 1);
+    }
+    return counts;
+  }, [rapid, statusCandidates, bucketAt]);
+  // A new status choice moves off an open note it hides, to the next shown
+  // note (else the first). With nothing shown the open note stays alone.
+  const applyHiddenStatuses = (next: ReadonlySet<RapidStatusBucket>) => {
+    setHiddenStatuses(next);
+    if (next.size === 0) return;
+    const matches = rapidStatusMatches(statusCandidates, bucketAt, next);
+    if (matches.length === 0 || matches.includes(cursor)) return;
+    setCursor(matches.find((i) => i > cursor) ?? matches[0]);
+  };
   // Clicking another row's note text moves the cursor AND opens its editor.
   // The hydration effect closes the editor when the row changes, so the open
   // waits until that row has settled (its draft is loaded), then applies.
@@ -1164,13 +1247,13 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
   const rowVerse = row?.verse ?? 0;
   const rapidOpenVerseQuotes = useMemo(() => {
     const byVerse = new Map<number, FlowQuote[]>();
-    if (!rapid || !rapidInline || typeFilter || rowVerse <= 0) return byVerse;
+    if (!rapid || !rapidInline || filterOn || rowVerse <= 0) return byVerse;
     byVerse.set(rowVerse, [{ quote: rowQuote, occurrence: rowOccurrence }]);
     return byVerse;
-  }, [rapid, rapidInline, typeFilter, rowVerse, rowQuote, rowOccurrence]);
+  }, [rapid, rapidInline, filterOn, rowVerse, rowQuote, rowOccurrence]);
   const rapidFilterQuotes = useMemo(() => {
     const byVerse = new Map<number, FlowQuote[]>();
-    if (!rapid || !rapidInline || !typeFilter || !queueIds) return byVerse;
+    if (!rapid || !rapidInline || !filterOn || !queueIds) return byVerse;
     for (const i of visibleIdx) {
       const r = rowById.get(queueIds[i]);
       if (!r || r.verse <= 0) continue;
@@ -1179,8 +1262,8 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
       byVerse.set(r.verse, list);
     }
     return byVerse;
-  }, [rapid, rapidInline, typeFilter, queueIds, visibleIdx, rowById]);
-  const rapidGroupQuotes = typeFilter ? rapidFilterQuotes : rapidOpenVerseQuotes;
+  }, [rapid, rapidInline, filterOn, queueIds, visibleIdx, rowById]);
+  const rapidGroupQuotes = filterOn ? rapidFilterQuotes : rapidOpenVerseQuotes;
 
   const englishNote = row ? (sourceNotes.get(row.id)?.note ?? null) : null;
 
@@ -1188,7 +1271,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
   const nextUnstatused = useCallback(
     (from: number, table: Record<string, CardStatus>): number => {
       if (!queueIds) return -1;
-      if (typeFilter) {
+      if (filterOn) {
         // Same cycle — start just after `from`, wrap, check `from` itself
         // last — restricted to the filtered index list.
         const n = visibleIdx.length;
@@ -1207,7 +1290,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
       }
       return -1;
     },
-    [queueIds, typeFilter, visibleIdx],
+    [queueIds, filterOn, visibleIdx],
   );
 
   const advanceAfter = useCallback(
@@ -1215,7 +1298,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
       if (!queueIds) return;
       const table = { ...statuses, [id]: next };
       if (reviewing) {
-        if (typeFilter) {
+        if (filterOn) {
           const nxt = visibleIdx.find((i) => i > cursor);
           if (nxt === undefined) setView("done");
           else setCursor(nxt);
@@ -1230,11 +1313,11 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
         // Filtered set exhausted while the wider chapter still has open
         // cards: hold position rather than show the (untrue) chapter-complete
         // view. Without a filter this condition is never taken.
-        if (typeFilter && queueIds.some((qid) => !table[qid])) return;
+        if (filterOn && queueIds.some((qid) => !table[qid])) return;
         setView("done");
       } else setCursor(nxt);
     },
-    [queueIds, statuses, reviewing, cursor, nextUnstatused, typeFilter, visibleIdx],
+    [queueIds, statuses, reviewing, cursor, nextUnstatused, filterOn, visibleIdx],
   );
 
   // Free navigation — one cursor, four drivers: the card stack's Prev/Next,
@@ -1242,7 +1325,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
   // filter active, movement maps through visibleIdx; without one, the
   // original clamp arithmetic runs untouched.
   const goPrev = useCallback(() => {
-    if (!typeFilter) {
+    if (!filterOn) {
       setCursor((c) => Math.max(0, c - 1));
       return;
     }
@@ -1254,19 +1337,19 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
       }
       return target;
     });
-  }, [typeFilter, visibleIdx]);
+  }, [filterOn, visibleIdx]);
   const goNext = useCallback(() => {
-    if (!typeFilter) {
+    if (!filterOn) {
       setCursor((c) => Math.min(total - 1, c + 1));
       return;
     }
     setCursor((c) => visibleIdx.find((i) => i > c) ?? c);
-  }, [typeFilter, visibleIdx, total]);
+  }, [filterOn, visibleIdx, total]);
 
   // Disabled logic for every Prev/Next affordance — reduces to the original
   // expressions (cursor === 0 / cursor >= total - 1) when no filter is active.
-  const canPrev = typeFilter ? visibleIdx.some((i) => i < cursor) : cursor > 0;
-  const canNext = typeFilter ? visibleIdx.some((i) => i > cursor) : cursor < total - 1;
+  const canPrev = filterOn ? visibleIdx.some((i) => i < cursor) : cursor > 0;
+  const canNext = filterOn ? visibleIdx.some((i) => i > cursor) : cursor < total - 1;
 
   // Swipe pages in the TARGET language's reading order (the content being
   // paged), not the UI chrome's — the words screen derives direction the same
@@ -2021,7 +2104,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
   // Rapid check draws only while there is an open note to show; the done view,
   // an empty chapter or an empty type filter fall back to the card layout.
   const rapidReady =
-    rapid && !done && total > 0 && row != null && !(typeFilter != null && visibleIdx.length === 0);
+    rapid && !done && total > 0 && row != null && !(typeFilter != null && typeMatchIdx.length === 0);
   const approvedCount = queueIds.filter(
     (id) => statuses[id] === "approved" && !editedIds.has(id),
   ).length;
@@ -2067,19 +2150,13 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
     r: TnRow,
     isCurrent: boolean,
   ): { kind: FlowStatusKind; label: string } => {
-    const st = statuses[id];
-    const status = resolveFlowChipStatus({
-      isCurrent,
-      hasLiveDiff: hasDiff,
-      draftPresent: draftRowIds.has(id),
-      approved: st === "approved",
-      skipped: st === "skipped",
-      pending: editedIds.has(id) || r.translation_state === "edited",
-      aquifer: r.translation_state === "ai_draft" && isAquiferDraftRow(r),
-      aiDrafted: false,
-    });
+    const status = noteChipStatus(id, r, isCurrent, hasDiff);
     return { kind: flowChipKind(status), label: noteChipLabel(status) };
   };
+  // Status filter menu labels: the chip's own wording.
+  const statusLabels = Object.fromEntries(
+    RAPID_STATUS_BUCKETS.map((b) => [b, noteChipLabel(b)]),
+  ) as Record<RapidStatusBucket, string>;
   const chip: { kind: FlowStatusKind; label: string } = row
     ? noteChip(row.id, row, true)
     : { kind: "draft", label: t("flowTranslate.status.draft") };
@@ -2098,8 +2175,8 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
   // "N of M" — while a type filter is active, position and count are within
   // the filtered set and the type label is appended ("3 of 12 · metaphor");
   // with no filter this is character-for-character the original string.
-  const filteredPos = typeFilter ? visibleIdx.indexOf(cursor) : -1;
-  const headerCount = typeFilter
+  const filteredPos = filterOn ? visibleIdx.indexOf(cursor) : -1;
+  const headerCount = filterOn
     ? t("flowTranslate.pagerOfType", {
         index: done
           ? visibleIdx.length
@@ -2107,7 +2184,12 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
             ? 0
             : Math.max(1, filteredPos + 1),
         total: visibleIdx.length,
-        type: typeLabelOf(typeFilter),
+        type: [
+          typeFilter ? typeLabelOf(typeFilter) : null,
+          statusFilterOn ? t("flowTranslate.rapid.statusFilter.pager") : null,
+        ]
+          .filter(Boolean)
+          .join(" · "),
       })
     : done
       ? t("flowTranslate.pagerOf", { index: total, total })
@@ -2975,11 +3057,11 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
   // from the frozen queue, so order and counts match the card view.
   const rapidRows: RapidCheckRow[] = !rapidReady
     ? []
-    : (typeFilter ? visibleIdx : queueIds.map((_, i) => i)).flatMap((i) => {
+    : (filterOn ? visibleIdx : queueIds.map((_, i) => i)).flatMap((i) => {
         const id = queueIds[i];
         const r = rowById.get(id);
         if (!r) return [];
-        if (!typeFilter && (r.chapter !== row.chapter || r.verse !== row.verse)) return [];
+        if (!filterOn && (r.chapter !== row.chapter || r.verse !== row.verse)) return [];
         const isCurrent = id === currentId;
         const st = statuses[id];
         const liveEdit = (isCurrent && hasDiff) || (!isCurrent && draftRowIds.has(id));
@@ -3015,7 +3097,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
   // a hash change clears the type filter and seeks by verse number.
   const rapidStops: (RapidVerseStop & { idx: number })[] = [];
   if (rapidReady && queueIds) {
-    for (const i of typeFilter ? visibleIdx : queueIds.map((_, n) => n)) {
+    for (const i of filterOn ? visibleIdx : queueIds.map((_, n) => n)) {
       const r = rowById.get(queueIds[i]);
       if (!r) continue;
       const key = `${r.chapter}:${r.verse}`;
@@ -3302,7 +3384,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
       {rapidReady ? (
         <NotesRapidCheck
           rows={rapidRows}
-          groupByVerse={typeFilter != null}
+          groupByVerse={filterOn}
           renderGroupLanes={
             rapidInline
               ? (v, refLabel) => (
@@ -3311,7 +3393,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
                     // Without a filter the one group is the open note's verse:
                     // a bridged note ("13:26-27") shows every verse it covers,
                     // as the pinned block does (#341).
-                    verses={typeFilter ? undefined : renderCovered.verses}
+                    verses={filterOn ? undefined : renderCovered.verses}
                     refLabel={refLabel}
                     lanes={rapidGroupLanes}
                     sourceIndex={sourceIndex}
@@ -3338,8 +3420,28 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
               {rapidVerseBlock}
             </Stack>
           }
-          // The type filter sits on the verse block's control line instead.
-          filterControl={null}
+          // The type filter sits on the verse block's control line instead;
+          // this line says what the status filter hides.
+          filterControl={
+            statusFilterOn ? (
+              <RapidStatusFilterLine
+                hidden={hiddenStatuses}
+                counts={statusCounts}
+                labels={statusLabels}
+                shown={visibleIdx.length}
+                total={statusCandidates.length}
+                onShowAll={() => applyHiddenStatuses(NO_HIDDEN_STATUSES)}
+              />
+            ) : null
+          }
+          statusFilter={
+            <RapidStatusFilterMenu
+              hidden={hiddenStatuses}
+              counts={statusCounts}
+              labels={statusLabels}
+              onChange={applyHiddenStatuses}
+            />
+          }
           editor={editorField}
           editing={editing}
           editorContainerRef={editorContainerRef}

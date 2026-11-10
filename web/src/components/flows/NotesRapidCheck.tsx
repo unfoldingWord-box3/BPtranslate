@@ -85,8 +85,10 @@ export interface NotesRapidCheckProps {
   onToggleSourceUlt: (() => void) | null;
   /** Alerts and the verse block, pinned above the list. */
   header: ReactNode;
-  /** The screen's article-type filter; null when the chapter has no types. */
+  /** A line above the column header: what the status filter hides. */
   filterControl: ReactNode;
+  /** The status filter's menu button, in the "Status · type" header cell. */
+  statusFilter?: ReactNode;
   /** The screen's editor for the current row (TextField + Save). */
   editor: ReactNode;
   editing: boolean;
@@ -152,6 +154,7 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
     onToggleSourceUlt,
     header,
     filterControl,
+    statusFilter,
     editor,
     editing,
     editorContainerRef,
@@ -407,6 +410,7 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
           )}
           <RapidColumnHeader
             cols={`${CHECK_COL} ${cols}`}
+            statusFilter={statusFilter}
             leadingCell={
               <CheckBox
                 checked={allChecked ? true : selectedIds.length > 0 ? "mixed" : false}
