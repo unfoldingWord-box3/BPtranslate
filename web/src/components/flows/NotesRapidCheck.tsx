@@ -48,8 +48,12 @@ export interface NotesRapidCheckProps {
   rows: RapidCheckRow[];
   /** Type-filter mode: rows span the chapter, so label each verse group. */
   groupByVerse: boolean;
-  /** Type-filter mode: the compact lanes drawn in a verse group's head. */
+  /** The compact lanes drawn in a verse group's head: given only in the
+   *  "verses inline" placement, with or without a type filter. A verse
+   *  group with lanes gets a head even when groupByVerse is off. */
   renderGroupLanes?: (verse: number, refLabel: string) => ReactNode;
+  /** Flips the verse placement (top / inline), the V key. */
+  onTogglePlacement: () => void;
   book: string;
   sourceLabel: string;
   sourceDir: "rtl" | "ltr";
@@ -117,6 +121,7 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
     rows,
     groupByVerse,
     renderGroupLanes,
+    onTogglePlacement,
     book,
     sourceLabel,
     sourceDir,
@@ -180,6 +185,9 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
 
   // Keep the current row in view below the pinned header as the cursor moves.
   const currentId = rows.find((r) => r.isCurrent)?.id ?? null;
+  // Switching the verse placement resizes the pinned header and adds or
+  // removes the group heads: bring the current row back into view then too.
+  const inlineLanes = renderGroupLanes != null;
   useEffect(() => {
     if (!currentId) return;
     const el = scrollRef.current?.querySelector<HTMLElement>(`[data-rapid-row="${CSS.escape(currentId)}"]`);
@@ -188,7 +196,7 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
     const head = el?.previousElementSibling;
     if (head instanceof HTMLElement && head.dataset.rapidGroup != null) head.scrollIntoView({ block: "nearest" });
     el?.scrollIntoView({ block: "nearest" });
-  }, [currentId]);
+  }, [currentId, inlineLanes, stickyH]);
 
   // Keyboard focus must stay inside the list for the shortcuts to work. The
   // element that held it can disappear: J past a verse's last note replaces
@@ -322,6 +330,9 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
     } else if (code === "KeyU" && !e.shiftKey && onToggleSourceUlt) {
       e.preventDefault();
       onToggleSourceUlt();
+    } else if (code === "KeyV" && !e.shiftKey) {
+      e.preventDefault();
+      if (!e.repeat) onTogglePlacement();
     } else if (code === "KeyQ" && !e.shiftKey && onOpenQuote) {
       e.preventDefault();
       // Only while the open row is drawn: its pencil (or, with the quote
@@ -387,6 +398,7 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
             onToggleEnglish={onToggleEnglish}
             sourceUltKey={onToggleSourceUlt != null}
             quoteKey={onOpenQuote != null}
+            placementKey
           />
         </Box>
 
@@ -401,11 +413,11 @@ export function NotesRapidCheck(props: NotesRapidCheckProps) {
         >
           {rows.map((r, i) => {
             const groupLanes =
-              groupByVerse && renderGroupLanes && r.verse > 0 && (i === 0 || rows[i - 1].verse !== r.verse)
+              renderGroupLanes && r.verse > 0 && (i === 0 || rows[i - 1].verse !== r.verse)
                 ? renderGroupLanes(r.verse, `${book} ${r.refLabel}`)
                 : null;
             const groupHead =
-              groupByVerse && (i === 0 || rows[i - 1].verse !== r.verse) ? (
+              (groupByVerse || groupLanes) && (i === 0 || rows[i - 1].verse !== r.verse) ? (
                 <Box
                   key={`v-${r.id}`}
                   role="listitem"

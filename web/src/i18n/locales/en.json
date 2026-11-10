@@ -1755,6 +1755,15 @@
       "lanes": {
         "groupAria": "Scripture for {{ref}}"
       },
+      "verse": {
+        "label": "Verse",
+        "groupAria": "Where the verse text shows",
+        "top": "Top",
+        "topTitle": "Show the open note's verse at the top (V)",
+        "inline": "Inline",
+        "inlineTitle": "Show each verse above its notes (V)",
+        "key": "verse text at the top or above its notes"
+      },
       "bulk": {
         "selectAll": "Check all notes shown",
         "selectNote": "Check note {{ref}}",

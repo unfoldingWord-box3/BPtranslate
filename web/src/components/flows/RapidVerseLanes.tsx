@@ -1,7 +1,9 @@
-// Rapid check, type-filter mode: the compact scripture lanes drawn above each
-// verse group (mockup board C, design PR #825; issue #831). The pinned verse
-// block at the top still shows the open note's full card; these lanes let the
-// translator read every listed verse without opening one of its notes.
+// Rapid check's compact scripture lanes drawn above each verse group (mockup
+// board C, design PR #825; issue #831), in the "verses inline" placement
+// (be:rapidVersePlacement). The pinned verse block then keeps only its
+// controls, and these lanes let the translator read every listed verse
+// without opening one of its notes. With a type filter there is one group per
+// listed verse; without one, a single group: the open note's verse.
 //
 // Drawing only. TranslateNotesScreen hands in the lane indexes it already
 // builds for the pinned block, the verse, and the quotes of the notes listed
@@ -26,6 +28,8 @@ export interface RapidLaneSpec {
 
 export interface RapidVerseLanesProps {
   verse: number;
+  /** The verses to draw when more than `verse` (a bridged note, "13:26-27"). */
+  verses?: number[];
   /** "ZEC 13:2", for the group's accessible name. */
   refLabel: string;
   /** In display order. Hidden lanes are simply left out by the caller. */
@@ -38,6 +42,7 @@ export interface RapidVerseLanesProps {
 
 export const RapidVerseLanes = memo(function RapidVerseLanes({
   verse,
+  verses,
   refLabel,
   lanes,
   sourceIndex,
@@ -48,7 +53,7 @@ export const RapidVerseLanes = memo(function RapidVerseLanes({
   const drawn = useMemo(
     () =>
       lanes.map((lane) => {
-        const { slices, plainText } = coveredLaneSlices(lane.index, sourceIndex, [verse]);
+        const { slices, plainText } = coveredLaneSlices(lane.index, sourceIndex, verses ?? [verse]);
         return {
           key: lane.key,
           label: lane.label,
@@ -57,7 +62,7 @@ export const RapidVerseLanes = memo(function RapidVerseLanes({
           segments: plainText ? flowLaneSegmentsForQuotes(slices, quotes) : [],
         };
       }),
-    [lanes, sourceIndex, verse, quotes],
+    [lanes, sourceIndex, verse, verses, quotes],
   );
   if (drawn.length === 0) return null;
   // The pinned verse block's lane styling (RapidVerseBlock), so the two

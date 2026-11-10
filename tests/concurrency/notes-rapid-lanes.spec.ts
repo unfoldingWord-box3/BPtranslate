@@ -26,16 +26,22 @@ type Row = TnRow & {
 
 const slugOf = (ref: string | null | undefined) => (ref ?? "").split("/").pop() ?? "";
 
-async function openRapid(browser: Parameters<typeof newUserContext>[0], name: string, hashTail: string) {
+async function openRapid(
+  browser: Parameters<typeof newUserContext>[0],
+  name: string,
+  hashTail: string,
+  prefs: Record<string, string> = {},
+) {
   const { context, auth } = await newUserContext(browser, name);
   openContexts.push(context);
-  await context.addInitScript(() => {
+  await context.addInitScript((extra) => {
     try {
       localStorage.setItem("be:notesRapidCheck", "true");
+      for (const [k, v] of Object.entries(extra)) localStorage.setItem(k, v);
     } catch {
       /* private mode */
     }
-  });
+  }, prefs);
   const page = await context.newPage();
   await page.setViewportSize({ width: 1366, height: 768 });
   await page.route("https://git.door43.org/**", (route) => route.fulfill({ status: 404, body: "not mocked" }));
@@ -176,7 +182,7 @@ test("rapid check: clicking an approved circle takes the approval back", async (
   await page.keyboard.press("Escape");
 });
 
-test("rapid check: type-filter mode draws lanes above every verse group", async ({ browser }) => {
+test("rapid check: type-filter mode draws lanes above every verse group (verses inline)", async ({ browser }) => {
   const probe = await newUserContext(browser, "rapid-lanes-probe");
   openContexts.push(probe.context);
   const chap = await fetchChapter(probe.context.request, probe.auth.token, BOOK, CHAPTER);
@@ -192,9 +198,14 @@ test("rapid check: type-filter mode draws lanes above every verse group", async 
   expect(verses.size, `ZEC ${CHAPTER} needs a type spanning 2+ verses`).toBeGreaterThanOrEqual(2);
   const first = live.find((r) => slugOf(r.support_reference) === slug)!;
 
-  const { page, list } = await openRapid(browser, "rapid-lanes", `${first.verse}?row=${first.id}`);
-  // No filter: no group heads, no group lanes.
-  await expect(list.locator("[data-rapid-lanes]")).toHaveCount(0);
+  // Group lanes are the "verses inline" placement; the default ("top") keeps
+  // the verse in the pinned block only (notes-rapid-verse-placement.spec.ts).
+  const { page, list } = await openRapid(browser, "rapid-lanes", `${first.verse}?row=${first.id}`, {
+    "be:rapidVersePlacement": "inline",
+  });
+  // No filter: one group, the open note's verse, with its lanes.
+  await expect(list.locator("[data-rapid-lanes]")).toHaveCount(1);
+  await expect(list.locator(`[data-rapid-lanes="${first.verse}"]`)).toBeVisible();
 
   await page.locator('[aria-label="Filter notes by type"] [role="combobox"]').click();
   await page.locator(`li[role="option"][title="${slug}"]`).click();

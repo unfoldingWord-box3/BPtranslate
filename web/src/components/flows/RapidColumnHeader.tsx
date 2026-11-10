@@ -41,6 +41,8 @@ export interface RapidColumnHeaderProps {
   sourceUltKey: boolean;
   /** Q opens the quote picker (Rapid check, #831). */
   quoteKey?: boolean;
+  /** V flips where the verse text shows (top / inline). */
+  placementKey?: boolean;
   /** A cell ahead of the others: the bulk select-all checkbox (#829). */
   leadingCell?: ReactNode;
 }
@@ -74,6 +76,7 @@ export function RapidColumnHeader({
   onToggleEnglish,
   sourceUltKey,
   quoteKey = false,
+  placementKey = false,
   leadingCell,
 }: RapidColumnHeaderProps) {
   const { t } = useTranslation();
@@ -141,6 +144,7 @@ export function RapidColumnHeader({
     ...(englishAvailable ? [[["E"], t("flowTranslate.rapid.cols.keyEnglish")] as [string[], string]] : []),
     ...(sourceUltKey ? [[["U"], t("flowTranslate.rapid.cols.keySourceUlt")] as [string[], string]] : []),
     ...(quoteKey ? [[["Q"], t("flowTranslate.rapid.quote.key")] as [string[], string]] : []),
+    ...(placementKey ? [[["V"], t("flowTranslate.rapid.verse.key")] as [string[], string]] : []),
   ];
 
   return (
