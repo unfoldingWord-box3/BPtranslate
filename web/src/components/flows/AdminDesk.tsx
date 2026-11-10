@@ -40,6 +40,7 @@ import PaletteIcon from "@mui/icons-material/Palette";
 import ArticleIcon from "@mui/icons-material/Article";
 import VisibilityIcon from "@mui/icons-material/Visibility";
 import FactCheckIcon from "@mui/icons-material/FactCheck";
+import QueryStatsIcon from "@mui/icons-material/QueryStats";
 
 const INSPIRE = "#31ADE3";
 
@@ -49,6 +50,7 @@ export type AdminSection =
   | "workflow"
   | "progress"
   | "review"
+  | "scorecard"
   | "ai"
   | "style"
   | "templates"
@@ -62,6 +64,7 @@ const SECTIONS: NavItem[] = [
   { key: "progress", labelKey: "adminDesk.nav.progress", icon: <InsightsIcon fontSize="small" />, hash: "#/admin/progress" },
   { key: "workflow", labelKey: "adminDesk.nav.workflow", icon: <AccountTreeIcon fontSize="small" />, hash: "#/admin/workflow" },
   { key: "review", labelKey: "adminDesk.nav.review", icon: <FactCheckIcon fontSize="small" />, hash: "#/admin/review" },
+  { key: "scorecard", labelKey: "adminDesk.nav.scorecard", icon: <QueryStatsIcon fontSize="small" />, hash: "#/admin/scorecard" },
   { key: "team", labelKey: "adminDesk.nav.team", icon: <GroupsIcon fontSize="small" />, hash: "#/admin/team" },
   { key: "setup", labelKey: "adminDesk.nav.setup", icon: <TuneIcon fontSize="small" />, hash: "#/admin/setup" },
 ];
