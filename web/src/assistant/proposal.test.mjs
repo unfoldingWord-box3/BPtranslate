@@ -39,3 +39,7 @@ test("noteDiff: unescapes newlines and diffs Arabic words, not the whole text", 
   assert.ok(d.some((o) => o.type === "eq" && o.text.includes("الكتاب")));
   assert.equal(d.filter((o) => o.type !== "add").map((o) => o.text).join(""), "هذا الكتاب جيد\nسطر");
 });
+
+test("echoContent: a long reply is cut before it goes back to the server", () => {
+  assert.equal(echoContent("ب".repeat(5000), acts({})).length, 2000);
+});

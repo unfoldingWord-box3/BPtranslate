@@ -48,7 +48,15 @@ export function actionCount(a: ProposalActions): number {
  * The assistant turn sent back to the server: the reply text plus one plain
  * line saying what it offered, so a follow-up like "now do the rest" makes sense.
  */
+/**
+ * Earlier replies go back with every message, so each is cut to keep the body
+ * under the server's 200 KB limit next to the notes (Arabic is two bytes a
+ * character): 10 turns of 2,000 characters plus 120 KB of notes fit.
+ */
+export const MAX_ECHO_CHARS = 2000;
+
 export function echoContent(reply: string, a: ProposalActions): string {
+  reply = reply.slice(0, MAX_ECHO_CHARS);
   const parts: string[] = [];
   if (a.edits.length) parts.push(`${a.edits.length} edit${a.edits.length === 1 ? "" : "s"}`);
   if (a.approve.length) parts.push(`${a.approve.length} approval${a.approve.length === 1 ? "" : "s"}`);

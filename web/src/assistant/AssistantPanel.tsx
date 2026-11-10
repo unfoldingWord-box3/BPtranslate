@@ -187,6 +187,7 @@ export default function AssistantPanel(props: Props) {
     const p = turns[i]?.proposal;
     if (!p || p.applied || applyingIdx !== null) return;
     setApplyingIdx(i);
+    setError(null);
     try {
       const sel = selectedActions(p.actions, new Set(p.unticked));
       const r = await onApply(sel, p.snapshot);
