@@ -30,6 +30,7 @@ Choose **Scroll** at the top (next to **One verse**) to see the whole chapter as
 - The count, **Go to verse** and the arrows follow the verse at the top of the list. The arrows and **Go to verse** move the list to the verse you pick.
 - Select a word in any verse. On a wide screen the detail panel shows it. On a narrow screen the detail appears under that verse's text.
 - The address in the browser follows the verse you are reading, so a reload or a bookmark opens at that verse.
+- After the last verse, select **Continue to chapter** to go on to the next chapter, still in **Scroll**. The book's last chapter has no such button.
 
 Your choice is remembered on this device. Choose **One verse** to go back to one verse at a time, at the verse you were reading.
 
