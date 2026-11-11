@@ -6,6 +6,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { resultFor409, deletesOnFatal, healKeepsStatePin, rearmOnKeepMine } from "./conflict409.ts";
+import * as c409 from "./conflict409.ts";
 
 test("Keep mine re-arms the resolved op without its expected_state pin (#883 review A2)", () => {
   const held = { id: "op1", status: "conflict", expectedVersion: 3, conflictCurrent: { version: 5 }, expectedState: "ai_draft", patch: { note: "x" } };
@@ -93,4 +94,32 @@ test("an auto-heal resend keeps the pin whenever a pinless resend could write", 
   // No usable server row.
   assert.equal(healKeepsStatePin({ note: "text" }, null), true);
   assert.equal(healKeepsStatePin({}, row), true);
+});
+
+test("a pinned assistant edit whose 409 shows it already saved settles as saved, with nothing resent (#886 item 1)", () => {
+  const f = c409.healSettlesAsSaved;
+  assert.equal(typeof f, "function");
+  const op = (patch, expectedState = "ai_draft") => ({ patch, expectedState });
+  // Our edit landed and its response was lost: the server note holds our text.
+  // A resend without the pin is a write that a set-aside or revert in the gap
+  // cannot stop, so the op is settled from the 409's row instead.
+  assert.equal(f(op({ note: "assistant text" }), { ...row, note: "assistant text", translation_state: "edited" }), true);
+  // A colleague approved it since (#883 review A1): still saved, not a refusal.
+  assert.equal(f(op({ note: "assistant text" }), { ...row, note: "assistant text", translation_state: "validated" }), true);
+  // null pins "no state" and is still a pin.
+  assert.equal(f(op({ note: "text" }, null), { ...row, translation_state: null }), true);
+});
+
+test("everything else about an auto-healed 409 is unchanged (#886 item 1)", () => {
+  const f = c409.healSettlesAsSaved;
+  assert.equal(typeof f, "function");
+  // A typed edit (no pin) keeps resending as before.
+  assert.equal(f({ patch: { note: "text" } }, row), false);
+  // Set aside: keep the pin and resend, so the server refuses it.
+  assert.equal(f({ patch: { note: "text" }, expectedState: "ai_draft" }, { ...row, trashed_at: 1700000000 }), false);
+  // Our field still differs, or is equal only once newlines are folded: the resend writes.
+  assert.equal(f({ patch: { note: "assistant text" }, expectedState: "ai_draft" }, row), false);
+  assert.equal(f({ patch: { note: "a\\nb" }, expectedState: "ai_draft" }, { ...row, note: "a\nb" }), false);
+  // No usable server row.
+  assert.equal(f({ patch: { note: "text" }, expectedState: "ai_draft" }, null), false);
 });
