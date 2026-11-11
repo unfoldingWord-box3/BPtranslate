@@ -34,15 +34,16 @@ import { isApprovableRow } from "../../lib/reviewApproval";
 import { isAiProviderNotConfigured } from "../../lib/aiProviderErrors";
 import { redoOutcome } from "../../lib/applySkipped";
 import { escapeNewlines, waitForOp } from "./translateShared";
-import { stillAsProposed } from "./rapidAssistant";
+import { snapshotMismatch, stillAsProposed, type RapidSnapshot } from "./rapidAssistant";
 
 type CardStatus = "approved" | "skipped";
 
 // The server's cap on translate.rowIds (api/src/pipelines.ts TranslateOptions).
 const MAX_ROWS_PER_JOB = 50;
 
-type SkipReason = "unsaved" | "pending" | "changed" | "locked" | "noDraft" | "approved" | "notNeeded" | "failed";
-const REASONS: SkipReason[] = ["unsaved", "pending", "changed", "locked", "noDraft", "approved", "notNeeded", "failed"];
+// stateChanged: only the assistant's Apply counts it (approval changed since the proposal, #878).
+type SkipReason = "unsaved" | "pending" | "changed" | "stateChanged" | "locked" | "noDraft" | "approved" | "notNeeded" | "failed";
+const REASONS: SkipReason[] = ["unsaved", "pending", "changed", "stateChanged", "locked", "noDraft", "approved", "notNeeded", "failed"];
 
 export interface RapidBulkResult {
   text: string;
@@ -401,9 +402,14 @@ export function useRapidBulk(a: RapidBulkArgs) {
    * aside, or a version that is no longer the one the proposal was made
    * against are skipped and counted. Each edit goes through the outbox like a
    * typed save and waits for its result (saveDraft's wait). The edited note
-   * ends up 'edited' on the server, so it still needs approval.
+   * ends up 'edited' on the server, so it still needs approval. With `snap`
+   * (the assistant's Apply), a note whose approval state changed since the
+   * proposal is skipped too: approving does not bump the version, so the
+   * edit would otherwise move a note approved since then back to Edited
+   * (#878). The edit also carries the snapshot's state to the server, which
+   * refuses it when the note has moved off it there (#880).
    */
-  async function runEdits(edits: AssistantSelection["edits"]): Promise<RunOut> {
+  async function runEdits(edits: AssistantSelection["edits"], snap?: RapidSnapshot): Promise<RunOut> {
     if (edits.length === 0) return { left: [], count: 0, skipped: emptySkips(), stopped: false };
     const ids = edits.map((e) => e.id);
     if (running || a.busy) return blockedRun(ids);
@@ -450,9 +456,22 @@ export function useRapidBulk(a: RapidBulkArgs) {
           left.push(e.id);
           continue;
         }
+        // The row on screen already shows the new state, so nothing reloads.
+        if (snap && snapshotMismatch(e.id, snap, r) === "stateChanged") {
+          skipped.stateChanged++;
+          left.push(e.id);
+          continue;
+        }
         const patch = { note: escapeNewlines(e.note) };
+        // The server re-checks the state (#880): an approval this tab has not
+        // seen yet, or one landing after the check above, refuses the edit.
+        const expectedState = snap?.states.has(e.id) ? (snap.states.get(e.id) ?? null) : undefined;
         try {
-          const op = await outbox.enqueueRow("tn", e.id, r.version, patch, { book, baseline: { note: r.note } });
+          const op = await outbox.enqueueRow("tn", e.id, r.version, patch, {
+            book,
+            baseline: { note: r.note },
+            ...(expectedState !== undefined ? { expectedState } : {}),
+          });
           const res = await waitForOp(op.id);
           if (res === null) {
             // Still queued (or the lane is read-only): not confirmed, so not
@@ -482,6 +501,12 @@ export function useRapidBulk(a: RapidBulkArgs) {
               if (e.id === a.currentId) openChanged = true;
             } else if (res.kind === "locked") {
               skipped.locked++;
+            } else if (res.kind === "fatal" && res.reason === "state_mismatch") {
+              // Approval changed on the server since the proposal, unseen by
+              // this tab: count it as such and reload so the note shows it.
+              void outbox.drop(op.id, { onlyIfStatus: "failed" }).catch(() => undefined);
+              skipped.stateChanged++;
+              refetchNeeded = true;
             } else {
               void outbox.drop(op.id, { onlyIfStatus: "failed" }).catch(() => undefined);
               skipped.failed++;
@@ -532,6 +557,7 @@ export function useRapidBulk(a: RapidBulkArgs) {
     const unchanged = (ids: string[], into: Record<SkipReason, number>) => {
       const r = stillAsProposed(ids, sel, a.rowById);
       into.changed += r.changed;
+      into.stateChanged += r.stateChanged;
       into.failed += r.missing;
       return r.ids;
     };
@@ -546,7 +572,7 @@ export function useRapidBulk(a: RapidBulkArgs) {
     const notNeededSkips = emptySkips();
     const notNeededIds = unchanged(sel.notNeeded, notNeededSkips);
     const noRun: RunOut = { left: [], count: 0, skipped: emptySkips(), stopped: false };
-    const edits = await runEdits(sel.edits);
+    const edits = await runEdits(sel.edits, sel);
     if (edits.blocked) return { text: t("assistant.apply.busy"), severity: "warning", retryable: true };
     if (sel.edits.length > 0) {
       merge(edits);
@@ -789,7 +815,7 @@ export function useRapidBulk(a: RapidBulkArgs) {
       setUndoable(null);
     },
     approve,
-    applyEdits: runEdits,
+    applyEdits: (edits: AssistantSelection["edits"]) => runEdits(edits),
     applyAssistant,
     redo,
     notNeeded,

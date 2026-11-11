@@ -85,27 +85,44 @@ export function buildRapidNotes(
   };
 }
 
+type SnapRow = { version: number; translation_state?: string | null };
+
+/**
+ * How a note differs from the snapshot: `changed` for a new version (someone's
+ * edit) or no snapshot entry; `stateChanged` for the same version with another
+ * approval state, since approving does not bump the version (#878); null when
+ * it is as the assistant saw it.
+ */
+export function snapshotMismatch(id: string, snap: RapidSnapshot, r: SnapRow): "changed" | "stateChanged" | null {
+  if (snap.versions.get(id) !== r.version || !snap.states.has(id)) return "changed";
+  if (snap.states.get(id) !== (r.translation_state ?? null)) return "stateChanged";
+  return null;
+}
+
 /**
  * Split a proposal's Approve or Not needed ids into the rows still as the
- * assistant saw them and the rest: a version or approval-state change since
- * the snapshot (or no snapshot at all) is `changed`; a row no longer on the
- * screen is `missing`, which the result line reports as a failure.
+ * assistant saw them and the rest, counted by `snapshotMismatch`'s reason; a
+ * row no longer on the screen is `missing`, which the result line reports as
+ * a failure.
  */
 export function stillAsProposed(
   ids: readonly string[],
   snap: RapidSnapshot,
-  rowById: ReadonlyMap<string, { version: number; translation_state?: string | null }>,
-): { ids: string[]; changed: number; missing: number } {
+  rowById: ReadonlyMap<string, SnapRow>,
+): { ids: string[]; changed: number; stateChanged: number; missing: number } {
   const out: string[] = [];
   let changed = 0;
+  let stateChanged = 0;
   let missing = 0;
   for (const id of ids) {
     const r = rowById.get(id);
+    const why = r ? snapshotMismatch(id, snap, r) : null;
     if (!r) missing++;
-    else if (snap.versions.get(id) !== r.version || !snap.states.has(id) || snap.states.get(id) !== (r.translation_state ?? null)) changed++;
+    else if (why === "changed") changed++;
+    else if (why === "stateChanged") stateChanged++;
     else out.push(id);
   }
-  return { ids: out, changed, missing };
+  return { ids: out, changed, stateChanged, missing };
 }
 
 /**

@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import * as rapid from "./rapidAssistant.ts";
 import { MAX_NOTES, MAX_NOTE_CHARS, buildRapidNotes, editsWithVersions, stillAsProposed } from "./rapidAssistant.ts";
 
 const row = (id, o = {}) => ({ id, chapter: 2, verse: 3, quote: "q", note: "text " + id, version: 7, translation_state: "ai_draft", ...o });
@@ -97,7 +98,7 @@ test("buildRapidNotes: captures each sent note's approval state, null when it ha
   assert.equal(states.has("x"), false);
 });
 
-test("stillAsProposed: a version or approval-state change is 'changed', a row gone from the screen is 'missing' (#860)", () => {
+test("stillAsProposed: a version change is 'changed', an approval-state change is 'stateChanged' (#878), a row gone from the screen is 'missing' (#860)", () => {
   const snap = {
     versions: new Map([["same", 3], ["nullState", 3], ["moved", 3], ["approved", 3], ["gone", 3]]),
     states: new Map([["same", "ai_draft"], ["nullState", null], ["moved", "ai_draft"], ["approved", "ai_draft"], ["gone", "ai_draft"]]),
@@ -113,6 +114,24 @@ test("stillAsProposed: a version or approval-state change is 'changed', a row go
   ]);
   const r = stillAsProposed(["same", "nullState", "moved", "approved", "gone", "unsent"], snap, rowById);
   assert.deepEqual(r.ids, ["same", "nullState"]);
-  assert.equal(r.changed, 3); // moved, approved, and unsent (nothing to check it against)
+  assert.equal(r.changed, 2); // moved, and unsent (nothing to check it against)
+  // Approved since the proposal, same version: its own reason, not "changed by someone else, reloaded" (#878).
+  assert.equal(r.stateChanged, 1);
   assert.equal(r.missing, 1); // gone
+});
+
+test("snapshotMismatch: a new version (or no snapshot entry) is 'changed'; the same version with another approval state is 'stateChanged' (#878)", () => {
+  const snap = {
+    versions: new Map([["same", 3], ["nullState", 3], ["moved", 3], ["approved", 3], ["both", 3]]),
+    states: new Map([["same", "ai_draft"], ["nullState", null], ["moved", "ai_draft"], ["approved", "ai_draft"], ["both", "ai_draft"]]),
+  };
+  const check = (id, r) => rapid.snapshotMismatch(id, snap, r);
+  assert.equal(check("same", { version: 3, translation_state: "ai_draft" }), null);
+  assert.equal(check("nullState", { version: 3 }), null);
+  assert.equal(check("moved", { version: 4, translation_state: "ai_draft" }), "changed");
+  // The edit case: approving does not bump the version, so only the state shows it.
+  assert.equal(check("approved", { version: 3, translation_state: "validated" }), "stateChanged");
+  // A version change wins: that is someone's edit, and the row is reloaded.
+  assert.equal(check("both", { version: 4, translation_state: "validated" }), "changed");
+  assert.equal(check("unsent", { version: 3, translation_state: "ai_draft" }), "changed");
 });

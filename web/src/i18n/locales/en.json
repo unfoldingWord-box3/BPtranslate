@@ -1878,6 +1878,7 @@
           "unsaved": "unsaved typing: {{count}}",
           "pending": "a change still saving: {{count}}",
           "changed": "changed by someone else, reloaded: {{count}}",
+          "stateChanged": "approval changed since the proposal: {{count}}",
           "locked": "locked by an AI run: {{count}}",
           "noDraft": "nothing to approve: {{count}}",
           "approved": "approved, take approval off first: {{count}}",
