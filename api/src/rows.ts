@@ -586,8 +586,15 @@ rows.patch("/:kind/:id", requireEditor, async (c) => {
     }
     statePin = { value: raw as TranslationStatePin | null };
   }
+  // A set-aside (trashed) tn note counts as moved too (#883 item 5): trashing
+  // does not bump the version either, and the content write below un-trashes
+  // the note, so a stale assistant edit would revive a note set aside since
+  // the proposal. The assistant is never sent set-aside notes, so a pin always
+  // means "not set aside". The UPDATE's WHERE carries the same check.
   const stateMoved = (r: Record<string, unknown>) =>
-    statePin !== null && ((r.translation_state as string | null | undefined) ?? null) !== statePin.value;
+    statePin !== null &&
+    (((r.translation_state as string | null | undefined) ?? null) !== statePin.value ||
+      (kind === "tn" && r.trashed_at != null));
 
   const schema = PATCH_SCHEMA[kind];
   const parsed = schema.safeParse(body);
@@ -918,7 +925,7 @@ rows.patch("/:kind/:id", requireEditor, async (c) => {
            SET ${setClauses.join(", ")}
          WHERE id = ?${baseParams + 4}
            AND version = ?${baseParams + 5}
-           AND deleted_at IS NULL${bookClause(baseParams + 6)}${statePin ? ` AND translation_state IS ?${baseParams + 7}` : ""}`,
+           AND deleted_at IS NULL${bookClause(baseParams + 6)}${statePin ? ` AND translation_state IS ?${baseParams + 7}${kind === "tn" ? " AND trashed_at IS NULL" : ""}` : ""}`,
       )
       .bind(...values),
     c.env.DB

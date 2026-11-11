@@ -34,14 +34,14 @@ import { isApprovableRow } from "../../lib/reviewApproval";
 import { isAiProviderNotConfigured } from "../../lib/aiProviderErrors";
 import { redoOutcome } from "../../lib/applySkipped";
 import { escapeNewlines, waitForOp } from "./translateShared";
-import { snapshotMismatch, stillAsProposed, type RapidSnapshot } from "./rapidAssistant";
+import { snapshotMismatch, statusesAfterEdit, stillAsProposed, type RapidSnapshot } from "./rapidAssistant";
 
 type CardStatus = "approved" | "skipped";
 
 // The server's cap on translate.rowIds (api/src/pipelines.ts TranslateOptions).
 const MAX_ROWS_PER_JOB = 50;
 
-// stateChanged: only the assistant's Apply counts it (approval changed since the proposal, #878).
+// stateChanged: only the assistant's Apply counts it (the note changed since the proposal, #878, #883).
 type SkipReason = "unsaved" | "pending" | "changed" | "stateChanged" | "locked" | "noDraft" | "approved" | "notNeeded" | "failed";
 const REASONS: SkipReason[] = ["unsaved", "pending", "changed", "stateChanged", "locked", "noDraft", "approved", "notNeeded", "failed"];
 
@@ -482,13 +482,10 @@ export function useRapidBulk(a: RapidBulkArgs) {
           } else if (res.kind === "ok") {
             const u = res.updated as TnRow | null;
             a.applyLocalRowReplacement("tn", u && u.id === e.id && typeof u.version === "number" ? u : { ...r, ...patch });
-            // Like a typed save: an edit takes the note off Approved.
-            a.setStatuses((p) => {
-              if (p[e.id] === undefined) return p;
-              const next = { ...p };
-              delete next[e.id];
-              return next;
-            });
+            // Like a typed save, an edit takes the note off Approved, unless
+            // the returned row says otherwise: a no-op resend after a lost
+            // response returns the note as it is now (#883 review A1).
+            a.setStatuses((p) => statusesAfterEdit(p, e.id, u));
             saved++;
             if (e.id === a.currentId) openChanged = true;
           } else {
@@ -502,11 +499,15 @@ export function useRapidBulk(a: RapidBulkArgs) {
             } else if (res.kind === "locked") {
               skipped.locked++;
             } else if (res.kind === "fatal" && res.reason === "state_mismatch") {
-              // Approval changed on the server since the proposal, unseen by
-              // this tab: count it as such and reload so the note shows it.
-              void outbox.drop(op.id, { onlyIfStatus: "failed" }).catch(() => undefined);
+              // The note changed on the server since the proposal, unseen by
+              // this tab (its approval, a set-aside, or, after an auto-heal,
+              // another field's edit): count it as such and reload so the note
+              // shows it. The outbox already deleted the op (#883 item 4), and
+              // the screen's outbox listener sets its status circle (item 1).
               skipped.stateChanged++;
               refetchNeeded = true;
+              // The open note's editor reloads too, as for a version skip (review A3).
+              if (e.id === a.currentId) openChanged = true;
             } else {
               void outbox.drop(op.id, { onlyIfStatus: "failed" }).catch(() => undefined);
               skipped.failed++;

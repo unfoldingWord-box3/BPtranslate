@@ -126,6 +126,47 @@ export function stillAsProposed(
 }
 
 /**
+ * The Rapid status table after the server refused an assistant edit with
+ * state_mismatch (#883 item 1). The table is seeded once per chapter, so a
+ * refetch alone leaves the circle showing what this tab saw before: set it
+ * from `current`, the row in the 409 body. Approved shows Approved, set aside
+ * shows Not needed, anything else clears an Approved mark (as un-approve's
+ * 409 does). Returns `prev` itself when nothing changes.
+ */
+export function statusesAfterRefusal(
+  prev: Record<string, "approved" | "skipped">,
+  id: string,
+  current: { translation_state?: string | null; trashed_at?: number | null } | null | undefined,
+): Record<string, "approved" | "skipped"> {
+  if (!current || typeof current !== "object") return prev;
+  const want = current.trashed_at != null ? "skipped" : current.translation_state === "validated" ? "approved" : undefined;
+  if (want !== undefined) return prev[id] === want ? prev : { ...prev, [id]: want };
+  if (prev[id] !== "approved") return prev;
+  const next = { ...prev };
+  delete next[id];
+  return next;
+}
+
+/**
+ * The Rapid status table after an assistant edit saved (#883 review A1). The
+ * server's row decides when the response carries it: usually the edit demoted
+ * the note to 'edited', but a resend whose first response was lost is a no-op
+ * that returns the note as it is now, maybe approved by a colleague since.
+ * Without a usable row, the edit takes the note off its mark, like a typed save.
+ */
+export function statusesAfterEdit(
+  prev: Record<string, "approved" | "skipped">,
+  id: string,
+  updated: { id?: unknown; version?: unknown; translation_state?: string | null; trashed_at?: number | null } | null | undefined,
+): Record<string, "approved" | "skipped"> {
+  if (updated && updated.id === id && typeof updated.version === "number") return statusesAfterRefusal(prev, id, updated);
+  if (prev[id] === undefined) return prev;
+  const next = { ...prev };
+  delete next[id];
+  return next;
+}
+
+/**
  * Attach the captured version to each proposed edit. An edit for a note that
  * was not in the snapshot cannot be checked for changes, so it is not applied.
  */

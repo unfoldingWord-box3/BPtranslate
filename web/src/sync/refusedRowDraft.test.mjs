@@ -185,6 +185,8 @@ test("A6: a fatal that means the row is gone keeps nothing; other refusals do", 
   assert.equal(keepsRefusedText({ kind: "locked", lockBody: { error: "chapter_locked", jobId: "j" } }), true);
   assert.equal(keepsRefusedText({ kind: "ok", updated: {} }), false);
   assert.equal(keepsRefusedText({ kind: "conflict", current: {} }), false);
+  // An expected_state refusal is the assistant's text, never typing (#883 item 4).
+  assert.equal(keepsRefusedText({ kind: "fatal", reason: "state_mismatch", current: {} }), false);
 });
 
 const refusedDraft = (patch, refused, extra = {}) => draft({ patch }, { refused, ...extra });

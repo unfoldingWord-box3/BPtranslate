@@ -135,3 +135,37 @@ test("snapshotMismatch: a new version (or no snapshot entry) is 'changed'; the s
   assert.equal(check("both", { version: 4, translation_state: "validated" }), "changed");
   assert.equal(check("unsent", { version: 3, translation_state: "ai_draft" }), "changed");
 });
+
+test("statusesAfterRefusal: the status circle follows the row a state_mismatch refusal returned (#883 item 1)", () => {
+  const f = rapid.statusesAfterRefusal;
+  // A colleague approved it: the circle shows Approved, as a chapter load would.
+  assert.deepEqual(f({ other: "skipped" }, "n1", { translation_state: "validated", trashed_at: null }), { other: "skipped", n1: "approved" });
+  // Un-approved elsewhere: the filled circle is cleared, like un-approve's 409.
+  assert.deepEqual(f({ n1: "approved", other: "approved" }, "n1", { translation_state: "edited" }), { other: "approved" });
+  // Set aside elsewhere (#883 item 5): Not needed.
+  assert.deepEqual(f({ n1: "approved" }, "n1", { translation_state: "validated", trashed_at: 1700000000 }), { n1: "skipped" });
+  // Nothing to change: the same object, so React skips the render.
+  const same = { n1: "approved" };
+  assert.equal(f(same, "n1", { translation_state: "validated" }), same);
+  const none = {};
+  assert.equal(f(none, "n1", { translation_state: "ai_draft" }), none);
+  // No usable row in the 409 body: leave the table alone.
+  assert.equal(f(same, "n1", undefined), same);
+  assert.equal(f(same, "n1", null), same);
+});
+
+test("statusesAfterEdit: a saved assistant edit sets the circle from the row the server returned (#883 review A1)", () => {
+  const f = rapid.statusesAfterEdit;
+  // A resend whose first response was lost is a no-op 200 that returns the row
+  // as it is now: a colleague approved it meanwhile, so it stays Approved.
+  assert.deepEqual(f({ n1: "approved" }, "n1", { id: "n1", version: 5, translation_state: "validated" }), { n1: "approved" });
+  assert.deepEqual(f({}, "n1", { id: "n1", version: 5, translation_state: "validated" }), { n1: "approved" });
+  // The usual case: the edit demoted the note to 'edited', which clears Approved.
+  assert.deepEqual(f({ n1: "approved", other: "approved" }, "n1", { id: "n1", version: 5, translation_state: "edited" }), { other: "approved" });
+  // No usable row in the response: as before, the edit takes the note off its mark.
+  assert.deepEqual(f({ n1: "approved", other: "skipped" }, "n1", null), { other: "skipped" });
+  assert.deepEqual(f({ n1: "approved" }, "n1", { id: "other", version: 5, translation_state: "validated" }), {});
+  assert.deepEqual(f({ n1: "approved" }, "n1", { id: "n1", translation_state: "validated" }), {});
+  const none = {};
+  assert.equal(f(none, "n1", null), none);
+});
