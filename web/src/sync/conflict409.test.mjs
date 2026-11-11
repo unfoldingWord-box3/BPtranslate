@@ -5,7 +5,31 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { resultFor409, deletesOnFatal, healKeepsStatePin } from "./conflict409.ts";
+import { resultFor409, deletesOnFatal, healKeepsStatePin, rearmOnKeepMine } from "./conflict409.ts";
+
+test("Keep mine re-arms the resolved op without its expected_state pin (#883 review A2)", () => {
+  const held = { id: "op1", status: "conflict", expectedVersion: 3, conflictCurrent: { version: 5 }, expectedState: "ai_draft", patch: { note: "x" } };
+  const out = rearmOnKeepMine(held, "op1", 5);
+  assert.equal(out.status, "pending");
+  assert.equal(out.expectedVersion, 5);
+  assert.equal(out.conflictCurrent, undefined);
+  // The user chose to write over the note as it is now: a pin would only be refused.
+  assert.equal("expectedState" in out, false);
+  assert.deepEqual(out.patch, { note: "x" });
+  // A pinned null ("no state") is dropped the same way.
+  assert.equal("expectedState" in rearmOnKeepMine({ ...held, expectedState: null }, "op1", 5), false);
+});
+
+test("Keep mine re-arms the row's other waiting saves as before, pins kept", () => {
+  const sibling = { id: "op2", status: "pending", expectedVersion: 3, expectedState: "edited", patch: { note: "y" } };
+  const out = rearmOnKeepMine(sibling, "op1", 5);
+  assert.equal(out.status, "pending");
+  assert.equal(out.expectedVersion, 5);
+  assert.equal(out.conflictCurrent, undefined);
+  assert.equal(out.expectedState, "edited");
+  // A typed op has no pin and gains none.
+  assert.equal("expectedState" in rearmOnKeepMine({ id: "op1", status: "conflict", expectedVersion: 3, patch: {} }, "op1", 5), false);
+});
 
 const row = { id: "n1", version: 4, note: "text", translation_state: "validated", trashed_at: null };
 
