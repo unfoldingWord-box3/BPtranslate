@@ -209,6 +209,50 @@ test("tq rows take the same pin", async () => {
   assert.equal(sqlite.prepare(`SELECT question FROM tq_rows WHERE id = 'q1'`).get().question, "q?");
 });
 
+// #883 item 5: trashing does not bump the version, and a content edit
+// un-trashes a note, so a pinned (assistant) edit must not revive a note
+// someone set aside since the proposal. The assistant is never sent trashed
+// notes, so a pin always means "not set aside".
+const trashedRow = (sqlite, id) =>
+  sqlite.prepare(`SELECT version, note, translation_state, trashed_at FROM tn_rows WHERE id = ?`).get(id);
+
+test("a pinned edit to a note set aside since the proposal is refused and the note stays set aside (#883)", async () => {
+  const { patch, sqlite, updates } = fresh();
+  sqlite.prepare(`UPDATE tn_rows SET trashed_at = 1700000000 WHERE id = 'draft'`).run();
+  const res = await patch("draft", "3", { note: "assistant text", expected_state: "ai_draft" });
+  assert.equal(res.status, 409);
+  const body = await res.json();
+  assert.equal(body.error, "state_mismatch");
+  assert.equal(body.current?.trashed_at, 1700000000);
+  assert.deepEqual({ ...trashedRow(sqlite, "draft") }, { version: 3, note: "note text", translation_state: "ai_draft", trashed_at: 1700000000 });
+  assert.equal(updates("draft").length, 0);
+});
+
+test("a set-aside landing between the route's read and its UPDATE is refused too (#883)", async () => {
+  const { patch, sqlite, hooks, updates } = fresh();
+  let fired = false;
+  hooks.beforeUpdate = () => {
+    if (fired) return;
+    fired = true;
+    sqlite.prepare(`UPDATE tn_rows SET trashed_at = 1700000000 WHERE id = 'draft'`).run();
+  };
+  const res = await patch("draft", "3", { note: "assistant text", expected_state: "ai_draft" });
+  assert.ok(fired);
+  assert.equal(res.status, 409);
+  assert.equal((await res.json()).error, "state_mismatch");
+  assert.equal(trashedRow(sqlite, "draft").trashed_at, 1700000000);
+  assert.equal(trashedRow(sqlite, "draft").note, "note text");
+  assert.equal(updates("draft").length, 0);
+});
+
+test("an unpinned (typed) edit to a set-aside note still revives it, as before (#883)", async () => {
+  const { patch, sqlite } = fresh();
+  sqlite.prepare(`UPDATE tn_rows SET trashed_at = 1700000000 WHERE id = 'draft'`).run();
+  const res = await patch("draft", "3", { note: "typed text" });
+  assert.equal(res.status, 200);
+  assert.deepEqual({ ...trashedRow(sqlite, "draft") }, { version: 4, note: "typed text", translation_state: "edited", trashed_at: null });
+});
+
 test("an invalid expected_state is a 400 and nothing changes", async () => {
   const { patch, row } = fresh();
   for (const bad of ["approved", 1, ""]) {

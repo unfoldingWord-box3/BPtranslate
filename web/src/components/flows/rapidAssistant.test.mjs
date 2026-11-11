@@ -135,3 +135,21 @@ test("snapshotMismatch: a new version (or no snapshot entry) is 'changed'; the s
   assert.equal(check("both", { version: 4, translation_state: "validated" }), "changed");
   assert.equal(check("unsent", { version: 3, translation_state: "ai_draft" }), "changed");
 });
+
+test("statusesAfterRefusal: the status circle follows the row a state_mismatch refusal returned (#883 item 1)", () => {
+  const f = rapid.statusesAfterRefusal;
+  // A colleague approved it: the circle shows Approved, as a chapter load would.
+  assert.deepEqual(f({ other: "skipped" }, "n1", { translation_state: "validated", trashed_at: null }), { other: "skipped", n1: "approved" });
+  // Un-approved elsewhere: the filled circle is cleared, like un-approve's 409.
+  assert.deepEqual(f({ n1: "approved", other: "approved" }, "n1", { translation_state: "edited" }), { other: "approved" });
+  // Set aside elsewhere (#883 item 5): Not needed.
+  assert.deepEqual(f({ n1: "approved" }, "n1", { translation_state: "validated", trashed_at: 1700000000 }), { n1: "skipped" });
+  // Nothing to change: the same object, so React skips the render.
+  const same = { n1: "approved" };
+  assert.equal(f(same, "n1", { translation_state: "validated" }), same);
+  const none = {};
+  assert.equal(f(none, "n1", { translation_state: "ai_draft" }), none);
+  // No usable row in the 409 body: leave the table alone.
+  assert.equal(f(same, "n1", undefined), same);
+  assert.equal(f(same, "n1", null), same);
+});
