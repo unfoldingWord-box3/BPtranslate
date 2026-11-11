@@ -41,7 +41,7 @@ type CardStatus = "approved" | "skipped";
 // The server's cap on translate.rowIds (api/src/pipelines.ts TranslateOptions).
 const MAX_ROWS_PER_JOB = 50;
 
-// stateChanged: only the assistant's Apply counts it (approval changed since the proposal, #878).
+// stateChanged: only the assistant's Apply counts it (the note changed since the proposal, #878, #883).
 type SkipReason = "unsaved" | "pending" | "changed" | "stateChanged" | "locked" | "noDraft" | "approved" | "notNeeded" | "failed";
 const REASONS: SkipReason[] = ["unsaved", "pending", "changed", "stateChanged", "locked", "noDraft", "approved", "notNeeded", "failed"];
 
@@ -502,9 +502,11 @@ export function useRapidBulk(a: RapidBulkArgs) {
             } else if (res.kind === "locked") {
               skipped.locked++;
             } else if (res.kind === "fatal" && res.reason === "state_mismatch") {
-              // Approval changed on the server since the proposal, unseen by
-              // this tab: count it as such and reload so the note shows it.
-              void outbox.drop(op.id, { onlyIfStatus: "failed" }).catch(() => undefined);
+              // The note changed on the server since the proposal, unseen by
+              // this tab (its approval, a set-aside, or, after an auto-heal,
+              // another field's edit): count it as such and reload so the note
+              // shows it. The outbox already deleted the op (#883 item 4), and
+              // the screen's outbox listener sets its status circle (item 1).
               skipped.stateChanged++;
               refetchNeeded = true;
             } else {

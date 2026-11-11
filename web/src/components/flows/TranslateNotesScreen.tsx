@@ -204,7 +204,7 @@ import { pipelineStore, getSessionKey, type PipelineJob } from "../../sync/pipel
 import { jobLocksChapterNotes, jobLocksNote, lockJobReleased } from "../../lib/chapterLock";
 import { redoOutcome } from "../../lib/applySkipped";
 import { useRapidBulk } from "./useRapidBulk";
-import { editsWithVersions } from "./rapidAssistant";
+import { editsWithVersions, statusesAfterRefusal } from "./rapidAssistant";
 import {
   api,
   ApiError,
@@ -1067,13 +1067,21 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
           setChapterLock({ body: result.lockBody, rowId });
           return;
         }
+        // The server refused an assistant edit because the note changed since
+        // the proposal (#883 item 1), also when the refusal came after Apply
+        // stopped waiting: show the note's approval as the server has it.
+        if (result.kind === "fatal" && result.reason === "state_mismatch") {
+          const current = result.current as { chapter?: number; translation_state?: string | null; trashed_at?: number | null } | undefined;
+          if (current?.chapter === chapter) setStatuses((prev) => statusesAfterRefusal(prev, rowId, current));
+          return;
+        }
         // Only a settled conflict is a question for the user: the outbox
         // auto-heals the healable ones and still notifies listeners.
         if (result.kind === "conflict" && op.status === "conflict") {
           setConflictRowId(op.target.id);
         }
       }),
-    [book, t],
+    [book, chapter, t],
   );
 
   // ── scripture context ────────────────────────────────────────────────────

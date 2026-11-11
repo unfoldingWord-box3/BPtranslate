@@ -20,6 +20,7 @@ import {
 } from "./api";
 import { backoffMs } from "./backoff";
 import { isSortOrderOnlyPatch, wouldAutoHeal } from "./rowConflict";
+import { deletesOnFatal, healKeepsStatePin, resultFor409 } from "./conflict409.ts";
 import { isLaneFrozen, laneFreezeReason } from "./laneFreeze";
 import {
   MAX_ATTEMPTS_SENTINEL,
@@ -147,7 +148,8 @@ export interface OutboxOp {
   restoredFromVersion?: number;
   // The translation_state the patch was proposed against (#880), sent as the
   // PATCH's expected_state; null pins "no state". Set only by the Rapid check
-  // assistant's Apply. Kept on the op so an auto-healed resend still carries it.
+  // assistant's Apply. Kept on the op so an auto-healed resend still carries it,
+  // unless that resend cannot write (healKeepsStatePin, #883 item 2).
   expectedState?: string | null;
   // The row's values for the patched fields at the moment we enqueued (the
   // version we branched from). On a 409 this lets us tell a spurious conflict
@@ -731,7 +733,8 @@ type Result =
   | { kind: "ok"; updated: unknown }
   | { kind: "conflict"; current: unknown }
   | { kind: "retry"; reason: string }
-  | { kind: "fatal"; reason: string }
+  // `current`: the server's row, set for state_mismatch only (conflict409.ts).
+  | { kind: "fatal"; reason: string; current?: unknown }
   // Chapter is locked because an AI pipeline is mid-flight. The auto-apply
   // step will overwrite the row anyway, so retrying is pointless — the op
   // gets dropped and the listener can surface a toast.
@@ -758,21 +761,6 @@ const dropListeners = new Set<DropListener>();
 export function onOutboxDrop(fn: DropListener): () => void {
   dropListeners.add(fn);
   return () => dropListeners.delete(fn);
-}
-
-function unexpectedAlignmentLossReason(body: unknown): string | null {
-  const error = (body as { error?: unknown } | null)?.error;
-  if (error !== "unexpected_alignment_loss") return null;
-  const losses = (body as { delta?: { unexpectedLosses?: unknown[] } } | null)
-    ?.delta?.unexpectedLosses;
-  const sample = Array.isArray(losses)
-    ? losses
-        .slice(0, 3)
-        .map((loss) => (loss as { text?: unknown } | null)?.text)
-        .filter((text): text is string => typeof text === "string" && text.length > 0)
-        .join(", ")
-    : "";
-  return `unexpected_alignment_loss${sample ? `: ${sample}` : ""}`;
 }
 
 async function dispatch(op: OutboxOp): Promise<Result> {
@@ -834,42 +822,9 @@ async function dispatch(op: OutboxOp): Promise<Result> {
         if (isChapterLockedBody(e.body)) {
           return { kind: "locked", lockBody: e.body };
         }
-        const alignmentLoss = unexpectedAlignmentLossReason(e.body);
-        if (alignmentLoss) {
-          return { kind: "fatal", reason: alignmentLoss };
-        }
-        // Lane-specific terminal errors: the verse's generation is stale or a
-        // replacement is active — retrying won't help; quarantine immediately.
-        const errCode = (e.body as { error?: string } | null)?.error;
-        if (errCode === "workspace_mismatch") {
-          // This tab's X-Workspace header (its own notion of the active org)
-          // no longer matches the workspace the server resolved the request
-          // against — a SIBLING tab switched orgs out from under it (see
-          // api.ts's request() and workspaces.ts's requireWorkspaceMatch).
-          // This is NOT a version conflict: don't surface a merge prompt,
-          // don't burn the retry-attempt cap (reason doesn't start with
-          // "transient"). The op still belongs to — and is valid against —
-          // the OTHER workspace's outbox database; leave it queued as-is. Once
-          // api.ts's reload lands the user back where their outbox agrees
-          // with the server, it drains normally.
-          return { kind: "retry", reason: "workspace_mismatch" };
-        }
-        // A row patch's expected_state no longer matches (#880): the note's
-        // approval changed since the edit was proposed. Resending (or the
-        // auto-heal a version_mismatch gets) cannot help, and no typing is
-        // held: only the assistant's Apply pins a state.
-        if (errCode === "state_mismatch") return { kind: "fatal", reason: errCode };
-        if (
-          errCode === "source_generation_mismatch" ||
-          errCode === "lane_replacement_required" ||
-          errCode === "lane_replacement_in_progress" ||
-          errCode === "scripture_text_read_only" ||
-          errCode === "scripture_fully_locked"
-        ) {
-          return { kind: "fatal", reason: errCode };
-        }
-        const body = e.body as { current?: unknown } | undefined;
-        return { kind: "conflict", current: body?.current };
+        // Every other 409 (version_mismatch, state_mismatch, lane refusals...):
+        // conflict409.ts, which the strip-types test runner can load (#883).
+        return resultFor409(e.body);
       }
       if (e.status === 401) {
         // Token missing/expired. Don't burn retries against a wall — pause
@@ -1155,6 +1110,12 @@ async function drainPass() {
             stored.conflictRetries = (stored.conflictRetries ?? 0) + 1;
             stored.conflictCurrent = undefined;
             stored.lastError = sortOrderOnly ? "sort_order_autoheal" : "nonconflict_autoheal";
+            // The server already holds this patch (this edit landed and its
+            // response was lost): the resend is a no-op, and the pin would
+            // only turn it into a state_mismatch refusal (#883 item 2).
+            if (stored.expectedState !== undefined && !healKeepsStatePin(stored.patch, result.current)) {
+              delete stored.expectedState;
+            }
           } else {
             stored.status = "conflict";
             stored.conflictCurrent = result.current;
@@ -1187,6 +1148,11 @@ async function drainPass() {
         }
       } else {
         await settleAfterDispatch((stored) => {
+          // A state_mismatch op is the assistant's proposed text, not typing,
+          // and a retry is refused the same way: drop it rather than park a
+          // failed save nobody can fix (#883 item 4). Listeners still hear
+          // the result, so the row is rebuilt from the server.
+          if (deletesOnFatal(result.reason)) return "delete";
           stored.status = "failed";
           stored.lastError = result.reason;
           if (
