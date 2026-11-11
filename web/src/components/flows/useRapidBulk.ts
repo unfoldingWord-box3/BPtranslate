@@ -506,6 +506,8 @@ export function useRapidBulk(a: RapidBulkArgs) {
               // the screen's outbox listener sets its status circle (item 1).
               skipped.stateChanged++;
               refetchNeeded = true;
+              // The open note's editor reloads too, as for a version skip (review A3).
+              if (e.id === a.currentId) openChanged = true;
             } else {
               void outbox.drop(op.id, { onlyIfStatus: "failed" }).catch(() => undefined);
               skipped.failed++;
