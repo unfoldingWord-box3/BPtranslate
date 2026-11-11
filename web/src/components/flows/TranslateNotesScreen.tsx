@@ -204,7 +204,7 @@ import { pipelineStore, getSessionKey, type PipelineJob } from "../../sync/pipel
 import { jobLocksChapterNotes, jobLocksNote, lockJobReleased } from "../../lib/chapterLock";
 import { redoOutcome } from "../../lib/applySkipped";
 import { useRapidBulk } from "./useRapidBulk";
-import { editsWithVersions, statusesAfterRefusal } from "./rapidAssistant";
+import { editsWithVersions, statusesAfterAssistantSave, statusesAfterRefusal } from "./rapidAssistant";
 import {
   api,
   ApiError,
@@ -1061,6 +1061,10 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
         const rowId = op.target.id;
         if (result.kind === "ok") {
           setChapterLock((prev) => (prev?.rowId === rowId ? null : prev));
+          // A saved assistant edit sets the note's circle from the saved row,
+          // also when it saved after Apply stopped waiting (#886 item 4).
+          const saved = { action: op.action, expectedState: op.expectedState, target: op.target };
+          setStatuses((prev) => statusesAfterAssistantSave(prev, saved, result.updated as TnRow | null, chapter));
           return;
         }
         if (result.kind === "locked") {

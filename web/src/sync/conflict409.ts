@@ -74,13 +74,12 @@ export function deletesOnFatal(reason: string): boolean {
 }
 
 /**
- * Whether an auto-healed resend keeps the op's expected_state pin (#883
- * item 2). It drops the pin only when the resend cannot write: every patched
- * field already holds the patch's value exactly (the server's no-op test is
- * strict equality, with no newline folding) and the note is not set aside (a
- * set-aside note skips that no-op). That is the case of this edit having
- * landed with its response lost: the server note is now 'edited', so the pin
- * would turn a saved edit into a refusal. Anything else keeps the pin.
+ * Whether the server row in a 409 already holds this patch, so a resend could
+ * not write (#883 item 2): false when every patched field already holds the
+ * patch's value exactly (the server's no-op test is strict equality, with no
+ * newline folding) and the note is not set aside (a set-aside note skips that
+ * no-op). Anything else is true: an auto-healed resend writes, and keeps the
+ * op's expected_state pin.
  */
 export function healKeepsStatePin(patch: Record<string, unknown>, current: unknown): boolean {
   if (!current || typeof current !== "object") return true;
@@ -89,6 +88,22 @@ export function healKeepsStatePin(patch: Record<string, unknown>, current: unkno
   const keys = Object.keys(patch);
   if (keys.length === 0) return true;
   return !keys.every((k) => row[k] === patch[k]);
+}
+
+/**
+ * Whether an auto-healed 409 settles a pinned (assistant) op as saved, using
+ * the 409's row as the saved row, instead of resending it (#886 item 1). True
+ * when the server already holds the patch (healKeepsStatePin is false): this
+ * edit landed and its response was lost. A resend there would have to drop the
+ * pin to avoid a refusal, and an unpinned resend would revive a note set aside,
+ * or overwrite a revert, made in the gap before it. Ops without a pin (typed
+ * edits) keep resending as before.
+ */
+export function healSettlesAsSaved(
+  op: { patch: Record<string, unknown>; expectedState?: string | null },
+  current: unknown,
+): boolean {
+  return op.expectedState !== undefined && !healKeepsStatePin(op.patch, current);
 }
 
 /**

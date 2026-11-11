@@ -20,7 +20,7 @@ import {
 } from "./api";
 import { backoffMs } from "./backoff";
 import { isSortOrderOnlyPatch, wouldAutoHeal } from "./rowConflict";
-import { deletesOnFatal, healKeepsStatePin, rearmOnKeepMine, resultFor409 } from "./conflict409.ts";
+import { deletesOnFatal, healSettlesAsSaved, rearmOnKeepMine, resultFor409 } from "./conflict409.ts";
 import { isLaneFrozen, laneFreezeReason } from "./laneFreeze";
 import {
   MAX_ATTEMPTS_SENTINEL,
@@ -148,8 +148,9 @@ export interface OutboxOp {
   restoredFromVersion?: number;
   // The translation_state the patch was proposed against (#880), sent as the
   // PATCH's expected_state; null pins "no state". Set only by the Rapid check
-  // assistant's Apply. Kept on the op so an auto-healed resend still carries it,
-  // unless that resend cannot write (healKeepsStatePin, #883 item 2).
+  // assistant's Apply. Kept on the op so an auto-healed resend still carries it.
+  // When the 409 shows the server already holds the patch, the op is settled
+  // as saved instead of resent (healSettlesAsSaved, #886 item 1).
   expectedState?: string | null;
   // The row's values for the patched fields at the moment we enqueued (the
   // version we branched from). On a 409 this lets us tell a spurious conflict
@@ -1081,6 +1082,10 @@ async function drainPass() {
     // dispatch below can tell a genuine terminal exit from one that got
     // walked back (upstream issue #570).
     let persisted = true;
+    // Set when a 409 shows the server already holds this op's patch and the
+    // op was settled as saved (#886 item 1): it is announced as a 200 with
+    // this row.
+    let savedRow: { row: unknown } | null = null;
     try {
       if (result.kind === "ok") {
         await settleAfterDispatch(() => "delete");
@@ -1094,29 +1099,34 @@ async function drainPass() {
         // row anyway. Drop the op — unless quarantine already claimed it.
         await settleAfterDispatch(() => "delete");
       } else if (result.kind === "conflict") {
+        const current = result.current;
+        let savedOnServer = false;
         const settled = await settleAfterDispatch((stored) => {
-          const serverVersion = (result.current as { version?: unknown } | null | undefined)
+          const serverVersion = (current as { version?: unknown } | null | undefined)
             ?.version;
           const sortOrderOnly =
             stored.target.kind === "row" &&
             stored.action === "patch" &&
             isSortOrderOnlyPatch(stored.patch);
           // wouldAutoHeal also checks that serverVersion is a number.
-          if (wouldAutoHeal(stored, result.current) && typeof serverVersion === "number") {
+          if (wouldAutoHeal(stored, current) && typeof serverVersion === "number") {
+            // The server already holds this assistant edit (it landed and
+            // its response was lost): settle it as saved and send nothing.
+            // A resend would have to drop the pin, and an unpinned resend
+            // would revive a note set aside, or overwrite a revert, in the
+            // gap (#886 item 1; #883 item 2 dropped the pin here).
+            if (healSettlesAsSaved(stored, current)) {
+              savedOnServer = true;
+              return "delete";
+            }
             stored.status = "pending";
             stored.expectedVersion = serverVersion;
             stored.conflictRetries = (stored.conflictRetries ?? 0) + 1;
             stored.conflictCurrent = undefined;
             stored.lastError = sortOrderOnly ? "sort_order_autoheal" : "nonconflict_autoheal";
-            // The server already holds this patch (this edit landed and its
-            // response was lost): the resend is a no-op, and the pin would
-            // only turn it into a state_mismatch refusal (#883 item 2).
-            if (stored.expectedState !== undefined && !healKeepsStatePin(stored.patch, result.current)) {
-              delete stored.expectedState;
-            }
           } else {
             stored.status = "conflict";
-            stored.conflictCurrent = result.current;
+            stored.conflictCurrent = current;
             stored.lastError = "version_mismatch";
             pinnedBlocked.add(targetKey(stored.target));
           }
@@ -1124,6 +1134,16 @@ async function drainPass() {
         });
         if (settled === "quarantined") {
           /* keep quarantine */
+        } else if (settled === "deleted" && savedOnServer) {
+          // Announced as the 200 the lost response would have been: the
+          // result listeners and waitForOp count it saved, and set the row
+          // (and its status circle) from the server's row (#883 review A1).
+          savedRow = { row: current };
+          try {
+            await threadVersionToSiblings(next, current);
+          } catch {
+            /* siblings keep their stale version and resolve via the 409 flow */
+          }
         }
       } else if (result.kind === "retry") {
         const settled = await settleAfterDispatch((stored) => {
@@ -1185,9 +1205,10 @@ async function drainPass() {
       }
     }
 
-    if (shouldAnnounceResult(result.kind, persisted)) {
+    const announced: Result = savedRow ? { kind: "ok", updated: savedRow.row } : result;
+    if (shouldAnnounceResult(announced.kind, persisted)) {
       let queued: OutboxOp[] | null | undefined;
-      if (result.kind === "ok" && next.target.kind === "row") {
+      if (announced.kind === "ok" && next.target.kind === "row") {
         try {
           // Merged in the same microtask the read resolves in, with no await
           // between here and the listeners. An op whose write was created
@@ -1200,7 +1221,7 @@ async function drainPass() {
           queued = null;
         }
       }
-      for (const l of resultListeners) l(next, result, queued);
+      for (const l of resultListeners) l(next, announced, queued);
     }
     void notify();
   }
