@@ -130,8 +130,9 @@ export function stillAsProposed(
  * state_mismatch (#883 item 1). The table is seeded once per chapter, so a
  * refetch alone leaves the circle showing what this tab saw before: set it
  * from `current`, the row in the 409 body. Approved shows Approved, set aside
- * shows Not needed, anything else clears an Approved mark (as un-approve's
- * 409 does). Returns `prev` itself when nothing changes.
+ * shows Not needed, anything else clears the mark (as un-approve's 409 does),
+ * a Not needed mark included: the note is live on the server (#886 item 4).
+ * Returns `prev` itself when nothing changes.
  */
 export function statusesAfterRefusal(
   prev: Record<string, "approved" | "skipped">,
@@ -141,7 +142,7 @@ export function statusesAfterRefusal(
   if (!current || typeof current !== "object") return prev;
   const want = current.trashed_at != null ? "skipped" : current.translation_state === "validated" ? "approved" : undefined;
   if (want !== undefined) return prev[id] === want ? prev : { ...prev, [id]: want };
-  if (prev[id] !== "approved") return prev;
+  if (prev[id] === undefined) return prev;
   const next = { ...prev };
   delete next[id];
   return next;
@@ -164,6 +165,28 @@ export function statusesAfterEdit(
   const next = { ...prev };
   delete next[id];
   return next;
+}
+
+/**
+ * The Rapid status table after the outbox saved an assistant edit, heard by
+ * the screen's outbox listener (#886 item 4). That covers a save that lands
+ * after Apply stopped waiting, which Apply itself never sees. Only an
+ * assistant edit (a patch carrying an expected_state pin) whose saved row is
+ * usable and in this chapter changes the table, through statusesAfterEdit;
+ * typed saves keep their own handling. Returns `prev` itself otherwise.
+ */
+export function statusesAfterAssistantSave(
+  prev: Record<string, "approved" | "skipped">,
+  op: { action: string; expectedState?: string | null; target: { id: string } },
+  updated:
+    | { id?: unknown; version?: unknown; chapter?: unknown; translation_state?: string | null; trashed_at?: number | null }
+    | null
+    | undefined,
+  chapter: number,
+): Record<string, "approved" | "skipped"> {
+  if (op.action !== "patch" || op.expectedState === undefined) return prev;
+  if (!updated || updated.id !== op.target.id || typeof updated.version !== "number" || updated.chapter !== chapter) return prev;
+  return statusesAfterEdit(prev, op.target.id, updated);
 }
 
 /**

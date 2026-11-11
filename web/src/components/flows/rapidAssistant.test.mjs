@@ -169,3 +169,33 @@ test("statusesAfterEdit: a saved assistant edit sets the circle from the row the
   const none = {};
   assert.equal(f(none, "n1", null), none);
 });
+
+test("a Not needed mark clears when the server row is neither approved nor set aside (#886 item 4)", () => {
+  // A refusal whose row is live and unapproved.
+  assert.deepEqual(rapid.statusesAfterRefusal({ n1: "skipped", other: "skipped" }, "n1", { translation_state: "edited", trashed_at: null }), { other: "skipped" });
+  // A saved assistant edit revived the note (a content write clears trashed_at).
+  assert.deepEqual(rapid.statusesAfterEdit({ n1: "skipped" }, "n1", { id: "n1", version: 6, translation_state: "edited", trashed_at: null }), {});
+  // Still set aside: the mark stays, as the same object.
+  const kept = { n1: "skipped" };
+  assert.equal(rapid.statusesAfterEdit(kept, "n1", { id: "n1", version: 6, translation_state: "edited", trashed_at: 1700000000 }), kept);
+});
+
+test("statusesAfterAssistantSave: a late save of an assistant edit sets the mark from its row (#886 item 4)", () => {
+  const f = rapid.statusesAfterAssistantSave;
+  assert.equal(typeof f, "function");
+  const op = { action: "patch", expectedState: "ai_draft", target: { id: "n1" } };
+  const live = { id: "n1", version: 6, chapter: 2, translation_state: "edited", trashed_at: null };
+  // Apply stopped waiting, the user set the note aside, then the edit landed and revived it.
+  assert.deepEqual(f({ n1: "skipped", other: "approved" }, op, live, 2), { other: "approved" });
+  assert.deepEqual(f({ n1: "approved" }, op, live, 2), {});
+  // A colleague approved it before the lost response was settled (#883 review A1).
+  assert.deepEqual(f({}, op, { ...live, translation_state: "validated" }, 2), { n1: "approved" });
+  // Left alone: a typed save (no pin), a delete, another chapter, or no usable row.
+  const prev = { n1: "skipped" };
+  assert.equal(f(prev, { action: "patch", target: { id: "n1" } }, live, 2), prev);
+  assert.equal(f(prev, { ...op, action: "delete" }, live, 2), prev);
+  assert.equal(f(prev, op, live, 3), prev);
+  assert.equal(f(prev, op, { ...live, id: "other" }, 2), prev);
+  assert.equal(f(prev, op, { ...live, version: undefined }, 2), prev);
+  assert.equal(f(prev, op, null, 2), prev);
+});
