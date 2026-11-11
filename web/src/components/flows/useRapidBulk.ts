@@ -34,7 +34,7 @@ import { isApprovableRow } from "../../lib/reviewApproval";
 import { isAiProviderNotConfigured } from "../../lib/aiProviderErrors";
 import { redoOutcome } from "../../lib/applySkipped";
 import { escapeNewlines, waitForOp } from "./translateShared";
-import { snapshotMismatch, stillAsProposed, type RapidSnapshot } from "./rapidAssistant";
+import { snapshotMismatch, statusesAfterEdit, stillAsProposed, type RapidSnapshot } from "./rapidAssistant";
 
 type CardStatus = "approved" | "skipped";
 
@@ -482,13 +482,10 @@ export function useRapidBulk(a: RapidBulkArgs) {
           } else if (res.kind === "ok") {
             const u = res.updated as TnRow | null;
             a.applyLocalRowReplacement("tn", u && u.id === e.id && typeof u.version === "number" ? u : { ...r, ...patch });
-            // Like a typed save: an edit takes the note off Approved.
-            a.setStatuses((p) => {
-              if (p[e.id] === undefined) return p;
-              const next = { ...p };
-              delete next[e.id];
-              return next;
-            });
+            // Like a typed save, an edit takes the note off Approved, unless
+            // the returned row says otherwise: a no-op resend after a lost
+            // response returns the note as it is now (#883 review A1).
+            a.setStatuses((p) => statusesAfterEdit(p, e.id, u));
             saved++;
             if (e.id === a.currentId) openChanged = true;
           } else {

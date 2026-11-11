@@ -148,6 +148,25 @@ export function statusesAfterRefusal(
 }
 
 /**
+ * The Rapid status table after an assistant edit saved (#883 review A1). The
+ * server's row decides when the response carries it: usually the edit demoted
+ * the note to 'edited', but a resend whose first response was lost is a no-op
+ * that returns the note as it is now, maybe approved by a colleague since.
+ * Without a usable row, the edit takes the note off its mark, like a typed save.
+ */
+export function statusesAfterEdit(
+  prev: Record<string, "approved" | "skipped">,
+  id: string,
+  updated: { id?: unknown; version?: unknown; translation_state?: string | null; trashed_at?: number | null } | null | undefined,
+): Record<string, "approved" | "skipped"> {
+  if (updated && updated.id === id && typeof updated.version === "number") return statusesAfterRefusal(prev, id, updated);
+  if (prev[id] === undefined) return prev;
+  const next = { ...prev };
+  delete next[id];
+  return next;
+}
+
+/**
  * Attach the captured version to each proposed edit. An edit for a note that
  * was not in the snapshot cannot be checked for changes, so it is not applied.
  */
