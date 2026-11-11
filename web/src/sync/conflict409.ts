@@ -90,3 +90,21 @@ export function healKeepsStatePin(patch: Record<string, unknown>, current: unkno
   if (keys.length === 0) return true;
   return !keys.every((k) => row[k] === patch[k]);
 }
+
+/**
+ * One op of the row a user resolved with Keep mine (outbox.resolveConflict),
+ * re-armed at the server's version. The resolved op also loses its
+ * expected_state pin (#883 review A2): the user chose to write over the note
+ * as it is now, and the pin would only get the resend refused (state_mismatch)
+ * and deleted, so the choice would vanish. The row's other waiting saves keep
+ * theirs. Mutates and returns `o`.
+ */
+export function rearmOnKeepMine<
+  T extends { id: string; status: string; expectedVersion: number; conflictCurrent?: unknown; expectedState?: string | null },
+>(o: T, resolvedId: string, version: number): T {
+  o.expectedVersion = version;
+  o.status = "pending";
+  o.conflictCurrent = undefined;
+  if (o.id === resolvedId) delete o.expectedState;
+  return o;
+}

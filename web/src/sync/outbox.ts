@@ -20,7 +20,7 @@ import {
 } from "./api";
 import { backoffMs } from "./backoff";
 import { isSortOrderOnlyPatch, wouldAutoHeal } from "./rowConflict";
-import { deletesOnFatal, healKeepsStatePin, resultFor409 } from "./conflict409.ts";
+import { deletesOnFatal, healKeepsStatePin, rearmOnKeepMine, resultFor409 } from "./conflict409.ts";
 import { isLaneFrozen, laneFreezeReason } from "./laneFreeze";
 import {
   MAX_ATTEMPTS_SENTINEL,
@@ -559,10 +559,8 @@ export const outbox = {
     for (const o of all) {
       if (targetKey(o.target) !== key) continue;
       if (o.status === "conflict" || o.status === "pending") {
-        o.expectedVersion = newExpectedVersion;
-        o.status = "pending";
-        o.conflictCurrent = undefined;
-        await tx.store.put(o);
+        // The resolved op also drops its expected_state pin (#883 review A2).
+        await tx.store.put(rearmOnKeepMine(o, opId, newExpectedVersion));
       }
     }
     await tx.done;
