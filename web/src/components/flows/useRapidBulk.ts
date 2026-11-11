@@ -406,7 +406,8 @@ export function useRapidBulk(a: RapidBulkArgs) {
    * (the assistant's Apply), a note whose approval state changed since the
    * proposal is skipped too: approving does not bump the version, so the
    * edit would otherwise move a note approved since then back to Edited
-   * (#878).
+   * (#878). The edit also carries the snapshot's state to the server, which
+   * refuses it when the note has moved off it there (#880).
    */
   async function runEdits(edits: AssistantSelection["edits"], snap?: RapidSnapshot): Promise<RunOut> {
     if (edits.length === 0) return { left: [], count: 0, skipped: emptySkips(), stopped: false };
@@ -462,8 +463,15 @@ export function useRapidBulk(a: RapidBulkArgs) {
           continue;
         }
         const patch = { note: escapeNewlines(e.note) };
+        // The server re-checks the state (#880): an approval this tab has not
+        // seen yet, or one landing after the check above, refuses the edit.
+        const expectedState = snap?.states.has(e.id) ? (snap.states.get(e.id) ?? null) : undefined;
         try {
-          const op = await outbox.enqueueRow("tn", e.id, r.version, patch, { book, baseline: { note: r.note } });
+          const op = await outbox.enqueueRow("tn", e.id, r.version, patch, {
+            book,
+            baseline: { note: r.note },
+            ...(expectedState !== undefined ? { expectedState } : {}),
+          });
           const res = await waitForOp(op.id);
           if (res === null) {
             // Still queued (or the lane is read-only): not confirmed, so not
@@ -493,6 +501,12 @@ export function useRapidBulk(a: RapidBulkArgs) {
               if (e.id === a.currentId) openChanged = true;
             } else if (res.kind === "locked") {
               skipped.locked++;
+            } else if (res.kind === "fatal" && res.reason === "state_mismatch") {
+              // Approval changed on the server since the proposal, unseen by
+              // this tab: count it as such and reload so the note shows it.
+              void outbox.drop(op.id, { onlyIfStatus: "failed" }).catch(() => undefined);
+              skipped.stateChanged++;
+              refetchNeeded = true;
             } else {
               void outbox.drop(op.id, { onlyIfStatus: "failed" }).catch(() => undefined);
               skipped.failed++;

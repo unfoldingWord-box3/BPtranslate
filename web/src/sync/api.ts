@@ -2235,16 +2235,19 @@ export const api = {
     id: string,
     expectedVersion: number,
     patch: Record<string, unknown>,
-    opts: { restoredFromVersion?: number | null; book: string; queuedAt?: number },
+    // expectedState (#880): the translation_state the edit was proposed
+    // against; the server refuses the edit (409 state_mismatch) if the row has
+    // moved off it. Undefined sends no pin (every typed edit).
+    opts: { restoredFromVersion?: number | null; expectedState?: string | null; book: string; queuedAt?: number },
   ) =>
     request<T>(`/api/rows/${kind}/${encodeURIComponent(id)}?book=${encodeURIComponent(opts.book)}`, {
       method: "PATCH",
       headers: { "If-Match": String(expectedVersion), ...rowWriteDiagnosticHeaders(opts.queuedAt) },
-      body: JSON.stringify(
-        typeof opts.restoredFromVersion === "number"
-          ? { ...patch, restored_from_version: opts.restoredFromVersion }
-          : patch,
-      ),
+      body: JSON.stringify({
+        ...patch,
+        ...(typeof opts.restoredFromVersion === "number" ? { restored_from_version: opts.restoredFromVersion } : {}),
+        ...(opts.expectedState !== undefined ? { expected_state: opts.expectedState } : {}),
+      }),
     }),
 
   deleteRow: (kind: RowKind, id: string, expectedVersion: number, book: string, queuedAt?: number) =>
