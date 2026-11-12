@@ -29,6 +29,13 @@ test("a done job that skipped other notes: new draft", () => {
   assert.equal(redoOutcome({ state: "done" }, "a1b2"), "drafted");
 });
 
+test("a done job that dropped this note's draft as the English: english (#794)", () => {
+  const report = JSON.stringify({ tnSameAsEnglish: 1, tnSameAsEnglishIds: ["a1b2"] });
+  assert.equal(redoOutcome({ state: "done", apply_skipped_json: report }, "a1b2"), "english");
+  assert.equal(redoOutcome({ state: "done", apply_skipped_json: report }, "c3d4"), "drafted");
+  assert.deepEqual(skippedTnRowIds({ apply_skipped_json: report }), [], "an English echo is not a kept edit");
+});
+
 test("a job that did not finish is a failure whatever it skipped", () => {
   assert.equal(redoOutcome({ state: "failed", apply_skipped_json: skipped }, "a1b2"), "failed");
   assert.equal(redoOutcome({ state: "cancelled" }, "a1b2"), "failed");

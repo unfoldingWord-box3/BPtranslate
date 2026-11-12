@@ -1682,7 +1682,13 @@ export interface PipelineStatusResponse {
    */
   queuePosition?: number;
   queueAhead?: number;
-  /** Notes (#601), questions (#725) or tW/tA articles (#734, by path) a translate apply left alone because a person changed them after the job was queued. */
+  /**
+   * What a translate apply left alone: notes (#601), questions (#725) or tW/tA
+   * articles (#734, by path) a person changed after the job was queued;
+   * approved notes and questions a whole-chapter run kept (#794); note drafts
+   * not applied because they were the English source note, and why that check
+   * could not run when it could not (#794).
+   */
   applySkipped?: {
     tnTouched?: number;
     tnTouchedIds?: string[];
@@ -1690,6 +1696,13 @@ export interface PipelineStatusResponse {
     tqTouchedIds?: string[];
     articleTouched?: number;
     articleTouchedPaths?: string[];
+    tnApproved?: number;
+    tnApprovedIds?: string[];
+    tqApproved?: number;
+    tqApprovedIds?: string[];
+    tnSameAsEnglish?: number;
+    tnSameAsEnglishIds?: string[];
+    tnEnglishCheckNotRun?: string;
   };
 }
 
