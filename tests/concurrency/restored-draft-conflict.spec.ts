@@ -421,3 +421,154 @@ test("tN card: a reorder of the note landing does not let a restored draft save 
   await probe.dispose();
   await context.close();
 });
+
+// Verses from the end of the chapter, clear of the ones the cases above take
+// from the front: the last pair verse for the first case below, the one
+// before it for the second.
+async function pairFromEnd(probe: Parameters<typeof fetchChapter>[0], token: string, fromEnd: number) {
+  const chapter = await fetchChapter(probe, token, "ZEC", CHAPTER);
+  const byVerse = new Map<number, typeof chapter.tn>();
+  for (const r of chapter.tn) byVerse.set(r.verse, [...(byVerse.get(r.verse) ?? []), r]);
+  const pairs = [...byVerse.entries()].filter(([v, rows]) => v > 1 && rows.length >= 2);
+  expect(pairs.length, `expected more pair verses on ZEC ${CHAPTER}`).toBeGreaterThan(variants.length + 3 + fromEnd);
+  return pairs[pairs.length - 1 - fromEnd][1];
+}
+
+test("tN card: after the card's own save lands and no text is left unsaved, a later edit saves at the current version", async ({
+  browser,
+}) => {
+  // Review round 3, C-F1. The card's own Save lands and nothing unsaved is
+  // left, so the copy its text was typed against must be let go. Another
+  // person then saves the note, the card shows their text, and the translator
+  // edits that: the Save goes out at the current version and lands. Holding
+  // on to the copy would send it at the old version and raise a false
+  // conflict against a note the translator was looking at.
+  test.setTimeout(90_000);
+  const probe = await apiRequest.newContext({ baseURL: BASE });
+  const other = await mintToken(probe, "other-754-released");
+  const [tn, sibling] = await pairFromEnd(probe, other.token, 0);
+  const { context } = await newUserContext(browser, "restored-draft-754-released");
+  const page = await context.newPage();
+
+  const sent: Array<{ ifMatch: string | undefined; status: number }> = [];
+  await context.route(`**/api/rows/tn/${tn.id}**`, async (route, request) => {
+    if (request.method() !== "PATCH") return route.continue();
+    const response = await route.fetch();
+    sent.push({ ifMatch: request.headers()["if-match"], status: response.status() });
+    return route.fulfill({ response });
+  });
+
+  await gotoVerse(page, "ZEC", CHAPTER, tn.verse);
+  const mine = `OWN SAVE 754 RELEASED ${Date.now()}`;
+  await noteTextarea(page, tn.id).fill(mine);
+  await saveNote(page, tn.id);
+  await expect.poll(() => sent.length, { message: "the own save should land" }).toBe(1);
+  expect(sent[0]).toEqual({ ifMatch: String(tn.version), status: 200 });
+  // Leave the card (it stays mounted) so it takes the next server copy.
+  await noteTextarea(page, sibling.id).click();
+  await page.waitForTimeout(1000);
+
+  const otherText = `OTHER 754 RELEASED ${Date.now()}`;
+  const res = await authedRequest(probe, other.token, other.csrf).patch(
+    `/api/rows/tn/${tn.id}?book=ZEC`,
+    { note: otherText },
+    tn.version + 1,
+  );
+  expect(res.status(), `second user's PATCH failed: ${await res.text()}`).toBe(200);
+  await expect(noteTextarea(page, tn.id)).toHaveValue(otherText, { timeout: 10_000 });
+  await page.waitForTimeout(500);
+
+  const edited = `${otherText} EDITED`;
+  await noteTextarea(page, tn.id).fill(edited);
+  await saveNote(page, tn.id);
+  await expect.poll(() => sent.length, { message: "the edit's Save should reach the server" }).toBe(2);
+  console.log("[#754 released]", JSON.stringify({ sent }));
+  expect(sent[1], "the edit goes out at the current version and lands").toEqual({
+    ifMatch: String(tn.version + 2),
+    status: 200,
+  });
+  await expect(page.getByText(/^1 conflict$/)).toHaveCount(0);
+  const after = (await fetchChapter(probe, other.token, "ZEC", CHAPTER)).tn.find((r) => r.id === tn.id)!;
+  expect(after.note).toBe(edited);
+
+  await probe.dispose();
+  await context.close();
+});
+
+test("tN card: a restored draft's Save queued behind a reorder still goes out at the draft's version", async ({
+  browser,
+}) => {
+  // Review round 3, C-F2. The restored draft's Save is queued while an
+  // earlier write of the same row (a reorder) is still in flight. When the
+  // reorder lands, the outbox must not move the Save up to the landed version:
+  // that version carries the other person's note, and the Save would replace
+  // it with a 200.
+  test.setTimeout(90_000);
+  const probe = await apiRequest.newContext({ baseURL: BASE });
+  const other = await mintToken(probe, "other-754-queued");
+  const [tn] = await pairFromEnd(probe, other.token, 1);
+  const key = `row:tn:ZEC:${tn.id}`;
+  const { context } = await newUserContext(browser, "restored-draft-754-queued");
+  const page = await context.newPage();
+
+  let holdReorder = false;
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  const sent: Array<{ ifMatch: string | undefined; body: Record<string, unknown>; status: number }> = [];
+  await context.route(`**/api/rows/tn/${tn.id}**`, async (route, request) => {
+    if (request.method() !== "PATCH") return route.continue();
+    const body = (request.postDataJSON() ?? {}) as Record<string, unknown>;
+    if (holdReorder && "sort_order" in body) await held;
+    const response = await route.fetch();
+    sent.push({ ifMatch: request.headers()["if-match"], body, status: response.status() });
+    return route.fulfill({ response });
+  });
+
+  await gotoVerse(page, "ZEC", CHAPTER, tn.verse);
+  const typed = `QUEUED 754 ${Date.now()}`;
+  await noteTextarea(page, tn.id).fill(typed);
+  await expect
+    .poll(async () => (await readDraft(page, key))?.payload?.patch ?? null)
+    .toEqual(expect.objectContaining({ note: typed }));
+  await gotoVerse(page, "ZEC", AWAY_CHAPTER, 1);
+
+  const otherText = `OTHER 754 QUEUED ${Date.now()}`;
+  const res = await authedRequest(probe, other.token, other.csrf).patch(
+    `/api/rows/tn/${tn.id}?book=ZEC`,
+    { note: otherText },
+    tn.version,
+  );
+  expect(res.status()).toBe(200);
+
+  await page.goto(`/#/ZEC/${CHAPTER}/${tn.verse}`);
+  await page.reload();
+  await page.locator("[data-note-id]").first().waitFor({ timeout: 10_000 });
+  await expect(noteTextarea(page, tn.id)).toHaveValue(typed);
+  await page.waitForTimeout(500);
+
+  // Reorder the note and hold its PATCH in flight, then Save the draft.
+  holdReorder = true;
+  const card = page.locator(`[data-note-id="${tn.id}"]`);
+  const down = card.locator('[data-reorder-arrow="down"]');
+  if (await down.isEnabled()) await down.click();
+  else await card.locator('[data-reorder-arrow="up"]').click();
+  await page.waitForTimeout(500);
+  await saveNote(page, tn.id);
+  await page.waitForTimeout(500);
+  release();
+
+  await expect.poll(() => sent.some((s) => "note" in s.body), { message: "the Save should reach the server" }).toBe(true);
+  await page.waitForTimeout(1000);
+  console.log("[#754 queued]", JSON.stringify({ sent: sent.map((s) => ({ ...s, body: Object.keys(s.body) })) }));
+  expect(sent.find((s) => "sort_order" in s.body)?.status, "the reorder should land").toBe(200);
+  const save = sent.find((s) => "note" in s.body)!;
+  expect(save.ifMatch, "the Save keeps the version the draft was typed against").toBe(String(tn.version));
+  expect(save.status).toBe(409);
+  await expect(page.getByText(/^1 conflict$/).first()).toBeVisible({ timeout: 10_000 });
+  expect(sent.filter((s) => "note" in s.body).map((s) => s.status)).not.toContain(200);
+  const after = (await fetchChapter(probe, other.token, "ZEC", CHAPTER)).tn.find((r) => r.id === tn.id)!;
+  expect(after.note, "the other person's note must not be overwritten").toBe(otherText);
+
+  await probe.dispose();
+  await context.close();
+});
