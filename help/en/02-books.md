@@ -3,7 +3,7 @@ id: books
 title: Books and the book package
 routes: [books, package]
 roles: [editor, admin, viewer]
-keywords: [books, book list, import, bring in, re-pull, continue, package, hub, chapters, publish, lifecycle, progress, approved]
+keywords: [books, book list, import, bring in, re-pull, continue, package, hub, chapters, publish, lifecycle, progress, approved, ai, ai run, door43]
 screenshots:
   - books-1 #/books/OBA
   - books-2 #/package/OBA
@@ -41,5 +41,7 @@ After **Open**, you see the package for the book. The back arrow returns to **Bo
 - **Book lifecycle** shows progress: **Notes approved**, **Questions approved** and **Verses done**. Admins also see **Publish this book** and **Latest publish results**. Publishing sends approved content to Door43. Rows still waiting for review are held back.
 - **Chapter by chapter**: **Scripture**, **Notes**, **Questions** and **Alignment**. Select a row to open its chapter list, then choose a chapter. A row with nothing in it (for example no notes) is greyed out.
 - **Whole book**: **Verse view** and **Words & Articles**.
+
+Editors and admins also have an icon in the package's top bar. In a translation project it is a sparkle icon, **Start an AI run**, with **Translate chapter**, **Translate questions** and **Import from Door43** (admins also see **Pull Aquifer drafts** and **Re-source notes from English**). In a source project it is a download icon, **Import from Door43**. On a phone it is the first item in your account menu instead. The Scripture, Notes and Questions screens have the same icon; [Translating scripture](#help:scripture) explains what each item does.
 
 Related: [Scripture](#help:scripture), [Notes](#help:notes), [Questions](#help:questions), [Alignment](#help:alignment), [Verse view](#help:verse-view), [Words and articles](#help:words).

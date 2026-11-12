@@ -20,8 +20,10 @@ import { orgRoutes } from "./orgRoutes";
 import { adminUsers } from "./adminUserRoutes";
 import { articles } from "./articles";
 import { translationMemory } from "./translationMemory";
+import { suggestionInbox } from "./suggestionInbox";
 import { aiProvider } from "./aiProvider";
 import { helpRoutes } from "./help/helpRoutes";
+import { assistantRoutes } from "./assistant/assistantRoutes";
 import { l10n } from "./l10n";
 import { books } from "./bookImport";
 import { populateReferencedArticles } from "./articlePopulate";
@@ -30,12 +32,13 @@ import { syncTemplates } from "./templateSync";
 import { attachAuth, chatConfirmMac, chatWriteEnv, requireAuth, requireCsrf, mintDevToken, startDcsAuth, callbackDcsAuth, authMe, authLogout, refreshToken, updateLastLocation, currentUserId } from "./auth";
 import { workspaceRoutes } from "./workspaceRoutes";
 import { handleMcp, isMcpPath } from "./mcp";
+import { adminSender } from "./mcpTools";
 import { chatLinkRoutes } from "./chatLinkRoutes";
 import { chatIsAdmin, chatRoleFor, claimCode, lookupLink, revokeLink, type ChatLink } from "./chatLinks";
 import { readPackageRefs } from "./packageRefs";
 import { readSourceNotes } from "./sourceNotes";
 import { blockViewerWrites } from "./viewerGuard";
-import { sweepContextExportQueue } from "./contextExportQueue";
+import { requestDailyContextExport, sweepContextExportQueue } from "./contextExportQueue";
 import { listWorkspaces, resolveWorkspaceFresh, workspaceEnv, parseWorkspaceCookie, requireWorkspaceMatch, primeWorkspaces } from "./workspaces";
 
 export interface Env {
@@ -57,7 +60,7 @@ export interface Env {
   ALLOWED_ORIGINS?: string;
   DEV_AUTH_ENABLED?: string;
   // "true" only on deployments that register the nightly export cron (prod).
-  // Absent/other on the dev worker (crons = []) — the UI uses this to show the
+  // Absent/other on the dev worker (no nightly export cron) — the UI uses this to show the
   // 05:30 schedule vs. a manual-exports notice (#240).
   NIGHTLY_EXPORTS_ENABLED?: string;
   DCS_CLIENT_ID?: string;
@@ -96,6 +99,8 @@ export interface Env {
   // Daily per-user spend cap in USD for the help assistant (api/src/help).
   // Missing or invalid falls back to "2".
   HELP_CHAT_DAILY_CAP_USD?: string;
+  // Daily per-user spend cap in USD for the editing assistant (api/src/assistant). Default 7.
+  ASSISTANT_DAILY_CAP_USD?: string;
   // Override the bot URL (defaults to https://uw-bt-bot.fly.dev/api/tn-quick
   // when unset). Useful for staging / local bot dev.
   TN_QUICK_URL?: string;
@@ -164,13 +169,17 @@ export interface Env {
   DB_POOL1?: D1Database;
 }
 
-// Cron patterns must match the [env.production.triggers] crons list in
-// wrangler.toml (the default env registers no crons — see the note there).
+// Cron patterns must match the crons lists in wrangler.toml: production
+// registers EXPORT_CRON and POLL_CRON, the default env only CONTEXT_CRON.
 // There's no runtime way to assert they line up (wrangler doesn't expose
 // triggers to the Worker), but constants in code give grep something to find
 // when the schedule changes.
 const EXPORT_CRON = "30 5 * * *";
 const POLL_CRON = "*/5 * * * *";
+// Daily context-pack export (#793). Registered on the DEFAULT env only (the
+// live dev worker): production's EXPORT_CRON nightly export already renders the
+// context pack, so registering this there too would export it twice a night.
+const CONTEXT_CRON = "15 4 * * *";
 // Dormant: not yet registered in wrangler.toml [env.production.triggers].
 // Branch below is unreachable until the cron entry is added there.
 // Scheduled for 08:00 UTC — 2 hours after EXPORT_CRON so DCS-side merge of
@@ -326,8 +335,10 @@ app.route("/api/admin/users", adminUsers);
 app.route("/api/articles", articles);
 app.route("/api/templates", templates);
 app.route("/api/translation-memory", translationMemory);
+app.route("/api/suggestion-inbox", suggestionInbox);
 app.route("/api/ai-provider", aiProvider);
 app.route("/api/help", helpRoutes);
+app.route("/api/assistant", assistantRoutes);
 app.route("/api/l10n", l10n);
 app.route("/api/chat-links", chatLinkRoutes);
 
@@ -502,12 +513,19 @@ async function runScheduledTick(controller: ScheduledController, env: Env, _ctx:
       // don't have a real policy yet, but the table grows without bound
       // otherwise (every keystroke that lands a PATCH writes a row). Gated
       // on minute-of-hour so it fires ~once/hour instead of every 5 min.
+      // Translation-preferences history (kind 'prefs', #786) is kept: one
+      // entry per save, rare, and the only record of who changed the
+      // instructions every AI draft is given.
       const minuteOfHour = Math.floor(Date.now() / 60_000) % 60;
       if (minuteOfHour < 5) {
         await env.DB.prepare(
-          `DELETE FROM edit_log WHERE created_at < unixepoch() - (180 * 86400)`,
+          `DELETE FROM edit_log WHERE created_at < unixepoch() - (180 * 86400) AND kind <> 'prefs'`,
         ).run();
       }
+      return;
+    }
+    if (controller.cron === CONTEXT_CRON) {
+      await requestDailyContextExport(env);
       return;
     }
     if (controller.cron === REIMPORT_CRON) {
@@ -554,6 +572,22 @@ export default {
           role: await chatRoleFor(wsEnv, link.username),
           linkId: link.linkId,
         };
+        // Writes run as the linked user: the principal rides a per-call env
+        // clone (chatWriteEnv), never the env the reads use.
+        // No body means no body and no Content-Type: a chat read as the
+        // linked user (the template routes are editor-only).
+        const sendAs = async (p: typeof principal, method: string, path: string, body?: unknown, ifMatch?: number) => {
+          const headers: Record<string, string> = {};
+          if (body !== undefined) headers["Content-Type"] = "application/json";
+          if (ifMatch !== undefined) headers["If-Match"] = String(ifMatch);
+          const req = new Request(new URL(path, request.url), {
+            method,
+            headers,
+            ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+          });
+          const res = await app.fetch(req, chatWriteEnv(wsEnv, p), ctx);
+          return { status: res.status, body: await res.json().catch(() => null) };
+        };
         return {
           workspace: { slug: ws.slug, label: ws.label, org: ws.org },
           principal,
@@ -561,22 +595,12 @@ export default {
             const res = await app.fetch(new Request(new URL(path, request.url)), wsEnv, ctx);
             return { status: res.status, body: await res.json().catch(() => null) };
           },
-          // Writes run as the linked user: the principal rides a per-call env
-          // clone (chatWriteEnv), never the env the reads use.
-          // No body means no body and no Content-Type: a chat read as the
-          // linked user (the template routes are editor-only).
-          send: async (method: string, path: string, body?: unknown, ifMatch?: number) => {
-            const headers: Record<string, string> = {};
-            if (body !== undefined) headers["Content-Type"] = "application/json";
-            if (ifMatch !== undefined) headers["If-Match"] = String(ifMatch);
-            const req = new Request(new URL(path, request.url), {
-              method,
-              headers,
-              ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-            });
-            const res = await app.fetch(req, chatWriteEnv(wsEnv, principal), ctx);
-            return { status: res.status, body: await res.json().catch(() => null) };
-          },
+          send: (method: string, path: string, body?: unknown, ifMatch?: number) => sendAs(principal, method, path, body, ifMatch),
+          // The one exception to the editor cap (mcpTools.ts adminSender).
+          sendAsAdmin: adminSender(
+            () => chatIsAdmin(wsEnv, link.username),
+            (method, path, body, ifMatch) => sendAs({ ...principal, role: "admin" }, method, path, body, ifMatch),
+          ),
           // Read-only D1 exception to the route-handler rule; see packageRefs.ts.
           packageRefs: (book: string) => readPackageRefs(wsEnv, book),
           sourceNotes: (book: string, chapter: number) => readSourceNotes(wsEnv, book, chapter),

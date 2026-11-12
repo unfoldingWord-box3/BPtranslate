@@ -8,12 +8,12 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { Env } from "./index";
 import type { ArticleUnit } from "./types";
-import { currentUserId, requireEditor } from "./auth";
+import { currentUserId, editSource, requireEditor } from "./auth.ts";
 import {
   populateReferencedArticles,
   populateSingleArticle,
   refreshFromSource,
-} from "./articlePopulate";
+} from "./articlePopulate.ts";
 
 export const articles = new Hono<{ Bindings: Env; Variables: { userId?: number } }>();
 
@@ -21,7 +21,8 @@ const RESOURCES = new Set(["tw", "ta"]);
 const isResource = (r: string): r is "tw" | "ta" => RESOURCES.has(r);
 
 // latest_source subquery (mirrors chapters.ts): the article's most recent
-// edit_log source — 'ai_pipeline' drives the AI chip, NULL after a human edit.
+// edit_log source — 'ai_pipeline' drives the AI chip; a human edit writes NULL
+// from the web app and 'chat' from the chat assistant (editSource).
 const LATEST_SOURCE_SQL = `(
   SELECT source FROM edit_log
    WHERE kind = a.resource AND row_key = a.path
@@ -117,10 +118,10 @@ articles.patch("/:resource/unit", requireEditor, async (c) => {
       .prepare(
         // Audit gated on the CAS having won (changes() in the same batch).
         `INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action, source)
-         SELECT ?1, ?2, NULL, ?3, ?4, ?4 + 1, 'update', NULL
+         SELECT ?1, ?2, NULL, ?3, ?4, ?4 + 1, 'update', ?5
           WHERE (SELECT changes()) > 0`,
       )
-      .bind(resource, path, userId ?? null, expected),
+      .bind(resource, path, userId ?? null, expected, editSource(c)),
   ]);
 
   if (!updateRes.meta.changes) {
@@ -148,16 +149,28 @@ articles.patch("/:resource/unit", requireEditor, async (c) => {
   return c.json(updated);
 });
 
-const ValidateBody = z.object({ value: z.union([z.literal(0), z.literal(1), z.boolean()]) });
+const ValidateBody = z.object({
+  value: z.union([z.literal(0), z.literal(1), z.boolean()]),
+  expected_state: z.enum(["ai_draft", "edited", "validated"]).optional(),
+});
 
 // POST /api/articles/:resource/unit/validate?path=... — the "Approve" action.
 // value=1 → validated; value=0 → edited. Non-version-bumping; guarded on
-// translation_state IS NOT NULL; audit source=NULL (human approval).
+// translation_state IS NOT NULL; audit source=NULL (human approval), 'chat' when
+// a chat reviewer approved. Optional If-Match pins the version the caller saw,
+// and optional body expected_state pins the translation_state they saw: state
+// flips never bump `version`, so the version alone misses an un-approve that
+// landed after the reviewer saw the part. The chat's bpt_approve_article sends
+// both; the web app sends neither. A pinned miss is a 409 version_mismatch with
+// current. Same as the template validate (templates.ts, #708).
 articles.post("/:resource/unit/validate", requireEditor, async (c) => {
   const resource = c.req.param("resource");
   const path = c.req.query("path");
   if (!isResource(resource)) return c.json({ error: "unknown_resource" }, 400);
   if (!path) return c.json({ error: "path_required" }, 400);
+  const ifMatch = c.req.header("if-match");
+  const expected = parseIfMatch(ifMatch);
+  if (ifMatch !== undefined && expected === null) return c.json({ error: "invalid_if_match" }, 400);
   let body: unknown;
   try {
     body = await c.req.json();
@@ -178,23 +191,62 @@ articles.post("/:resource/unit/validate", requireEditor, async (c) => {
   const snapshotClause = state === "validated"
     ? ", pre_draft_json = json_object('target_md', target_md)"
     : "";
-  const [updateRes] = await c.env.DB.batch([
-    c.env.DB
-      .prepare(
-        `UPDATE article_units SET translation_state = ?1, updated_at = ?2${snapshotClause}
-          WHERE resource = ?3 AND path = ?4 AND deleted_at IS NULL AND translation_state IS NOT NULL`,
-      )
-      .bind(state, now, resource, path),
+  const expectedState = parsed.data.expected_state ?? null;
+  // The pin clauses numbered from ?first, with their values in the same order.
+  // Each statement binds exactly the parameters it references (D1 rejects an
+  // unreferenced ?N), so a clause and its value come and go together.
+  const pins = (first: number) => {
+    let n = first;
+    let sql = "";
+    const values: unknown[] = [];
+    if (expected !== null) {
+      sql += ` AND version = ?${n++}`;
+      values.push(expected);
+    }
+    if (expectedState !== null) {
+      sql += ` AND translation_state = ?${n++}`;
+      values.push(expectedState);
+    }
+    return { sql, values };
+  };
+  const auditPins = pins(6);
+  const updatePins = pins(5);
+  // The audit INSERT runs FIRST: its WHERE must see the part before the UPDATE,
+  // or a state pin (which the UPDATE itself changes) would never match and the
+  // approval would land with no audit entry. A batch is one transaction.
+  const [, updateRes] = await c.env.DB.batch([
     c.env.DB
       .prepare(
         `INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action, source)
-         SELECT ?1, ?2, NULL, ?3, version, version, ?4, NULL
+         SELECT ?1, ?2, NULL, ?3, version, version, ?4, ?5
            FROM article_units
-          WHERE resource = ?1 AND path = ?2 AND deleted_at IS NULL AND translation_state IS NOT NULL`,
+          WHERE resource = ?1 AND path = ?2 AND deleted_at IS NULL AND translation_state IS NOT NULL${auditPins.sql}`,
       )
-      .bind(resource, path, userId ?? null, action),
+      .bind(resource, path, userId ?? null, action, editSource(c), ...auditPins.values),
+    c.env.DB
+      .prepare(
+        `UPDATE article_units SET translation_state = ?1, updated_at = ?2${snapshotClause}
+          WHERE resource = ?3 AND path = ?4 AND deleted_at IS NULL AND translation_state IS NOT NULL${updatePins.sql}`,
+      )
+      .bind(state, now, resource, path, ...updatePins.values),
   ]);
-  if (!updateRes.meta.changes) return c.json({ error: "not_found" }, 404);
+  if (!updateRes.meta.changes) {
+    if (expected !== null || expectedState !== null) {
+      const cur = await c.env.DB.prepare(
+        `SELECT a.*, ${LATEST_SOURCE_SQL} FROM article_units a
+          WHERE a.resource = ?1 AND a.path = ?2 AND a.deleted_at IS NULL`,
+      )
+        .bind(resource, path)
+        .first<ArticleUnit>();
+      const moved =
+        !!cur &&
+        cur.translation_state !== null &&
+        ((expected !== null && cur.version !== expected) ||
+          (expectedState !== null && cur.translation_state !== expectedState));
+      if (moved) return c.json({ error: "version_mismatch", current: cur }, 409);
+    }
+    return c.json({ error: "not_found" }, 404);
+  }
   const updated = await c.env.DB.prepare(
     `SELECT a.*, ${LATEST_SOURCE_SQL} FROM article_units a
       WHERE a.resource = ?1 AND a.path = ?2`,

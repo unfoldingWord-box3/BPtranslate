@@ -51,7 +51,8 @@ import { lostAlignedWords } from "../lib/alignmentDelta";
 import { useLexicon, type LexiconEntry } from "../hooks/useLexicon";
 import { useAlignmentSuggestions } from "../hooks/useAlignmentSuggestions";
 import { useProjectConfig } from "../hooks/useProjectConfig";
-import { versionIsRtl, versionLabel } from "../lib/versionLabels";
+import { versionDirection, versionLabel } from "../lib/versionLabels";
+import { TargetDirectionGate } from "./TargetDirectionGate";
 import { isHebrewBook } from "../lib/sourceSearch";
 import {
   computeGhosts,
@@ -750,8 +751,12 @@ export const AlignmentPanel = forwardRef<AlignmentPanelHandle, Props>(
     // Target words follow the project's language (an Arabic ULT is RTL even
     // under an English UI); source words follow the book's original language
     // (Hebrew OT RTL, Greek NT LTR).
+    // The target direction is null until the project config loads with
+    // nothing cached; the word bank and alignment cards wait on it rather than
+    // guessing LTR (issue #728).
     const projectConfig = useProjectConfig();
-    const targetDir: "rtl" | "ltr" = versionIsRtl(projectConfig, bibleVersion) ? "rtl" : "ltr";
+    const targetDirOrNull = versionDirection(projectConfig, bibleVersion);
+    const targetDir: "rtl" | "ltr" = targetDirOrNull ?? "ltr";
     const sourceDir: "rtl" | "ltr" = isHebrewBook(book) ? "rtl" : "ltr";
 
     const hctx: HighlightCtx = useMemo(
@@ -975,6 +980,7 @@ export const AlignmentPanel = forwardRef<AlignmentPanelHandle, Props>(
                 hctx={hctx}
               />
             )}
+            <TargetDirectionGate known={targetDirOrNull !== null}>
             <InventoryStrip
               state={state}
               bibleVersion={bibleVersion}
@@ -1030,6 +1036,7 @@ export const AlignmentPanel = forwardRef<AlignmentPanelHandle, Props>(
                 targetDir={targetDir}
               />
             </Box>
+            </TargetDirectionGate>
             <ActionBar
               dirty={dirty}
               ghostCount={ghostByGroup.size}

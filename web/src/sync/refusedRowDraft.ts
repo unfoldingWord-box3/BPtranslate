@@ -59,10 +59,12 @@ function withRefused(draft: DraftRecord, refused: Fields): DraftRecord {
 
 // Whether a result is a refusal whose text should be kept. A fatal 404 means
 // the row is gone (deleted meanwhile): there is nothing to save the text to,
-// and a draft for it would be a permanent phantom "unsaved".
+// and a draft for it would be a permanent phantom "unsaved". A state_mismatch
+// refuses the Rapid check assistant's proposed text, which nobody typed, so it
+// is not kept either (#883 item 4).
 export function keepsRefusedText(result: OutboxResult): boolean {
   if (result.kind === "locked") return true;
-  return result.kind === "fatal" && result.reason !== "http 404";
+  return result.kind === "fatal" && result.reason !== "http 404" && result.reason !== "state_mismatch";
 }
 
 // The draft record to write for `key` after `op` was refused, or undefined to

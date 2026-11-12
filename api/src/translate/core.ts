@@ -129,7 +129,8 @@ export function selectExamples<E extends PackExampleLike>(
     const slug = slugFromSupportReference(e.supportReference);
     return slug !== null && slugSet.has(slug);
   });
-  const general = live.filter((e) => !bySlug.includes(e));
+  const picked = new Set(bySlug); // a Set: the examples file can hold ~20k rows
+  const general = live.filter((e) => !picked.has(e));
   return [...bySlug, ...general].slice(0, max);
 }
 

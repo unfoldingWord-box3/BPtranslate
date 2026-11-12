@@ -67,6 +67,14 @@ export const ADMIN_SURFACES: AdminSurfaceEntry[] = [
     notes: "Both markdown prefs share MarkdownPrefPanel on the desk side (Style).",
   },
   {
+    id: "prefsHistory",
+    label: "Preferences change history + restore (brief / instructions / common issues)",
+    classic: { section: "brief", file: PREFS },
+    desk: { page: "style", file: STYLE, anchor: "<PrefsHistoryButton" },
+    notes:
+      "#788. Both sides mount the shared PrefsHistoryButton (components/PrefsHistoryDialog.tsx) above the Brief editor; classic shows it to admins only.",
+  },
+  {
     id: "terminology",
     label: "Terminology",
     classic: { section: "terminology", file: PREFS },
@@ -79,6 +87,14 @@ export const ADMIN_SURFACES: AdminSurfaceEntry[] = [
     label: "Examples (validated few-shot memory)",
     classic: { section: "examples", file: PREFS },
     desk: { page: "style", file: STYLE, anchor: "<ExamplesPanel" },
+  },
+  {
+    id: "houseStyleRules",
+    label: "House-style rules (fixes applied to AI translate drafts at import; enable / disable)",
+    classic: { section: "houseStyle", file: PREFS },
+    desk: { page: "style", file: STYLE, anchor: "<HouseStyleRulesSection" },
+    notes:
+      "#815. Both sides mount the shared HouseStyleRulesSection (components/HouseStyleRulesSection.tsx); admin-only, like GET/PATCH /api/translation-memory/house-style-rules. Rules arrive by migration; there is no add/edit form.",
   },
   {
     id: "setupWizard",
@@ -102,7 +118,7 @@ export const ADMIN_SURFACES: AdminSurfaceEntry[] = [
   },
   {
     id: "aiService",
-    label: "AI service (provider / model / API key, help-assistant switch)",
+    label: "AI service (provider / model / API key, help-assistant and assistant-chat switches)",
     classic: { section: "aiService", file: PREFS },
     desk: { page: "ai", file: "src/components/flows/AiScreen.tsx", anchor: "<AiServiceSection" },
     notes: "Moved from the admin Setup desk to the AI studio (#/admin/ai; #/ai until #537) under #479 so config and use share one screen. Classic #/preferences keeps its copy until classic retires (#173).",
@@ -144,6 +160,30 @@ export const ADMIN_SURFACES: AdminSurfaceEntry[] = [
       "Desk-only by design (#296): new admin features land on the desk, and classic #/preferences is slated to retire (#173), so no classic port is planned. Calls POST /api/books/:book/review-state — dry run first, then an explicit confirm.",
   },
   {
+    id: "draftScorecard",
+    label: "Draft quality scorecard (per-chapter AI draft vs approved note, context pack)",
+    classic: null,
+    desk: {
+      page: "scorecard",
+      file: "src/components/flows/AdminDraftScorecardScreen.tsx",
+      anchor: "function AdminDraftScorecardScreen",
+    },
+    notes:
+      "Desk-only by design (#816), like Review state: new admin features land on the desk and classic #/preferences is slated to retire (#173). Read-only; calls GET /api/books/:book/draft-scorecard.",
+  },
+  {
+    id: "suggestionInbox",
+    label: "Suggestion inbox (repeated editor corrections → house-style rule / term / template / Common issues)",
+    classic: null,
+    desk: {
+      page: "suggestions",
+      file: "src/components/flows/AdminSuggestionInboxScreen.tsx",
+      anchor: "function AdminSuggestionInboxScreen",
+    },
+    notes:
+      "Desk-only by design (#819), like the scorecard: classic #/preferences is slated to retire (#173). Calls GET /api/suggestion-inbox/:book, POST /api/suggestion-inbox/:book/approve (creates an enabled house_style_rules row) and POST /api/suggestion-inbox/:book/reject (only a card currently shown for that book).",
+  },
+  {
     id: "aiPipelines",
     label: "AI studio (run AI pipelines)",
     classic: null,
@@ -162,6 +202,14 @@ export const ADMIN_SURFACES: AdminSurfaceEntry[] = [
     classic: null,
     desk: { page: "templates", file: "src/components/flows/CurateScreen.tsx", anchor: "function CurateScreen" },
     notes: "Desk key \"templates\", hash #/admin/curate[/{templateId}] (#/curate until #537). Not the classic #/templates note-template workspace.",
+  },
+  {
+    id: "draftMissingTemplates",
+    label: "Draft missing templates from approved notes",
+    classic: null,
+    desk: { page: "templates", file: "src/components/flows/CurateScreen.tsx", anchor: "<DraftMissingTemplatesButton" },
+    notes:
+      "#818. Shared DraftMissingTemplatesButton (components/DraftMissingTemplatesButton.tsx), also mounted in the classic #/templates workspace (TemplateWorkspace.tsx), which is not a PreferencesWorkspace section. Admin only.",
   },
   {
     id: "observe",

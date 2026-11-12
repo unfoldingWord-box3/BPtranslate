@@ -231,3 +231,142 @@ export function useShowSourceUltAlignment(): [boolean, (next: boolean) => void] 
   }, []);
   return [on, setShowSourceUltAlignment];
 }
+
+// ── Rapid check layout in the flows notes screen ────────────────────────────
+//
+// Whether TranslateNotesScreen shows the dense, keyboard-driven "rapid check"
+// list (every note of the current verse, or of the current type filter, as
+// rows with the editor inline) instead of the card view. Only at the lg
+// breakpoint (1200px) and up: the screen ignores it below that. Defaults OFF so the card
+// view stays the default for everyone.
+const NOTES_RAPID_CHECK_KEY = "be:notesRapidCheck";
+
+export function getNotesRapidCheck(): boolean {
+  try {
+    return localStorage.getItem(NOTES_RAPID_CHECK_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+const notesRapidCheckListeners = new Set<(on: boolean) => void>();
+
+export function setNotesRapidCheck(next: boolean): void {
+  try {
+    localStorage.setItem(NOTES_RAPID_CHECK_KEY, String(next));
+  } catch {
+    /* quota or private mode — soft fail, still notify so the UI stays live */
+  }
+  for (const listener of notesRapidCheckListeners) listener(next);
+}
+
+export function useNotesRapidCheck(): [boolean, (next: boolean) => void] {
+  const [on, setOnState] = useState<boolean>(getNotesRapidCheck);
+  useEffect(() => {
+    notesRapidCheckListeners.add(setOnState);
+    return () => {
+      notesRapidCheckListeners.delete(setOnState);
+    };
+  }, []);
+  return [on, setNotesRapidCheck];
+}
+
+// ── Hidden lanes and columns in rapid check ─────────────────────────────────
+//
+// Rapid check lets a translator hide parts of the screen to make room for more
+// note rows. Both prefs hold the ids of what is HIDDEN, so the default (empty)
+// shows everything and anything new appears until someone hides it.
+//   - Lanes are keyed by resource (the project repo, e.g. "ar_avd"), not by
+//     book, so hiding a lane holds across books. The source ULT lane is not in
+//     here: it keeps its own toggle (be:showSourceUlt above, the U key).
+//   - Columns: "quote" (the original-language quote) and "english" (the
+//     English note). The target note column cannot be hidden.
+// Stored as a JSON array of strings.
+export type RapidColumn = "quote" | "english";
+
+function makeHiddenSetPref(key: string) {
+  const read = (): string[] => {
+    try {
+      const parsed: unknown = JSON.parse(localStorage.getItem(key) ?? "[]");
+      return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string") : [];
+    } catch {
+      return [];
+    }
+  };
+  const listeners = new Set<(ids: string[]) => void>();
+  // In memory, so a storage that throws (private mode, quota) still keeps
+  // every toggle of this page view, not only the last one.
+  let current: string[] | null = null;
+  const get = (): string[] => (current ??= read());
+  const write = (ids: string[]): void => {
+    current = ids;
+    try {
+      localStorage.setItem(key, JSON.stringify(ids));
+    } catch {
+      /* quota or private mode — soft fail, still notify so the UI stays live */
+    }
+    for (const listener of listeners) listener(ids);
+  };
+  const setHidden = (id: string, hidden: boolean): void => {
+    const rest = get().filter((v) => v !== id);
+    write(hidden ? [...rest, id] : rest);
+  };
+  return function useHiddenSet(): [ReadonlySet<string>, (id: string, hidden: boolean) => void] {
+    const [ids, setIds] = useState<string[]>(get);
+    useEffect(() => {
+      listeners.add(setIds);
+      return () => {
+        listeners.delete(setIds);
+      };
+    }, []);
+    // A new Set each render is fine: callers only call .has().
+    return [new Set(ids), setHidden];
+  };
+}
+
+export const useRapidHiddenLanes = makeHiddenSetPref("be:rapidHiddenLanes");
+export const useRapidHiddenColumns = makeHiddenSetPref("be:rapidHiddenColumns");
+
+// ── Where rapid check draws the verse text ──────────────────────────────────
+//
+//   "top"    — the open note's verse is pinned in the sticky header (the
+//              layout rapid check shipped with, so it is the DEFAULT). With a
+//              type filter, only the pinned verse shows: the verse groups get
+//              no lanes of their own, so no verse is drawn twice.
+//   "inline" — no verse text in the sticky header (its controls stay); each
+//              verse group's lanes sit above that verse's notes and scroll
+//              with them, with or without a type filter.
+// Anything stored other than "inline" reads as "top".
+export type RapidVersePlacement = "top" | "inline";
+
+const RAPID_VERSE_PLACEMENT_KEY = "be:rapidVersePlacement";
+
+export function getRapidVersePlacement(): RapidVersePlacement {
+  try {
+    return localStorage.getItem(RAPID_VERSE_PLACEMENT_KEY) === "inline" ? "inline" : "top";
+  } catch {
+    return "top";
+  }
+}
+
+const rapidVersePlacementListeners = new Set<(p: RapidVersePlacement) => void>();
+
+export function setRapidVersePlacement(next: RapidVersePlacement): void {
+  try {
+    localStorage.setItem(RAPID_VERSE_PLACEMENT_KEY, next);
+  } catch {
+    /* quota or private mode — soft fail, still notify so the UI stays live */
+  }
+  for (const listener of rapidVersePlacementListeners) listener(next);
+}
+
+export function useRapidVersePlacement(): [RapidVersePlacement, (next: RapidVersePlacement) => void] {
+  const [placement, setPlacementState] = useState<RapidVersePlacement>(getRapidVersePlacement);
+  useEffect(() => {
+    rapidVersePlacementListeners.add(setPlacementState);
+    return () => {
+      rapidVersePlacementListeners.delete(setPlacementState);
+    };
+  }, []);
+  return [placement, setRapidVersePlacement];
+}

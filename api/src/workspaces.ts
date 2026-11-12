@@ -987,7 +987,8 @@ function isWorkspaceMismatchExempt(path: string): boolean {
 // fine once the user is back there).
 //
 // Absent header ALWAYS passes — older clients, curl, and the exempt paths
-// above never send it. This is detection of a known-stale claim, not
+// above never send it, nor does the SPA's GET /api/l10n/overrides (shared
+// data, fetched at boot before the tab knows its slug, #766). This is detection of a known-stale claim, not
 // enforcement that the header be present.
 export const requireWorkspaceMatch: MiddlewareHandler<{ Bindings: Env }> = async (c, next) => {
   const claimed = c.req.header("x-workspace");

@@ -315,11 +315,18 @@ console.log("[jsonrpc] envelope");
   assert(list.body.result.tools.every((t) => t.inputSchema?.type === "object"), "every tool has an object inputSchema");
   // The only writes are the one-row review tools (issue #670 part a), the
   // admin-only AI draft start (part b), the range un-approve (part c) and the
-  // note-template tools (#702).
-  const writes = names.filter((n) => /edit|approve|draft|export|bulk|state/.test(n)).sort();
+  // note-template tools (#702), the tW/tA article part tools (part d) and
+  // the admin-only translation preferences edit (#784) and the admin-only
+  // terminology add, edit and delete (#785) and restore (#795).
+  const writes = names.filter((n) => /add|delete|restore|edit|approve|draft|export|bulk|state/.test(n)).sort();
   assert(
-    JSON.stringify(writes) === JSON.stringify(["bpt_approve", "bpt_approve_template", "bpt_bulk_set_state", "bpt_draft", "bpt_edit_row", "bpt_edit_template"]),
-    "the only write tools are the row and template edit and approve tools, bpt_draft and bpt_bulk_set_state",
+    JSON.stringify(writes) ===
+      JSON.stringify([
+        "bpt_add_term", "bpt_approve", "bpt_approve_article", "bpt_approve_template", "bpt_bulk_set_state",
+        "bpt_delete_term", "bpt_draft", "bpt_edit_article", "bpt_edit_preferences", "bpt_edit_row",
+        "bpt_edit_template", "bpt_edit_term", "bpt_restore_term",
+      ]),
+    "the only write tools are the row, template and article edit and approve tools, bpt_draft, bpt_bulk_set_state, bpt_edit_preferences and the term add, edit, delete and restore tools",
   );
   const needsToken = list.body.result.tools.filter((t) => t.name !== "bpt_link_account");
   assert(needsToken.every((t) => t.inputSchema.required?.includes("session_token")), "every tool but link_account requires session_token");

@@ -14,6 +14,7 @@ import { nextPreDraftJson } from "./preDraftSnapshot.ts";
 import { getLatestSuccessfulContextExport } from "./contextExportResults.ts";
 import { applyContextRef, derivedTargetLang } from "./assistedContextRef.ts";
 import { queueContextExport } from "./contextExportQueue.ts";
+import { draftMissingRoutes } from "./templateDraftMissing.ts";
 
 export const templates = new Hono<{ Bindings: Env; Variables: { userId?: number } }>();
 
@@ -522,3 +523,8 @@ templates.post("/sync", requireAdmin, async (c) => {
   const result = await syncTemplates(c.env);
   return c.json(result);
 });
+
+// GET/POST /api/templates/draft-missing — admin "Draft missing templates from
+// approved notes" (#818). Runs in the Worker on the org's own key, so unlike
+// /unit/draft above it is not held back by TEMPLATE_DRAFT_NEEDS_ORG_KEY.
+templates.route("/draft-missing", draftMissingRoutes());

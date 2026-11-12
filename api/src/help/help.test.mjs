@@ -380,7 +380,7 @@ test("claude adapter request shape and usage mapping", async () => {
   assert.equal(params.max_tokens, 1024);
   assert.deepEqual(params.system, [{ type: "text", text: "SYS", cache_control: { type: "ephemeral" } }]);
   assert.equal("thinking" in params, false);
-  assert.deepEqual(r, { text: "hi", usage: { inputTokens: 5, outputTokens: 6, cacheWriteTokens: 7, cacheReadTokens: 8 } });
+  assert.deepEqual(r, { text: "hi", truncated: false, usage: { inputTokens: 5, outputTokens: 6, cacheWriteTokens: 7, cacheReadTokens: 8 } });
 });
 
 test("gemini and chat-completions adapter request shapes", async () => {

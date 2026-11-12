@@ -234,3 +234,58 @@ export function flowLaneSegmentsAcross(
   }
   return out;
 }
+
+// One note's quote, as a lane marks it.
+export interface FlowQuote {
+  quote: string | null | undefined;
+  occurrence: number | null | undefined;
+}
+
+// Segments for a lane with SEVERAL quotes marked at once. Rapid check's
+// type-filter mode draws each verse group's lanes once, with the quote of
+// every listed note in that verse marked (mockup board C, design PR #825).
+// Each quote resolves on its own through findTargetHighlights; the token sets
+// are unioned, so two quotes that share a token mark it once. Per verse like
+// flowLaneSegmentsAcross (occurrence numbers are per verse), with the same
+// fallbacks: no quote that resolves leaves the slice as its plain text.
+// flowLaneSegments / flowLaneSegmentsAcross are left as they are.
+export function flowLaneSegmentsForQuotes(
+  slices: readonly FlowLaneSlice[],
+  quotes: readonly FlowQuote[],
+): FlowSegment[] {
+  const out: FlowSegment[] = [];
+  for (const slice of slices) {
+    const fallback: FlowSegment[] = slice.plainText
+      ? [{ kind: "text", text: slice.plainText, marked: false }]
+      : [];
+    let segments = fallback;
+    const vos = slice.verseObjects;
+    if (Array.isArray(vos) && vos.length > 0) {
+      const union = new Set<HighlightKey>();
+      for (const q of quotes) {
+        if (!q.quote) continue;
+        const keys = findTargetHighlights(
+          vos,
+          q.quote,
+          q.occurrence ?? 1,
+          Array.isArray(slice.sourceVerseObjects) ? slice.sourceVerseObjects : undefined,
+        );
+        for (const k of keys) union.add(k);
+      }
+      if (union.size > 0) {
+        const marked = toSegments(collectParts(vos, union));
+        if (marked.length > 0 && marked.some((s) => s.marked)) segments = marked;
+      }
+    }
+    if (segments.length === 0) continue;
+    if (out.length > 0)
+      out.push({
+        kind: "verseMarker",
+        verse: slice.verse,
+        text: verseBoundaryText(slice.verse),
+        marked: false,
+      });
+    out.push(...segments);
+  }
+  return out;
+}

@@ -30,11 +30,20 @@ export type FetchLike = (url: string) => Promise<FetchLikeResponse>;
 
 const DCS_BASE = "https://git.door43.org";
 export const SUPPORTED_MANIFEST_FORMAT = 1;
-// Real pack files (manifest.yaml, brief.md, templates.tsv, terms.csv,
-// validated.jsonl) are KBs. This cap is a hardening bound, not a realistic
-// size — it protects the translate runner from an oversized/misconfigured or
-// malicious pack file.
+// Hardening bounds that protect the translate runner from an oversized,
+// misconfigured or malicious pack file. The hand-authored files (manifest,
+// brief, instructions, templates, terms) are KBs, so they keep a 2 MB cap.
+// examples/validated.jsonl is different: the daily context export used to write
+// one line per human-validated row, so the file grew without bound (BSOJ Arabic
+// reached 2.4 MB at 3,240 rows, ~745 bytes/row, on 2026-11-07, which failed
+// every translate run). Since #813 the export writes a bounded selection
+// (contextExport.ts selectPackExamples; ~0.7 MB for that same data). The 16 MB
+// cap (~21k rows) stays for packs exported before that and still reachable by
+// a pinned contextRef. At the cap the step holds the string, a UTF-8 copy for
+// the size check, and the parsed rows at once, an estimated 60-90 MB of the
+// Worker's 128 MB.
 export const MAX_PACK_FILE_BYTES = 2_000_000;
+export const MAX_EXAMPLES_FILE_BYTES = 16_000_000;
 
 export const PACK_FILES = {
   manifest: "manifest.yaml",
@@ -114,20 +123,20 @@ function rawUrl({ org, repo, ref }: ParsedRef, filePath: string): string {
   return `${DCS_BASE}/${org}/${repo}/raw/${kind}/${encodeURIComponent(ref)}/${filePath}`;
 }
 
-async function fetchText(url: string, fetchImpl: FetchLike | undefined): Promise<string | null> {
+async function fetchText(url: string, fetchImpl: FetchLike | undefined, maxBytes: number): Promise<string | null> {
   const res = await (fetchImpl || (fetch as unknown as FetchLike))(url);
   if (res.status === 404) return null;
   if (!res.ok) throw new Error(`fetch ${url} → HTTP ${res.status}`);
   const contentLength = Number(res.headers && typeof res.headers.get === "function" ? res.headers.get("content-length") : null);
-  if (Number.isFinite(contentLength) && contentLength > MAX_PACK_FILE_BYTES) {
-    throw new Error(`file too large (>${MAX_PACK_FILE_BYTES} bytes): ${url}`);
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    throw new Error(`file too large (>${maxBytes} bytes): ${url}`);
   }
   const text = await res.text();
   // Byte length, not string length: pack files are often Arabic/Hebrew, where
   // one character is 2-3 bytes, so a character count would let a file through
   // at several times the intended cap.
-  if (new TextEncoder().encode(text).length > MAX_PACK_FILE_BYTES) {
-    throw new Error(`file too large (>${MAX_PACK_FILE_BYTES} bytes): ${url}`);
+  if (new TextEncoder().encode(text).length > maxBytes) {
+    throw new Error(`file too large (>${maxBytes} bytes): ${url}`);
   }
   return text;
 }
@@ -314,7 +323,10 @@ export function parseTermsCsv(text: unknown): PackTerm[] {
 }
 
 /**
- * Parse validated.jsonl with tombstone last-line-wins on (resource, rowId).
+ * Parse validated.jsonl with tombstone last-line-wins on (resource, book, rowId).
+ * Row ids are unique only within a book (#822). A live line without `book` keys
+ * on an empty book. A tombstone with `book` revokes only that book's row; a
+ * tombstone without `book` revokes that (resource, rowId) in every book.
  */
 export function parseExamplesJsonl(text: unknown): PackExample[] {
   const byKey = new Map<string, PackExample>();
@@ -333,16 +345,23 @@ export function parseExamplesJsonl(text: unknown): PackExample[] {
     seq += 1;
     const resource = o.resource ? String(o.resource) : "tn";
     const rowId = o.rowId != null ? String(o.rowId) : `anon-${seq}`;
-    const key = `${resource}\0${rowId}`;
+    const book = o.book ? String(o.book) : null;
+    const key = `${resource}\0${book ?? ""}\0${rowId}`;
     if (o.tombstone) {
-      byKey.delete(key);
+      if (book !== null) {
+        byKey.delete(key);
+      } else {
+        for (const [k, ex] of byKey) {
+          if (ex.resource === resource && ex.rowId === rowId) byKey.delete(k);
+        }
+      }
       continue;
     }
     if (!o.source || !o.target) continue;
     byKey.set(key, {
       resource,
       rowId,
-      book: o.book ? String(o.book) : null,
+      book,
       ref: o.ref ? String(o.ref) : null,
       supportReference: o.supportReference ? String(o.supportReference) : null,
       source: nfc(String(o.source)),
@@ -373,7 +392,8 @@ export async function loadContextPack(
   const raw: Partial<Record<PackFileKey, string | null>> = {};
   const missing: string[] = [];
   const [contents, sha] = await Promise.all([
-    Promise.all(entries.map(([, rel]) => fetchText(rawUrl(parsed, rel), fetchImpl))),
+    Promise.all(entries.map(([key, rel]) =>
+      fetchText(rawUrl(parsed, rel), fetchImpl, key === "examples" ? MAX_EXAMPLES_FILE_BYTES : MAX_PACK_FILE_BYTES))),
     resolveContextSha(parsed, fetchImpl),
   ]);
   entries.forEach(([key, rel], i) => {

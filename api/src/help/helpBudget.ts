@@ -10,10 +10,16 @@ type Db = D1Database;
 
 export const DEFAULT_CAP_USD = 2;
 
-/** Parse HELP_CHAT_DAILY_CAP_USD; 0 means no AI spend; missing, non-numeric or negative falls back to $2. */
-export function capMicrosFromEnv(raw: string | undefined): number {
+/**
+ * The usage table a budget call works on. Interpolated into SQL, so it is a
+ * closed union: never pass a string that came from input.
+ */
+export type UsageTable = "help_chat_usage" | "assistant_chat_usage";
+
+/** Parse a daily-cap env var; 0 means no AI spend; missing, non-numeric or negative falls back to `defaultUsd` ($2 for help). */
+export function capMicrosFromEnv(raw: string | undefined, defaultUsd: number = DEFAULT_CAP_USD): number {
   const n = Number(raw);
-  const usd = raw !== undefined && raw.trim() !== "" && Number.isFinite(n) && n >= 0 ? n : DEFAULT_CAP_USD;
+  const usd = raw !== undefined && raw.trim() !== "" && Number.isFinite(n) && n >= 0 ? n : defaultUsd;
   return Math.round(usd * 1_000_000);
 }
 
@@ -61,14 +67,21 @@ export function worstCaseMicros(
 }
 
 /** True iff the reservation fit under the cap and was recorded. */
-export async function reserve(db: Db, userId: number, day: string, micros: number, capMicros: number): Promise<boolean> {
+export async function reserve(
+  db: Db,
+  userId: number,
+  day: string,
+  micros: number,
+  capMicros: number,
+  table: UsageTable = "help_chat_usage",
+): Promise<boolean> {
   await db
-    .prepare("INSERT INTO help_chat_usage (user_id, day) VALUES (?1, ?2) ON CONFLICT(user_id, day) DO NOTHING")
+    .prepare(`INSERT INTO ${table} (user_id, day) VALUES (?1, ?2) ON CONFLICT(user_id, day) DO NOTHING`)
     .bind(userId, day)
     .run();
   const r = await db
     .prepare(
-      `UPDATE help_chat_usage SET reserved_micros = reserved_micros + ?1
+      `UPDATE ${table} SET reserved_micros = reserved_micros + ?1
         WHERE user_id = ?2 AND day = ?3 AND spent_micros + reserved_micros + ?1 <= ?4`,
     )
     .bind(micros, userId, day, capMicros)
@@ -87,10 +100,11 @@ export async function settle(
   reservedMicros: number,
   actualMicros: number,
   answered: boolean,
+  table: UsageTable = "help_chat_usage",
 ): Promise<void> {
   await db
     .prepare(
-      `UPDATE help_chat_usage
+      `UPDATE ${table}
           SET reserved_micros = MAX(reserved_micros - ?1, 0),
               spent_micros = spent_micros + ?2,
               calls = calls + ?5
@@ -100,9 +114,15 @@ export async function settle(
     .run();
 }
 
-export async function remainingMicros(db: Db, userId: number, day: string, capMicros: number): Promise<number> {
+export async function remainingMicros(
+  db: Db,
+  userId: number,
+  day: string,
+  capMicros: number,
+  table: UsageTable = "help_chat_usage",
+): Promise<number> {
   const row = await db
-    .prepare("SELECT spent_micros, reserved_micros FROM help_chat_usage WHERE user_id = ?1 AND day = ?2")
+    .prepare(`SELECT spent_micros, reserved_micros FROM ${table} WHERE user_id = ?1 AND day = ?2`)
     .bind(userId, day)
     .first<{ spent_micros: number; reserved_micros: number }>();
   const used = row ? row.spent_micros + row.reserved_micros : 0;

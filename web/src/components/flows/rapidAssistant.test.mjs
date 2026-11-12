@@ -1,0 +1,201 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import * as rapid from "./rapidAssistant.ts";
+import { MAX_NOTES, MAX_NOTE_CHARS, buildRapidNotes, editsWithVersions, stillAsProposed } from "./rapidAssistant.ts";
+
+const row = (id, o = {}) => ({ id, chapter: 2, verse: 3, quote: "q", note: "text " + id, version: 7, translation_state: "ai_draft", ...o });
+
+test("buildRapidNotes: ref, state, checked flag, stored text as-is, screen order", () => {
+  const { notes } = buildRapidNotes([row("a", { verse: 0, note: "line\\none", translation_state: null }), row("b")], new Set(["b"]));
+  assert.deepEqual(notes.map((n) => n.ref), ["2:intro", "2:3"]);
+  assert.equal(notes[0].note, "line\\none");
+  assert.equal(notes[0].state, null);
+  assert.deepEqual(notes.map((n) => n.checked), [false, true]);
+});
+
+test("buildRapidNotes: versions are captured per sent note", () => {
+  const { versions } = buildRapidNotes([row("a", { version: 4 }), row("b", { version: 9 })], new Set());
+  assert.equal(versions.get("a"), 4);
+  assert.equal(versions.get("b"), 9);
+});
+
+test("buildRapidNotes: a note over the size limit is left out, not cut", () => {
+  const { notes, versions } = buildRapidNotes([row("a", { note: "x".repeat(MAX_NOTE_CHARS + 1) }), row("b")], new Set());
+  assert.deepEqual(notes.map((n) => n.id), ["b"]);
+  assert.equal(versions.has("a"), false);
+});
+
+test("buildRapidNotes: over the note cap, checked notes stay and order is kept", () => {
+  const rows = Array.from({ length: MAX_NOTES + 5 }, (_, i) => row("n" + i));
+  const last = "n" + (MAX_NOTES + 4);
+  const { notes } = buildRapidNotes(rows, new Set([last]));
+  assert.equal(notes.length, MAX_NOTES);
+  assert.equal(notes[notes.length - 1].id, last);
+  assert.deepEqual(notes.slice(0, 3).map((n) => n.id), ["n0", "n1", "n2"]);
+});
+
+test("buildRapidNotes: stays under the body budget", () => {
+  const rows = Array.from({ length: 100 }, (_, i) => row("n" + i, { note: "y".repeat(5000) }));
+  const { notes } = buildRapidNotes(rows, new Set());
+  assert.ok(JSON.stringify(notes).length < 180_000);
+  assert.ok(notes.length > 0 && notes.length < 100);
+});
+
+test("editsWithVersions: attaches the captured version, drops unknown ids", () => {
+  const out = editsWithVersions([{ id: "a", note: "x" }, { id: "z", note: "y" }], new Map([["a", 4]]));
+  assert.deepEqual(out, [{ id: "a", note: "x", version: 4 }]);
+});
+
+test("buildRapidNotes: the budget counts UTF-8 bytes, so Arabic fits the server's 200 KB body", () => {
+  // 100 Arabic notes of 1500 characters: ~150k characters but ~300 KB of UTF-8.
+  const rows = Array.from({ length: 100 }, (_, i) => row("n" + i, { note: "ب".repeat(1500) }));
+  const { notes } = buildRapidNotes(rows, new Set());
+  assert.ok(new TextEncoder().encode(JSON.stringify(notes)).length <= 120_000);
+  assert.ok(notes.length > 0 && notes.length < 100);
+});
+
+// Issue #859: the panel tells the user what was left out, so it reports both kinds.
+test("buildRapidNotes: nothing left out reports zero of each", () => {
+  const { omitted } = buildRapidNotes([row("a"), row("b")], new Set());
+  assert.deepEqual(omitted, { tooLong: 0, tooMany: 0, tooLongRefs: [], tooManyRefs: [] });
+});
+
+test("buildRapidNotes: an over-long note is counted as too long, with its ref", () => {
+  const { omitted } = buildRapidNotes(
+    [row("a", { verse: 5, note: "x".repeat(MAX_NOTE_CHARS + 1) }), row("b"), row("c", { verse: 0, note: "z".repeat(MAX_NOTE_CHARS + 50) })],
+    new Set(["a"]),
+  );
+  assert.equal(omitted.tooLong, 2);
+  assert.deepEqual(omitted.tooLongRefs, ["2:5", "2:intro"]);
+  assert.equal(omitted.tooMany, 0);
+});
+
+test("buildRapidNotes: over the note cap, the extra notes are counted as too many", () => {
+  const rows = Array.from({ length: MAX_NOTES + 5 }, (_, i) => row("n" + i, { verse: i + 1 }));
+  const { notes, omitted } = buildRapidNotes(rows, new Set());
+  assert.equal(notes.length, MAX_NOTES);
+  assert.equal(omitted.tooMany, 5);
+  assert.deepEqual(omitted.tooManyRefs, ["2:201", "2:202", "2:203", "2:204", "2:205"]);
+  assert.equal(omitted.tooLong, 0);
+});
+
+test("buildRapidNotes: over the byte budget, a checked note is kept and the rest are counted", () => {
+  const rows = Array.from({ length: 100 }, (_, i) => row("n" + i, { verse: i + 1, note: "y".repeat(5000) }));
+  const { notes, omitted } = buildRapidNotes(rows, new Set(["n99"]));
+  assert.ok(notes.some((n) => n.id === "n99"));
+  assert.equal(notes.length + omitted.tooMany, 100);
+  assert.ok(omitted.tooMany > 0);
+  assert.equal(omitted.tooManyRefs.length, omitted.tooMany);
+  assert.ok(!omitted.tooManyRefs.includes("2:100"));
+  assert.equal(omitted.tooLong, 0);
+});
+
+test("buildRapidNotes: captures each sent note's approval state, null when it has none (#860)", () => {
+  const rows = [row("a", { translation_state: "validated" }), row("b", { translation_state: undefined }), row("x", { note: "x".repeat(MAX_NOTE_CHARS + 1) })];
+  const { states } = buildRapidNotes(rows, new Set());
+  assert.equal(states.get("a"), "validated");
+  assert.equal(states.get("b"), null);
+  assert.equal(states.has("x"), false);
+});
+
+test("stillAsProposed: a version change is 'changed', an approval-state change is 'stateChanged' (#878), a row gone from the screen is 'missing' (#860)", () => {
+  const snap = {
+    versions: new Map([["same", 3], ["nullState", 3], ["moved", 3], ["approved", 3], ["gone", 3]]),
+    states: new Map([["same", "ai_draft"], ["nullState", null], ["moved", "ai_draft"], ["approved", "ai_draft"], ["gone", "ai_draft"]]),
+  };
+  const rowById = new Map([
+    ["same", { version: 3, translation_state: "ai_draft" }],
+    // A row with no state field matches the null that was sent.
+    ["nullState", { version: 3 }],
+    ["moved", { version: 4, translation_state: "ai_draft" }],
+    // Approving does not bump the version, so only the state shows it.
+    ["approved", { version: 3, translation_state: "validated" }],
+    ["unsent", { version: 1, translation_state: null }],
+  ]);
+  const r = stillAsProposed(["same", "nullState", "moved", "approved", "gone", "unsent"], snap, rowById);
+  assert.deepEqual(r.ids, ["same", "nullState"]);
+  assert.equal(r.changed, 2); // moved, and unsent (nothing to check it against)
+  // Approved since the proposal, same version: its own reason, not "changed by someone else, reloaded" (#878).
+  assert.equal(r.stateChanged, 1);
+  assert.equal(r.missing, 1); // gone
+});
+
+test("snapshotMismatch: a new version (or no snapshot entry) is 'changed'; the same version with another approval state is 'stateChanged' (#878)", () => {
+  const snap = {
+    versions: new Map([["same", 3], ["nullState", 3], ["moved", 3], ["approved", 3], ["both", 3]]),
+    states: new Map([["same", "ai_draft"], ["nullState", null], ["moved", "ai_draft"], ["approved", "ai_draft"], ["both", "ai_draft"]]),
+  };
+  const check = (id, r) => rapid.snapshotMismatch(id, snap, r);
+  assert.equal(check("same", { version: 3, translation_state: "ai_draft" }), null);
+  assert.equal(check("nullState", { version: 3 }), null);
+  assert.equal(check("moved", { version: 4, translation_state: "ai_draft" }), "changed");
+  // The edit case: approving does not bump the version, so only the state shows it.
+  assert.equal(check("approved", { version: 3, translation_state: "validated" }), "stateChanged");
+  // A version change wins: that is someone's edit, and the row is reloaded.
+  assert.equal(check("both", { version: 4, translation_state: "validated" }), "changed");
+  assert.equal(check("unsent", { version: 3, translation_state: "ai_draft" }), "changed");
+});
+
+test("statusesAfterRefusal: the status circle follows the row a state_mismatch refusal returned (#883 item 1)", () => {
+  const f = rapid.statusesAfterRefusal;
+  // A colleague approved it: the circle shows Approved, as a chapter load would.
+  assert.deepEqual(f({ other: "skipped" }, "n1", { translation_state: "validated", trashed_at: null }), { other: "skipped", n1: "approved" });
+  // Un-approved elsewhere: the filled circle is cleared, like un-approve's 409.
+  assert.deepEqual(f({ n1: "approved", other: "approved" }, "n1", { translation_state: "edited" }), { other: "approved" });
+  // Set aside elsewhere (#883 item 5): Not needed.
+  assert.deepEqual(f({ n1: "approved" }, "n1", { translation_state: "validated", trashed_at: 1700000000 }), { n1: "skipped" });
+  // Nothing to change: the same object, so React skips the render.
+  const same = { n1: "approved" };
+  assert.equal(f(same, "n1", { translation_state: "validated" }), same);
+  const none = {};
+  assert.equal(f(none, "n1", { translation_state: "ai_draft" }), none);
+  // No usable row in the 409 body: leave the table alone.
+  assert.equal(f(same, "n1", undefined), same);
+  assert.equal(f(same, "n1", null), same);
+});
+
+test("statusesAfterEdit: a saved assistant edit sets the circle from the row the server returned (#883 review A1)", () => {
+  const f = rapid.statusesAfterEdit;
+  // A resend whose first response was lost is a no-op 200 that returns the row
+  // as it is now: a colleague approved it meanwhile, so it stays Approved.
+  assert.deepEqual(f({ n1: "approved" }, "n1", { id: "n1", version: 5, translation_state: "validated" }), { n1: "approved" });
+  assert.deepEqual(f({}, "n1", { id: "n1", version: 5, translation_state: "validated" }), { n1: "approved" });
+  // The usual case: the edit demoted the note to 'edited', which clears Approved.
+  assert.deepEqual(f({ n1: "approved", other: "approved" }, "n1", { id: "n1", version: 5, translation_state: "edited" }), { other: "approved" });
+  // No usable row in the response: as before, the edit takes the note off its mark.
+  assert.deepEqual(f({ n1: "approved", other: "skipped" }, "n1", null), { other: "skipped" });
+  assert.deepEqual(f({ n1: "approved" }, "n1", { id: "other", version: 5, translation_state: "validated" }), {});
+  assert.deepEqual(f({ n1: "approved" }, "n1", { id: "n1", translation_state: "validated" }), {});
+  const none = {};
+  assert.equal(f(none, "n1", null), none);
+});
+
+test("a Not needed mark clears when the server row is neither approved nor set aside (#886 item 4)", () => {
+  // A refusal whose row is live and unapproved.
+  assert.deepEqual(rapid.statusesAfterRefusal({ n1: "skipped", other: "skipped" }, "n1", { translation_state: "edited", trashed_at: null }), { other: "skipped" });
+  // A saved assistant edit revived the note (a content write clears trashed_at).
+  assert.deepEqual(rapid.statusesAfterEdit({ n1: "skipped" }, "n1", { id: "n1", version: 6, translation_state: "edited", trashed_at: null }), {});
+  // Still set aside: the mark stays, as the same object.
+  const kept = { n1: "skipped" };
+  assert.equal(rapid.statusesAfterEdit(kept, "n1", { id: "n1", version: 6, translation_state: "edited", trashed_at: 1700000000 }), kept);
+});
+
+test("statusesAfterAssistantSave: a late save of an assistant edit sets the mark from its row (#886 item 4)", () => {
+  const f = rapid.statusesAfterAssistantSave;
+  assert.equal(typeof f, "function");
+  const op = { action: "patch", expectedState: "ai_draft", target: { id: "n1" } };
+  const live = { id: "n1", version: 6, chapter: 2, translation_state: "edited", trashed_at: null };
+  // Apply stopped waiting, the user set the note aside, then the edit landed and revived it.
+  assert.deepEqual(f({ n1: "skipped", other: "approved" }, op, live, 2), { other: "approved" });
+  assert.deepEqual(f({ n1: "approved" }, op, live, 2), {});
+  // A colleague approved it before the lost response was settled (#883 review A1).
+  assert.deepEqual(f({}, op, { ...live, translation_state: "validated" }, 2), { n1: "approved" });
+  // Left alone: a typed save (no pin), a delete, another chapter, or no usable row.
+  const prev = { n1: "skipped" };
+  assert.equal(f(prev, { action: "patch", target: { id: "n1" } }, live, 2), prev);
+  assert.equal(f(prev, { ...op, action: "delete" }, live, 2), prev);
+  assert.equal(f(prev, op, live, 3), prev);
+  assert.equal(f(prev, op, { ...live, id: "other" }, 2), prev);
+  assert.equal(f(prev, op, { ...live, version: undefined }, 2), prev);
+  assert.equal(f(prev, op, null, 2), prev);
+});

@@ -150,62 +150,124 @@ export async function bookSourcePlansForClient(
   return { tnNoteSources, tqQuestionSources };
 }
 
+// One source file's notes, restricted to the chapters that resolve to that
+// source (see the header): the Door43 read, the per-isolate cache, and the
+// failure reasons, shared by readSourceNotes and readBookSourceNotes.
+async function loadSourceFile(
+  env: Env,
+  plan: { base: RepoRef | null; ranges: ResolvedSourceRange[] },
+  ref: RepoRef,
+  book: string,
+): Promise<SourceNotes> {
+  const source = `${ref.owner}/${ref.repo}`;
+  const file = `tn_${book}.tsv`;
+  const url = dcsRawUrl(env, ref.owner, ref.repo, file);
+  const forChapters = (rows: Map<string, SourceRow>): SourceNotes => {
+    const notes = new Map<string, string>();
+    for (const [id, r] of rows) {
+      const s = sourceForChapter(plan, r.chapter);
+      if (s && sameRepo(s, ref)) notes.set(id, r.note);
+    }
+    return { ok: true, source, notes };
+  };
+
+  const hit = cache.get(url);
+  if (hit && Date.now() - hit.at < TTL_MS) return forChapters(hit.rows);
+
+  const res = await fetchAnonymous(url);
+  if (res.text === null) {
+    const why = res.timedOut
+      ? "Door43 did not answer in time"
+      : res.status === 404
+        ? "it has no such file, or the repository is not public"
+        : res.truncated
+          ? "the download was cut short"
+          : res.status
+            ? `HTTP ${res.status}`
+            : "network error";
+    return { ok: false, reason: `Could not read the English notes ${file} from ${source} (${why}).` };
+  }
+  const rows = new Map<string, SourceRow>();
+  for (const row of parseTsv(res.text).rows) {
+    const id = row["ID"];
+    if (id) rows.set(id, { chapter: refParts(row["Reference"])[0], note: row["Note"] ?? "" });
+  }
+  if (rows.size === 0) return { ok: false, reason: `${source} ${file} has no notes with an ID column.` };
+
+  cache.delete(url);
+  cache.set(url, { at: Date.now(), rows });
+  while (cache.size > MAX_ENTRIES) cache.delete(cache.keys().next().value as string);
+  return forChapters(rows);
+}
+
+const NOT_TRANSLATING = "This project writes its notes in English, so they have no separate English source.";
+const NO_SOURCE = "This project has no English tN source repository set up.";
+const READ_FAILED = "Could not read the English source notes.";
+
 // `chapter` is the chapter of the rows being compared (0 = front matter): an
 // override can give each chapter range of a book a different source.
 export async function readSourceNotes(env: Env, book: string, chapter: number): Promise<SourceNotes> {
   try {
     const cfg = await getProjectConfig(env);
-    if (!isTranslationConfig(cfg)) {
-      return { ok: false, reason: "This project writes its notes in English, so they have no separate English source." };
-    }
+    if (!isTranslationConfig(cfg)) return { ok: false, reason: NOT_TRANSLATING };
     // translateFromSource=true: with no override, the base is the
     // project-wide translationSource, as before #691. With no project-wide tN
     // repo the base is null, but a dcs override still applies (import reads
     // it regardless), so only a chapter that resolves to nothing has no source.
     const plan = await planBookNoteSources(env, cfg, book, "tn", true);
     const ref = sourceForChapter(plan, chapter);
-    if (!ref) return { ok: false, reason: "This project has no English tN source repository set up." };
-    const source = `${ref.owner}/${ref.repo}`;
-    const file = `tn_${book}.tsv`;
-    const url = dcsRawUrl(env, ref.owner, ref.repo, file);
-    const forChapters = (rows: Map<string, SourceRow>): SourceNotes => {
-      const notes = new Map<string, string>();
-      for (const [id, r] of rows) {
-        const s = sourceForChapter(plan, r.chapter);
-        if (s && sameRepo(s, ref)) notes.set(id, r.note);
-      }
-      return { ok: true, source, notes };
-    };
-
-    const hit = cache.get(url);
-    if (hit && Date.now() - hit.at < TTL_MS) return forChapters(hit.rows);
-
-    const res = await fetchAnonymous(url);
-    if (res.text === null) {
-      const why = res.timedOut
-        ? "Door43 did not answer in time"
-        : res.status === 404
-          ? "it has no such file, or the repository is not public"
-          : res.truncated
-            ? "the download was cut short"
-            : res.status
-              ? `HTTP ${res.status}`
-              : "network error";
-      return { ok: false, reason: `Could not read the English notes ${file} from ${source} (${why}).` };
-    }
-    const rows = new Map<string, SourceRow>();
-    for (const row of parseTsv(res.text).rows) {
-      const id = row["ID"];
-      if (id) rows.set(id, { chapter: refParts(row["Reference"])[0], note: row["Note"] ?? "" });
-    }
-    if (rows.size === 0) return { ok: false, reason: `${source} ${file} has no notes with an ID column.` };
-
-    cache.delete(url);
-    cache.set(url, { at: Date.now(), rows });
-    while (cache.size > MAX_ENTRIES) cache.delete(cache.keys().next().value as string);
-    return forChapters(rows);
+    if (!ref) return { ok: false, reason: NO_SOURCE };
+    return await loadSourceFile(env, plan, ref, book);
   } catch (e) {
     console.error("readSourceNotes failed", e instanceof Error ? e.message : String(e));
-    return { ok: false, reason: "Could not read the English source notes." };
+    return { ok: false, reason: READ_FAILED };
+  }
+}
+
+// readSourceNotes for many chapters of one book at once (the draft scorecard,
+// #816). The config and override plan are read once, the chapters are grouped
+// by the source repo they resolve to, and each distinct source is read ONCE,
+// all of them concurrently, so a slow or unreachable Door43 costs one timeout
+// for the whole request rather than one per chapter. A source that fails
+// fails every chapter that uses it; nothing is retried.
+export async function readBookSourceNotes(
+  env: Env,
+  book: string,
+  chapters: number[],
+): Promise<Map<number, SourceNotes>> {
+  const out = new Map<number, SourceNotes>();
+  const failAll = (reason: string) => {
+    for (const ch of chapters) out.set(ch, { ok: false, reason });
+    return out;
+  };
+  try {
+    const cfg = await getProjectConfig(env);
+    if (!isTranslationConfig(cfg)) return failAll(NOT_TRANSLATING);
+    const plan = await planBookNoteSources(env, cfg, book, "tn", true);
+    const groups = new Map<string, { ref: RepoRef; chapters: number[] }>();
+    for (const ch of chapters) {
+      const ref = sourceForChapter(plan, ch);
+      if (!ref) {
+        out.set(ch, { ok: false, reason: NO_SOURCE });
+        continue;
+      }
+      const key = `${ref.owner}/${ref.repo}`.toLowerCase();
+      const g = groups.get(key);
+      if (g) g.chapters.push(ch);
+      else groups.set(key, { ref, chapters: [ch] });
+    }
+    await Promise.all(
+      [...groups.values()].map(async (g) => {
+        const res = await loadSourceFile(env, plan, g.ref, book).catch((e): SourceNotes => {
+          console.error("readBookSourceNotes failed", e instanceof Error ? e.message : String(e));
+          return { ok: false, reason: READ_FAILED };
+        });
+        for (const ch of g.chapters) out.set(ch, res);
+      }),
+    );
+    return out;
+  } catch (e) {
+    console.error("readBookSourceNotes failed", e instanceof Error ? e.message : String(e));
+    return failAll(READ_FAILED);
   }
 }

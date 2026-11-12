@@ -208,6 +208,15 @@ export async function refreshProjectConfig(): Promise<ProjectConfig> {
 // admin-toggleable `mode` (materialized server-side), decoupled from the
 // data source: an admin can run an org that HAS a translationSource in
 // authoring mode, or vice versa.
+/**
+ * isTranslationProject once the config is known; null while it is still
+ * loading (or failed with nothing cached), for callers that must not guess
+ * "source project" from a missing config (lib/pipelineTrigger.ts, #731).
+ */
+export function projectType(cfg: ProjectConfig | null): boolean | null {
+  return cfg ? isTranslationProject(cfg) : null;
+}
+
 export function isTranslationProject(cfg: ProjectConfig | null): boolean {
   if (!cfg) return false;
   // `mode` is the source of truth. Fall back to the legacy translationSource

@@ -27,7 +27,7 @@ import {
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import SaveIcon from "@mui/icons-material/Save";
 import { useTranslation } from "react-i18next";
-import { api, ApiError, type AiProviderSettings, type HelpStatus } from "../sync/api";
+import { api, ApiError, type AiProviderSettings, type AssistantStatus, type HelpStatus } from "../sync/api";
 import { adminKeyWarningCopyKey } from "../lib/aiErrorCopy";
 import { formatUsd } from "../help/money";
 
@@ -72,6 +72,10 @@ export function AiServiceSection() {
   const [help, setHelp] = useState<HelpStatus | null>(null);
   const [helpSaving, setHelpSaving] = useState(false);
   const [helpLoadError, setHelpLoadError] = useState(false);
+  // Assistant-chat switch (api/src/assistant): its own endpoint, its own load state.
+  const [assistant, setAssistant] = useState<AssistantStatus | null>(null);
+  const [assistantSaving, setAssistantSaving] = useState(false);
+  const [assistantLoadError, setAssistantLoadError] = useState(false);
 
   // Draft form state, seeded from `settings` once loaded.
   const [draftProvider, setDraftProvider] = useState<string>(UI_DEFAULT_PROVIDER);
@@ -144,10 +148,19 @@ export function AiServiceSection() {
       .catch(() => setHelpLoadError(true));
   };
 
+  const loadAssistant = () => {
+    setAssistantLoadError(false);
+    api
+      .getAssistantStatus()
+      .then(setAssistant)
+      .catch(() => setAssistantLoadError(true));
+  };
+
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- mount-time load; the same `load` backs the Retry button, so it must clear loadError at start or a retry keeps showing the failure alert while it refetches.
     void load();
     loadHelp();
+    loadAssistant();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only load; `load` is a new function every render (the Retry button calls it directly), so listing it would refetch on every render.
   }, []);
 
@@ -160,6 +173,18 @@ export function AiServiceSection() {
       save.setMsg(t("preferences.saveFailed"));
     } finally {
       setHelpSaving(false);
+    }
+  };
+
+  const onAssistantToggle = async (enabled: boolean) => {
+    setAssistantSaving(true);
+    try {
+      const res = await api.setAssistantSettings(enabled);
+      setAssistant((a) => (a ? { ...a, enabled: res.enabled } : a));
+    } catch {
+      save.setMsg(t("preferences.saveFailed"));
+    } finally {
+      setAssistantSaving(false);
     }
   };
 
@@ -201,6 +226,42 @@ export function AiServiceSection() {
     </>
   );
 
+  const assistantSwitch = (
+    <>
+      {assistantLoadError && !assistant && (
+        <Alert
+          severity="error"
+          action={
+            <Button size="small" onClick={loadAssistant}>
+              {t("common.retry")}
+            </Button>
+          }
+        >
+          {t("preferences.aiService.assistantChat.loadFailed")}
+        </Alert>
+      )}
+
+      {assistant && (
+        <Box>
+          <FormControlLabel
+            control={
+              <Switch
+                checked={assistant.enabled}
+                disabled={assistantSaving}
+                onChange={(e) => void onAssistantToggle(e.target.checked)}
+              />
+            }
+            label={t("preferences.aiService.assistantChat.label")}
+          />
+          <FormHelperText sx={{ mx: 0 }}>
+            {t("preferences.aiService.assistantChat.helper", { cap: formatUsd(assistant.capUsd) })}{" "}
+            {t("preferences.aiService.assistantChat.needsKey")}
+          </FormHelperText>
+        </Box>
+      )}
+    </>
+  );
+
   if (settings === null) {
     return (
       <Stack spacing={2}>
@@ -219,6 +280,7 @@ export function AiServiceSection() {
           <CircularProgress size={22} />
         )}
         {helpSwitch}
+        {assistantSwitch}
         <Snackbar open={!!save.msg} autoHideDuration={4000} onClose={save.clear} message={save.msg ?? ""} />
       </Stack>
     );
@@ -442,6 +504,7 @@ export function AiServiceSection() {
         </Box>
 
         {helpSwitch}
+        {assistantSwitch}
       </Stack>
 
       <Dialog open={clearOpen} onClose={() => !clearing && setClearOpen(false)} maxWidth="xs" fullWidth>

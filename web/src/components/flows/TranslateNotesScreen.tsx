@@ -122,6 +122,8 @@ import ViewColumnIcon from "@mui/icons-material/ViewColumn";
 import EditOutlinedIcon from "@mui/icons-material/EditOutlined";
 
 import { LockBanner } from "./FlowBanners";
+import { NotesRapidCheck, type RapidCheckRow } from "./NotesRapidCheck";
+import { RapidVerseBlock, type RapidLane, type RapidVerseStop } from "./RapidVerseBlock";
 import { FlowStatusChip, type FlowStatusKind } from "./FlowStatusChip";
 import { escapeNewlines, isAquiferDraftRow, unescapeNewlines, waitForOp } from "./translateShared";
 import { useSwipeNav } from "./useSwipeNav";
@@ -142,7 +144,15 @@ import { useLexicon } from "../../hooks/useLexicon";
 import { buildQuoteFromSelection, quotePickUnchanged, selectionFromQuote } from "../../lib/quoteBuilder";
 import type { HighlightKey } from "../../lib/highlight";
 import { useUnsavedGuard } from "../../hooks/useUnsavedGuard";
-import { useShowSourceUlt, useShowSourceUltAlignment } from "../../lib/editorPrefs";
+import {
+  useNotesRapidCheck,
+  useRapidHiddenColumns,
+  useRapidHiddenLanes,
+  useRapidVersePlacement,
+  useShowSourceUlt,
+  useShowSourceUltAlignment,
+} from "../../lib/editorPrefs";
+import { isApprovableRow } from "../../lib/reviewApproval";
 import { resolveSourceRef } from "../../lib/sourceRef";
 import {
   buildVerseIndex,
@@ -165,7 +175,18 @@ import {
   QUICK_DRAFTS_NEED_ORG_KEY,
 } from "../../lib/aiProviderErrors";
 import { resolveFlowChipStatus, flowChipKind, type FlowChipStatus } from "../../lib/flowStatusChip";
-import { flowLaneSegmentsAcross, type FlowSegment } from "../../lib/flowHighlight";
+import {
+  RAPID_STATUS_BUCKETS,
+  rapidStatusBucket,
+  rapidStatusOffered,
+  rapidStatusMatches,
+  withOpenNote,
+  type RapidStatusBucket,
+} from "../../lib/rapidStatusFilter";
+import { RapidStatusFilterMenu, RapidStatusFilterLine } from "./RapidStatusFilter";
+import { flowLaneSegmentsAcross, type FlowQuote, type FlowSegment } from "../../lib/flowHighlight";
+import { RapidVerseLanes, type RapidLaneSpec } from "./RapidVerseLanes";
+import { RapidVersePlacementToggle } from "./RapidVersePlacementToggle";
 import { isHebrewBook } from "../../lib/sourceSearch";
 import { realChapters } from "../../lib/bookSummary";
 import { drafts, rowKey } from "../../sync/drafts";
@@ -182,6 +203,8 @@ import { onOutboxDrop, onOutboxResult, outbox, type OutboxOp } from "../../sync/
 import { pipelineStore, getSessionKey, type PipelineJob } from "../../sync/pipelineStore";
 import { jobLocksChapterNotes, jobLocksNote, lockJobReleased } from "../../lib/chapterLock";
 import { redoOutcome } from "../../lib/applySkipped";
+import { useRapidBulk } from "./useRapidBulk";
+import { editsWithVersions, statusesAfterAssistantSave, statusesAfterRefusal } from "./rapidAssistant";
 import {
   api,
   ApiError,
@@ -190,7 +213,9 @@ import {
   type TnRow,
   type TqRow,
 } from "../../sync/api";
+import { versionMismatchRow } from "../../lib/versionMismatch";
 import { SCRIPTURE_FONT_STACK } from "../../theme";
+import { arabicFontSize, editsArabicScript, startsArabicScript } from "../../lib/arabicScriptSize";
 
 export interface TranslateNotesScreenProps extends FlowScreenContext {
   book: string;
@@ -285,8 +310,13 @@ function Lane({ label, text, segments, labelFontFamily, mark }: LaneProps) {
       {text ? (
         // dir="auto" follows the *content*: Arabic lane text lays out RTL with
         // trailing punctuation on the correct side, English stays LTR. The
-        // label above keeps the container's direction.
-        <Box component="span" dir="auto" sx={{ display: "block", textAlign: "start" }}>
+        // label above keeps the container's direction. Arabic is drawn a size
+        // larger to match the English (arabicScriptSize).
+        <Box
+          component="span"
+          dir="auto"
+          sx={{ display: "block", textAlign: "start", fontSize: arabicFontSize("1em", startsArabicScript(text)) }}
+        >
           {mark(segments)}
         </Box>
       ) : (
@@ -297,6 +327,10 @@ function Lane({ label, text, segments, labelFontFamily, mark }: LaneProps) {
     </Box>
   );
 }
+
+// A stable empty list, so a verse group with no quotes keeps its memo.
+const NO_QUOTES: readonly FlowQuote[] = [];
+const NO_HIDDEN_STATUSES: ReadonlySet<RapidStatusBucket> = new Set();
 
 export default function TranslateNotesScreen({ book, chapter, verse, rowId, role }: TranslateNotesScreenProps) {
   const { t } = useTranslation();
@@ -565,11 +599,10 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
       .sort((a, b) => a.label.localeCompare(b.label));
   }, [queueIds, rowById]);
 
-  // The filtered traversal: an ascending index list over the FROZEN queue —
-  // the queue itself is never mutated. Every cursor movement while a filter
-  // is active maps through this list; with no filter the original code paths
-  // run untouched (byte-equivalent behavior).
-  const visibleIdx = useMemo(() => {
+  // The type filter's matches: an ascending index list over the FROZEN queue —
+  // the queue itself is never mutated. Rapid check's status filter narrows
+  // this further into `visibleIdx` (below, after `rapid`).
+  const typeMatchIdx = useMemo(() => {
     if (!queueIds || !typeFilter) return [];
     const out: number[] = [];
     queueIds.forEach((id, i) => {
@@ -588,9 +621,9 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
       setTypeFilter(null);
       return;
     }
-    if (visibleIdx.length === 0) return;
-    if (!visibleIdx.includes(cursor)) setCursor(visibleIdx[0]);
-  }, [typeFilter, typeOptions, visibleIdx, cursor, queueIds]);
+    if (typeMatchIdx.length === 0) return;
+    if (!typeMatchIdx.includes(cursor)) setCursor(typeMatchIdx[0]);
+  }, [typeFilter, typeOptions, typeMatchIdx, cursor, queueIds]);
 
   // ── editor state ─────────────────────────────────────────────────────────
   const [draftValue, setDraftValue] = useState("");
@@ -870,6 +903,117 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
 
   useUnsavedGuard(hasDiff);
 
+  // ── rapid check layout (laptop and up) ───────────────────────────────────
+  // A dense, keyboard-driven rendering of the SAME queue, cursor and editor
+  // (NotesRapidCheck.tsx). Offered only from lg (1200px): its five columns
+  // were designed at 1366 and crowd below that. Smaller screens always get
+  // the card view, and the toggle is hidden there.
+  const rapidRoom = useMediaQuery(theme.breakpoints.up("lg"));
+  const [rapidPref, setRapidPref] = useNotesRapidCheck();
+  const rapid = rapidPref && rapidRoom;
+  // Columns and lanes the translator hid, remembered per browser (#830 and
+  // the declutter round): see RapidColumnHeader and RapidVerseBlock.
+  const [rapidHiddenCols, setRapidHiddenCol] = useRapidHiddenColumns();
+  const [rapidHiddenLanes, setRapidHiddenLane] = useRapidHiddenLanes();
+  // Where the verse text shows (be:rapidVersePlacement): pinned at the top
+  // (default) or inline above each verse group's notes. Never both, so a
+  // type filter no longer draws the open note's verse twice.
+  const [rapidPlacement, setRapidPlacement] = useRapidVersePlacement();
+  const rapidInline = rapidPlacement === "inline";
+
+  // ── status filter (Rapid check only) ─────────────────────────────────────
+  // Statuses the translator hid from the list. Session-local, and kept across
+  // chapters: "hide approved" is how someone works through a book. Only
+  // Rapid check offers it; the card and list views (the done view among
+  // them) ignore it.
+  const [hiddenStatuses, setHiddenStatuses] = useState<ReadonlySet<RapidStatusBucket>>(NO_HIDDEN_STATUSES);
+  // The status a note's chip shows, minus the open editor's live diff (the
+  // open note is always listed, so its live state never decides anything).
+  // noteChip below resolves through this too, so filter and chip agree.
+  const noteChipStatus = useCallback(
+    (id: string, r: TnRow, isCurrent: boolean, liveDiff: boolean): FlowChipStatus => {
+      const st = statuses[id];
+      return resolveFlowChipStatus({
+        isCurrent,
+        hasLiveDiff: liveDiff,
+        draftPresent: draftRowIds.has(id),
+        approved: st === "approved",
+        skipped: st === "skipped",
+        pending: editedIds.has(id) || r.translation_state === "edited",
+        aquifer: r.translation_state === "ai_draft" && isAquiferDraftRow(r),
+        aiDrafted: false,
+      });
+    },
+    [statuses, draftRowIds, editedIds],
+  );
+  // The notes the status filter chooses from: the type filter's matches, or
+  // the whole chapter.
+  const statusCandidates = useMemo(
+    () => (typeFilter ? typeMatchIdx : (queueIds ?? []).map((_, i) => i)),
+    [typeFilter, typeMatchIdx, queueIds],
+  );
+  const bucketAt = useCallback(
+    (i: number): RapidStatusBucket => {
+      const id = queueIds?.[i];
+      const r = id ? rowById.get(id) : undefined;
+      return id && r ? rapidStatusBucket(noteChipStatus(id, r, false, false)) : "draft";
+    },
+    [queueIds, rowById, noteChipStatus],
+  );
+  // Menu counts: every note the status filter chooses from, by status.
+  const statusCounts = useMemo(() => {
+    const counts = new Map<RapidStatusBucket, number>();
+    if (!rapid) return counts;
+    for (const i of statusCandidates) {
+      const b = bucketAt(i);
+      counts.set(b, (counts.get(b) ?? 0) + 1);
+    }
+    return counts;
+  }, [rapid, statusCandidates, bucketAt]);
+  const statusFilterOn =
+    rapid && view !== "done" && [...hiddenStatuses].some((b) => rapidStatusOffered(b, statusCounts));
+  // Either filter turns Rapid check's list chapter-wide; every cursor
+  // movement then maps through visibleIdx. With neither, the original code
+  // paths run untouched.
+  const filterOn = typeFilter != null || statusFilterOn;
+  const statusMatchIdx = useMemo(
+    () => (statusFilterOn ? rapidStatusMatches(statusCandidates, bucketAt, hiddenStatuses) : statusCandidates),
+    [statusFilterOn, statusCandidates, bucketAt, hiddenStatuses],
+  );
+  const visibleIdx = useMemo(
+    () =>
+      statusFilterOn
+        ? withOpenNote(statusMatchIdx, cursor, !typeFilter || typeMatchIdx.includes(cursor))
+        : typeMatchIdx,
+    [statusFilterOn, statusMatchIdx, cursor, typeFilter, typeMatchIdx],
+  );
+  // A new status choice moves off an open note it hides, to the next shown
+  // note (else the first). With nothing shown the open note stays alone.
+  const applyHiddenStatuses = (next: ReadonlySet<RapidStatusBucket>) => {
+    setHiddenStatuses(next);
+    if (next.size === 0) return;
+    const matches = rapidStatusMatches(statusCandidates, bucketAt, next);
+    if (matches.length === 0 || matches.includes(cursor)) return;
+    setCursor(matches.find((i) => i > cursor) ?? matches[0]);
+  };
+  // Clicking another row's note text moves the cursor AND opens its editor.
+  // The hydration effect closes the editor when the row changes, so the open
+  // waits until that row has settled (its draft is loaded), then applies.
+  const [editRequest, setEditRequest] = useState<string | null>(null);
+  useEffect(() => {
+    if (!editRequest || !row) return;
+    if (row.id !== editRequest) {
+      // The cursor moved on (J/K) before that row settled: drop the request
+      // so a later visit does not open the editor unasked.
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- the open must wait for the hydration effect above to settle the row (rendering it would be undone by that effect's setEditing(false)); clearing a stale request belongs to the same post-commit step.
+      setEditRequest(null);
+      return;
+    }
+    if (settledKey !== `${rowKey("tn", book, row.id)}#${reloadNonce}`) return;
+    setEditRequest(null);
+    if (!editLocked) setEditing(true);
+  }, [editRequest, row, settledKey, book, reloadNonce, editLocked]);
+
   // Entering edit mode focuses the textarea without letting the browser's own
   // autoFocus scroll fire mid-keyboard-open (which, combined with the
   // same-frame height change on phones, loses the user's place); we drive the
@@ -917,10 +1061,22 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
         const rowId = op.target.id;
         if (result.kind === "ok") {
           setChapterLock((prev) => (prev?.rowId === rowId ? null : prev));
+          // A saved assistant edit sets the note's circle from the saved row,
+          // also when it saved after Apply stopped waiting (#886 item 4).
+          const saved = { action: op.action, expectedState: op.expectedState, target: op.target };
+          setStatuses((prev) => statusesAfterAssistantSave(prev, saved, result.updated as TnRow | null, chapter));
           return;
         }
         if (result.kind === "locked") {
           setChapterLock({ body: result.lockBody, rowId });
+          return;
+        }
+        // The server refused an assistant edit because the note changed since
+        // the proposal (#883 item 1), also when the refusal came after Apply
+        // stopped waiting: show the note's approval as the server has it.
+        if (result.kind === "fatal" && result.reason === "state_mismatch") {
+          const current = result.current as { chapter?: number; translation_state?: string | null; trashed_at?: number | null } | undefined;
+          if (current?.chapter === chapter) setStatuses((prev) => statusesAfterRefusal(prev, rowId, current));
           return;
         }
         // Only a settled conflict is a question for the user: the outbox
@@ -929,7 +1085,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
           setConflictRowId(op.target.id);
         }
       }),
-    [book, t],
+    [book, chapter, t],
   );
 
   // ── scripture context ────────────────────────────────────────────────────
@@ -1064,13 +1220,72 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
     [HL, t],
   );
 
+  // Rapid check's lane ids for the hidden-lanes pref (be:rapidHiddenLanes),
+  // keyed by repo so the choice holds across books.
+  const laneId = (role: "lit" | "sim", label: string) =>
+    (projectConfig?.repos?.[role] || `${role}:${label}`).toLowerCase();
+  const litLaneId = laneId("lit", litLabel);
+  const simLaneId = laneId("sim", simLabel);
+  // Rapid check, "verses inline" placement: each verse group draws its own
+  // compact lanes (RapidVerseLanes, #831). Same lanes, order and toggles as
+  // the pinned verse block: the source ULT while U / its chip is on and it has
+  // loaded, then the project's literal and simplified lanes unless hidden.
+  // Built once per data change, not per keystroke.
+  const rapidGroupLanes = useMemo<RapidLaneSpec[]>(() => {
+    const lanes: RapidLaneSpec[] = [];
+    if (sourceUltOn && sourceUlt.status === "ready") {
+      lanes.push({ key: "source-ult", label: sourceUltLabel, index: sourceUltIndex });
+    }
+    if (!rapidHiddenLanes.has(litLaneId)) lanes.push({ key: "lit", label: litLabel, index: ultIndex });
+    if (!rapidHiddenLanes.has(simLaneId)) lanes.push({ key: "sim", label: simLabel, index: ustIndex });
+    return lanes;
+  }, [
+    sourceUltOn,
+    sourceUlt.status,
+    sourceUltLabel,
+    sourceUltIndex,
+    rapidHiddenLanes,
+    litLaneId,
+    litLabel,
+    ultIndex,
+    simLaneId,
+    simLabel,
+    ustIndex,
+  ]);
+  // The quotes each inline group marks. With a type filter, every listed
+  // note's quote in its verse (#831). Without one there is a single group,
+  // the open note's verse, and it marks the open note's quote only, as the
+  // pinned block does: marking every note of the verse would paint most of it.
+  // Two memos, so that with a filter J/K (which changes the open row) does
+  // not rebuild every group's quotes and re-run every group's highlighting.
+  const rowVerse = row?.verse ?? 0;
+  const rapidOpenVerseQuotes = useMemo(() => {
+    const byVerse = new Map<number, FlowQuote[]>();
+    if (!rapid || !rapidInline || filterOn || rowVerse <= 0) return byVerse;
+    byVerse.set(rowVerse, [{ quote: rowQuote, occurrence: rowOccurrence }]);
+    return byVerse;
+  }, [rapid, rapidInline, filterOn, rowVerse, rowQuote, rowOccurrence]);
+  const rapidFilterQuotes = useMemo(() => {
+    const byVerse = new Map<number, FlowQuote[]>();
+    if (!rapid || !rapidInline || !filterOn || !queueIds) return byVerse;
+    for (const i of visibleIdx) {
+      const r = rowById.get(queueIds[i]);
+      if (!r || r.verse <= 0) continue;
+      const list = byVerse.get(r.verse) ?? [];
+      list.push({ quote: r.quote, occurrence: r.occurrence });
+      byVerse.set(r.verse, list);
+    }
+    return byVerse;
+  }, [rapid, rapidInline, filterOn, queueIds, visibleIdx, rowById]);
+  const rapidGroupQuotes = filterOn ? rapidFilterQuotes : rapidOpenVerseQuotes;
+
   const englishNote = row ? (sourceNotes.get(row.id)?.note ?? null) : null;
 
   // ── navigation between cards ─────────────────────────────────────────────
   const nextUnstatused = useCallback(
     (from: number, table: Record<string, CardStatus>): number => {
       if (!queueIds) return -1;
-      if (typeFilter) {
+      if (filterOn) {
         // Same cycle — start just after `from`, wrap, check `from` itself
         // last — restricted to the filtered index list.
         const n = visibleIdx.length;
@@ -1089,7 +1304,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
       }
       return -1;
     },
-    [queueIds, typeFilter, visibleIdx],
+    [queueIds, filterOn, visibleIdx],
   );
 
   const advanceAfter = useCallback(
@@ -1097,7 +1312,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
       if (!queueIds) return;
       const table = { ...statuses, [id]: next };
       if (reviewing) {
-        if (typeFilter) {
+        if (filterOn) {
           const nxt = visibleIdx.find((i) => i > cursor);
           if (nxt === undefined) setView("done");
           else setCursor(nxt);
@@ -1112,11 +1327,11 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
         // Filtered set exhausted while the wider chapter still has open
         // cards: hold position rather than show the (untrue) chapter-complete
         // view. Without a filter this condition is never taken.
-        if (typeFilter && queueIds.some((qid) => !table[qid])) return;
+        if (filterOn && queueIds.some((qid) => !table[qid])) return;
         setView("done");
       } else setCursor(nxt);
     },
-    [queueIds, statuses, reviewing, cursor, nextUnstatused, typeFilter, visibleIdx],
+    [queueIds, statuses, reviewing, cursor, nextUnstatused, filterOn, visibleIdx],
   );
 
   // Free navigation — one cursor, four drivers: the card stack's Prev/Next,
@@ -1124,7 +1339,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
   // filter active, movement maps through visibleIdx; without one, the
   // original clamp arithmetic runs untouched.
   const goPrev = useCallback(() => {
-    if (!typeFilter) {
+    if (!filterOn) {
       setCursor((c) => Math.max(0, c - 1));
       return;
     }
@@ -1136,19 +1351,19 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
       }
       return target;
     });
-  }, [typeFilter, visibleIdx]);
+  }, [filterOn, visibleIdx]);
   const goNext = useCallback(() => {
-    if (!typeFilter) {
+    if (!filterOn) {
       setCursor((c) => Math.min(total - 1, c + 1));
       return;
     }
     setCursor((c) => visibleIdx.find((i) => i > c) ?? c);
-  }, [typeFilter, visibleIdx, total]);
+  }, [filterOn, visibleIdx, total]);
 
   // Disabled logic for every Prev/Next affordance — reduces to the original
   // expressions (cursor === 0 / cursor >= total - 1) when no filter is active.
-  const canPrev = typeFilter ? visibleIdx.some((i) => i < cursor) : cursor > 0;
-  const canNext = typeFilter ? visibleIdx.some((i) => i > cursor) : cursor < total - 1;
+  const canPrev = filterOn ? visibleIdx.some((i) => i < cursor) : cursor > 0;
+  const canNext = filterOn ? visibleIdx.some((i) => i > cursor) : cursor < total - 1;
 
   // Swipe pages in the TARGET language's reading order (the content being
   // paged), not the UI chrome's — the words screen derives direction the same
@@ -1382,22 +1597,28 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
     );
   }
 
-  async function handleApprove() {
-    if (!row || busy) return;
+  // Resolves true when the note was approved (the bulk Approve counts it).
+  // `stay` (bulk Approve) keeps the cursor and skips the toast: moving to the
+  // next open note mid-run would replace the rows the bulk action is on.
+  async function handleApprove(opts?: { stay?: boolean }): Promise<boolean> {
+    if (!row || busy) return false;
     setBusy(true);
     setNotice(null);
     try {
       if (await quoteOpPending(row.id)) {
         say(t("flowTranslate.quotePendingApprove"));
-        return;
+        return false;
       }
-      if (hasDiff && !(await saveDraft(row))) return;
+      if (hasDiff && !(await saveDraft(row))) return false;
       const updated = await api.validateNote(row.id, book, true);
       applyLocalRowReplacement("tn", updated);
       setStatuses((prev) => ({ ...prev, [row.id]: "approved" }));
       setEditing(false);
-      setToast(t("flowTranslate.toastApproved"));
-      advanceAfter(row.id, "approved");
+      if (!opts?.stay) {
+        setToast(t("flowTranslate.toastApproved"));
+        advanceAfter(row.id, "approved");
+      }
+      return true;
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) {
         say(t("flowTranslate.approveNeedsDraft"));
@@ -1408,6 +1629,128 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
       } else {
         say(
           t("flowTranslate.approveFailed", {
+            status: err instanceof ApiError ? err.status : t("flowTranslate.genericError"),
+          }),
+        );
+      }
+    } finally {
+      setBusy(false);
+    }
+    return false;
+  }
+
+  // Rapid check's status circle on a row that is NOT the open one. Only the
+  // open row has its text in memory, so a row with unsaved typing (a draft in
+  // the store) or any write still in the outbox is refused rather than
+  // approved: /validate sends no version, so approving the server text while
+  // the user's edit waits elsewhere would approve the wrong words, and a PATCH
+  // landing after it would demote the row again (see handleApprove).
+  async function approveOtherRow(id: string) {
+    if (busy || id === row?.id) return;
+    if (draftRowIds.has(id)) {
+      say(t("flowTranslate.rapid.openToSave"));
+      return;
+    }
+    setBusy(true);
+    setNotice(null);
+    try {
+      const ops = await outbox.listWithUncommitted().catch(() => null);
+      const pending =
+        !ops ||
+        ops.some(
+          (o) =>
+            o.target.kind === "row" &&
+            o.target.rowKind === "tn" &&
+            o.target.book === book &&
+            o.target.id === id,
+        );
+      if (pending) {
+        say(t("flowTranslate.rapid.savePending"));
+        return;
+      }
+      // This row was never opened, so approve exactly what is on screen: the
+      // version and state shown. A peer's edit (or a set-aside) since then is
+      // refused with a 409 instead of being approved unseen.
+      const shown = rowById.get(id);
+      const shownState =
+        shown?.translation_state === "ai_draft" || shown?.translation_state === "edited"
+          ? shown.translation_state
+          : undefined;
+      const updated = await api.validateNote(id, book, true, {
+        expectedVersion: shown?.version,
+        expectedState: shownState,
+      });
+      applyLocalRowReplacement("tn", updated);
+      setStatuses((prev) => ({ ...prev, [id]: "approved" }));
+      setToast(t("flowTranslate.toastApproved"));
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409 && !isChapterLockedBody(err.body)) {
+        say(t("flowTranslate.rapid.changedElsewhere"));
+        void refetch();
+      } else if (err instanceof ApiError && err.status === 404) {
+        say(t("flowTranslate.approveNeedsDraft"));
+      } else if (err instanceof ApiError && isChapterLockedBody(err.body)) {
+        setChapterLock({ body: err.body, rowId: id });
+        say(t("flowTranslate.noteLockedByTranslate"));
+      } else {
+        say(
+          t("flowTranslate.approveFailed", {
+            status: err instanceof ApiError ? err.status : t("flowTranslate.genericError"),
+          }),
+        );
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Rapid check: clicking an approved row's circle takes the approval back.
+  // The row goes to 'edited', not its earlier 'ai_draft': a person has
+  // reviewed it, which is what /validate value=0 records. Pinned to the
+  // version, state and updated_at on screen, so an approval that already
+  // changed elsewhere is reported, not overwritten. A state flip does not
+  // bump the version, so only updated_at catches a peer's un-approve plus
+  // re-approve since this row was shown. Nothing to confirm: clicking the
+  // circle again re-approves, and the toast says what happened.
+  async function unapproveRow(id: string) {
+    if (busy) return;
+    const shown = rowById.get(id);
+    if (!shown) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      const updated = await api.validateNote(id, book, false, {
+        expectedVersion: shown.version,
+        expectedState: "validated",
+        expectedUpdatedAt: shown.updated_at,
+      });
+      applyLocalRowReplacement("tn", updated);
+      setStatuses((prev) => {
+        if (prev[id] === undefined) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      setToast(t("flowTranslate.rapid.unapprove.done"));
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        // The statuses table is seeded once per chapter, so a refetch alone
+        // would keep the circle filled: clear it when the server says the
+        // row is no longer approved.
+        const current = (err.body as { current?: { translation_state?: string | null } } | null)?.current;
+        if (current && current.translation_state !== "validated") {
+          setStatuses((prev) => {
+            if (prev[id] !== "approved") return prev;
+            const next = { ...prev };
+            delete next[id];
+            return next;
+          });
+        }
+        say(t("flowTranslate.rapid.unapprove.changedElsewhere"));
+        void refetch();
+      } else {
+        say(
+          t("flowTranslate.rapid.unapprove.failed", {
             status: err instanceof ApiError ? err.status : t("flowTranslate.genericError"),
           }),
         );
@@ -1448,7 +1791,12 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
     setBusy(true);
     setNotice(null);
     try {
-      const updated = await api.trashNote(row.id, book);
+      // Pinned to the version and state on screen (#837): a colleague's edit
+      // or approval since then is refused with a 409 instead of being set
+      // aside unseen.
+      // Always sent, null included: null pins "still has no state".
+      const shownState = row.translation_state ?? null;
+      const updated = await api.trashNote(row.id, book, { expectedVersion: row.version, expectedState: shownState });
       applyLocalRowReplacement("tn", updated);
       setStatuses((prev) => ({ ...prev, [row.id]: "skipped" }));
       setEditing(false);
@@ -1472,6 +1820,17 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
       if (err instanceof ApiError && isChapterLockedBody(err.body)) {
         setChapterLock({ body: err.body, rowId: row.id });
         say(t("flowTranslate.noteLockedByTranslate"));
+        return;
+      }
+      // Only a version_mismatch means a colleague changed the note; any other
+      // 409 (workspace_mismatch, say) falls through to the generic failure.
+      const current = versionMismatchRow<TnRow>(err);
+      if (current) {
+        // The row as it is now goes on screen at once, then the open note
+        // reloads: its editor re-hydrates only on a reload-counter bump.
+        applyLocalRowReplacement("tn", current);
+        say(t("flowTranslate.rapid.changedElsewhere"));
+        reloadOpenRow();
         return;
       }
       say(
@@ -1598,7 +1957,9 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
         // `already_running` answer means we latched onto a broader in-flight
         // job (chapter-wide, ~1h) instead of a fresh single-row run; the old
         // fixed 15-minute timer misreported that healthy job as a `timeout`
-        // failure (#376). A cancel/dismiss still settles early via the store
+        // failure (#376). A `queued` answer gets the same long budget: the
+        // job waits behind other work first (since #757, often the covering
+        // ~1h job). A cancel/dismiss still settles early via the store
         // subscriptions; this timer is only the last-resort backstop.
         introRedoTimerRef.current = window.setTimeout(() => {
           settleIntroRedo(
@@ -1696,6 +2057,15 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
     void refetch().then(() => setReloadNonce((n) => n + 1));
   }
 
+  // Refetch, then re-seed the open note from the new data. The counter bumps
+  // even if the refetch fails (useChapter's refetch reports its own errors),
+  // so no rejection is left unhandled and the editor still re-hydrates.
+  function reloadOpenRow() {
+    void refetch()
+      .catch(() => undefined)
+      .then(() => setReloadNonce((n) => n + 1));
+  }
+
   // AI run for this chapter (#481): top bar on tablet+, account menu on
   // phone; nothing for viewers. After a Door43 import, reload like the
   // conflict path does so the open card re-seeds from the imported text.
@@ -1705,6 +2075,27 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
     role,
     phone: !isTabletUp,
     onImported: () => void refetch().then(() => setReloadNonce((n) => n + 1)),
+  });
+
+  // Rapid check's checkbox bulk actions (#829).
+  const rapidBulk = useRapidBulk({
+    book,
+    chapter,
+    currentId: row?.id ?? null,
+    hasDiff,
+    draftRowIds,
+    rowById,
+    statuses,
+    setStatuses,
+    applyLocalRowReplacement,
+    refetch,
+    reload: reloadOpenRow,
+    busy: busy || redoing,
+    setBusy,
+    setEditing,
+    handleApprove,
+    aiUnavailable,
+    t,
   });
 
   // ── render gates (every hook above this line, unconditionally) ───────────
@@ -1724,6 +2115,10 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
   }
 
   const done = view === "done";
+  // Rapid check draws only while there is an open note to show; the done view,
+  // an empty chapter or an empty type filter fall back to the card layout.
+  const rapidReady =
+    rapid && !done && total > 0 && row != null && !(typeFilter != null && typeMatchIdx.length === 0);
   const approvedCount = queueIds.filter(
     (id) => statuses[id] === "approved" && !editedIds.has(id),
   ).length;
@@ -1769,19 +2164,13 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
     r: TnRow,
     isCurrent: boolean,
   ): { kind: FlowStatusKind; label: string } => {
-    const st = statuses[id];
-    const status = resolveFlowChipStatus({
-      isCurrent,
-      hasLiveDiff: hasDiff,
-      draftPresent: draftRowIds.has(id),
-      approved: st === "approved",
-      skipped: st === "skipped",
-      pending: editedIds.has(id) || r.translation_state === "edited",
-      aquifer: r.translation_state === "ai_draft" && isAquiferDraftRow(r),
-      aiDrafted: false,
-    });
+    const status = noteChipStatus(id, r, isCurrent, hasDiff);
     return { kind: flowChipKind(status), label: noteChipLabel(status) };
   };
+  // Status filter menu labels: the chip's own wording.
+  const statusLabels = Object.fromEntries(
+    RAPID_STATUS_BUCKETS.map((b) => [b, noteChipLabel(b)]),
+  ) as Record<RapidStatusBucket, string>;
   const chip: { kind: FlowStatusKind; label: string } = row
     ? noteChip(row.id, row, true)
     : { kind: "draft", label: t("flowTranslate.status.draft") };
@@ -1800,8 +2189,8 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
   // "N of M" — while a type filter is active, position and count are within
   // the filtered set and the type label is appended ("3 of 12 · metaphor");
   // with no filter this is character-for-character the original string.
-  const filteredPos = typeFilter ? visibleIdx.indexOf(cursor) : -1;
-  const headerCount = typeFilter
+  const filteredPos = filterOn ? visibleIdx.indexOf(cursor) : -1;
+  const headerCount = filterOn
     ? t("flowTranslate.pagerOfType", {
         index: done
           ? visibleIdx.length
@@ -1809,7 +2198,12 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
             ? 0
             : Math.max(1, filteredPos + 1),
         total: visibleIdx.length,
-        type: typeLabelOf(typeFilter),
+        type: [
+          typeFilter ? typeLabelOf(typeFilter) : null,
+          statusFilterOn ? t("flowTranslate.rapid.statusFilter.pager") : null,
+        ]
+          .filter(Boolean)
+          .join(" · "),
       })
     : done
       ? t("flowTranslate.pagerOf", { index: total, total })
@@ -1887,7 +2281,17 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
           value={typeFilter ?? ""}
           onChange={(e) => {
             const v = e.target.value as string;
-            setTypeFilter(v === "" ? null : v);
+            const next = v === "" ? null : v;
+            setTypeFilter(next);
+            // Land on a note both filters show; the type effect alone would
+            // pick the type's first note even if its status is hidden.
+            if (next && statusFilterOn) {
+              const ofType = queueIds.flatMap((id, i) =>
+                typeSlugOf(rowById.get(id)?.support_reference) === next ? [i] : [],
+              );
+              const m = rapidStatusMatches(ofType, bucketAt, hiddenStatuses);
+              if (m.length > 0 && !m.includes(cursor)) setCursor(m.find((i) => i > cursor) ?? m[0]);
+            }
           }}
           aria-label={t("flowTranslate.filterAria")}
           sx={{ borderRadius: "10px", fontSize: "0.875rem", bgcolor: "background.paper" }}
@@ -1904,43 +2308,269 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
 
   const noteLock = chapterLock && chapterLock.rowId === row?.id ? chapterLock.body : null;
 
+  // Lock, conflict and notice alerts: above the card stack, or pinned above
+  // the rapid check list.
+  const statusAlerts = (
+    <>
+  {(translateLockJob || noteLock) && (
+    // A chapter-wide translate run (from the pipeline store) makes the
+    // editor read-only; any other lock is reported by a refused save,
+    // on the note it was refused for (issue #606).
+    <LockBanner
+      pipelineType={translateLockJob?.pipeline_type ?? noteLock?.pipelineType ?? null}
+      startedAt={translateLockJob?.created_at ?? noteLock?.startedAt ?? null}
+    />
+  )}
+  {rowTranslateLocked && !translateLockJob && !noteLock && (
+    // A single-note or verse-range redraft covers this note only: say so
+    // here instead of a chapter-wide banner (issue #606).
+    <Alert severity="info">{t("flowTranslate.noteLockedByTranslate")}</Alert>
+  )}
+
+  {row && conflictRowId === row.id && (
+    <Alert
+      severity="warning"
+      action={
+        <Button color="inherit" size="small" onClick={reloadRow}>
+          {t("flowTranslate.reloadNote")}
+        </Button>
+      }
+    >
+      {t("flowTranslate.conflictNotice")}
+    </Alert>
+  )}
+
+  {notice && (
+    <Alert severity={notice.severity} onClose={() => setNotice(null)}>
+      {notice.text}
+    </Alert>
+  )}
+    </>
+  );
+
+  // The verse block (reference, lane toggles, lanes) and the open editor are
+  // shared by the card view and the rapid check layout, so both draw the
+  // same scripture and edit through the same state.
+  const scriptureCard = row ? (
+    <Box sx={cardSx}>
+      <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.75 }}>
+        <Typography
+          sx={{ fontSize: "0.875rem", fontWeight: 700, color: REF_COLOR, flex: 1, minWidth: 0 }}
+        >
+          {row.verse === 0
+            ? t("flowTranslate.introRefLong", { book, chapter: row.chapter })
+            : // `ref_raw` ("13:26" or bridged "13:26-27") is the authoritative
+              // reference and the only place a note's range lives (tn_rows has
+              // no verse_end); render it like the classic NoteCard, but only
+              // when it names the span the lanes actually show — see
+              // noteRefLabel. (issue #341)
+              `${book} ${noteRefLabel(row)}`}
+        </Typography>
+        {sourceUltAvailable && (
+          // Toggle for the source ULT lane (#430). A pressed chip rather
+          // than a Switch: it sits in the card header next to the
+          // reference, and its label IS the lane label it reveals.
+          <Chip
+            size="small"
+            clickable
+            variant={showSourceUlt ? "filled" : "outlined"}
+            color={showSourceUlt ? "primary" : "default"}
+            label={sourceUltLabel}
+            aria-pressed={showSourceUlt}
+            aria-label={t("flowTranslate.toggleSourceUlt", { label: sourceUltLabel })}
+            onClick={() => setShowSourceUlt(!showSourceUlt)}
+            sx={{ flex: "none", fontWeight: 700, letterSpacing: "0.04em" }}
+          />
+        )}
+        {sourceUltOn && (
+          // Second toggle (#431), beside the lane toggle it depends on:
+          // swaps that lane for the read-only alignment strip.
+          <Chip
+            size="small"
+            clickable
+            variant={showUltAlignment ? "filled" : "outlined"}
+            color={showUltAlignment ? "primary" : "default"}
+            label={t("flowTranslate.alignmentChip")}
+            aria-pressed={showUltAlignment}
+            // The visible text is the accessible name (label-in-name);
+            // the longer explanation is a description, not a rename.
+            title={t("flowTranslate.toggleSourceUltAlignment", { label: sourceUltLabel })}
+            onClick={() => setShowUltAlignment(!showUltAlignment)}
+            sx={{ flex: "none", fontWeight: 700 }}
+          />
+        )}
+      </Stack>
+      {sourceUltOn &&
+        (sourceUlt.status === "ready" && sourceUltText ? (
+          ultAlignmentOn && sourceUltStrip && sourceUltStrip.length > 0 ? (
+            <UltAlignmentStrip
+              // A new note is a new strip: remount drops the old
+              // hover/pinned focus (object identity of the slices
+              // alone is not a note change).
+              key={row.id}
+              label={sourceUltLabel}
+              slices={sourceUltStrip}
+              originalLabel={sourceLabel}
+              originalDir={sourceDir}
+              labelFontFamily={theme.typography.fontFamily}
+              quoteBg={HL}
+            />
+          ) : (
+            <>
+              {ultAlignmentOn && sourceUltStrip === null && (
+                <Typography
+                  variant="caption"
+                  data-align-bridged=""
+                  sx={{ display: "block", mb: 0.5, color: "text.secondary", fontStyle: "italic" }}
+                >
+                  {t("flowTranslate.alignmentBridged", { label: sourceUltLabel })}
+                </Typography>
+              )}
+              <Lane
+                label={sourceUltLabel}
+                text={sourceUltText}
+                segments={sourceUltSegments}
+                labelFontFamily={theme.typography.fontFamily}
+                mark={mark}
+              />
+            </>
+          )
+        ) : (
+          // Not the Lane's own empty state: that copy talks about an
+          // undrafted TARGET lane "in this workspace", which is the wrong
+          // story for a published source that simply lacks the verse.
+          <Typography
+            variant="caption"
+            sx={{ display: "block", mb: 1, color: "text.secondary", fontStyle: "italic" }}
+          >
+            {sourceUlt.status === "error"
+              ? t("flowTranslate.sourceLaneUnavailable", { label: sourceUltLabel })
+              : sourceUlt.status === "ready"
+                ? t("flowTranslate.sourceLaneNoVerse", { label: sourceUltLabel })
+                : t("flowTranslate.sourceLaneLoading", { label: sourceUltLabel })}
+          </Typography>
+        ))}
+      <Lane
+        label={litLabel}
+        text={ultText}
+        segments={ultSegments}
+        labelFontFamily={theme.typography.fontFamily}
+        mark={mark}
+      />
+      <Lane
+        label={simLabel}
+        text={ustText}
+        segments={ustSegments}
+        labelFontFamily={theme.typography.fontFamily}
+        mark={mark}
+      />
+      {renderCovered.clamped && (
+        <Typography
+          variant="caption"
+          sx={{ display: "block", mt: 0.5, color: "text.secondary", fontStyle: "italic" }}
+        >
+          {t("flowTranslate.laneClampHint", {
+            shown: renderCovered.verses.length,
+            total: renderCovered.total,
+          })}
+        </Typography>
+      )}
+    </Box>
+  ) : null;
+
+  const editorField = (
+    <>
+      <TextField
+        inputRef={editorInputRef}
+        multiline
+        fullWidth
+        minRows={4}
+        value={draftValue}
+        onChange={(e) => setDraftValue(e.target.value)}
+        // Direction follows the *content*, not the project language:
+        // dir="auto" lets first-strong-character detection pick RTL for
+        // genuine Arabic and LTR for English placeholder text, so LTR
+        // content in an RTL-target project no longer bidi-mangles (#256).
+        // Never an sx `direction` (stylis inverts it under an RTL UI; PR #53).
+        disabled={editLocked}
+        inputProps={{ dir: "auto" }}
+        sx={{
+          "& .MuiOutlinedInput-root": {
+            bgcolor: "action.hover",
+            borderRadius: "9px",
+            // Arabic a size larger, as in the read-only note (arabicScriptSize).
+            fontSize: arabicFontSize("0.97rem", editsArabicScript(draftValue, projectConfig?.languageCode)),
+            lineHeight: 1.55,
+          },
+          "& .MuiOutlinedInput-notchedOutline": {
+            borderWidth: "1.5px",
+            borderColor: INSPIRE,
+          },
+        }}
+      />
+      <Stack direction="row" justifyContent="flex-end" spacing={0.5} sx={{ mt: 1 }}>
+        {rapidReady && hasDiff && (
+          // Rapid check only: put the note back to its saved text. The
+          // persist effect then clears this row's stored draft (draftValue
+          // equals the baseline again), the same path a type-back takes, so
+          // nothing comes back after a reload. The server is not touched.
+          <Button
+            disabled={busy || redoing}
+            onClick={() => {
+              setDraftValue(baseline);
+              setEditing(false);
+            }}
+            sx={{ minHeight: 44, color: "text.secondary", fontWeight: 700 }}
+          >
+            {t("flowTranslate.rapid.editor.discard")}
+          </Button>
+        )}
+        {rapidReady && (
+          // Rapid check only: close the editor and keep the typing as an
+          // unsaved draft, exactly what Esc does.
+          <Button
+            onClick={() => setEditing(false)}
+            title={t("flowTranslate.rapid.editor.closeTitle")}
+            sx={{ minHeight: 44, color: "text.secondary", fontWeight: 700, gap: 0.75 }}
+          >
+            {t("flowTranslate.rapid.editor.close")}
+            <Box
+              component="kbd"
+              sx={{
+                fontFamily: "ui-monospace, Menlo, monospace",
+                fontSize: "0.6875rem",
+                fontWeight: 400,
+                border: "1px solid",
+                borderColor: "divider",
+                borderBottomWidth: 2,
+                borderRadius: "4px",
+                paddingInline: "4px",
+              }}
+            >
+              Esc
+            </Box>
+          </Button>
+        )}
+        <Button
+          // editLocked: a lock that arrived mid-edit (a translate run
+          // now holds this note) disables Save too, not just entering
+          // edit mode; the typing waits in the drafts store (#561).
+          disabled={busy || redoing || editLocked}
+          onClick={() => void handleSave()}
+          startIcon={<SaveIcon />}
+          sx={{ minHeight: 44, color: "text.secondary", fontWeight: 700 }}
+        >
+          {t("flowTranslate.save")}
+        </Button>
+      </Stack>
+    </>
+  );
+
   // Everything inside the reading column — identical at every width; only the
   // container differs (phone: the centred column; md+: the detail pane).
   const detailBody = (
     <>
-        {(translateLockJob || noteLock) && (
-          // A chapter-wide translate run (from the pipeline store) makes the
-          // editor read-only; any other lock is reported by a refused save,
-          // on the note it was refused for (issue #606).
-          <LockBanner
-            pipelineType={translateLockJob?.pipeline_type ?? noteLock?.pipelineType ?? null}
-            startedAt={translateLockJob?.created_at ?? noteLock?.startedAt ?? null}
-          />
-        )}
-        {rowTranslateLocked && !translateLockJob && !noteLock && (
-          // A single-note or verse-range redraft covers this note only: say so
-          // here instead of a chapter-wide banner (issue #606).
-          <Alert severity="info">{t("flowTranslate.noteLockedByTranslate")}</Alert>
-        )}
-
-        {row && conflictRowId === row.id && (
-          <Alert
-            severity="warning"
-            action={
-              <Button color="inherit" size="small" onClick={reloadRow}>
-                {t("flowTranslate.reloadNote")}
-              </Button>
-            }
-          >
-            {t("flowTranslate.conflictNotice")}
-          </Alert>
-        )}
-
-        {notice && (
-          <Alert severity={notice.severity} onClose={() => setNotice(null)}>
-            {notice.text}
-          </Alert>
-        )}
+        {statusAlerts}
 
         {total === 0 ? (
           <Alert severity="info">{t("flowTranslate.noNotesInChapter", { book, chapter })}</Alert>
@@ -2085,130 +2715,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
             )}
 
             {/* scripture */}
-            <Box sx={cardSx}>
-              <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.75 }}>
-                <Typography
-                  sx={{ fontSize: "0.875rem", fontWeight: 700, color: REF_COLOR, flex: 1, minWidth: 0 }}
-                >
-                  {row.verse === 0
-                    ? t("flowTranslate.introRefLong", { book, chapter: row.chapter })
-                    : // `ref_raw` ("13:26" or bridged "13:26-27") is the authoritative
-                      // reference and the only place a note's range lives (tn_rows has
-                      // no verse_end); render it like the classic NoteCard, but only
-                      // when it names the span the lanes actually show — see
-                      // noteRefLabel. (issue #341)
-                      `${book} ${noteRefLabel(row)}`}
-                </Typography>
-                {sourceUltAvailable && (
-                  // Toggle for the source ULT lane (#430). A pressed chip rather
-                  // than a Switch: it sits in the card header next to the
-                  // reference, and its label IS the lane label it reveals.
-                  <Chip
-                    size="small"
-                    clickable
-                    variant={showSourceUlt ? "filled" : "outlined"}
-                    color={showSourceUlt ? "primary" : "default"}
-                    label={sourceUltLabel}
-                    aria-pressed={showSourceUlt}
-                    aria-label={t("flowTranslate.toggleSourceUlt", { label: sourceUltLabel })}
-                    onClick={() => setShowSourceUlt(!showSourceUlt)}
-                    sx={{ flex: "none", fontWeight: 700, letterSpacing: "0.04em" }}
-                  />
-                )}
-                {sourceUltOn && (
-                  // Second toggle (#431), beside the lane toggle it depends on:
-                  // swaps that lane for the read-only alignment strip.
-                  <Chip
-                    size="small"
-                    clickable
-                    variant={showUltAlignment ? "filled" : "outlined"}
-                    color={showUltAlignment ? "primary" : "default"}
-                    label={t("flowTranslate.alignmentChip")}
-                    aria-pressed={showUltAlignment}
-                    // The visible text is the accessible name (label-in-name);
-                    // the longer explanation is a description, not a rename.
-                    title={t("flowTranslate.toggleSourceUltAlignment", { label: sourceUltLabel })}
-                    onClick={() => setShowUltAlignment(!showUltAlignment)}
-                    sx={{ flex: "none", fontWeight: 700 }}
-                  />
-                )}
-              </Stack>
-              {sourceUltOn &&
-                (sourceUlt.status === "ready" && sourceUltText ? (
-                  ultAlignmentOn && sourceUltStrip && sourceUltStrip.length > 0 ? (
-                    <UltAlignmentStrip
-                      // A new note is a new strip: remount drops the old
-                      // hover/pinned focus (object identity of the slices
-                      // alone is not a note change).
-                      key={row.id}
-                      label={sourceUltLabel}
-                      slices={sourceUltStrip}
-                      originalLabel={sourceLabel}
-                      originalDir={sourceDir}
-                      labelFontFamily={theme.typography.fontFamily}
-                      quoteBg={HL}
-                    />
-                  ) : (
-                    <>
-                      {ultAlignmentOn && sourceUltStrip === null && (
-                        <Typography
-                          variant="caption"
-                          data-align-bridged=""
-                          sx={{ display: "block", mb: 0.5, color: "text.secondary", fontStyle: "italic" }}
-                        >
-                          {t("flowTranslate.alignmentBridged", { label: sourceUltLabel })}
-                        </Typography>
-                      )}
-                      <Lane
-                        label={sourceUltLabel}
-                        text={sourceUltText}
-                        segments={sourceUltSegments}
-                        labelFontFamily={theme.typography.fontFamily}
-                        mark={mark}
-                      />
-                    </>
-                  )
-                ) : (
-                  // Not the Lane's own empty state: that copy talks about an
-                  // undrafted TARGET lane "in this workspace", which is the wrong
-                  // story for a published source that simply lacks the verse.
-                  <Typography
-                    variant="caption"
-                    sx={{ display: "block", mb: 1, color: "text.secondary", fontStyle: "italic" }}
-                  >
-                    {sourceUlt.status === "error"
-                      ? t("flowTranslate.sourceLaneUnavailable", { label: sourceUltLabel })
-                      : sourceUlt.status === "ready"
-                        ? t("flowTranslate.sourceLaneNoVerse", { label: sourceUltLabel })
-                        : t("flowTranslate.sourceLaneLoading", { label: sourceUltLabel })}
-                  </Typography>
-                ))}
-              <Lane
-                label={litLabel}
-                text={ultText}
-                segments={ultSegments}
-                labelFontFamily={theme.typography.fontFamily}
-                mark={mark}
-              />
-              <Lane
-                label={simLabel}
-                text={ustText}
-                segments={ustSegments}
-                labelFontFamily={theme.typography.fontFamily}
-                mark={mark}
-              />
-              {renderCovered.clamped && (
-                <Typography
-                  variant="caption"
-                  sx={{ display: "block", mt: 0.5, color: "text.secondary", fontStyle: "italic" }}
-                >
-                  {t("flowTranslate.laneClampHint", {
-                    shown: renderCovered.verses.length,
-                    total: renderCovered.total,
-                  })}
-                </Typography>
-              )}
-            </Box>
+            {scriptureCard}
 
             {(() => {
               // Intro notes (row.verse === 0) render the source + target cards
@@ -2269,48 +2776,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
               </Typography>
 
               {editing ? (
-                <>
-                  <TextField
-                    inputRef={editorInputRef}
-                    multiline
-                    fullWidth
-                    minRows={4}
-                    value={draftValue}
-                    onChange={(e) => setDraftValue(e.target.value)}
-                    // Direction follows the *content*, not the project language:
-                    // dir="auto" lets first-strong-character detection pick RTL for
-                    // genuine Arabic and LTR for English placeholder text, so LTR
-                    // content in an RTL-target project no longer bidi-mangles (#256).
-                    // Never an sx `direction` (stylis inverts it under an RTL UI; PR #53).
-                    disabled={editLocked}
-                    inputProps={{ dir: "auto" }}
-                    sx={{
-                      "& .MuiOutlinedInput-root": {
-                        bgcolor: "action.hover",
-                        borderRadius: "9px",
-                        fontSize: "0.97rem",
-                        lineHeight: 1.55,
-                      },
-                      "& .MuiOutlinedInput-notchedOutline": {
-                        borderWidth: "1.5px",
-                        borderColor: INSPIRE,
-                      },
-                    }}
-                  />
-                  <Stack direction="row" justifyContent="flex-end" sx={{ mt: 1 }}>
-                    <Button
-                      // editLocked: a lock that arrived mid-edit (a translate run
-                      // now holds this note) disables Save too, not just entering
-                      // edit mode; the typing waits in the drafts store (#561).
-                      disabled={busy || redoing || editLocked}
-                      onClick={() => void handleSave()}
-                      startIcon={<SaveIcon />}
-                      sx={{ minHeight: 44, color: "text.secondary", fontWeight: 700 }}
-                    >
-                      {t("flowTranslate.save")}
-                    </Button>
-                  </Stack>
-                </>
+                editorField
               ) : (
                 <>
                   <Box
@@ -2336,7 +2802,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
                       paddingInline: 0.5,
                       marginBlock: -0.25,
                       marginInline: -0.5,
-                      fontSize: "0.97rem",
+                      fontSize: arabicFontSize("0.97rem", startsArabicScript(draftValue)),
                       lineHeight: 1.55,
                       whiteSpace: "pre-wrap",
                       textAlign: "start",
@@ -2536,8 +3002,8 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
               maxWidth: wide ? "none" : COLUMN_PX,
               mx: "auto",
               paddingInline: wide ? 2.5 : 2,
-              paddingBlockStart: 1.5,
-              paddingBlockEnd: wide ? 1.5 : "calc(12px + env(safe-area-inset-bottom))",
+              paddingBlockStart: rapidReady ? 1 : 1.5,
+              paddingBlockEnd: rapidReady ? 1 : wide ? 1.5 : "calc(12px + env(safe-area-inset-bottom))",
             }}
           >
             <Button
@@ -2556,7 +3022,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
               }
               sx={{
                 flex: 1,
-                minHeight: 50,
+                minHeight: rapidReady ? 36 : 50,
                 borderRadius: "12px",
                 fontWeight: 700,
                 color: ACCENT,
@@ -2574,7 +3040,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
               onClick={() => void handleNotNeeded()}
               sx={{
                 flex: 1,
-                minHeight: 50,
+                minHeight: rapidReady ? 36 : 50,
                 borderRadius: "12px",
                 fontWeight: 700,
                 bgcolor: skip.soft,
@@ -2596,7 +3062,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
               startIcon={<CheckIcon />}
               sx={{
                 flex: 1.4,
-                minHeight: 50,
+                minHeight: rapidReady ? 36 : 50,
                 borderRadius: "12px",
                 fontWeight: 700,
                 bgcolor: ok.main,
@@ -2608,6 +3074,204 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
             </Button>
           </Stack>
         </Box>
+    ) : null;
+
+  // Rapid check rows: the open note's verse, or with a type filter every
+  // matching note in the chapter (grouped by verse in the list). Both come
+  // from the frozen queue, so order and counts match the card view.
+  const rapidRows: RapidCheckRow[] = !rapidReady
+    ? []
+    : (filterOn ? visibleIdx : queueIds.map((_, i) => i)).flatMap((i) => {
+        const id = queueIds[i];
+        const r = rowById.get(id);
+        if (!r) return [];
+        if (!filterOn && (r.chapter !== row.chapter || r.verse !== row.verse)) return [];
+        const isCurrent = id === currentId;
+        const st = statuses[id];
+        const liveEdit = (isCurrent && hasDiff) || (!isCurrent && draftRowIds.has(id));
+        // Same source as the status chip (noteChip), so circle and chip agree.
+        const approved = st === "approved" && !liveEdit;
+        const blocked = !isCurrent && draftRowIds.has(id);
+        const slug = typeSlugOf(r.support_reference);
+        const english = sourceNotes.get(id)?.note;
+        return [
+          {
+            id,
+            idx: i,
+            verse: r.verse,
+            refLabel: r.verse === 0 ? t("flowTranslate.introRef", { chapter: r.chapter }) : noteRefLabel(r),
+            typeSlug: slug,
+            typeLabel: slug ? typeLabelOf(slug) : null,
+            chip: noteChip(id, r, isCurrent),
+            quote: r.quote ?? "",
+            englishNote: english ? unescapeNewlines(english) : null,
+            targetText: isCurrent ? draftValue : unescapeNewlines(r.note),
+            isCurrent,
+            approved,
+            approvable: !approved && !blocked && st !== "skipped" && (isApprovableRow(r) || (isCurrent && hasDiff)),
+            blocked,
+          },
+        ];
+      });
+
+  // Verse navigation in rapid check: every verse of the chapter that has
+  // notes (only matching notes under a type filter), in queue order. Moving
+  // lands on the verse's first note through the same cursor the rows use, so
+  // drafts stash and hydrate exactly as they do on J/K. Not through the URL:
+  // a hash change clears the type filter and seeks by verse number.
+  const rapidStops: (RapidVerseStop & { idx: number })[] = [];
+  if (rapidReady && queueIds) {
+    for (const i of filterOn ? visibleIdx : queueIds.map((_, n) => n)) {
+      const r = rowById.get(queueIds[i]);
+      if (!r) continue;
+      const key = `${r.chapter}:${r.verse}`;
+      const last = rapidStops[rapidStops.length - 1];
+      if (last?.key === key) {
+        last.count += 1;
+        continue;
+      }
+      rapidStops.push({
+        key,
+        idx: i,
+        count: 1,
+        label: r.verse === 0 ? t("flowTranslate.introRef", { chapter: r.chapter }) : `${r.chapter}:${r.verse}`,
+      });
+    }
+  }
+  const rapidStopKey = row ? `${row.chapter}:${row.verse}` : null;
+  const rapidStopAt = rapidStops.findIndex((s) => s.key === rapidStopKey);
+  const rapidGoStop = (key: string) => {
+    const stop = rapidStops.find((s) => s.key === key);
+    if (!stop) return;
+    setCursor(stop.idx);
+    setView("cards");
+  };
+  const rapidPrevStop = rapidStopAt > 0 ? rapidStops[rapidStopAt - 1] : null;
+  const rapidNextStop = rapidStopAt >= 0 && rapidStopAt < rapidStops.length - 1 ? rapidStops[rapidStopAt + 1] : null;
+
+  // The lanes of rapid check's compact verse block. Each project lane hides
+  // on its own, keyed by its repo so the choice holds across books. The
+  // source ULT lane keeps its own toggle (be:showSourceUlt, the U key), so the
+  // chip and U always agree.
+  // (laneId, litLaneId and simLaneId are defined above rapidGroupLanes,
+  // which hides the per-verse group lanes by the same keys.)
+  const rapidLanes: RapidLane[] = !rapidReady
+    ? []
+    : [
+        ...(sourceUltAvailable
+          ? [
+              {
+                id: "source-ult",
+                label: sourceUltLabel,
+                shown: showSourceUlt,
+                onToggle: () => setShowSourceUlt(!showSourceUlt),
+                toggleLabel: t("flowTranslate.toggleSourceUlt", { label: sourceUltLabel }),
+                bodyHasLabel: ultAlignmentOn && sourceUltStrip != null && sourceUltStrip.length > 0,
+                text: sourceUltText,
+                segments: sourceUltSegments,
+                // The same states the card view's source lane shows.
+                body:
+                  sourceUlt.status === "ready" && sourceUltText ? (
+                    ultAlignmentOn && sourceUltStrip && sourceUltStrip.length > 0 && row ? (
+                      <UltAlignmentStrip
+                        key={row.id}
+                        label={sourceUltLabel}
+                        slices={sourceUltStrip}
+                        originalLabel={sourceLabel}
+                        originalDir={sourceDir}
+                        labelFontFamily={theme.typography.fontFamily}
+                        quoteBg={HL}
+                      />
+                    ) : undefined
+                  ) : (
+                    <Typography variant="caption" sx={{ color: "text.secondary", fontStyle: "italic" }}>
+                      {sourceUlt.status === "error"
+                        ? t("flowTranslate.sourceLaneUnavailable", { label: sourceUltLabel })
+                        : sourceUlt.status === "ready"
+                          ? t("flowTranslate.sourceLaneNoVerse", { label: sourceUltLabel })
+                          : t("flowTranslate.sourceLaneLoading", { label: sourceUltLabel })}
+                    </Typography>
+                  ),
+                caption:
+                  ultAlignmentOn && sourceUltStrip === null ? (
+                    <Typography
+                      variant="caption"
+                      data-align-bridged=""
+                      sx={{ display: "block", color: "text.secondary", fontStyle: "italic" }}
+                    >
+                      {t("flowTranslate.alignmentBridged", { label: sourceUltLabel })}
+                    </Typography>
+                  ) : undefined,
+              },
+            ]
+          : []),
+        {
+          id: litLaneId,
+          label: litLabel,
+          shown: !rapidHiddenLanes.has(litLaneId),
+          // Until the project config arrives the id is a placeholder: a
+          // toggle then would be saved under the wrong key, so the chip waits.
+          disabled: !projectConfig,
+          onToggle: () => setRapidHiddenLane(litLaneId, !rapidHiddenLanes.has(litLaneId)),
+          toggleLabel: t("flowTranslate.rapid.cols.laneToggle", { label: litLabel }),
+          text: ultText,
+          segments: ultSegments,
+        },
+        {
+          id: simLaneId,
+          label: simLabel,
+          shown: !rapidHiddenLanes.has(simLaneId),
+          disabled: !projectConfig,
+          onToggle: () => setRapidHiddenLane(simLaneId, !rapidHiddenLanes.has(simLaneId)),
+          toggleLabel: t("flowTranslate.rapid.cols.laneToggle", { label: simLabel }),
+          text: ustText,
+          segments: ustSegments,
+        },
+      ];
+  const rapidVerseBlock =
+    rapidReady && row ? (
+      <RapidVerseBlock
+        reference={
+          row.verse === 0 ? t("flowTranslate.introRefLong", { book, chapter: row.chapter }) : `${book} ${noteRefLabel(row)}`
+        }
+        stops={rapidStops}
+        currentKey={rapidStopKey}
+        onGoTo={rapidGoStop}
+        lanes={rapidLanes}
+        mark={mark}
+        showLanes={!rapidInline}
+        controls={
+          <>
+            {typeFilterControl && (
+              <Box sx={{ width: 220, "& .MuiSelect-select": { paddingBlock: "4px" } }}>{typeFilterControl}</Box>
+            )}
+            {sourceUltOn && !rapidInline && (
+              // The card view's alignment-strip toggle (#431), offered while
+              // the source lane shows. The inline lanes draw plain text, so
+              // the strip (and this chip) belong to the pinned placement.
+              <Chip
+                size="small"
+                clickable
+                variant={showUltAlignment ? "filled" : "outlined"}
+                color={showUltAlignment ? "primary" : "default"}
+                label={t("flowTranslate.alignmentChip")}
+                aria-pressed={showUltAlignment}
+                title={t("flowTranslate.toggleSourceUltAlignment", { label: sourceUltLabel })}
+                onClick={() => setShowUltAlignment(!showUltAlignment)}
+                sx={{ flex: "none", fontWeight: 700 }}
+              />
+            )}
+            <RapidVersePlacementToggle value={rapidPlacement} onChange={setRapidPlacement} />
+          </>
+        }
+        footnote={
+          renderCovered.clamped ? (
+            <Typography variant="caption" sx={{ display: "block", mt: 0.25, color: "text.secondary", fontStyle: "italic" }}>
+              {t("flowTranslate.laneClampHint", { shown: renderCovered.verses.length, total: renderCovered.total })}
+            </Typography>
+          ) : undefined
+        }
+      />
     ) : null;
 
   return (
@@ -2629,7 +3293,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
       {aiRun.action}
       {!focusMode && (
       <FlowHeader>
-        <Box sx={{ maxWidth: wide ? 1440 : COLUMN_PX, mx: "auto", paddingInline: isTabletUp ? 2 : 1, paddingBlock: 1.5 }}>
+        <Box sx={{ maxWidth: wide ? 1440 : COLUMN_PX, mx: "auto", paddingInline: isTabletUp ? 2 : 1, paddingBlock: rapidReady ? 1 : 1.5 }}>
           <Stack direction="row" alignItems="center" spacing={isTabletUp ? 1.25 : 0.5}>
             <IconButton
               aria-label={t("flowTranslate.backToPackage", { book })}
@@ -2680,6 +3344,21 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
                 <ViewColumnIcon fontSize="small" />
               </IconButton>
             )}
+            {rapidRoom && (
+              // Rapid check (1200px and up): the dense, keyboard-driven list.
+              // Remembered per browser (editorPrefs).
+              <Chip
+                size="small"
+                clickable
+                variant={rapidPref ? "filled" : "outlined"}
+                color={rapidPref ? "primary" : "default"}
+                label={t("flowTranslate.rapid.toggle")}
+                aria-pressed={rapidPref}
+                title={t("flowTranslate.rapid.toggleTitle")}
+                onClick={() => setRapidPref(!rapidPref)}
+                sx={{ flex: "none", fontWeight: 700 }}
+              />
+            )}
             {aiRun.headerButton}
             {/* compact prev/next — same cursor and disabled logic as the card
                 stack's Prev/Next; chevrons flip under RTL (the scripture
@@ -2726,7 +3405,139 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
       </FlowHeader>
       )}
 
-      {wide ? (
+      {rapidReady ? (
+        <NotesRapidCheck
+          rows={rapidRows}
+          groupByVerse={filterOn}
+          renderGroupLanes={
+            rapidInline
+              ? (v, refLabel) => (
+                  <RapidVerseLanes
+                    verse={v}
+                    // Without a filter the one group is the open note's verse:
+                    // a bridged note ("13:26-27") shows every verse it covers,
+                    // as the pinned block does (#341).
+                    verses={filterOn ? undefined : renderCovered.verses}
+                    refLabel={refLabel}
+                    lanes={rapidGroupLanes}
+                    sourceIndex={sourceIndex}
+                    quotes={rapidGroupQuotes.get(v) ?? NO_QUOTES}
+                    mark={mark}
+                  />
+                )
+              : undefined
+          }
+          onTogglePlacement={() => setRapidPlacement(rapidInline ? "top" : "inline")}
+          book={book}
+          sourceLabel={sourceLabel}
+          sourceDir={sourceDir}
+          targetLabel={targetLabel}
+          englishAvailable={translationMode}
+          showEnglish={!rapidHiddenCols.has("english")}
+          onToggleEnglish={() => setRapidHiddenCol("english", !rapidHiddenCols.has("english"))}
+          showQuote={!rapidHiddenCols.has("quote")}
+          onToggleQuote={() => setRapidHiddenCol("quote", !rapidHiddenCols.has("quote"))}
+          onToggleSourceUlt={sourceUltAvailable ? () => setShowSourceUlt(!showSourceUlt) : null}
+          header={
+            <Stack spacing={1}>
+              {statusAlerts}
+              {rapidVerseBlock}
+            </Stack>
+          }
+          // The type filter sits on the verse block's control line instead;
+          // this line says what the status filter hides.
+          filterControl={
+            statusFilterOn ? (
+              <RapidStatusFilterLine
+                hidden={hiddenStatuses}
+                counts={statusCounts}
+                labels={statusLabels}
+                shown={visibleIdx.length}
+                total={statusCandidates.length}
+                onShowAll={() => applyHiddenStatuses(NO_HIDDEN_STATUSES)}
+              />
+            ) : null
+          }
+          statusFilter={
+            <RapidStatusFilterMenu
+              hidden={hiddenStatuses}
+              counts={statusCounts}
+              labels={statusLabels}
+              onChange={applyHiddenStatuses}
+            />
+          }
+          editor={editorField}
+          editing={editing}
+          editorContainerRef={editorContainerRef}
+          footer={actionBar}
+          busy={busy || redoing}
+          editLocked={editLocked}
+          onSelect={(idx) => {
+            setCursor(idx);
+            setView("cards");
+          }}
+          onEdit={(idx) => {
+            if (idx === cursor) {
+              if (!editLocked) setEditing(true);
+              return;
+            }
+            setCursor(idx);
+            setView("cards");
+            setEditRequest(queueIds[idx]);
+          }}
+          onApprove={(id) => void (id === currentId ? handleApprove() : approveOtherRow(id))}
+          onUnapprove={(id) => void unapproveRow(id)}
+          onOpenQuote={canPickQuote ? openQuotePicker : null}
+          quoteAnchorRef={setQuoteAnchor}
+          quoteOpen={quoteOpen}
+          onNext={goNext}
+          onPrev={goPrev}
+          onPrevVerse={rapidPrevStop ? () => rapidGoStop(rapidPrevStop.key) : null}
+          onNextVerse={rapidNextStop ? () => rapidGoStop(rapidNextStop.key) : null}
+          onApproveCurrent={() => void handleApprove()}
+          onStartEdit={() => {
+            if (!editLocked) setEditing(true);
+          }}
+          onStopEdit={() => setEditing(false)}
+          assistant={{
+            chapter,
+            rows: () =>
+              (queueIds ?? []).flatMap((id) => {
+                const r = rowById.get(id);
+                return r && r.trashed_at == null && statuses[id] !== "skipped" ? [r] : [];
+              }),
+            describeId: (id) => {
+              const r = rowById.get(id);
+              if (!r) return null;
+              return {
+                label: r.verse === 0 ? t("flowTranslate.introRef", { chapter: r.chapter }) : noteRefLabel(r),
+                before: r.note ?? "",
+              };
+            },
+            onApply: (sel, snapshot) =>
+              rapidBulk.applyAssistant({
+                edits: editsWithVersions(sel.edits, snapshot.versions),
+                approve: sel.approve,
+                notNeeded: sel.notNeeded,
+                versions: snapshot.versions,
+                states: snapshot.states,
+              }),
+          }}
+          bulk={{
+            onApprove: rapidBulk.approve,
+            onRedo: rapidBulk.redo,
+            onNotNeeded: rapidBulk.notNeeded,
+            running: rapidBulk.running,
+            // The translate job redrafts from the English notes, which only a
+            // translation workspace has.
+            redoBlocked: aiUnavailable ?? (translationMode ? null : t("flowTranslate.rapid.bulk.redoNeedsTranslation")),
+            result: rapidBulk.result,
+            onUndo: rapidBulk.undo,
+            onDismiss: rapidBulk.dismiss,
+          }}
+          selectionScope={chapterKey}
+        />
+      ) : wide ? (
         /* desk (the words screen's md+ pattern): 1440px centred grid — the
            note queue as a scrollable list pane on the inline-start side, the
            card stack in a panel-chromed detail pane. Grid column order follows
@@ -2868,6 +3679,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
           }
           onCancel={() => setQuoteOpenRowId(null)}
           onCommit={() => void commitQuote()}
+          manageFocus
         />
       )}
       <Snackbar

@@ -15,7 +15,7 @@
 // which the adminSurfaceMap flagged as a gap. It's now admin-only, matching
 // the other three former pill-bar "More tools" screens (#186).
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Box,
@@ -46,6 +46,8 @@ import { useUnsavedGuard } from "../../hooks/useUnsavedGuard";
 import { drafts as draftStore, type DraftRecord } from "../../sync/drafts";
 import type { TemplateUnitMeta } from "../../sync/api";
 import { AI_NEEDS_ORG_KEY, QUICK_DRAFTS_NEED_ORG_KEY } from "../../lib/aiProviderErrors";
+import { openEditorNeedsReload } from "../../lib/bulkDraft";
+import { DraftMissingTemplatesButton } from "../DraftMissingTemplatesButton";
 
 export interface CurateScreenProps extends FlowScreenContext {
   templateId: string | null;
@@ -146,16 +148,24 @@ export default function CurateScreen({ role, templateId }: CurateScreenProps) {
   // remounts the editor so it refetches: without it the editor keeps a stale
   // version (next Save 409s) and an Approve would publish text never shown.
   const [editorReload, setEditorReload] = useState(0);
+  // The unit open right now, for the run callbacks below: they finish after an
+  // await, and the admin can open another unit mid-run (#847). Reading
+  // templateId there would give the unit open when the run started. Synced
+  // after every commit (no deps); must stay above the early returns below.
+  const openTemplateIdRef = useRef(templateId);
+  useLayoutEffect(() => {
+    openTemplateIdRef.current = templateId;
+  });
   const handleDraftAll = useCallback(async () => {
     if (bulkRunning || draftableUnits.length === 0 || aiDisabled) return;
     const targeted = new Set(draftableUnits.map((u) => u.template_id));
     const result = await draftAll(draftableUnits);
     if (result.reason === "disabled") setAiDisabled(true);
     refetch();
-    // draftableUnits excludes units with unsaved typing, so a remount here can
-    // never discard a draft the user is holding.
-    if (templateId && targeted.has(templateId)) setEditorReload((k) => k + 1);
-  }, [bulkRunning, draftableUnits, draftAll, refetch, aiDisabled, templateId]);
+    // draftableUnits leaves out units with unsaved typing when the run starts,
+    // and a remount restores any typing from the drafts store either way.
+    if (openEditorNeedsReload(openTemplateIdRef.current, targeted)) setEditorReload((k) => k + 1);
+  }, [bulkRunning, draftableUnits, draftAll, refetch, aiDisabled, setAiDisabled, setEditorReload]);
   const bulkMessage = useMemo(() => {
     if (!bulkResult) return null;
     const { drafted, failed, reason, lastErrorCode } = bulkResult;
@@ -283,6 +293,19 @@ export default function CurateScreen({ role, templateId }: CurateScreenProps) {
               <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1 }}>
                 {approvedTally}
               </Typography>
+              <Box sx={{ mt: 1.25 }}>
+                <DraftMissingTemplatesButton
+                  onRun={(written) => {
+                    refetch();
+                    // Same remount as "Draft all" above: the open editor must not
+                    // keep (and let Approve publish) a copy the run replaced.
+                    // A remount restores any unsaved typing from the drafts store.
+                    if (openEditorNeedsReload(openTemplateIdRef.current, new Set(written))) {
+                      setEditorReload((k) => k + 1);
+                    }
+                  }}
+                />
+              </Box>
             </Box>
 
             <Box sx={{ flex: 1, overflowY: "auto", minHeight: 0 }} role="list" aria-label={t("moreTools.curate.templateList")}>

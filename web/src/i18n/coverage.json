@@ -47,6 +47,7 @@
     "dialogs.findReplace.tnScope",
     "flowQuestions.subAuthoring",
     "flowScripture.subPlain",
+    "flowTranslate.rapid.nav.option",
     "flowTranslate.subtitle",
     "flowVerse.verse.groupHeading",
     "import.sources.sourceAquifer",
@@ -69,7 +70,8 @@
     "setup.resource.tn",
     "setup.resource.tq",
     "setup.resource.tw",
-    "setup.resource.twl"
+    "setup.resource.twl",
+    "templates.draftMissing.failedItem"
   ],
   "review": {
     "en": {

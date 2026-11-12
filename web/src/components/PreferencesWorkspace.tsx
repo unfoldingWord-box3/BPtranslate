@@ -56,11 +56,13 @@ import {
 import { currentPrefsFromConflict } from "../sync/prefsConflict";
 import { bookName } from "../lib/bookNames";
 import { MarkdownView } from "./MarkdownView";
+import { PrefsHistoryButton } from "./PrefsHistoryDialog";
 import { defaultReplaceSelection } from "../lib/setupWizard";
 import { SetupWizard } from "./SetupWizard";
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 import { UserManagementSection } from "./UserManagementSection";
 import { AiServiceSection } from "./AiServiceSection";
+import { HouseStyleRulesSection } from "./HouseStyleRulesSection";
 import { UiLanguageControl } from "./TopBar";
 import { LocalizationSection } from "./LocalizationSection";
 import { TerminologySection } from "./TerminologySection";
@@ -114,16 +116,17 @@ export type Section =
   | "setup"
   | "localization"
   | "users"
-  | "aiService";
+  | "aiService"
+  | "houseStyle";
 // Memory sections shown in the rail when a translation project + memory are
-// available. "setup", "localization", "users", and "aiService" are admin-only
-// and gated separately (they must show regardless of project type / memory),
-// so they aren't listed.
+// available. "setup", "localization", "users", "aiService" and "houseStyle" are
+// admin-only and gated separately (they must show regardless of project type /
+// memory), so they aren't listed.
 export const SECTIONS: Section[] = ["brief", "instructions", "commonIssues", "terminology", "examples"];
 // Every routable section (memory + the admin-only setup wizard, localization
-// editor, user management, and AI service config) — used for hash-route
-// validation in App.tsx.
-export const ALL_SECTIONS: Section[] = [...SECTIONS, "setup", "localization", "users", "aiService"];
+// editor, user management, AI service config and house-style rules) — used for
+// hash-route validation in App.tsx.
+export const ALL_SECTIONS: Section[] = [...SECTIONS, "setup", "localization", "users", "aiService", "houseStyle"];
 
 // Memory is now one long scrollable page; the rail items and deep links jump to
 // a section by scrolling its wrapper (id `pref-sec-<key>`) into view rather than
@@ -151,6 +154,9 @@ export function PreferencesWorkspace({ onNavigate, onBack, section, role }: Prop
   // section's save can't leave another section holding a stale version that
   // self-409s on its very next save.
   const prefsState = useTranslationPrefs(memoryAvailable);
+  // Bumped by a restore from the preferences history (#788) to remount the
+  // seed-once prefs sections.
+  const [prefsGen, setPrefsGen] = useState(0);
 
   // Deep-link / rail-driven anchor scroll: when the routed section is a memory
   // section and the long page is available, scroll it into view. Runs on mount
@@ -297,6 +303,25 @@ export function PreferencesWorkspace({ onNavigate, onBack, section, role }: Prop
               </Typography>
             </Box>
           )}
+          {role === "admin" && (
+            <Box
+              onClick={() => onNavigate("houseStyle")}
+              sx={{
+                px: 1.5,
+                py: 0.9,
+                cursor: "pointer",
+                borderInlineStart: "3px solid",
+                borderColor: section === "houseStyle" ? "primary.main" : "transparent",
+                bgcolor:
+                  section === "houseStyle" ? (theme) => alpha(theme.palette.primary.main, 0.08) : "transparent",
+                "&:hover": { bgcolor: "action.hover" },
+              }}
+            >
+              <Typography variant="body2" sx={{ fontWeight: section === "houseStyle" ? 700 : 400 }}>
+                {t("preferences.section.houseStyle")}
+              </Typography>
+            </Box>
+          )}
         </Box>
       </Box>
 
@@ -321,6 +346,8 @@ export function PreferencesWorkspace({ onNavigate, onBack, section, role }: Prop
             <UserManagementSection />
           ) : section === "aiService" && role === "admin" ? (
             <AiServiceSection />
+          ) : section === "houseStyle" && role === "admin" ? (
+            <HouseStyleRulesSection />
           ) : cfg === null ? null : !isTranslation ? (
             <Alert severity="info" variant="outlined">
               {t("preferences.glOnly")}
@@ -337,13 +364,26 @@ export function PreferencesWorkspace({ onNavigate, onBack, section, role }: Prop
             // visible anchor label — no duplicate heading needed.
             <Stack spacing={4} divider={<Divider />}>
               <Box id="pref-sec-brief" sx={{ scrollMarginTop: "16px" }}>
-                <BriefSection prefsState={prefsState} />
+                {/* Change history + restore (#788), admin-only like the PUT it
+                    makes. Outside the keyed sections so a restore's remount
+                    doesn't close the dialog. */}
+                {role === "admin" && (
+                  <Stack direction="row" alignItems="center" justifyContent="flex-end" gap={1} sx={{ mb: 1 }}>
+                    <Typography variant="caption" color="text.secondary">
+                      {t("prefsHistory.caption")}
+                    </Typography>
+                    <PrefsHistoryButton apply={prefsState.apply} onRestored={() => setPrefsGen((g) => g + 1)} />
+                  </Stack>
+                )}
+                {/* Keyed by prefsGen: these sections seed their text once, so a
+                    restore remounts them to show (and save on top of) it. */}
+                <BriefSection key={`brief-${prefsGen}`} prefsState={prefsState} />
               </Box>
               <Box id="pref-sec-instructions" sx={{ scrollMarginTop: "16px" }}>
-                <InstructionsSection prefsState={prefsState} />
+                <InstructionsSection key={`instructions-${prefsGen}`} prefsState={prefsState} />
               </Box>
               <Box id="pref-sec-commonIssues" sx={{ scrollMarginTop: "16px" }}>
-                <CommonIssuesSection prefsState={prefsState} />
+                <CommonIssuesSection key={`commonIssues-${prefsGen}`} prefsState={prefsState} />
               </Box>
               <Box id="pref-sec-terminology" sx={{ scrollMarginTop: "16px" }}>
                 <TerminologySection direction={cfg?.direction ?? "ltr"} />

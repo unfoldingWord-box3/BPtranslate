@@ -20,6 +20,7 @@ import {
 } from "./api";
 import { backoffMs } from "./backoff";
 import { isSortOrderOnlyPatch, wouldAutoHeal } from "./rowConflict";
+import { deletesOnFatal, healSettlesAsSaved, rearmOnKeepMine, resultFor409 } from "./conflict409.ts";
 import { isLaneFrozen, laneFreezeReason } from "./laneFreeze";
 import {
   MAX_ATTEMPTS_SENTINEL,
@@ -145,6 +146,12 @@ export interface OutboxOp {
   // The server stores it on the new edit_log entry + the row's column so
   // the UI can label the chip v{N} even though row.version is now N+1.
   restoredFromVersion?: number;
+  // The translation_state the patch was proposed against (#880), sent as the
+  // PATCH's expected_state; null pins "no state". Set only by the Rapid check
+  // assistant's Apply. Kept on the op so an auto-healed resend still carries it.
+  // When the 409 shows the server already holds the patch, the op is settled
+  // as saved instead of resent (healSettlesAsSaved, #886 item 1).
+  expectedState?: string | null;
   // The row's values for the patched fields at the moment we enqueued (the
   // version we branched from). On a 409 this lets us tell a spurious conflict
   // (the server changed a *different* field, or already has our value) from a
@@ -307,6 +314,7 @@ export const outbox = {
     patch: Record<string, unknown>,
     opts: {
       restoredFromVersion?: number;
+      expectedState?: string | null;
       book: string;
       baseline?: Record<string, unknown>;
       draftRef?: { chapter: number; verse: number };
@@ -328,6 +336,7 @@ export const outbox = {
       ...(opts.restoredFromVersion !== undefined
         ? { restoredFromVersion: opts.restoredFromVersion }
         : {}),
+      ...(opts.expectedState !== undefined ? { expectedState: opts.expectedState } : {}),
       ...(opts.baseline !== undefined ? { baseline: opts.baseline } : {}),
       ...(opts.draftRef !== undefined ? { draftRef: opts.draftRef } : {}),
     };
@@ -551,10 +560,8 @@ export const outbox = {
     for (const o of all) {
       if (targetKey(o.target) !== key) continue;
       if (o.status === "conflict" || o.status === "pending") {
-        o.expectedVersion = newExpectedVersion;
-        o.status = "pending";
-        o.conflictCurrent = undefined;
-        await tx.store.put(o);
+        // The resolved op also drops its expected_state pin (#883 review A2).
+        await tx.store.put(rearmOnKeepMine(o, opId, newExpectedVersion));
       }
     }
     await tx.done;
@@ -725,7 +732,8 @@ type Result =
   | { kind: "ok"; updated: unknown }
   | { kind: "conflict"; current: unknown }
   | { kind: "retry"; reason: string }
-  | { kind: "fatal"; reason: string }
+  // `current`: the server's row, set for state_mismatch only (conflict409.ts).
+  | { kind: "fatal"; reason: string; current?: unknown }
   // Chapter is locked because an AI pipeline is mid-flight. The auto-apply
   // step will overwrite the row anyway, so retrying is pointless — the op
   // gets dropped and the listener can surface a toast.
@@ -754,21 +762,6 @@ export function onOutboxDrop(fn: DropListener): () => void {
   return () => dropListeners.delete(fn);
 }
 
-function unexpectedAlignmentLossReason(body: unknown): string | null {
-  const error = (body as { error?: unknown } | null)?.error;
-  if (error !== "unexpected_alignment_loss") return null;
-  const losses = (body as { delta?: { unexpectedLosses?: unknown[] } } | null)
-    ?.delta?.unexpectedLosses;
-  const sample = Array.isArray(losses)
-    ? losses
-        .slice(0, 3)
-        .map((loss) => (loss as { text?: unknown } | null)?.text)
-        .filter((text): text is string => typeof text === "string" && text.length > 0)
-        .join(", ")
-    : "";
-  return `unexpected_alignment_loss${sample ? `: ${sample}` : ""}`;
-}
-
 async function dispatch(op: OutboxOp): Promise<Result> {
   try {
     let updated: unknown;
@@ -789,6 +782,7 @@ async function dispatch(op: OutboxOp): Promise<Result> {
           op.patch,
           {
             ...(op.restoredFromVersion !== undefined ? { restoredFromVersion: op.restoredFromVersion } : {}),
+            ...(op.expectedState !== undefined ? { expectedState: op.expectedState } : {}),
             book: op.target.book,
             queuedAt: op.queuedAt,
           },
@@ -827,37 +821,9 @@ async function dispatch(op: OutboxOp): Promise<Result> {
         if (isChapterLockedBody(e.body)) {
           return { kind: "locked", lockBody: e.body };
         }
-        const alignmentLoss = unexpectedAlignmentLossReason(e.body);
-        if (alignmentLoss) {
-          return { kind: "fatal", reason: alignmentLoss };
-        }
-        // Lane-specific terminal errors: the verse's generation is stale or a
-        // replacement is active — retrying won't help; quarantine immediately.
-        const errCode = (e.body as { error?: string } | null)?.error;
-        if (errCode === "workspace_mismatch") {
-          // This tab's X-Workspace header (its own notion of the active org)
-          // no longer matches the workspace the server resolved the request
-          // against — a SIBLING tab switched orgs out from under it (see
-          // api.ts's request() and workspaces.ts's requireWorkspaceMatch).
-          // This is NOT a version conflict: don't surface a merge prompt,
-          // don't burn the retry-attempt cap (reason doesn't start with
-          // "transient"). The op still belongs to — and is valid against —
-          // the OTHER workspace's outbox database; leave it queued as-is. Once
-          // api.ts's reload lands the user back where their outbox agrees
-          // with the server, it drains normally.
-          return { kind: "retry", reason: "workspace_mismatch" };
-        }
-        if (
-          errCode === "source_generation_mismatch" ||
-          errCode === "lane_replacement_required" ||
-          errCode === "lane_replacement_in_progress" ||
-          errCode === "scripture_text_read_only" ||
-          errCode === "scripture_fully_locked"
-        ) {
-          return { kind: "fatal", reason: errCode };
-        }
-        const body = e.body as { current?: unknown } | undefined;
-        return { kind: "conflict", current: body?.current };
+        // Every other 409 (version_mismatch, state_mismatch, lane refusals...):
+        // conflict409.ts, which the strip-types test runner can load (#883).
+        return resultFor409(e.body);
       }
       if (e.status === 401) {
         // Token missing/expired. Don't burn retries against a wall — pause
@@ -1116,6 +1082,10 @@ async function drainPass() {
     // dispatch below can tell a genuine terminal exit from one that got
     // walked back (upstream issue #570).
     let persisted = true;
+    // Set when a 409 shows the server already holds this op's patch and the
+    // op was settled as saved (#886 item 1): it is announced as a 200 with
+    // this row.
+    let savedRow: { row: unknown } | null = null;
     try {
       if (result.kind === "ok") {
         await settleAfterDispatch(() => "delete");
@@ -1129,15 +1099,26 @@ async function drainPass() {
         // row anyway. Drop the op — unless quarantine already claimed it.
         await settleAfterDispatch(() => "delete");
       } else if (result.kind === "conflict") {
+        const current = result.current;
+        let savedOnServer = false;
         const settled = await settleAfterDispatch((stored) => {
-          const serverVersion = (result.current as { version?: unknown } | null | undefined)
+          const serverVersion = (current as { version?: unknown } | null | undefined)
             ?.version;
           const sortOrderOnly =
             stored.target.kind === "row" &&
             stored.action === "patch" &&
             isSortOrderOnlyPatch(stored.patch);
           // wouldAutoHeal also checks that serverVersion is a number.
-          if (wouldAutoHeal(stored, result.current) && typeof serverVersion === "number") {
+          if (wouldAutoHeal(stored, current) && typeof serverVersion === "number") {
+            // The server already holds this assistant edit (it landed and
+            // its response was lost): settle it as saved and send nothing.
+            // A resend would have to drop the pin, and an unpinned resend
+            // would revive a note set aside, or overwrite a revert, in the
+            // gap (#886 item 1; #883 item 2 dropped the pin here).
+            if (healSettlesAsSaved(stored, current)) {
+              savedOnServer = true;
+              return "delete";
+            }
             stored.status = "pending";
             stored.expectedVersion = serverVersion;
             stored.conflictRetries = (stored.conflictRetries ?? 0) + 1;
@@ -1145,7 +1126,7 @@ async function drainPass() {
             stored.lastError = sortOrderOnly ? "sort_order_autoheal" : "nonconflict_autoheal";
           } else {
             stored.status = "conflict";
-            stored.conflictCurrent = result.current;
+            stored.conflictCurrent = current;
             stored.lastError = "version_mismatch";
             pinnedBlocked.add(targetKey(stored.target));
           }
@@ -1153,6 +1134,16 @@ async function drainPass() {
         });
         if (settled === "quarantined") {
           /* keep quarantine */
+        } else if (settled === "deleted" && savedOnServer) {
+          // Announced as the 200 the lost response would have been: the
+          // result listeners and waitForOp count it saved, and set the row
+          // (and its status circle) from the server's row (#883 review A1).
+          savedRow = { row: current };
+          try {
+            await threadVersionToSiblings(next, current);
+          } catch {
+            /* siblings keep their stale version and resolve via the 409 flow */
+          }
         }
       } else if (result.kind === "retry") {
         const settled = await settleAfterDispatch((stored) => {
@@ -1175,6 +1166,11 @@ async function drainPass() {
         }
       } else {
         await settleAfterDispatch((stored) => {
+          // A state_mismatch op is the assistant's proposed text, not typing,
+          // and a retry is refused the same way: drop it rather than park a
+          // failed save nobody can fix (#883 item 4). Listeners still hear
+          // the result, so the row is rebuilt from the server.
+          if (deletesOnFatal(result.reason)) return "delete";
           stored.status = "failed";
           stored.lastError = result.reason;
           if (
@@ -1209,9 +1205,10 @@ async function drainPass() {
       }
     }
 
-    if (shouldAnnounceResult(result.kind, persisted)) {
+    const announced: Result = savedRow ? { kind: "ok", updated: savedRow.row } : result;
+    if (shouldAnnounceResult(announced.kind, persisted)) {
       let queued: OutboxOp[] | null | undefined;
-      if (result.kind === "ok" && next.target.kind === "row") {
+      if (announced.kind === "ok" && next.target.kind === "row") {
         try {
           // Merged in the same microtask the read resolves in, with no await
           // between here and the listeners. An op whose write was created
@@ -1224,7 +1221,7 @@ async function drainPass() {
           queued = null;
         }
       }
-      for (const l of resultListeners) l(next, result, queued);
+      for (const l of resultListeners) l(next, announced, queued);
     }
     void notify();
   }

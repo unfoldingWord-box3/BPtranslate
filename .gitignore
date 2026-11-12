@@ -49,3 +49,11 @@ scratch/
 
 # In-app guide screenshots copied from help/screenshots/ by scripts/build-help.mjs
 web/public/help/
+
+# Claude Code per-machine permission list: "don't ask again" can save
+# approved commands verbatim, secrets included. Never commit it.
+**/.claude/settings.local.json
+
+# review.sh output (diff + reviewer prompts and replies). The per-worktree
+# .claude/state/<worktree>.md files next to it stay tracked (#870).
+.claude/state/review-*/

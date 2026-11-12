@@ -9,25 +9,20 @@ import type { Env } from "../index";
 import { requireAuth, requireAdmin, currentUserId } from "../auth.ts";
 import { getAiProviderConfig, keyDecrypts, resolveDispatchAi } from "../aiProvider.ts";
 import { decryptApiKey } from "../aiKeyCrypto.ts";
-import { scrubSecrets } from "../translate/llm.ts";
 import { getProviderConfig } from "../translate/providerCatalog.ts";
 import {
   buildSystemPrompt,
-  costMicros,
-  describeProviderError,
   helpAdapterFor,
   maxOutputFor,
-  normalizeUsage,
-  usageIsComplete,
   HELP_TIMEOUT_MS,
   parseAnswer,
   withRouteContext,
   type HelpAdapter,
   type HelpAdapterDeps,
   type HelpMessage,
-  type HelpUsage,
 } from "./helpChat.ts";
-import { capMicrosFromEnv, inputTokenBound, isMissingSchemaError, nextResetIso, remainingMicros, reserve, settle, utcDay, worstCaseMicros } from "./helpBudget.ts";
+import { capMicrosFromEnv, inputTokenBound, isMissingSchemaError, nextResetIso, remainingMicros, reserve, utcDay, worstCaseMicros } from "./helpBudget.ts";
+import { runCappedCall } from "./cappedCall.ts";
 
 type HelpEnv = { Bindings: Env; Variables: { userId?: number; username?: string } };
 
@@ -80,24 +75,6 @@ async function helpEnabled(db: D1Database): Promise<boolean> {
     if (isMissingSchemaError(e)) return false;
     throw e;
   }
-}
-
-/**
- * Charge for a failed provider call. Usage attached to the error (a billed 200
- * we could not use) settles the real cost. A 4xx other than 408 is a rejection
- * that did not bill. Anything else (timeout, network, 5xx, unparseable 200) may
- * have billed, so it is charged the full reservation.
- */
-function failureCost(provider: string, err: unknown, worst: number): number {
-  const u = (err as { usage?: HelpUsage } | null)?.usage;
-  if (u && typeof u === "object") {
-    // All-zero (or unreadable) usage on a billed reply is not believable.
-    const n = normalizeUsage(u);
-    return n.inputTokens + n.outputTokens + n.cacheWriteTokens + n.cacheReadTokens === 0 ? worst : costMicros(provider, n);
-  }
-  const status = (err as { status?: unknown } | null)?.status;
-  if (typeof status === "number" && status >= 400 && status <= 499 && status !== 408) return 0;
-  return worst;
 }
 
 const usdOf = (micros: number) => micros / 1_000_000;
@@ -214,59 +191,24 @@ export function makeHelpRoutes(deps: HelpRouteDeps = {}) {
     // platform allows (~30 s). An unsettled reservation only blocks spend (it
     // never allows more) until UTC midnight. It never rejects.
     const work = (async (): Promise<{ status: 200 | 502; body: Record<string, unknown> }> => {
-      let actual = worst;
-      let answered = false;
-      let outcome: { status: 200 | 502; body: Record<string, unknown> };
-      let failure: { kind: string; status?: number } | null = null;
-      try {
-        const result = await adapter({ model: catalog.lightModel!, system, messages, apiKey, timeoutMs: HELP_TIMEOUT_MS });
-        const u = normalizeUsage(result.usage);
-        // Price from usage first, so nothing after this can re-price the call.
-        // A reply with an answer cannot honestly have zero output tokens.
-        if (!usageIsComplete(result.usage) || u.outputTokens === 0) {
-          console.warn(`help ask (${ai.provider}): provider reported no usable usage; charging the worst case`);
-          actual = worst;
-        } else {
-          actual = costMicros(ai.provider, u);
-        }
-        let parsed: { answer: string; articleIds: string[] } | null = null;
-        try {
-          parsed = parseAnswer(typeof result.text === "string" ? result.text : "", articleIds);
-        } catch {
-          parsed = null;
-        }
-        console.log(`help ask ok (${ai.provider}): in=${u.inputTokens} out=${u.outputTokens} cacheW=${u.cacheWriteTokens} cacheR=${u.cacheReadTokens} micros=${actual}`);
-        if (!parsed || parsed.answer === "") {
-          failure = { kind: "empty_answer" };
-          outcome = { status: 502, body: { code: "help_ai_failed", kind: "empty_answer" } };
-        } else {
-          answered = true;
-          outcome = { status: 200, body: { answer: parsed.answer, articleIds: parsed.articleIds } };
-        }
-      } catch (err) {
-        actual = failureCost(ai.provider, err, worst);
-        const status = (err as { status?: unknown } | null)?.status;
-        failure = { kind: describeProviderError(err, apiKey).kind, status: typeof status === "number" ? status : undefined };
-        outcome = { status: 502, body: { code: "help_ai_failed", kind: failure.kind } };
-      }
-      // One attempt: settle is not idempotent, so a retry after a commit-then-error
-      // could apply twice. On failure the reservation stays (it only blocks spend).
-      try {
-        await settle(db, userId, day, worst, actual, answered);
-      } catch (e) {
-        const m = scrubSecrets(e instanceof Error ? e.message : String(e), [apiKey]).slice(0, 300);
-        console.error(`help budget settle failed (user ${userId}, ${day}, reserved ${worst}, actual ${actual}): ${m}`);
-      }
-      // Provider error bodies can echo the question: log only kind and status.
-      if (failure) console.error(`help ask failed (${ai.provider}, ${failure.kind}${failure.status !== undefined ? `, HTTP ${failure.status}` : ""})`);
-      if (outcome.status === 200) {
-        try {
-          outcome.body.remainingUsd = usdOf(await remainingMicros(db, userId, day, cap));
-        } catch {
-          outcome.body.remainingUsd = 0;
-        }
-      }
-      return outcome;
+      const out = await runCappedCall<{ answer: string; articleIds: string[] }>({
+        db,
+        table: "help_chat_usage",
+        userId,
+        day,
+        capMicros: cap,
+        provider: ai.provider,
+        adapter,
+        request: { model: catalog.lightModel!, system, messages, apiKey, timeoutMs: HELP_TIMEOUT_MS },
+        worst,
+        labels: { call: "help ask", budget: "help budget" },
+        parse: (text) => {
+          const p = parseAnswer(text, articleIds);
+          return p.answer === "" ? { ok: false, kind: "empty_answer" } : { ok: true, body: p };
+        },
+      });
+      if (!out.ok) return { status: 502, body: { code: "help_ai_failed", kind: out.kind } };
+      return { status: 200, body: { answer: out.body.answer, articleIds: out.body.articleIds, remainingUsd: usdOf(out.remainingMicros) } };
     })();
     try {
       c.executionCtx.waitUntil(work);

@@ -116,15 +116,18 @@ name = "bptranslate-translate-dev"
 binding = "TRANSLATE_WORKFLOW"
 class_name = "TranslateWorkflow"
 
-# No crons on the default env: they're registered only on production (below)
-# so an accidental dev deploy can't double-fire the nightly export.
+# The default env registers ONLY the daily context-pack export (#793,
+# CONTEXT_CRON in src/index.ts). The nightly DCS export and the pipeline poller
+# are registered only on production (below) so an accidental dev deploy can't
+# double-fire the nightly export. Validated notes only reach the AI's example
+# set through a context export, and nothing else schedules one here.
 # `wrangler dev --test-scheduled` exposes /__scheduled regardless.
-# This is spelled as an explicit empty list rather than an omitted [triggers]
+# This is spelled as an explicit list rather than an omitted [triggers]
 # block on purpose — omitting it leaves whatever crons are already attached to
-# the dev script in place, so it can't *guarantee* the dev worker is cron-free.
-# `crons = []` actively clears them on every deploy.
+# the dev script in place, so it can't guarantee which crons the dev worker has.
+# An explicit list replaces them on every deploy.
 [triggers]
-crons = []
+crons = ["15 4 * * *"]
 
 # Public-safe defaults; secrets go in `wrangler secret put` (DCS_CLIENT_ID,
 # DCS_CLIENT_SECRET, JWT_SIGNING_KEY, DCS_SERVICE_TOKEN, BT_API_TOKEN,
@@ -178,6 +181,7 @@ JWT_TTL_SECONDS = "1209600"
 ALLOWED_ORIGINS = ""
 DEV_AUTH_ENABLED = "true"
 HELP_CHAT_DAILY_CAP_USD = "2"
+ASSISTANT_DAILY_CAP_USD = "7"
 DCS_EXPORT_OWNER = "BibleEditorService"
 TN_QUICK_URL = "https://uw-bt-bot.fly.dev/api/tn-quick"
 PIPELINE_API_BASE = "https://uw-bt-bot.fly.dev"
@@ -298,9 +302,10 @@ JWT_TTL_SECONDS = "1209600"
 ALLOWED_ORIGINS = "https://bptranslate.unfoldingword.workers.dev"
 DEV_AUTH_ENABLED = "false"
 HELP_CHAT_DAILY_CAP_USD = "2"
+ASSISTANT_DAILY_CAP_USD = "7"
 # Set ONLY here (prod), never in the default [vars] block: production registers
 # the nightly export cron ([env.production.triggers] above), the dev worker does
-# not (crons = []). The UI reads this to show the 05:30 schedule vs. a
+# not (it has only the daily context-export cron). The UI reads this to show the 05:30 schedule vs. a
 # "use Run export now" notice, so a cron-less deployment doesn't imply exports
 # are silently failing (#240). Keep it in sync with the crons list above.
 NIGHTLY_EXPORTS_ENABLED = "true"

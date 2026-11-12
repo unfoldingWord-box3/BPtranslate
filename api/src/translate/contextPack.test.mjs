@@ -8,7 +8,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   loadContextPack, parseTermsCsv, parseExamplesJsonl, parseTemplatesTsv, parseManifestYaml,
-  parseRegisterFromBrief, parseCsvLine, parseContextRef, MAX_PACK_FILE_BYTES,
+  parseRegisterFromBrief, parseCsvLine, parseContextRef, MAX_PACK_FILE_BYTES, MAX_EXAMPLES_FILE_BYTES,
 } from "./contextPack.ts";
 import { fakeRawFetch, fixturePackFiles } from "./fixtures.mjs";
 
@@ -86,6 +86,52 @@ test("parseExamplesJsonl applies tombstones last-line-wins", () => {
     + JSON.stringify({ resource: "tn", rowId: "y", source: "c", target: "d", validated_at: 3 }) + "\n");
   assert.equal(examples.length, 1);
   assert.equal(examples[0].rowId, "y");
+});
+
+// Issue #822: tN/tQ row ids are unique only within a book, so the dedupe key
+// must include the book or two books' rows with the same id collapse into one.
+test("parseExamplesJsonl keeps same rowId in different books apart", () => {
+  const line = (o) => JSON.stringify(o) + "\n";
+  const examples = parseExamplesJsonl(
+    line({ resource: "tn", rowId: "abcd", book: "GEN", source: "g", target: "G", validated_at: 1 })
+    + line({ resource: "tn", rowId: "abcd", book: "EXO", source: "e", target: "E", validated_at: 2 }));
+  assert.deepEqual(examples.map((e) => [e.book, e.rowId, e.target]), [["GEN", "abcd", "G"], ["EXO", "abcd", "E"]]);
+});
+
+test("parseExamplesJsonl: a later line for the same book and rowId replaces the earlier one", () => {
+  const line = (o) => JSON.stringify(o) + "\n";
+  const examples = parseExamplesJsonl(
+    line({ resource: "tn", rowId: "abcd", book: "GEN", source: "g1", target: "G1", validated_at: 1 })
+    + line({ resource: "tn", rowId: "abcd", book: "EXO", source: "e", target: "E", validated_at: 2 })
+    + line({ resource: "tn", rowId: "abcd", book: "GEN", source: "g2", target: "G2", validated_at: 3 }));
+  assert.deepEqual(examples.map((e) => [e.book, e.target]), [["EXO", "E"], ["GEN", "G2"]]);
+});
+
+test("parseExamplesJsonl: a tombstone removes only its own book's example", () => {
+  const line = (o) => JSON.stringify(o) + "\n";
+  const examples = parseExamplesJsonl(
+    line({ resource: "tn", rowId: "abcd", book: "GEN", source: "g", target: "G", validated_at: 1 })
+    + line({ resource: "tn", rowId: "abcd", book: "EXO", source: "e", target: "E", validated_at: 2 })
+    + line({ resource: "tn", rowId: "abcd", book: "GEN", tombstone: true, validated_at: 3 }));
+  assert.deepEqual(examples.map((e) => [e.book, e.target]), [["EXO", "E"]]);
+});
+
+test("parseExamplesJsonl: a tombstone without book revokes the rowId in every book", () => {
+  const line = (o) => JSON.stringify(o) + "\n";
+  const examples = parseExamplesJsonl(
+    line({ resource: "tn", rowId: "abcd", book: "GEN", source: "g", target: "G", validated_at: 1 })
+    + line({ resource: "tn", rowId: "abcd", book: "EXO", source: "e", target: "E", validated_at: 2 })
+    + line({ resource: "tn", rowId: "other", book: "EXO", source: "o", target: "O", validated_at: 3 })
+    + line({ resource: "tq", rowId: "abcd", book: "EXO", source: "q", target: "Q", validated_at: 4 })
+    + line({ resource: "tn", rowId: "abcd", tombstone: true, validated_at: 5 }));
+  assert.deepEqual(examples.map((e) => [e.resource, e.rowId, e.target]), [["tn", "other", "O"], ["tq", "abcd", "Q"]]);
+});
+
+test("parseExamplesJsonl: the contract's example pair (booked line, bookless tombstone) revokes", () => {
+  const examples = parseExamplesJsonl(
+    '{"resource":"tn","rowId":"abcd","book":"OBA","ref":"1:1","supportReference":"figs-metaphor","source":"s","target":"t","validated_at":1752470000}\n'
+    + '{"resource":"tn","rowId":"abcd","tombstone":true,"validated_at":1752480000}\n');
+  assert.equal(examples.length, 0);
 });
 
 test("parseManifestYaml / parseRegisterFromBrief cover the scalar subset", () => {
@@ -172,6 +218,41 @@ test("loadContextPack enforces the byte cap via content-length and via measured 
   const arabic = "ن".repeat(Math.ceil(MAX_PACK_FILE_BYTES / 2) + 1);
   const wide = async () => ({ status: 200, ok: true, headers: null, text: async () => arabic, json: async () => ({}) });
   await assert.rejects(loadContextPack(REF, { fetchImpl: wide }), /file too large/);
+});
+
+// 2026-11-07: BSOJ's exported validated.jsonl reached 2,413,747 bytes and the
+// shared 2 MB cap failed every Arabic translate run. Examples get their own cap.
+test("loadContextPack loads a validated.jsonl over the 2 MB general cap, up to the examples cap", async () => {
+  const line = JSON.stringify({ resource: "tn", rowId: "x", source: "s", target: "ن".repeat(400) });
+  const lines = [];
+  // ~800 UTF-8 bytes per line; build to the size of BSOJ's real file.
+  for (let i = 0, size = 0; size < 2_413_747; i++) {
+    lines.push(line.replace('"x"', `"r${i}"`));
+    size += new TextEncoder().encode(lines[i]).length + 1;
+  }
+  const body = lines.join("\n");
+  const bytes = new TextEncoder().encode(body).length;
+  assert.ok(bytes > MAX_PACK_FILE_BYTES && bytes < MAX_EXAMPLES_FILE_BYTES);
+  const files = { ...fixturePackFiles(), "examples/validated.jsonl": body };
+  const inner = fakeRawFetch(files);
+  const withLength = async (url) => {
+    const res = await inner(url);
+    if (!/validated\.jsonl$/.test(url)) return res;
+    return { ...res, headers: { get: (h) => (h === "content-length" ? String(bytes) : null) } };
+  };
+  const pack = await loadContextPack(REF, { fetchImpl: withLength });
+  assert.equal(pack.examples.length, lines.length);
+
+  const over = async (url) => {
+    const res = await inner(url);
+    if (!/validated\.jsonl$/.test(url)) return res;
+    return { ...res, headers: { get: (h) => (h === "content-length" ? String(MAX_EXAMPLES_FILE_BYTES + 1) : null) } };
+  };
+  await assert.rejects(loadContextPack(REF, { fetchImpl: over }), /file too large \(>16000000 bytes\)/);
+
+  // The 2 MB cap still applies to the hand-authored files.
+  const bigBrief = fakeRawFetch({ ...fixturePackFiles(), "brief.md": "x".repeat(MAX_PACK_FILE_BYTES + 1) });
+  await assert.rejects(loadContextPack(REF, { fetchImpl: bigBrief }), /file too large \(>2000000 bytes\).*brief\.md/);
 });
 
 test("loadContextPack surfaces a non-404 HTTP failure", async () => {

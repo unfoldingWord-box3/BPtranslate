@@ -1,5 +1,6 @@
 // Unit test for the scope terms of the /api/pipelines/start conflict queries
-// (issue #316 row scope, #347 item 2 verse range, #347 item 1 coverage).
+// (issue #316 row scope, #347 item 2 verse range, #347 item 1 coverage, #745
+// row scope inside a verse range, #757 rows touched after the covering job).
 //
 // The queries live inline in the Hono route in pipelines.ts, so this test drives
 // them against an in-memory node:sqlite DB (the schema-invariant testing pattern
@@ -22,6 +23,9 @@ import {
   coverageVerseRange,
   isNarrowerTranslateScope,
   needsRowVerseLookup,
+  needsTouchedRowCheck,
+  rowTouchedAfterJobBindings,
+  rowTouchedAfterJobSql,
   rowVerseLookupSql,
   rowVerseSpan,
 } from "./pipelineDedupSql.ts";
@@ -48,8 +52,11 @@ function makeDb() {
       end_chapter INTEGER,
       options_json TEXT,
       state TEXT,
-      created_at INTEGER
+      created_at INTEGER,
+      edit_log_watermark INTEGER
     );
+    CREATE TABLE edit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, row_key TEXT, book TEXT,
+                           action TEXT, source TEXT, created_at INTEGER);
     CREATE TABLE tn_rows (id TEXT, book TEXT, chapter INTEGER, verse INTEGER, deleted_at INTEGER,
                           PRIMARY KEY (book, id));
     CREATE TABLE tq_rows (id TEXT, book TEXT, chapter INTEGER, verse INTEGER, deleted_at INTEGER,
@@ -66,7 +73,17 @@ function makeDb() {
 
   // Mirror buildTranslateOptions' persistence: rowIds stored normalized, omitted
   // entirely for a chapter-wide job; verseStart/verseEnd only when present.
-  function seed(jobId, userId, translate, pipelineType = "translate", state = "running") {
+  // `watermark: true` stamps edit_log_watermark the way the route's INSERT does
+  // (MAX(edit_log.id) at enqueue); false leaves it NULL, like a job queued
+  // before migration 0076. `createdAt` overrides the enqueue second.
+  function seed(
+    jobId,
+    userId,
+    translate,
+    pipelineType = "translate",
+    state = "running",
+    { watermark = true, createdAt } = {},
+  ) {
     const opts =
       pipelineType === "translate" ? { resourceType: translate?.resourceType ?? "tn" } : {};
     const norm = normalizeRowIds(translate?.rowIds);
@@ -75,9 +92,19 @@ function makeDb() {
     if (translate?.verseEnd != null) opts.verseEnd = translate.verseEnd;
     db.prepare(
       `INSERT INTO pipeline_jobs
-         (job_id, user_id, pipeline_type, book, start_chapter, end_chapter, options_json, state, created_at)
-       VALUES (?, ?, ?, 'MRK', 5, 5, ?, ?, ?)`,
-    ).run(jobId, userId, pipelineType, JSON.stringify(opts), state, seq++);
+         (job_id, user_id, pipeline_type, book, start_chapter, end_chapter, options_json, state, created_at,
+          edit_log_watermark)
+       VALUES (?, ?, ?, 'MRK', 5, 5, ?, ?, ?,
+               ${watermark ? "(SELECT COALESCE(MAX(id), 0) FROM edit_log)" : "NULL"})`,
+    ).run(jobId, userId, pipelineType, JSON.stringify(opts), state, createdAt ?? seq++);
+  }
+
+  // An edit_log row for a tn/tq row in MRK, as the row routes write it. source
+  // NULL is the web app; `at` is the second it landed in.
+  function touch(kind, rowKey, { action = "update", source = null, at = 1000 } = {}) {
+    db.prepare(
+      `INSERT INTO edit_log (kind, row_key, book, action, source, created_at) VALUES (?, ?, 'MRK', ?, ?, ?)`,
+    ).run(kind, rowKey, action, source, at);
   }
 
   // Exact-identity dedupe — the route's PIPELINE_DEDUP_WHERE, bound the way the
@@ -110,7 +137,7 @@ function makeDb() {
   function findCovering(translate, verses = coverageVerseRange(translate?.verseStart, translate?.verseEnd)) {
     return db
       .prepare(
-        `SELECT j.job_id, j.user_id
+        `SELECT j.job_id, j.user_id, j.created_at, j.edit_log_watermark
            FROM pipeline_jobs j
           WHERE ${PIPELINE_COVERAGE_WHERE}
           ORDER BY j.created_at ASC
@@ -130,6 +157,21 @@ function makeDb() {
   function resolveConflict(translate, pipelineType = "translate") {
     const exact = findDup(translate, pipelineType);
     if (exact) return exact;
+    const covering = findCoveringJob(translate, pipelineType);
+    if (!covering) return undefined;
+    // #757: the route's own predicate, SQL and bindings — a requested row a
+    // person touched after the covering job was queued drops the coverage answer.
+    const rt = pipelineType === "translate" ? (translate?.resourceType ?? "tn") : null;
+    const norm = normalizeRowIds(translate?.rowIds);
+    if (!needsTouchedRowCheck(pipelineType, rt, norm)) return covering;
+    const touched = db
+      .prepare(rowTouchedAfterJobSql(rt, covering.edit_log_watermark !== null, norm.length))
+      .get(...rowTouchedAfterJobBindings("MRK", covering, norm));
+    return touched ? undefined : covering;
+  }
+
+  // Both coverage paths (#347 item 1, then #745), as the route runs them.
+  function findCoveringJob(translate, pipelineType) {
     const verses = coverageVerseRange(translate?.verseStart, translate?.verseEnd);
     const norm = normalizeRowIds(translate?.rowIds);
     const narrower = isNarrowerTranslateScope(pipelineType, norm, verses);
@@ -150,7 +192,7 @@ function makeDb() {
     return span ? findCovering(translate, span) : undefined;
   }
 
-  return { seed, seedRow, findDup, findCovering, resolveConflict, lookupCount: () => lookups };
+  return { seed, seedRow, touch, findDup, findCovering, resolveConflict, lookupCount: () => lookups };
 }
 
 const USER = 1;
@@ -454,6 +496,133 @@ console.log("\n[#745] a row-scoped request inside a running verse-range job is c
   seedRowQ("tq_rows", "q3", 3);
   const tq = resolveQ({ resourceType: "tq", rowIds: ["q3"] });
   assert(tq && tq.job_id === "jobTqV24", "a tq row on verse 3 is covered by a tq 2-4 job");
+}
+
+console.log("\n[#757] a row a person touched after the covering job was queued is not covered");
+{
+  // The covering job's apply skips a row a person edited, approved, trashed or
+  // restored after it was queued (humanTouchedIds, #601 notes / #725 questions).
+  // So an explicit "re-run AI on this row" must not be answered with that job.
+  const OTHER = 2;
+
+  // The issue's case: a running verse-range tq translate on verses 2-4.
+  {
+    const { seed, seedRow, touch, resolveConflict } = makeDb();
+    seedRow("tq_rows", "q3", 3);
+    seedRow("tq_rows", "q3b", 3);
+    seed("jobTqV24", USER, { resourceType: "tq", verseStart: 2, verseEnd: 4 });
+    touch("tq", "q3"); // edited after the job was queued
+    assert(
+      resolveConflict({ resourceType: "tq", rowIds: ["q3"] }) === undefined,
+      "verse-range tq 2-4: a question on verse 3 edited after the job was queued → the row-scoped start proceeds",
+    );
+    const untouched = resolveConflict({ resourceType: "tq", rowIds: ["q3b"] });
+    assert(
+      untouched && untouched.job_id === "jobTqV24",
+      "verse-range tq 2-4: an untouched question on verse 3 → still already_running",
+    );
+    assert(
+      resolveConflict({ resourceType: "tq", rowIds: ["q3", "q3b"] }) === undefined,
+      "one touched row among the requested ones is enough to start",
+    );
+  }
+
+  // Same for a chapter-wide job (shape (a)), tn and tq.
+  {
+    const { seed, seedRow, touch, resolveConflict } = makeDb();
+    seedRow("tn_rows", "n3", 3);
+    seedRow("tn_rows", "n4", 4);
+    seedRow("tq_rows", "q3", 3);
+    seed("jobAll", USER, undefined);
+    seed("jobAllTq", USER, { resourceType: "tq" });
+    touch("tn", "n3", { action: "validate" }); // Approve
+    touch("tq", "q3");
+    assert(
+      resolveConflict({ rowIds: ["n3"] }) === undefined,
+      "chapter-wide tn: a note approved after the job was queued → the row-scoped start proceeds",
+    );
+    const n4 = resolveConflict({ rowIds: ["n4"] });
+    assert(n4 && n4.job_id === "jobAll", "chapter-wide tn: an untouched note → still already_running");
+    assert(
+      resolveConflict({ resourceType: "tq", rowIds: ["q3"] }) === undefined,
+      "chapter-wide tq: a question edited after the job was queued → the row-scoped start proceeds",
+    );
+  }
+
+  // Another user's covering job: the route would answer 409; a touched row starts instead.
+  {
+    const { seed, seedRow, touch, resolveConflict } = makeDb();
+    seedRow("tn_rows", "n3", 3);
+    seed("jobV24other", OTHER, { verseStart: 2, verseEnd: 4 });
+    touch("tn", "n3");
+    assert(
+      resolveConflict({ rowIds: ["n3"] }) === undefined,
+      "another user's covering job does not 409 a row touched after it was queued",
+    );
+  }
+
+  // Touches that do not release the request.
+  {
+    const { seed, seedRow, touch, resolveConflict } = makeDb();
+    seedRow("tn_rows", "n3", 3);
+    touch("tn", "n3"); // BEFORE the job was queued: the job will redraft it
+    seed("jobV24", USER, { verseStart: 2, verseEnd: 4 });
+    touch("tn", "n3", { source: "ai_pipeline" }); // a machine writer, not a person
+    touch("tn", "n3", { action: "unvalidate" }); // un-approve: the apply resets it anyway
+    touch("tq", "n3"); // same id, other kind
+    const still = resolveConflict({ rowIds: ["n3"] });
+    assert(
+      still && still.job_id === "jobV24",
+      "a touch before the enqueue, a machine-source touch, an excluded action or another kind's row → still covered",
+    );
+    touch("tn", "n3", { source: "chat" }); // a person through the chat
+    assert(resolveConflict({ rowIds: ["n3"] }) === undefined, "a chat-source edit after the enqueue counts as a person");
+  }
+
+  // A job queued before migration 0076 (no watermark): seconds fallback on created_at.
+  {
+    const { seed, seedRow, touch, resolveConflict } = makeDb();
+    seedRow("tn_rows", "n3", 3);
+    seedRow("tn_rows", "n4", 4);
+    seed("jobOld", USER, undefined, "translate", "running", { watermark: false, createdAt: 500 });
+    touch("tn", "n3", { at: 500 }); // the enqueue second itself counts (the job has no rowIds)
+    touch("tn", "n4", { at: 499 });
+    assert(resolveConflict({ rowIds: ["n3"] }) === undefined, "no watermark: a touch in the enqueue second releases");
+    const n4 = resolveConflict({ rowIds: ["n4"] });
+    assert(n4 && n4.job_id === "jobOld", "no watermark: a touch the second before the enqueue does not");
+  }
+
+  // Known gap (under-blocks, the safe side): only the EARLIEST covering job is
+  // checked. A later covering job queued after the touch would redraft the row,
+  // but the request still starts — duplicate work, no lost edit.
+  {
+    const { seed, seedRow, touch, resolveConflict } = makeDb();
+    seedRow("tn_rows", "n3", 3);
+    seed("jobAll", USER, undefined);
+    touch("tn", "n3");
+    seed("jobV24later", USER, { verseStart: 2, verseEnd: 4 });
+    assert(
+      resolveConflict({ rowIds: ["n3"] }) === undefined,
+      "touched after the earliest covering job → starts, even though a later covering job would redraft it (gap)",
+    );
+  }
+
+  // Unchanged paths.
+  {
+    const { seed, seedRow, touch, resolveConflict } = makeDb();
+    seedRow("tq_rows", "q3", 3);
+    seed("jobRowQ3", USER, { resourceType: "tq", rowIds: ["q3"] });
+    seed("jobAll", USER, undefined);
+    touch("tq", "q3");
+    touch("tn", "n3");
+    const exact = resolveConflict({ resourceType: "tq", rowIds: ["q3"] });
+    assert(exact && exact.job_id === "jobRowQ3", "exact identity is unchanged: the same row's own job still answers");
+    const range = resolveConflict({ verseStart: 3, verseEnd: 3 });
+    assert(
+      range && range.job_id === "jobAll",
+      "a verse-range request (not row-scoped) inside a chapter-wide job stays covered",
+    );
+  }
 }
 
 console.log("\n[#347 item 1] only non-terminal jobs cover");

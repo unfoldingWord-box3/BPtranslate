@@ -9,11 +9,39 @@ name: Deploy to dev
 # should be touching prod.
 #
 # The file is named deploy-dev.yml, not deploy.yml, on purpose. A dispatch runs
-# the workflow file as it exists ON THE REF YOU PICK, and ~111 older branches in
-# this fork still carry the old prod-deploying deploy.yml. Under a new filename,
-# those branches can't be selected for this button (the file doesn't exist on
-# them). That is a speed bump, not a wall: the durable fix is scoping
-# CLOUDFLARE_API_TOKEN to the bptranslate-dev script only.
+# the workflow file as it exists ON THE REF YOU PICK. Older branches in this
+# fork still carry the old prod-deploying deploy.yml, but GitHub only offers
+# workflow_dispatch for workflow files that exist on the default branch, and
+# deploy.yml no longer does, so those copies cannot be run.
+#
+# The deploy job declares `environment: dev`. That GitHub Environment's only
+# rule is Deployment branches = Selected branches, `main` only (Settings ->
+# Environments -> dev); a dispatch from any other ref is refused before a step
+# runs (checked 2026-11-09, run 42679233486). CLOUDFLARE_API_TOKEN must be a
+# `dev` ENVIRONMENT secret and must NOT also exist as a repo secret: repo
+# secrets reach every workflow run on any same-repo branch, including older
+# branch copies of this file that lack the `environment:` line. Check with
+#   gh secret list --repo unfoldingWord-box3/BPtranslate            (no token)
+#   gh secret list --repo unfoldingWord-box3/BPtranslate --env dev  (token)
+# CLOUDFLARE_ACCOUNT_ID is not sensitive and stays a repo secret.
+#
+# Limit of this rule: it confines the token to code that is on `main`, not to
+# trusted people. The "Protect main" ruleset requires a PR but 0 approvals and
+# every collaborator is an admin, so anyone with push access can still
+# self-merge an edited copy of this file and dispatch it from `main`, or change
+# the environment's branch rule and secrets in Settings (nothing in the repo
+# would show it; re-check with the commands above). Don't add
+# `environment: dev` to a workflow triggered by pull_request_target,
+# workflow_run or schedule: those run with the default branch's ref, so they
+# pass the branch rule even when the code comes from elsewhere.
+#
+# The token set on 2026-11-09 (#823) is a user API token with account-level
+# Workers Scripts:Edit + D1:Edit, so it can deploy the prod Worker name
+# `bptranslate` too. Treat it as prod-capable. Cloudflare documents a narrower
+# option (developers.cloudflare.com/workers/authorization/): an ACCOUNT-OWNED
+# API token whose Workers policy is the Editor role on the single Worker
+# `bptranslate-dev`. D1 has no per-database scope, so that token still needs
+# account-wide D1:Edit for the migration step. Rotating to it: issue #824.
 on:
   workflow_dispatch:
 
@@ -25,6 +53,9 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # Gives this job the `dev` environment's secrets and enforces its
+    # main-only branch rule. See the header.
+    environment: dev
     steps:
       - uses: actions/checkout@v5
 
@@ -52,8 +83,8 @@ jobs:
       # bptranslate --remote` WOULD reach the prod DB. Never put the prod
       # name here. Also: Cloudflare's D1 token permission is account-wide
       # (no per-database scoping), so the token this step needs can write
-      # prod D1 too — keep its Workers-Scripts scope dev-only and treat the
-      # token itself as prod-sensitive.
+      # prod D1 too. The current token's Workers permission is account-wide as
+      # well (see the header), so treat the token itself as prod-capable.
       - name: Apply D1 migrations (dev databases)
         working-directory: api
         run: |

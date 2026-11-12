@@ -14,7 +14,7 @@ import { loadGuide } from "../../scripts/build-help.mjs";
 // mint (api/src/auth.ts mintDevToken), so admin screens render.
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const guide = loadGuide(repoRoot) as Record<string, { id: string; screenshots: { name: string; hash: string; phone: boolean; top: boolean }[] }[]>;
+const guide = loadGuide(repoRoot) as Record<string, { id: string; screenshots: { name: string; hash: string; phone: boolean; top: boolean; rapid: boolean }[] }[]>;
 const only = (process.env.GUIDE_ONLY ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 const langs = Object.keys(guide).filter((l) => guide[l].length > 0 || l === "en");
 
@@ -41,15 +41,17 @@ for (const lang of langs) {
           });
           if (!sw.ok()) throw new Error(`switch to workspace ${ws.slug}: ${sw.status()} ${await sw.text()}`);
           await ctx.addInitScript(
-            ({ code, slug }) => {
+            ({ code, slug, rapid }) => {
               try {
                 localStorage.setItem("be:uiLang", code);
                 localStorage.setItem("bible-editor.workspace", slug);
+                // The notes screen's rapid check layout (editorPrefs).
+                localStorage.setItem("be:notesRapidCheck", String(rapid));
               } catch {
                 /* ignore */
               }
             },
-            { code: lang, slug: ws.slug },
+            { code: lang, slug: ws.slug, rapid: shot.rapid },
           );
           const page = await ctx.newPage();
           await page.goto("/" + shot.hash);

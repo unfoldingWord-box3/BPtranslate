@@ -1,5 +1,5 @@
 import { expect, test, request as apiRequest, type BrowserContext, type Page } from "@playwright/test";
-import { fetchChapter, gotoVerse, mintToken, newUserContext } from "./helpers";
+import { closeTolerant, fetchChapter, gotoVerse, mintToken, newUserContext } from "./helpers";
 
 // Honor BE_BASE_URL so the suite runs on a relocated port (mirrors s8).
 const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
@@ -308,17 +308,21 @@ test("tN card: a save refused after the card was left keeps its text on screen a
   // marker quote, so the test can see the rebuilt row reach the card (the
   // quote field adopts it; only the note is held) before checking the note.
   const MARK = `REBUILT QUOTE ${Date.now()}`;
-  await context.route(`**/api/rows/tn/${tn.id}**`, async (route, request) => {
-    if (request.method() === "GET") {
-      const response = await route.fetch();
-      const json = { ...(await response.json()), quote: MARK };
-      return route.fulfill({ response, json });
-    }
-    if (request.method() !== "PATCH") return route.continue();
-    seen++;
-    await held;
-    await route.fulfill({ status: 422, contentType: "application/json", body: JSON.stringify({ error: "validation_failed" }) });
-  });
+  // A context route, but this test's only page closes with the context.
+  await context.route(
+    `**/api/rows/tn/${tn.id}**`,
+    closeTolerant(page, async (route, request) => {
+      if (request.method() === "GET") {
+        const response = await route.fetch();
+        const json = { ...(await response.json()), quote: MARK };
+        return route.fulfill({ response, json });
+      }
+      if (request.method() !== "PATCH") return route.continue();
+      seen++;
+      await held;
+      await route.fulfill({ status: 422, contentType: "application/json", body: JSON.stringify({ error: "validation_failed" }) });
+    }),
+  );
 
   await gotoVerse(page, "ZEC", CHAPTER, tn.verse);
   const note = (id: string) =>

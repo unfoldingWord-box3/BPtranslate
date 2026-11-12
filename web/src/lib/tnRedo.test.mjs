@@ -77,8 +77,15 @@ test("intro redo timeout scales up when start() answers already_running (#376)",
 
 test("intro redo keeps the short budget for a fresh single-row run", () => {
   assert.equal(introRedoTimeoutMs("running"), INTRO_REDO_TIMEOUT_MS);
-  assert.equal(introRedoTimeoutMs("queued"), INTRO_REDO_TIMEOUT_MS);
   assert.equal(INTRO_REDO_TIMEOUT_MS, 15 * 60 * 1000);
+});
+
+test("intro redo answered `queued` gets the chapter-sized budget (#757)", () => {
+  // The server answers `queued` only when other work holds the slot or is ahead
+  // by priority. Since #757 a Redo on a row touched after a covering chapter or
+  // verse-range job was queued starts its own job behind that ~1h job, so the
+  // 15-minute budget would report a healthy wait as a `timeout` failure.
+  assert.equal(introRedoTimeoutMs("queued"), CHAPTER_REDO_TIMEOUT_MS);
 });
 
 test("only the explicit not-configured codes latch Redo off; transient failures stay retryable", () => {

@@ -1,4 +1,4 @@
-import type { APIRequestContext, Browser, BrowserContext, Page } from "@playwright/test";
+import type { APIRequestContext, Browser, BrowserContext, Page, Request, Route } from "@playwright/test";
 
 // Frontend stores its JWT here (see web/src/sync/api.ts:171).
 const TOKEN_KEY = "bible-editor.auth.token";
@@ -61,6 +61,44 @@ export async function newUserContext(
     { key: TOKEN_KEY, token: auth.token },
   );
   return { context, auth };
+}
+
+// The errors Playwright (1.60) raises in a route handler whose page or context
+// is torn down mid-handler: route.fetch()/fulfill() on a closed target, a
+// fetch cut off when the context's request context is disposed, and a body
+// read (res.json()/res.text()) or fulfill({ response }) after that dispose.
+const TEARDOWN_ERROR =
+  /Target page, context or browser has been closed|Request context disposed\.|[Rr]esponse has been disposed/;
+
+/**
+ * Wrap a page.route or context.route handler so a request still in flight when
+ * the test closes its context ends quietly instead of failing the test. The
+ * app can repeat a request after the test's last assertion (one page load
+ * sends GET /api/project-config more than once), and that request can still
+ * be inside route.fetch() when the test calls context.close(). Playwright then
+ * reports the error "while running route callback", sometimes against the
+ * next test (#776, #780).
+ *
+ * `page` is the page whose closing ends the test; for a context.route, pass
+ * the test's page (context.close() closes it too). An error is swallowed only
+ * if that page is closed or the error is one of the messages above, which in
+ * these specs come only from teardown. The message check covers a rejection
+ * that reaches the handler before page.isClosed() turns true. Any other
+ * error, such as a non-OK status the handler throws or bad JSON, still fails
+ * the test.
+ */
+export function closeTolerant(
+  page: Page,
+  handler: (route: Route, request: Request) => Promise<unknown>,
+) {
+  return async (route: Route, request: Request): Promise<void> => {
+    try {
+      await handler(route, request);
+    } catch (err) {
+      if (page.isClosed() || TEARDOWN_ERROR.test(String(err))) return;
+      throw err;
+    }
+  };
 }
 
 // Pure-API authed request. Auth rides the context's be_access cookie; writes

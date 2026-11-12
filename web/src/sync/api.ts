@@ -6,6 +6,7 @@ import type { ScriptureStatus } from "../lib/unpublishedScriptureWarning";
 import type { LayoutSpec } from "../lib/layoutSpec";
 import type { ReviewSweepBody, ReviewSweepResource, ReviewSweepTarget } from "../lib/reviewStateSweep";
 import type { NoteSourcePlan } from "../lib/sourceNotePlan";
+import type { PrefsHistoryEntry } from "../lib/prefsHistory";
 import { getWorkspaceSlug, setWorkspaceSlug } from "./workspace";
 
 export type RowKind = "tn" | "tq" | "twl";
@@ -234,7 +235,6 @@ export function isChapterLockedBody(body: unknown): body is ChapterLockedBody {
   const b = body as Record<string, unknown>;
   return b.error === "chapter_locked" && typeof b.jobId === "string";
 }
-
 // 409 body returned by /api/pipelines/start when the upstream rejects the
 // request because another sessionKey already has this (pipelineType, scope)
 // running. The Worker enriches the bare upstream body with `existing` —
@@ -414,6 +414,9 @@ export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 export interface RequestInitWithTimeout extends RequestInit {
   /** Override the default 30s timeout. Pass 0 to disable. */
   timeoutMs?: number;
+  /** Send no X-Workspace claim. Only for routes whose data is the same in
+   *  every workspace (sharedDb), so a stale claim can't make them 409. */
+  noWorkspaceClaim?: boolean;
 }
 
 // Compose any number of AbortSignals into one. Aborts as soon as any input
@@ -486,13 +489,14 @@ async function request<T>(
     const csrf = getCsrfToken();
     if (csrf) headers["X-CSRF-Token"] = csrf;
   }
-  // Stamp this tab's own notion of the active workspace on every request.
+  // Stamp this tab's own notion of the active workspace on every request
+  // (except a `noWorkspaceClaim` one, whose data is shared by every org).
   // The server (requireWorkspaceMatch in api/src/workspaces.ts) compares it
   // against the workspace it actually resolved the request against (from the
   // be_ws cookie) and 409s workspace_mismatch on a mismatch — the signal that
   // a SIBLING tab switched orgs and this tab is now stale. See the 409
   // handling below and outbox.ts's dispatch().
-  headers["X-Workspace"] = getWorkspaceSlug();
+  if (!init?.noWorkspaceClaim) headers["X-Workspace"] = getWorkspaceSlug();
 
   const timeoutMs = init?.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   let signal = init?.signal ?? undefined;
@@ -511,6 +515,7 @@ async function request<T>(
   // dev proxy preserves them too.
   const fetchInit: RequestInit = { ...init, headers, signal, credentials: "include" };
   delete (fetchInit as RequestInitWithTimeout).timeoutMs;
+  delete (fetchInit as RequestInitWithTimeout).noWorkspaceClaim;
 
   // The timeout signal must stay armed until the *body* is consumed, not
   // just until headers arrive — a stalled response body would otherwise hang
@@ -717,7 +722,7 @@ export interface MeResponse {
   // an older/cached response.
   workspaceIsFallback?: boolean;
   // Whether this deployment registers the nightly export cron (prod does; the
-  // public dev worker does not — crons = []). Drives showing the 05:30 schedule
+  // public dev worker does not). Drives showing the 05:30 schedule
   // vs. a manual-exports notice (#240). Absent on older/cached responses →
   // treat as not enabled.
   nightlyExportsEnabled?: boolean;
@@ -1002,6 +1007,82 @@ export interface ReimportResponse {
   totals: ReimportCounts;
 }
 
+// Response of GET /api/books/:book/draft-scorecard (api/src/draftScorecard.ts,
+// issue #816; the exact metric rules are written up there).
+export interface DraftScorecardChapter {
+  /** null on the book total. */
+  chapter: number | null;
+  validated: number;
+  noDraft: number;
+  englishSource: number;
+  compared: number;
+  unchanged: number;
+  /** 0–100, null when nothing was compared. */
+  unchangedPct: number | null;
+  /** 0–1, null when nothing was compared. */
+  medianSimilarity: number | null;
+  /** Compared rows whose similarity is approximate (very long rewritten notes). */
+  approximateSimilarity: number;
+  closingPeriod: { eligible: number; made: number };
+  /** ref null = the run was not pinned (latest pack at run time, if any). */
+  contextPacks: { ref: string | null; count: number }[];
+  /** Compared drafts whose translate run is no longer on record. */
+  untracedDrafts: number;
+  /** "none" when the English source could not be read; "some" only on the book total. */
+  englishCheck: "all" | "some" | "none";
+}
+
+export interface DraftScorecardResponse {
+  book: string;
+  chapters: DraftScorecardChapter[];
+  total: DraftScorecardChapter;
+  /** Chapters whose English source could not be read. */
+  englishUncheckedChapters: number[];
+  /** Each distinct reason the English source could not be read, with its chapters. */
+  englishProblems: { reason: string; chapters: number[] }[];
+}
+
+// Response of GET /api/suggestion-inbox/:book (api/src/suggestionInbox.ts,
+// issue #819; the grouping, exclusion and home rules are written up there).
+export type SuggestionHome = "house_style" | "template" | "term" | "common_issues";
+
+export interface Suggestion {
+  /** Stable identity: JSON [change, before, after]. Sent back on approve/reject. */
+  key: string;
+  /** "insert-end": inserted at the very end of the note. */
+  change: "change" | "insert" | "insert-end";
+  before: string;
+  /** "" = the editors deleted `before`. */
+  after: string;
+  hits: number;
+  opportunities: number;
+  chapters: number[];
+  examples: { rowId: string; chapter: number; draft: string; final: string }[];
+  home: SuggestionHome;
+  /** The rule Approve creates; set only when home is house_style. */
+  rule: { kind: HouseStyleRule["kind"]; find: string; replace: string; scope: HouseStyleRule["scope"] } | null;
+  /**
+   * For a change a rule shape covers: of this book's drafts the rule would
+   * change (fires), how many it changes exactly as the editor did (correct),
+   * how many could not be checked in time (unchecked, never a pass), and the
+   * share needed (minPrecision) with at least 10 fires. Else null.
+   */
+  precision: { fires: number; correct: number; unchecked: number; minPrecision: number } | null;
+  /** Why a rule-shaped card is not a rule: its precision, its examples, or a check that could not finish. null otherwise. */
+  ruleBlocked: "precision" | "examples" | "unchecked" | null;
+}
+
+export interface SuggestionInboxResponse {
+  book: string;
+  minHits: number;
+  minChapters: number;
+  scanned: { validated: number; noDraft: number; compared: number; skippedLong: number };
+  excluded: { rejected: number; rule: number; term: number; template: number; commonIssues: number; lesson: number };
+  suggestions: Suggestion[];
+  /** The server has not had migration 0083 yet: Reject is unavailable. */
+  notMigrated: boolean;
+}
+
 // Responses of POST /api/books/:book/review-state (api/src/reviewState.ts).
 export interface ReviewSweepDryRunResponse {
   ok: true;
@@ -1144,6 +1225,23 @@ export type TermStatus = (typeof TERM_STATUSES)[number];
 export const REGISTERS = ["default", "formal", "informal"] as const;
 export type Register = (typeof REGISTERS)[number];
 
+// One house-style rule (issue #815, api/src/houseStyle.ts). `kind` is one of a
+// fixed set of matchers; `supported` is false for a row this server build
+// cannot run (it is then never applied).
+export interface HouseStyleRule {
+  id: string;
+  kind: "literal" | "whole_word" | "final_bracket_period" | string;
+  find: string;
+  replace: string;
+  scope: "note" | "end-of-note" | string;
+  examples: Array<{ before: string; after: string }>;
+  counterExamples: string[];
+  enabled: boolean;
+  supported: boolean;
+  updatedAt: number;
+  updatedBy: string | null;
+}
+
 export interface TranslationPrefs {
   id: number;
   audience: string | null;
@@ -1202,6 +1300,52 @@ export interface HelpAskErrorBody {
   code?: string;
   resetsAt?: string;
   remainingUsd?: number;
+}
+
+export interface AssistantStatus {
+  enabled: boolean;
+  configured: boolean;
+  keyUsable: boolean;
+  provider: string | null;
+  model: string | null;
+  capUsd: number;
+  remainingUsd: number;
+  canAsk: boolean;
+  /** The caller is an editor or admin in this workspace. */
+  canEdit: boolean;
+}
+export interface AssistantNote {
+  id: string;
+  ref: string;
+  quote: string | null;
+  note: string;
+  state: string | null;
+  checked: boolean;
+}
+export interface AssistantChatBody {
+  lang: string;
+  screen: "rapid_check";
+  context: { book: string; chapter: number; notes: AssistantNote[] };
+  messages: { role: "user" | "assistant"; content: string }[];
+}
+export interface AssistantActions {
+  edits: { id: string; note: string }[];
+  approve: string[];
+  notNeeded: string[];
+}
+export interface AssistantChatResponse {
+  reply: string;
+  actions: AssistantActions;
+  remainingUsd: number;
+}
+/** Error body of /api/assistant/chat (read it from ApiError.body). */
+export interface AssistantErrorBody {
+  code?: string;
+  resetsAt?: string;
+  remainingUsd?: number;
+  reason?: string;
+  /** assistant_failed: "truncated" | "unparseable" | "empty_answer" | a provider kind. */
+  kind?: string;
 }
 
 export interface AiProviderSettings {
@@ -1334,6 +1478,26 @@ export interface TemplateUnitMeta {
   version: number;
   // 1 when a source change demoted the draft and the target is now stale.
   stale_source: 0 | 1;
+}
+
+// GET /api/templates/draft-missing (#818). `reason` is set when it cannot run.
+export interface DraftMissingPreview {
+  available: boolean;
+  reason?: string;
+  provider: string | null;
+  qualifying: { slug: string; approvedNotes: number; units: number }[];
+  minApprovedNotes: number;
+  batchSize: number;
+}
+
+// POST /api/templates/draft-missing (#818).
+export interface DraftMissingResult {
+  drafted: { slug: string; approvedNotes: number; units: number }[];
+  failed: { slug: string; code: string }[];
+  remaining: number;
+  estimatedCostUsd: number | null;
+  /** Every template_id the run wrote (partial note types included). */
+  written: string[];
 }
 
 // One English-source revision (newest first).
@@ -1518,8 +1682,15 @@ export interface PipelineStatusResponse {
    */
   queuePosition?: number;
   queueAhead?: number;
-  /** Notes (#601) or questions (#725) a translate apply left alone because a person changed them after the job was queued. */
-  applySkipped?: { tnTouched?: number; tnTouchedIds?: string[]; tqTouched?: number; tqTouchedIds?: string[] };
+  /** Notes (#601), questions (#725) or tW/tA articles (#734, by path) a translate apply left alone because a person changed them after the job was queued. */
+  applySkipped?: {
+    tnTouched?: number;
+    tnTouchedIds?: string[];
+    tqTouched?: number;
+    tqTouchedIds?: string[];
+    articleTouched?: number;
+    articleTouchedPaths?: string[];
+  };
 }
 
 // AI pipeline proposal staged in pending_imports. The server parses payload
@@ -1990,6 +2161,35 @@ export const api = {
       { method: "POST", body: JSON.stringify(body), timeoutMs: 120_000 },
     ),
 
+  // Admin draft quality scorecard (#816): per-chapter AI draft vs approved note
+  // for one book. Read-only; api/src/draftScorecard.ts (admin only, 403 otherwise).
+  getDraftScorecard: (book: string, signal?: AbortSignal) =>
+    request<DraftScorecardResponse>(
+      `/api/books/${encodeURIComponent(book)}/draft-scorecard`,
+      { signal, timeoutMs: 60_000 },
+    ),
+
+  // Admin suggestion inbox (#819): repeated editor corrections to AI drafts,
+  // computed per book on request. Approve only for house-style cards; the
+  // server rebuilds the rule from its own card, so only the key is sent.
+  getSuggestionInbox: (book: string, signal?: AbortSignal) =>
+    request<SuggestionInboxResponse>(`/api/suggestion-inbox/${encodeURIComponent(book)}`, { signal, timeoutMs: 60_000 }),
+  approveSuggestion: (book: string, key: string) =>
+    request<{ rule: { id: string } }>(`/api/suggestion-inbox/${encodeURIComponent(book)}/approve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key }),
+      timeoutMs: 60_000,
+    }),
+  // The book is the one the admin is viewing: only a card shown there can be rejected.
+  rejectSuggestion: (book: string, key: string) =>
+    request<{ ok: true }>(`/api/suggestion-inbox/${encodeURIComponent(book)}/reject`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key }),
+      timeoutMs: 60_000,
+    }),
+
   setVerseDone: (book: string, chapter: number, verse: number, done: boolean) =>
     request<VerseStatus>(
       `/api/chapters/${encodeURIComponent(book)}/${chapter}/${verse}/status`,
@@ -2035,16 +2235,19 @@ export const api = {
     id: string,
     expectedVersion: number,
     patch: Record<string, unknown>,
-    opts: { restoredFromVersion?: number | null; book: string; queuedAt?: number },
+    // expectedState (#880): the translation_state the edit was proposed
+    // against; the server refuses the edit (409 state_mismatch) if the row has
+    // moved off it. Undefined sends no pin (every typed edit).
+    opts: { restoredFromVersion?: number | null; expectedState?: string | null; book: string; queuedAt?: number },
   ) =>
     request<T>(`/api/rows/${kind}/${encodeURIComponent(id)}?book=${encodeURIComponent(opts.book)}`, {
       method: "PATCH",
       headers: { "If-Match": String(expectedVersion), ...rowWriteDiagnosticHeaders(opts.queuedAt) },
-      body: JSON.stringify(
-        typeof opts.restoredFromVersion === "number"
-          ? { ...patch, restored_from_version: opts.restoredFromVersion }
-          : patch,
-      ),
+      body: JSON.stringify({
+        ...patch,
+        ...(typeof opts.restoredFromVersion === "number" ? { restored_from_version: opts.restoredFromVersion } : {}),
+        ...(opts.expectedState !== undefined ? { expected_state: opts.expectedState } : {}),
+      }),
     }),
 
   deleteRow: (kind: RowKind, id: string, expectedVersion: number, book: string, queuedAt?: number) =>
@@ -2087,11 +2290,33 @@ export const api = {
   // `bulk`: set by Approve-all loops. A one-at-a-time approval clears a bulk
   // approval stamp (the row becomes an AI example again); Approve-all is itself
   // a bulk approval and keeps it (#414).
-  validateNote: (id: string, book: string, value: boolean, opts?: { bulk?: boolean }) =>
+  // expectedVersion / expectedState: approve only if the row is still at the
+  // version and translation_state the caller showed (If-Match + expected_state;
+  // 409 otherwise, and a trashed row is refused). Rapid check's circle sends
+  // both for a note the user never opened.
+  validateNote: (
+    id: string,
+    book: string,
+    value: boolean,
+    opts?: {
+      bulk?: boolean;
+      expectedVersion?: number;
+      expectedState?: "ai_draft" | "edited" | "validated";
+      expectedUpdatedAt?: number;
+    },
+  ) =>
     request<TnRow>(`/api/rows/tn/${encodeURIComponent(id)}/validate?book=${encodeURIComponent(book)}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ value: value ? 1 : 0, ...(opts?.bulk ? { bulk: true } : {}) }),
+      headers: {
+        "Content-Type": "application/json",
+        ...(opts?.expectedVersion != null ? { "If-Match": String(opts.expectedVersion) } : {}),
+      },
+      body: JSON.stringify({
+        value: value ? 1 : 0,
+        ...(opts?.bulk ? { bulk: true } : {}),
+        ...(opts?.expectedState ? { expected_state: opts.expectedState } : {}),
+        ...(opts?.expectedUpdatedAt != null ? { expected_updated_at: opts.expectedUpdatedAt } : {}),
+      }),
     }),
 
   // Translation-mode "Approve" for translationQuestions — the tQ analogue of
@@ -2194,20 +2419,52 @@ export const api = {
 
   // "Approve" — value=true → 'validated'; value=false → 'edited'. Non-version-
   // bumping; 404 if the unit has no translation to (un)validate.
-  validateTemplate: (id: string, value: boolean) =>
+  // `pin` is the version and state the editor is showing. With it the server
+  // refuses (409 version_mismatch, body.current = the unit now) when the unit
+  // changed underneath the editor, e.g. a "Draft missing templates" run wrote
+  // a new AI draft: Approve must never publish text the person did not see.
+  validateTemplate: (
+    id: string,
+    value: boolean,
+    pin?: { version: number; state: TemplateUnit["translation_state"] },
+  ) =>
     request<TemplateUnit>(`/api/templates/unit/validate?id=${encodeURIComponent(id)}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ value: value ? 1 : 0 }),
+      headers: {
+        "Content-Type": "application/json",
+        ...(pin ? { "If-Match": String(pin.version) } : {}),
+      },
+      body: JSON.stringify({
+        value: value ? 1 : 0,
+        ...(pin?.state ? { expected_state: pin.state } : {}),
+      }),
     }),
 
   // Source revisions + word-diff-ready target history for the history dialog.
   getTemplateHistory: (id: string) =>
     request<TemplateHistory>(`/api/templates/unit/history?id=${encodeURIComponent(id)}`),
 
+  // "Draft missing templates from approved notes" (#818, admin only). The GET
+  // says whether it can run and which slugs qualify; the POST drafts one
+  // bounded batch on the org's own key. A run makes several model calls, so
+  // the timeout is long.
+  getDraftMissingTemplates: () => request<DraftMissingPreview>(`/api/templates/draft-missing`),
+  draftMissingTemplates: (skipSlugs: string[]) =>
+    request<DraftMissingResult>(`/api/templates/draft-missing`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ skipSlugs }),
+      timeoutMs: 600_000,
+    }),
+
   // ── UI localization overrides (migration 0052) ──
+  // No workspace claim: overrides live in the shared DB, the same for every
+  // org. main.tsx fetches them at boot, before App reconciles the slug, and a
+  // stale claim used to 409 and spend the tab's sibling-tab reload (#766).
   getL10nOverrides: () =>
-    request<{ overrides: Record<string, L10nBag>; versions: Record<string, number> }>(`/api/l10n/overrides`),
+    request<{ overrides: Record<string, L10nBag>; versions: Record<string, number> }>(`/api/l10n/overrides`, {
+      noWorkspaceClaim: true,
+    }),
   putL10nOverrides: (lang: string, expectedVersion: number, overrides: L10nBag) =>
     request<{ version: number }>(`/api/l10n/overrides/${lang}`, {
       method: "PUT",
@@ -2222,6 +2479,26 @@ export const api = {
       method: "PUT",
       headers: { "Content-Type": "application/json", "If-Match": String(expectedVersion) },
       body: JSON.stringify(patch),
+    }),
+  // Change history of the preferences row (issue #788), newest first. `next`
+  // is the `before` cursor for the next (older) page, or null at the end.
+  getTranslationPrefsHistory: (opts: { before?: number; limit?: number } = {}) => {
+    const qs = new URLSearchParams();
+    if (opts.before != null) qs.set("before", String(opts.before));
+    if (opts.limit != null) qs.set("limit", String(opts.limit));
+    const q = qs.toString();
+    return request<{ current: TranslationPrefs; entries: PrefsHistoryEntry[]; next: number | null }>(
+      `/api/translation-memory/prefs/history${q ? `?${q}` : ""}`,
+    );
+  },
+  // House-style rules applied to AI translate drafts at import (issue #815).
+  // Admin-only; the only change allowed is switching a rule on or off.
+  getHouseStyleRules: () => request<{ rules: HouseStyleRule[]; notMigrated?: boolean }>(`/api/translation-memory/house-style-rules`),
+  setHouseStyleRuleEnabled: (id: string, enabled: boolean) =>
+    request<{ rule: HouseStyleRule }>(`/api/translation-memory/house-style-rules/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
     }),
 
   // ── Org-wide AI provider config (migration 0065) ──
@@ -2253,6 +2530,24 @@ export const api = {
     }),
   setHelpChatEnabled: (enabled: boolean) =>
     request<{ enabled: boolean }>(`/api/help/settings`, {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    }),
+  // ── In-app assistant chat (api/src/assistant) ──
+  getAssistantStatus: (lang?: string) =>
+    request<AssistantStatus>(`/api/assistant/status${lang ? `?lang=${encodeURIComponent(lang)}` : ""}`),
+  // One model call per message; the server never writes.
+  assistantChat: (body: AssistantChatBody, signal?: AbortSignal) =>
+    request<AssistantChatResponse>(`/api/assistant/chat`, {
+      method: "POST",
+      body: JSON.stringify(body),
+      // Longer than the server's 120 s provider timeout, so a slow answer that
+      // the server pays for still reaches the user.
+      timeoutMs: 130_000,
+      signal,
+    }),
+  setAssistantSettings: (enabled: boolean) =>
+    request<{ enabled: boolean }>(`/api/assistant/settings`, {
       method: "PUT",
       body: JSON.stringify({ enabled }),
     }),
@@ -2292,8 +2587,21 @@ export const api = {
       headers: { "Content-Type": "application/json", "If-Match": String(expectedVersion) },
       body: JSON.stringify(patch),
     }),
-  deleteTerm: (id: number) =>
-    request<{ ok: boolean }>(`/api/translation-memory/terms/${id}`, { method: "DELETE" }),
+  // expectedVersion pins the delete to the version the person saw: a stale
+  // one is a 409 `version_mismatch` and the term stays.
+  deleteTerm: (id: number, expectedVersion?: number) =>
+    request<{ ok: boolean }>(`/api/translation-memory/terms/${id}`, {
+      method: "DELETE",
+      ...(expectedVersion !== undefined ? { headers: { "If-Match": String(expectedVersion) } } : {}),
+    }),
+  // Undo a delete (#801). expectedVersion is the version the term had when it
+  // was deleted (a delete does not change it), so a late undo cannot bring
+  // back a later edit someone else deleted: that is a 409 `version_mismatch`.
+  restoreTerm: (id: number, expectedVersion: number) =>
+    request<Term>(`/api/translation-memory/terms/${id}/restore`, {
+      method: "POST",
+      headers: { "If-Match": String(expectedVersion) },
+    }),
   importTerms: (csvText: string, dryRun: boolean) =>
     request<TermImportResult>(`/api/translation-memory/terms/import${dryRun ? "?dryRun=1" : ""}`, {
       method: "POST",
@@ -2315,12 +2623,30 @@ export const api = {
 
   // Move a note to the visible "trash" state (the delete button). Returns the
   // updated row with trashed_at set. Reversible via restoreNote; finalized to a
-  // deleted_at tombstone by the nightly job. No If-Match. Refused (409
-  // chapter_locked) while a translate run will write the note (#602); so is
-  // restoreNote.
-  trashNote: (id: string, book: string) =>
+  // deleted_at tombstone by the nightly job. Refused (409 chapter_locked)
+  // while a translate run will write the note (#602); so is restoreNote.
+  // opts pin the set-aside to the version and translation_state on screen
+  // (#837), as on validateNote (expectedState null = the note had no state): a stale one is a 409 `version_mismatch` with
+  // `current`, and the note stays live. Omitted: no check (the classic editor
+  // and Review queue).
+  trashNote: (
+    id: string,
+    book: string,
+    opts?: { expectedVersion?: number; expectedState?: "ai_draft" | "edited" | "validated" | null },
+  ) =>
     request<TnRow>(`/api/rows/tn/${encodeURIComponent(id)}/trash?book=${encodeURIComponent(book)}`, {
       method: "POST",
+      ...(opts
+        ? {
+            headers: {
+              "Content-Type": "application/json",
+              ...(opts.expectedVersion != null ? { "If-Match": String(opts.expectedVersion) } : {}),
+            },
+            // null is sent as null: it pins "still has no state". Only an
+            // absent expectedState skips the state check.
+            body: JSON.stringify(opts.expectedState !== undefined ? { expected_state: opts.expectedState } : {}),
+          }
+        : {}),
     }),
 
   // Bring a trashed note back to the live set (trashed_at cleared).

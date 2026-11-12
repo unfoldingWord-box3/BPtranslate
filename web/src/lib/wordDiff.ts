@@ -10,9 +10,15 @@ export function tokenize(s: string): string[] {
   return s.match(/\w+|\W+/g) ?? [];
 }
 
-export function diffWords(a: string, b: string): DiffOp[] {
-  const A = tokenize(a);
-  const B = tokenize(b);
+// Unicode-aware variant: `\w` is ASCII-only, so Arabic or Hebrew text would
+// come out as one big non-word token and diff as a whole-text replace.
+export function tokenizeUnicode(s: string): string[] {
+  return s.match(/[\p{L}\p{M}\p{N}_]+|[^\p{L}\p{M}\p{N}_]+/gu) ?? [];
+}
+
+export function diffWords(a: string, b: string, tok: (s: string) => string[] = tokenize): DiffOp[] {
+  const A = tok(a);
+  const B = tok(b);
   const m = A.length;
   const n = B.length;
   const dp: number[][] = Array.from({ length: m + 1 }, () =>

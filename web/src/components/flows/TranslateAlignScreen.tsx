@@ -137,7 +137,8 @@ import {
 import { useUnsavedGuard } from "../../hooks/useUnsavedGuard";
 import { useChapter } from "../../hooks/useChapter";
 import { useLexicon } from "../../hooks/useLexicon";
-import { useProjectConfig } from "../../hooks/useProjectConfig";
+import { useProjectConfig, useProjectConfigLoadFailed } from "../../hooks/useProjectConfig";
+import { TargetDirectionGate } from "../TargetDirectionGate";
 import { useAlignmentSuggestions } from "../../hooks/useAlignmentSuggestions";
 import { onOutboxResult, outbox } from "../../sync/outbox";
 import { alignmentDrafts, alignmentDraftKey } from "../../sync/alignmentDrafts";
@@ -262,6 +263,7 @@ export default function TranslateAlignScreen({
 
   const { status, data, applyLocalVerse } = useChapter(book, chapter);
   const projectConfig = useProjectConfig();
+  const configLoadFailed = useProjectConfigLoadFailed();
 
   // Viewers must not be able to start a save (AlignScreen.tsx:174-178: below
   // the UI, alignmentDrafts.set early-returns and outbox.enqueueVerse no-ops
@@ -918,8 +920,17 @@ export default function TranslateAlignScreen({
       <Box sx={{ height: "100%", minHeight: 0, overflowY: "auto", textAlign: "start" }}>
         {topbar}
         <Box sx={{ maxWidth: wide ? 1440 : COLUMN_PX, mx: "auto", paddingInline: 2, paddingBlock: 2 }}>
-          <Skeleton variant="rounded" height={44} />
-          <Skeleton variant="rounded" height={280} sx={{ mt: 2 }} />
+          {projectConfig === null && configLoadFailed ? (
+            // The aligners' target direction comes from the project config;
+            // offline with nothing cached, say so with a Retry instead of a
+            // skeleton that never resolves (issue #728, as #451).
+            <TargetDirectionGate known={false}>{null}</TargetDirectionGate>
+          ) : (
+            <>
+              <Skeleton variant="rounded" height={44} />
+              <Skeleton variant="rounded" height={280} sx={{ mt: 2 }} />
+            </>
+          )}
         </Box>
       </Box>
     );

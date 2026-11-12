@@ -1,6 +1,7 @@
 // Tools for the chat MCP endpoint (mcp.ts). Phase 1 of the "Book packages via
 // chat" plan: a reviewer in BT Servant can see what a book still needs, read
-// the notes for a verse range, and link the chat to their BPtranslate account
+// the notes and the verse text (bpt_get_verses, #783) for a verse range, and
+// link the chat to their BPtranslate account
 // (chatLinks.ts). Every tool but bpt_link_account takes the session_token,
 // because the link decides which workspace is read (issue #676). Reads go
 // through readerFrom; writes (bpt_edit_row, bpt_approve: issue #670 part a;
@@ -10,8 +11,17 @@
 // starts an AI draft through the web app's POST /api/pipelines/start, for
 // admins only, and bpt_job_status reads it back. The template tools
 // (bpt_templates_for_row, bpt_edit_template, bpt_approve_template) do the same
-// for note templates; their reads go through send("GET") as the linked user,
-// because the template routes are editor-only and getJson carries no user.
+// for note templates, and bpt_get_article, bpt_edit_article and
+// bpt_approve_article (part d) for tW/tA article parts; their reads go through
+// send("GET") as the linked user, because the template and article routes are
+// editor-only and getJson carries no user. bpt_get_preferences and
+// bpt_edit_preferences (#784) read and change the project's translation
+// preferences; the edit is admin-only and writes through sendAsAdmin.
+// bpt_list_terms, bpt_add_term, bpt_edit_term and bpt_delete_term (#785) read
+// and change the project's terminology, and bpt_restore_term (#795) undoes a
+// delete; the writes are admin-only, checked
+// with session.isAdmin, and go through plain send (the term routes are
+// editor-only).
 //
 // Each tool reads through the SAME route handlers the web app uses (`getJson`
 // runs the Hono app in-process), so chat and web never disagree about counts
@@ -56,6 +66,11 @@ export interface McpSession {
   // The linked user's real role in this workspace is admin (chatLinks.ts
   // chatIsAdmin). principal.role is capped at editor; bpt_draft asks this.
   isAdmin: () => Promise<boolean>;
+  // send() with the user's real admin role instead of the editor cap, for a
+  // route that is admin-only in the web app too (bpt_edit_preferences). It
+  // re-reads the role and answers 403 not_an_admin without calling the route
+  // when the user is not an admin.
+  sendAsAdmin: (method: string, path: string, body?: unknown, ifMatch?: number) => Promise<{ status: number; body: unknown }>;
   // Per-kind counts of what a pipeline job's apply staged, applied and
   // rejected (pipelines.ts jobResultCounts): a second read that skips the
   // route handlers, like packageRefs. bpt_job_status calls it only after the
@@ -73,11 +88,14 @@ export interface ToolContext {
 }
 
 import type { ChatPrincipal } from "./chatLinks.ts";
+import { derivePlainText } from "./alignmentCanonical.ts";
 import { isTsMilestone } from "./tsMilestone.ts";
+import { articleIdForTa, articleIdForTw, parseTaRef, parseTwRef, taPaths, twPath } from "./articlePopulate.ts";
 import { shortSupport, summarizePackageRefs, type PackageRefRows } from "./packageRefs.ts";
 import type { SourceNotes } from "./sourceNotes.ts";
 import { isTranslationConfig } from "./workflowLayouts.ts";
 import type { ProjectConfig } from "./projectConfig.ts";
+import { REGISTERS, TERM_STATUSES } from "./translationMemoryLib.ts";
 
 export class ToolInputError extends Error {}
 
@@ -640,6 +658,16 @@ function verseUnits(laneVerses: Record<string, VerseEntry>): VerseUnit[] {
     .sort((a, b) => a.start - b.start);
 }
 
+const laneHasVerses = (verses: Record<string, Record<string, VerseEntry>>, l: string) =>
+  verseUnits(verses[l] ?? {}).length > 0;
+
+// The lane a chapter is read from when the caller names none: ULT, else UST,
+// else the source text, else any lane with verses (bpt_chunks, bpt_get_verses).
+function defaultLane(verses: Record<string, Record<string, VerseEntry>>): string | undefined {
+  const has = (l: string) => laneHasVerses(verses, l);
+  return [...MARKER_LANES, ...SOURCE_LANES].find(has) ?? Object.keys(verses).find(has);
+}
+
 // Groups verse units into chunks: at each marker, or once a chunk spans at
 // least `by` verse numbers. The chunks cover verse 1 through `lastVerse` with
 // no gaps: each starts right after the previous one ends, so a verse missing
@@ -695,8 +723,7 @@ const chunkList: ToolDef = {
 
     const body = await apiGet(session, `/api/chapters/${book}/${chapter}`);
     const verses = (body.verses as Record<string, Record<string, VerseEntry>> | undefined) ?? {};
-    const hasVerses = (l: string) => verseUnits(verses[l] ?? {}).length > 0;
-    const lane = [...MARKER_LANES, ...SOURCE_LANES].find(hasVerses) ?? Object.keys(verses).find(hasVerses);
+    const lane = defaultLane(verses);
     if (!lane) {
       throw new ToolInputError(`${book} ${chapter} has no verses in this project. Call bpt_package_status for the chapters it has.`);
     }
@@ -742,6 +769,133 @@ const chunkList: ToolDef = {
       total_chunks: out.length,
       chunks: out,
       outside_chunks: { tn: tnVerses.length - tnIn, tq: tqVerses.length - tqIn },
+    };
+  },
+};
+
+// The project's own verse text (issue #783), so a reviewer can read a note
+// beside the verse it is about. Read-only. The plain text is derivePlainText
+// (alignmentCanonical.ts), the one the locked-lane save uses: \zaln-s
+// milestones unwrapped, the text of every node kept, including the quotes and
+// punctuation usfm-js parks on a marker's own text, and footnotes and cross
+// references (nodes that carry only content) left out. Paged by verse at
+// PAGE_BYTE_BUDGET, like bpt_chunk_work, so a long chapter is never cut off.
+// readingNodes runs first, for two things derivePlainText does not do (it also
+// feeds the locked-lane save, so it is left alone here).
+
+// Headings and other titles. usfm-js parks a heading at the end of the verse
+// BEFORE the one it heads, so its text would land on the wrong verse. \lit
+// (a liturgical note) is parked the same way. \d (a Psalm superscription) is
+// scripture and stays: it comes before \v 1, in the chapter's verse 0.
+const HEADING_TAG = /^(s\d*|ms\d*|mr|r|qa|sp|lit)$/;
+
+// Drops headings, and turns the nextChar of a node with no text of its own
+// (usfm-js keeps the space after \x* there) back into text, so the words on
+// either side of a cross reference or footnote are not glued together.
+function readingNodes(nodes: unknown[]): unknown[] {
+  const out: unknown[] = [];
+  for (const n of nodes) {
+    if (!n || typeof n !== "object") continue;
+    const o = n as Record<string, unknown>;
+    if (typeof o.tag === "string" && HEADING_TAG.test(o.tag)) continue;
+    out.push(Array.isArray(o.children) ? { ...o, children: readingNodes(o.children) } : o);
+    if (typeof o.text !== "string" && typeof o.nextChar === "string") out.push({ type: "text", text: o.nextChar });
+  }
+  return out;
+}
+
+const verseText = (content: VerseEntry["content"]) =>
+  derivePlainText({ verseObjects: readingNodes(content?.verseObjects ?? []) });
+
+const getVerses: ToolDef = {
+  name: "bpt_get_verses",
+  description:
+    "The verse text of one chapter of this project's translation, as plain text (USFM markers, word alignment, footnotes, cross references and section headings removed), to read a note or question beside the verse it is about. Reads ULT, the project's literal text, by default; if this chapter has no ULT text it reads UST, then the source text (UHB or UGNT), and the note says so. lane always names the text that was read; pass lane (e.g. UST) to read another. Verse 0 holds the chapter's front matter, such as a Psalm superscription: it comes first when verse_start is omitted and it has text. A bridged verse (\\v 9-10) comes back once, with verse_end. Results are paged: if next_verse_start is not null, call again with verse_start set to it (and the same verse_end) for the rest; never call a range complete until next_verse_start is null. A verse marked truncated had its text cut.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      book: { type: "string", description: "3-letter book code, e.g. TIT" },
+      chapter: { type: "integer", minimum: 1 },
+      verse_start: {
+        type: "integer",
+        minimum: 0,
+        description: "First verse. Omit to start at verse 0, the chapter's front matter (such as a Psalm superscription), which comes back only when it has text",
+      },
+      verse_end: { type: "integer", minimum: 0, description: "Last verse, inclusive; omit for the rest of the chapter" },
+      lane: { type: "string", description: "The text to read: ULT (the default) or UST, or UHB/UGNT for the source text" },
+    },
+    required: ["session_token", "book", "chapter"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const session = await readerFrom(args, ctx);
+    const book = bookArg(args);
+    const chapter = intArg(args, "chapter", { min: 1, required: true })!;
+    const vsArg = intArg(args, "verse_start", { min: 0 });
+    const vs = vsArg ?? 0;
+    const ve = intArg(args, "verse_end", { min: 0 }) ?? Number.MAX_SAFE_INTEGER;
+    if (ve < vs) throw new ToolInputError("verse_end is before verse_start");
+    let asked: string | null = null;
+    if (args.lane !== undefined && args.lane !== null) {
+      asked = typeof args.lane === "string" ? args.lane.trim().toUpperCase() : "";
+      if (!asked) throw new ToolInputError('lane must be a lane name like "ULT" or "UST"');
+    }
+
+    const body = await apiGet(session, `/api/chapters/${book}/${chapter}`);
+    const verses = (body.verses as Record<string, Record<string, VerseEntry>> | undefined) ?? {};
+    const lane = asked ?? defaultLane(verses);
+    if (!lane) {
+      throw new ToolInputError(`${book} ${chapter} has no verses in this project. Call bpt_package_status for the chapters it has.`);
+    }
+    if (!laneHasVerses(verses, lane)) {
+      const have = Object.keys(verses).filter((l) => laneHasVerses(verses, l));
+      throw new ToolInputError(
+        `${book} ${chapter} has no ${lane} text in this project. Lanes with text here: ${have.length ? have.join(", ") : "none"}.`,
+      );
+    }
+
+    // Every verse (or bridged block) that overlaps the range, in order. The
+    // chapter's front matter (verse 0, stored that way by the importers) is
+    // left out of a default start when it holds no text, as most chapters'
+    // (a bare \p) does.
+    const units = Object.values(verses[lane])
+      .map((v) => {
+        const start = Number(v.verse);
+        return { start, end: Math.max(start, Number(v.verse_end ?? start)), text: verseText(v.content) };
+      })
+      .filter((u) => u.end >= vs && u.start <= ve && (vsArg !== undefined || u.start > 0 || u.text !== ""))
+      .sort((a, b) => a.start - b.start);
+    const out: { verse: number; verse_end?: number; text: string; truncated?: true }[] = [];
+    let bytes = 0;
+    let i = 0;
+    for (; i < units.length; i++) {
+      const { start, end } = units[i];
+      const { text, cut } = capText(units[i].text, ROW_TEXT_CAP);
+      const item = { verse: start, ...(end > start ? { verse_end: end } : {}), text, ...(cut ? { truncated: true as const } : {}) };
+      // Measured as it travels: mcp.ts sends the result as a JSON string
+      // inside JSON, so every quote and backslash costs double.
+      const size = getRowBytes(item);
+      // Always return at least one verse, or paging would never move.
+      if (out.length > 0 && bytes + size > PAGE_BYTE_BUDGET) break;
+      out.push(item);
+      bytes += size;
+    }
+    const notes: string[] = [];
+    // Only this chapter is known: ULT may exist elsewhere, or be held back.
+    if (!asked && lane !== "ULT") notes.push(`ULT has no text for ${book} ${chapter} here, so the ${lane} text was used.`);
+    if (units.length === 0) notes.push(`${lane} has no verses in this range of ${book} ${chapter}.`);
+    return {
+      book,
+      chapter,
+      lane,
+      verse_start: vs,
+      verse_end: ve === Number.MAX_SAFE_INTEGER ? null : ve,
+      note: notes.length ? notes.join(" ") : null,
+      total: units.length,
+      returned: out.length,
+      next_verse_start: i < units.length ? units[i].start : null,
+      verses: out,
     };
   },
 };
@@ -971,18 +1125,20 @@ export function missingPlaceholders(placeholders: string[], text: string): strin
 }
 
 // An editor of a translation project, nothing else: an authoring project's
-// templates are the English source, not changed from chat.
-async function templateSession(args: Record<string, unknown>, ctx: ToolContext): Promise<McpSession> {
+// templates and tW/tA articles are the English source, not changed from chat.
+// `what` names them in the refusal.
+async function translationSession(
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+  what = "Its note templates are",
+  refusal = `This project writes its notes in English (authoring mode). ${what} the English source and are not changed from chat.`,
+): Promise<McpSession> {
   const session = await principalFrom(args, ctx);
   // send, not getJson: this route wants a signed-in user, and getJson has none.
   const { status, body } = await session.send("GET", "/api/project-config");
   if (status !== 200) throw new Error(`BPtranslate API /api/project-config returned ${status}`);
   const config = (body as { config?: ProjectConfig } | null)?.config;
-  if (!config || !isTranslationConfig(config)) {
-    throw new ToolInputError(
-      "This project writes its notes in English (authoring mode). Its note templates are the English source and are not changed from chat.",
-    );
-  }
+  if (!config || !isTranslationConfig(config)) throw new ToolInputError(refusal);
   return session;
 }
 
@@ -1054,7 +1210,7 @@ const templatesForRow: ToolDef = {
     additionalProperties: false,
   },
   run: async (args, ctx) => {
-    const session = await templateSession(args, ctx);
+    const session = await translationSession(args, ctx);
     const book = bookArg(args);
     const id = args.id;
     if (typeof id !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(id)) throw new ToolInputError("id is not a row id");
@@ -1120,7 +1276,7 @@ const templatesForRow: ToolDef = {
 
 // The arguments both template writes take, and the template as it is now.
 async function templateWriteTarget(args: Record<string, unknown>, ctx: ToolContext) {
-  const session = await templateSession(args, ctx);
+  const session = await translationSession(args, ctx);
   const id = templateIdArg(args);
   const version = intArg(args, "version", { min: 1, required: true })!;
   return { session, id, version, path: `/api/templates/unit?id=${encodeURIComponent(id)}` };
@@ -1213,6 +1369,260 @@ const approveTemplate: ToolDef = {
     }
     if (status !== 200) templateRefusal(t.id, status, body);
     return templateApplied(b);
+  },
+};
+
+// ── tW / tA articles (issue #670 part d) ────────────────────────────────────
+// The template tools' twins for article_units. One article is up to three
+// markdown files (parts: a tA article has body, title and sub-title), each
+// keyed by (resource, path) with its own version and state, so each part is
+// saved and approved on its own. Reads go through send("GET") as the linked
+// user, because the article routes are editor-only (like the template routes).
+
+const ARTICLES_ARE = "Its tW and tA articles are";
+const RESOURCE_LABEL = { tw: "tW", ta: "tA" } as const;
+
+function articleResourceArg(args: Record<string, unknown>): "tw" | "ta" {
+  if (args.resource !== "tw" && args.resource !== "ta") throw new ToolInputError('resource must be "tw" or "ta"');
+  return args.resource;
+}
+
+function articlePathArg(args: Record<string, unknown>): string {
+  const p = args.path;
+  if (typeof p !== "string" || !p.endsWith(".md") || p.length > 200 || p.includes("..") || /[\u0000-\u001f\u007f]/.test(p)) {
+    throw new ToolInputError("path is not an article part path: use the path bpt_get_article returned");
+  }
+  return p;
+}
+
+const articleUnitPath = (resource: "tw" | "ta", path: string) =>
+  `/api/articles/${resource}/unit?path=${encodeURIComponent(path)}`;
+
+// What the tools show of an article_units row; nothing else leaves the Worker.
+function projectArticlePart(u: Record<string, unknown>) {
+  return {
+    path: u.path,
+    part: u.part,
+    source_md: u.source_md,
+    target_md: (u.target_md as string | null) ?? null,
+    state: (u.translation_state as string | null) ?? null,
+    version: u.version,
+  };
+}
+
+// The part as it is now, or null when the project has no such part.
+async function getArticlePart(session: McpSession, resource: "tw" | "ta", path: string, write: boolean) {
+  const { status, body } = await session.send("GET", articleUnitPath(resource, path));
+  if (status === 200) return body as Record<string, unknown>;
+  if (status === 404) return null;
+  if (status === 403) throw new ToolInputError(`This user cannot edit in this project.${write ? " Nothing was changed." : ""}`);
+  throw new Error(`BPtranslate API /api/articles/${resource}/unit returned ${status}`);
+}
+
+// The answers an article write gives that are neither a success nor a conflict.
+function articleRefusal(resource: "tw" | "ta", path: string, status: number, body: unknown): never {
+  const b = (body ?? {}) as Record<string, unknown>;
+  if (status === 404) throw new ToolInputError(`There is no ${RESOURCE_LABEL[resource]} article part ${path} in this project. Nothing was changed.`);
+  if (status === 403) throw new ToolInputError("This user cannot edit in this project. Nothing was changed.");
+  if (status === 400) throw new ToolInputError(`BPtranslate refused the change (${String(b.error ?? "invalid")}). Nothing was changed.`);
+  throw new Error(`BPtranslate write for ${resource} ${path} returned ${status}`);
+}
+
+// Write results stay under the chat's cap too (GET_ROW_BYTE_BUDGET, as
+// bpt_get_article): one long tA part is ~15 KB of English plus a two-byte
+// translation. They never carry the English (the reviewer read it in
+// bpt_get_article); past the cap they leave out the reviewer's own text, then
+// the part's wording, keeping its version and state.
+const ARTICLE_RESULT_BUDGET = GET_ROW_BYTE_BUDGET - 1_000;
+const TOO_LONG = " The wording is too long to include here: call bpt_get_article to show it.";
+
+function articleWritePart(u: Record<string, unknown>) {
+  const { source_md: _english, ...part } = projectArticlePart(u);
+  return part;
+}
+
+function withoutWording(part: ReturnType<typeof articleWritePart>) {
+  const { target_md: _wording, ...rest } = part;
+  return { ...rest, target_left_out: true };
+}
+
+// retryWith: what to call again with. An approval pins the state too, and a
+// state change leaves the version as it was (see conflict).
+function articleConflict(yours: string | null, current: Record<string, unknown>, what: string, retryWith = "current.version") {
+  const message =
+    `Someone changed this article part after the reviewer saw it, so ${what} was NOT ${yours === null ? "made" : "saved"}. ` +
+    `Show the reviewer the current wording and ask; to go ahead, call again with ${retryWith}.`;
+  const part = articleWritePart(current);
+  const full = { status: "conflict", message, ...(yours !== null ? { your_text: yours } : {}), current: part };
+  if (getRowBytes(full) <= ARTICLE_RESULT_BUDGET) return full;
+  const noYours = { status: "conflict", message, ...(yours !== null ? { your_text_left_out: true } : {}), current: part };
+  if (getRowBytes(noYours) <= ARTICLE_RESULT_BUDGET) return noYours;
+  return { ...noYours, message: message + TOO_LONG, current: withoutWording(part) };
+}
+
+function articleApplied(u: Record<string, unknown>) {
+  const part = articleWritePart(u);
+  const out = { status: "applied", version: u.version, state: u.translation_state ?? null, part };
+  if (getRowBytes(out) <= ARTICLE_RESULT_BUDGET) return out;
+  return { ...out, part: withoutWording(part) };
+}
+
+const getArticle: ToolDef = {
+  name: "bpt_get_article",
+  description:
+    "One translationWords (tW) or translationAcademy (tA) article, with each of its parts: path, part (body; a tA article also has title and sub-title), source_md (the English), target_md (this project's translation; null means not translated yet), state and version. Name the article the way a note or word link does: a tW link (rc://*/tw/dict/bible/kt/god) or category and name (kt/god); a tA link or support reference (rc://*/ta/man/translate/figs-aside, figs-aside). Show the reviewer a part before changing or approving it; then use bpt_edit_article and bpt_approve_article with that part's path, version and state. Requires edit access; not available in an English-authoring project.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      resource: { type: "string", enum: ["tw", "ta"] },
+      article: { type: "string", description: "The article's link, support reference, or id (kt/god, translate/figs-aside)" },
+    },
+    required: ["session_token", "resource", "article"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const session = await translationSession(args, ctx, ARTICLES_ARE);
+    const resource = articleResourceArg(args);
+    const raw = typeof args.article === "string" ? args.article : "";
+    let articleId: string;
+    let paths: { path: string; part: string }[];
+    if (resource === "tw") {
+      const ref = parseTwRef(raw);
+      if (!ref) {
+        throw new ToolInputError(`"${raw}" is not a tW article: give its link (rc://*/tw/dict/bible/kt/god) or its category and name (kt/god).`);
+      }
+      articleId = articleIdForTw(ref);
+      paths = [{ path: twPath(ref.cat, ref.slug), part: "body" }];
+    } else {
+      const ref = parseTaRef(raw);
+      if (!ref) {
+        throw new ToolInputError(`"${raw}" is not a tA article: give its link (rc://*/ta/man/translate/figs-aside) or its name (figs-aside).`);
+      }
+      articleId = articleIdForTa(ref);
+      paths = taPaths(ref.manual, ref.slug);
+    }
+    const parts: Record<string, unknown>[] = [];
+    for (const p of paths) {
+      const u = await getArticlePart(session, resource, p.path, false);
+      if (u) parts.push(projectArticlePart(u));
+    }
+    if (parts.length === 0) {
+      throw new ToolInputError(
+        `The ${RESOURCE_LABEL[resource]} article ${articleId} is not loaded into this project yet. An editor can add it in the BPtranslate web app.`,
+      );
+    }
+    // A long tA body in a two-byte script can pass the chat's 32 KB cap
+    // (GET_ROW_BYTE_BUDGET). Leave out the English of translated parts first,
+    // then refuse rather than send a cut-off result.
+    let out = parts;
+    if (getRowBytes({ parts: out }) > GET_ROW_BYTE_BUDGET - 1_000) {
+      out = parts.map((p) => (p.target_md ? { ...p, source_md: null, source_left_out: true } : p));
+      if (getRowBytes({ parts: out }) > GET_ROW_BYTE_BUDGET - 1_000) {
+        throw new ToolInputError(
+          `The ${RESOURCE_LABEL[resource]} article ${articleId} is too long to send in one chat message. Edit it in the BPtranslate web app.`,
+        );
+      }
+    }
+    return { resource, article_id: articleId, parts: out };
+  },
+};
+
+// The arguments both article writes take.
+async function articleWriteTarget(args: Record<string, unknown>, ctx: ToolContext) {
+  const session = await translationSession(args, ctx, ARTICLES_ARE);
+  const resource = articleResourceArg(args);
+  const path = articlePathArg(args);
+  const version = intArg(args, "version", { min: 1, required: true })!;
+  return { session, resource, path, version };
+}
+
+const ARTICLE_PATH_SCHEMA = { type: "string", description: "The part's path from bpt_get_article" };
+
+const editArticle: ToolDef = {
+  name: "bpt_edit_article",
+  description:
+    "Save the reviewer's wording for one part of a tW or tA article, replacing that part's translation (target_md) whole. Pass the version the reviewer was shown; it is saved only if the part is still at that version. Returns status applied with the new version and state (an AI draft or approved part becomes state edited, so it needs approving again: pass the NEW version and state to bpt_approve_article), or status conflict when someone changed the part since, with your_text and current (the wording and version now): nothing was saved, so show the reviewer the current wording and ask. A very long part comes back with your_text_left_out or target_left_out instead of the text: call bpt_get_article to show it. Errors change nothing. Requires edit access.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      resource: { type: "string", enum: ["tw", "ta"] },
+      path: ARTICLE_PATH_SCHEMA,
+      version: { type: "integer", minimum: 1, description: "The part's version exactly as bpt_get_article showed it to the reviewer." },
+      text: { type: "string", description: "The whole new translation of this part, in markdown" },
+    },
+    required: ["session_token", "resource", "path", "version", "text"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const t = await articleWriteTarget(args, ctx);
+    const text = args.text;
+    // An empty PATCH leaves an untranslated part's state NULL, and the approve would then fail.
+    if (typeof text !== "string" || !text.trim()) throw new ToolInputError("text is required: the whole new translation of the part");
+    const { status, body } = await t.session.send("PATCH", articleUnitPath(t.resource, t.path), { target_md: text }, t.version);
+    const b = (body ?? {}) as Record<string, unknown>;
+    if (status === 409 && b.error === "version_mismatch") {
+      return articleConflict(text, b.current as Record<string, unknown>, "the new wording");
+    }
+    if (status !== 200) articleRefusal(t.resource, t.path, status, body);
+    return articleApplied(b);
+  },
+};
+
+const approveArticle: ToolDef = {
+  name: "bpt_approve_article",
+  description:
+    "Approve one part of a tW or tA article that the reviewer was shown and accepted, marking it validated. Only for wording the reviewer has actually read in this conversation. Pass the version and state exactly as the reviewer was shown them (after bpt_edit_article, the version and state it returned; approving does not change the version); the part is approved only if it is still at that version and in that state. Returns status applied, or status conflict when the part changed since (its wording, or its state: someone approved or un-approved it), with current (the wording, version and state now): nothing was approved, so show the reviewer the current wording first (target_left_out: too long to include, call bpt_get_article). A part with no translation yet cannot be approved. Errors change nothing. Requires edit access.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      resource: { type: "string", enum: ["tw", "ta"] },
+      path: ARTICLE_PATH_SCHEMA,
+      version: { type: "integer", minimum: 1, description: "The part's version exactly as bpt_get_article or bpt_edit_article returned it." },
+      state: {
+        type: "string",
+        enum: APPROVE_STATES,
+        description: "The part's state exactly as bpt_get_article or bpt_edit_article showed it to the reviewer.",
+      },
+    },
+    required: ["session_token", "resource", "path", "version", "state"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const t = await articleWriteTarget(args, ctx);
+    // Required: state flips never bump the version, so the version alone
+    // misses an un-approve that landed after the reviewer saw the part.
+    const state = args.state;
+    if (typeof state !== "string" || !(APPROVE_STATES as readonly string[]).includes(state)) {
+      throw new ToolInputError(`state is required: the part's state as the reviewer was shown it (${APPROVE_STATES.join(", ")})`);
+    }
+    const unit = await getArticlePart(t.session, t.resource, t.path, true);
+    if (!unit) articleRefusal(t.resource, t.path, 404, null);
+    if (unit.version !== t.version) return articleConflict(null, unit, "the approval", "current.version and current.state");
+    if (unit.translation_state == null) {
+      throw new ToolInputError(
+        `${t.path} has no translation yet, so there is nothing to approve. Save wording with bpt_edit_article first. Nothing was changed.`,
+      );
+    }
+    const { status, body } = await t.session.send(
+      "POST",
+      `/api/articles/${t.resource}/unit/validate?path=${encodeURIComponent(t.path)}`,
+      { value: 1, expected_state: state },
+      t.version,
+    );
+    const b = (body ?? {}) as Record<string, unknown>;
+    if (status === 409 && b.error === "version_mismatch") {
+      return articleConflict(null, b.current as Record<string, unknown>, "the approval", "current.version and current.state");
+    }
+    // The route answers 404 for a part that is gone AND for one whose
+    // translation was cleared since the check above: re-read to say which.
+    if (status === 404 && (await getArticlePart(t.session, t.resource, t.path, true))) {
+      throw new ToolInputError(`${t.path} has no translation now, so there is nothing to approve. Nothing was changed.`);
+    }
+    if (status !== 200) articleRefusal(t.resource, t.path, status, body);
+    return articleApplied(b);
   },
 };
 
@@ -1488,6 +1898,435 @@ const bulkSetState: ToolDef = {
   },
 };
 
+// ── Translation preferences (issue #784) ────────────────────────────────────
+// The Style page's brief, instructions and common issues: one row per project
+// (translation_prefs), read and saved through the web app's own
+// GET / PUT /api/translation-memory/prefs. GET is editor-only, so the read goes
+// through send("GET") as the linked user. PUT is admin-only in the web app, so
+// the edit asks session.isAdmin first and writes through sendAsAdmin, the one
+// route call that is not capped at editor. Saving queues a context export
+// (the route does it), which is how the next AI drafts get the new wording.
+// Terminology and examples are not here.
+
+const PREFS_PATH = "/api/translation-memory/prefs";
+const PREF_TEXT_FIELDS = ["audience", "purpose", "script_notes", "instructions_md", "common_issues_md", "notes"] as const;
+type PrefTextField = (typeof PREF_TEXT_FIELDS)[number];
+const PREF_FIELDS = [...PREF_TEXT_FIELDS, "register"] as const;
+type PrefField = (typeof PREF_FIELDS)[number];
+type Prefs = { version: number } & Record<PrefTextField, string | null> & { register: string };
+const PREFS_RESULT_BUDGET = GET_ROW_BYTE_BUDGET - 1_000;
+const NOT_SAVED = "Nothing was saved.";
+
+const PREF_FIELDS_HELP =
+  "audience (who the translation is for), purpose (what it is for), register (default, formal or informal: how formal AI drafts are), " +
+  "script_notes (script and direction notes), instructions_md (markdown added to every AI drafting and checking prompt), " +
+  "common_issues_md (markdown listing problems reviewers keep flagging), notes (the admins' own notes; not sent to the AI)";
+
+type SendFn = (method: string, path: string, body?: unknown, ifMatch?: number) => Promise<{ status: number; body: unknown }>;
+
+const PREFS_HISTORY_PATH = `${PREFS_PATH}/history`;
+
+// The only routes a chat tool may call with the user's admin role. Each is
+// admin-only in the web app too; adding one is a decision, not a reuse.
+// GET /prefs/history (#798) is read-only.
+export const CHAT_ADMIN_ROUTES: ReadonlySet<string> = new Set([`PUT ${PREFS_PATH}`, `GET ${PREFS_HISTORY_PATH}`]);
+
+// Builds session.sendAsAdmin (index.ts): refuses a route not listed above,
+// re-reads the real role on every call, and answers the route's own 403
+// shape, without calling it, for a user who is not an admin now. The route
+// is matched exactly on the path before any query string (the history read
+// pages with ?limit=&before=).
+export function adminSender(isAdmin: () => Promise<boolean>, sendAsAdminRole: SendFn): SendFn {
+  return async (method, path, body, ifMatch) => {
+    if (!CHAT_ADMIN_ROUTES.has(`${method} ${path.split("?")[0]}`)) throw new Error(`sendAsAdmin does not allow ${method} ${path}`);
+    if (!(await isAdmin())) return { status: 403, body: { error: "forbidden", reason: "not_an_admin" } };
+    return sendAsAdminRole(method, path, body, ifMatch);
+  };
+}
+
+// Readable by an editor of a translation project; an authoring project has
+// none (the web app shows the same refusal on its Style page).
+async function prefsSession(args: Record<string, unknown>, ctx: ToolContext): Promise<McpSession> {
+  return translationSession(args, ctx, "", "Translation preferences apply to translation projects only, and this project writes its notes in English.");
+}
+
+async function readPrefs(session: McpSession): Promise<Prefs> {
+  const { status, body } = await session.send("GET", PREFS_PATH);
+  if (status !== 200) throw new Error(`BPtranslate API ${PREFS_PATH} returned ${status}`);
+  const p = ((body ?? {}) as { prefs?: Record<string, unknown> }).prefs ?? {};
+  const out = { version: Number(p.version ?? 0), register: String(p.register ?? "default") } as Prefs;
+  for (const f of PREF_TEXT_FIELDS) out[f] = typeof p[f] === "string" ? (p[f] as string) : null;
+  return out;
+}
+
+// Whole fields, leaving out the largest text fields first until the result
+// fits. A single field over the budget on its own is cut, and says so: the
+// edit tool's append and replace still work on it.
+function prefsView(p: Prefs, fields: PrefField[], extra: Record<string, unknown>) {
+  const values: Record<string, unknown> = {};
+  for (const f of fields) values[f] = p[f];
+  const out = (v: Record<string, unknown>, leftOut: string[], more: Record<string, unknown> = {}) => ({
+    version: p.version,
+    ...extra,
+    preferences: v,
+    ...(leftOut.length
+      ? { left_out: leftOut, left_out_note: "Too long to include together: call again with field set to one of these to read it." }
+      : {}),
+    ...more,
+  });
+  if (fields.length === 1) {
+    const f = fields[0];
+    const text = values[f];
+    if (typeof text !== "string" || getRowBytes(out(values, [])) <= PREFS_RESULT_BUDGET) return out(values, []);
+    const cut = (keep: number) => out({ [f]: text.slice(0, keep) }, [], { truncated: { field: f, chars_shown: keep, total_chars: text.length } });
+    let keep = text.length;
+    while (keep > 0 && getRowBytes(cut(keep)) > PREFS_RESULT_BUDGET) keep = Math.floor(keep * 0.9);
+    return cut(keep);
+  }
+  const bySize = PREF_TEXT_FIELDS.filter((f) => typeof values[f] === "string").sort((a, b) => byteLength(values[b]) - byteLength(values[a]));
+  const leftOut: string[] = [];
+  for (const f of bySize) {
+    if (getRowBytes(out(values, leftOut)) <= PREFS_RESULT_BUDGET) break;
+    delete values[f];
+    leftOut.push(f);
+  }
+  return out(values, leftOut);
+}
+
+function prefFieldArg(raw: unknown, key: string, allowed: readonly string[]): PrefField {
+  if (typeof raw !== "string" || !allowed.includes(raw)) {
+    throw new ToolInputError(`${key} must be one of ${allowed.join(", ")}, got ${JSON.stringify(raw)}. ${NOT_SAVED}`);
+  }
+  return raw as PrefField;
+}
+
+function plainObject(raw: unknown, key: string): Record<string, unknown> {
+  if (raw === undefined || raw === null) return {};
+  if (typeof raw !== "object" || Array.isArray(raw)) throw new ToolInputError(`${key} must be an object of field: text. ${NOT_SAVED}`);
+  return raw as Record<string, unknown>;
+}
+
+export interface PrefsChanges {
+  set: Partial<Record<PrefField, string | null>>;
+  append: Partial<Record<PrefTextField, string>>;
+  replace: { field: PrefTextField; old_text: string; new_text: string }[];
+}
+
+// Parses the edit tool's three kinds of change. One field takes one kind, so
+// a set never silently wins over an append to the same field.
+export function parsePrefsChanges(args: Record<string, unknown>): PrefsChanges {
+  const set: PrefsChanges["set"] = {};
+  for (const [k, v] of Object.entries(plainObject(args.set, "set"))) {
+    const f = prefFieldArg(k, "a set field", PREF_FIELDS);
+    if (f === "register") {
+      if (typeof v !== "string" || !(REGISTERS as readonly string[]).includes(v)) {
+        throw new ToolInputError(`register must be one of ${REGISTERS.join(", ")}. ${NOT_SAVED}`);
+      }
+      set.register = v;
+    } else {
+      if (v !== null && typeof v !== "string") throw new ToolInputError(`set.${f} must be text, or null to clear it. ${NOT_SAVED}`);
+      // The web app saves an emptied box as null.
+      set[f] = v === null || !v.trim() ? null : v;
+    }
+  }
+  const append: PrefsChanges["append"] = {};
+  for (const [k, v] of Object.entries(plainObject(args.append, "append"))) {
+    const f = prefFieldArg(k, "an append field", PREF_TEXT_FIELDS) as PrefTextField;
+    if (typeof v !== "string" || !v.trim()) throw new ToolInputError(`append.${f} must be the text to add. ${NOT_SAVED}`);
+    append[f] = v;
+  }
+  const replace: PrefsChanges["replace"] = [];
+  if (args.replace !== undefined && args.replace !== null) {
+    if (!Array.isArray(args.replace) || args.replace.length > 20) {
+      throw new ToolInputError(`replace must be a list of at most 20 changes. ${NOT_SAVED}`);
+    }
+    for (const r of args.replace as unknown[]) {
+      const o = plainObject(r, "each replace");
+      const f = prefFieldArg(o.field, "replace field", PREF_TEXT_FIELDS) as PrefTextField;
+      if (typeof o.old_text !== "string" || !o.old_text) throw new ToolInputError(`replace old_text is required. ${NOT_SAVED}`);
+      if (typeof o.new_text !== "string") throw new ToolInputError(`replace new_text is required ("" removes old_text). ${NOT_SAVED}`);
+      replace.push({ field: f, old_text: o.old_text, new_text: o.new_text });
+    }
+  }
+  const kinds = new Map<string, string>();
+  const claim = (f: string, kind: string) => {
+    const had = kinds.get(f);
+    if (had && had !== kind) throw new ToolInputError(`${f} is in both ${had} and ${kind}: give each field one kind of change. ${NOT_SAVED}`);
+    kinds.set(f, kind);
+  };
+  for (const f of Object.keys(set)) claim(f, "set");
+  for (const f of Object.keys(append)) claim(f, "append");
+  for (const r of replace) claim(r.field, "replace");
+  if (!kinds.size) throw new ToolInputError(`Give at least one change in set, append or replace. ${NOT_SAVED}`);
+  return { set, append, replace };
+}
+
+// The new value of every changed field, from the stored values the reviewer
+// was shown. Pure, so the matching rules are testable on their own.
+export function applyPrefsChanges(current: Prefs, ch: PrefsChanges): Partial<Record<PrefField, string | null>> {
+  const next: Partial<Record<PrefField, string | null>> = { ...ch.set };
+  for (const [f, text] of Object.entries(ch.append) as [PrefTextField, string][]) {
+    const had = current[f] ?? "";
+    next[f] = had.trim() ? `${had.replace(/\s+$/, "")}\n\n${text}` : text;
+  }
+  for (const r of ch.replace) {
+    const had = (r.field in next ? next[r.field] : current[r.field]) ?? "";
+    const at = had.indexOf(r.old_text);
+    if (at < 0) throw new ToolInputError(`${r.field} does not contain this old_text: ${JSON.stringify(r.old_text.slice(0, 200))}. ${NOT_SAVED}`);
+    if (had.indexOf(r.old_text, at + 1) >= 0) {
+      throw new ToolInputError(`${r.field} contains this old_text more than once; include more of the surrounding text so it matches once. ${NOT_SAVED}`);
+    }
+    const after = had.slice(0, at) + r.new_text + had.slice(at + r.old_text.length);
+    next[r.field] = after.trim() ? after : null;
+  }
+  return next;
+}
+
+const prefsConflict = (version: number) => ({
+  status: "conflict",
+  current_version: version,
+  message: `Someone changed the translation preferences after the reviewer saw them, so ${NOT_SAVED.toLowerCase()} Call bpt_get_preferences, show the reviewer what is there now, and ask before trying again.`,
+});
+
+const FIELD_SCHEMA = { type: "string", enum: [...PREF_FIELDS] };
+const TEXT_FIELD_PROPS = Object.fromEntries(PREF_TEXT_FIELDS.map((f) => [f, { type: "string" }]));
+
+const getPreferences: ToolDef = {
+  name: "bpt_get_preferences",
+  description:
+    `This project's translation preferences, the ones on the web app's Style page that shape every AI draft: ${PREF_FIELDS_HELP}. ` +
+    "Editors see every field but notes. null means not filled in. Returns version (0 means never saved), can_edit (whether this user may change them: project admins only) and preferences. " +
+    "When they are too long to send together, the longest are named in left_out: call again with field set to one of them. " +
+    "A single field too long even on its own comes back cut, with truncated saying how many characters were shown; append and replace in bpt_edit_preferences still work on it. " +
+    "Show the reviewer the current wording before changing it with bpt_edit_preferences, and pass it this version. " +
+    "Requires edit access; translation projects only. Terminology and examples are not here (use the web app). Read-only.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      field: { ...FIELD_SCHEMA, description: "Return only this field" },
+    },
+    required: ["session_token"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const only = args.field === undefined || args.field === null ? undefined : prefFieldArg(args.field, "field", PREF_FIELDS);
+    const session = await prefsSession(args, ctx);
+    const admin = await session.isAdmin();
+    // The web app shows these only to admins; editors see what the AI is
+    // told, but not the admins' own notes.
+    if (only === "notes" && !admin) throw new ToolInputError("The notes are the admins' own; only a project admin can read them here.");
+    const prefs = await readPrefs(session);
+    const fields = only ? [only] : PREF_FIELDS.filter((f) => admin || f !== "notes");
+    return prefsView(prefs, fields, { can_edit: admin });
+  },
+};
+
+const editPreferences: ToolDef = {
+  name: "bpt_edit_preferences",
+  description:
+    `Change this project's translation preferences (the web app's Style page): ${PREF_FIELDS_HELP}. ` +
+    "They are part of every AI draft and check for everyone in the project from then on, so change only what the reviewer asked for, " +
+    "show them the exact new wording, and get a clear yes first. Project admins only; anyone else is refused. " +
+    "Three kinds of change, one kind per field: set (replace a field whole; null or empty clears it), append (add a paragraph at the end of a text field), " +
+    "replace (swap old_text, which must appear exactly once in the field, for new_text; an empty new_text deletes it). " +
+    "Prefer append and replace for instructions_md and common_issues_md, so the rest of the text stays exactly as it is. " +
+    "Pass the version bpt_get_preferences showed; it is saved only if the preferences are still at that version. " +
+    "Returns status applied with the new version and the changed fields' new text (or changed_left_out when too long), " +
+    "or status conflict when someone changed them since: nothing was saved, so read them again and ask. " +
+    "A request is limited to about 64 KB, so add very long text in several appends. " +
+    "Saving starts an update of what AI drafts are told; the next drafts use the new wording once it finishes. Errors change nothing.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      version: { type: "integer", minimum: 0, description: "The version exactly as bpt_get_preferences showed it" },
+      set: {
+        type: "object",
+        description: "Fields to replace whole",
+        properties: {
+          ...Object.fromEntries(PREF_TEXT_FIELDS.map((f) => [f, { type: ["string", "null"] }])),
+          register: { type: "string", enum: [...REGISTERS] },
+        },
+        additionalProperties: false,
+      },
+      append: {
+        type: "object",
+        description: "Text to add at the end of a field, as a new paragraph",
+        properties: TEXT_FIELD_PROPS,
+        additionalProperties: false,
+      },
+      replace: {
+        type: "array",
+        maxItems: 20,
+        description: "Exact text swaps, applied in order",
+        items: {
+          type: "object",
+          properties: {
+            field: { type: "string", enum: [...PREF_TEXT_FIELDS] },
+            old_text: { type: "string", description: "Text now in the field, exactly once" },
+            new_text: { type: "string", description: "What replaces it; empty deletes it" },
+          },
+          required: ["field", "old_text", "new_text"],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ["session_token", "version"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const version = intArg(args, "version", { min: 0, required: true })!;
+    const changes = parsePrefsChanges(args);
+    const session = await prefsSession(args, ctx);
+    if (!(await session.isAdmin())) {
+      throw new ToolInputError(
+        `Changing the translation preferences is for project admins only, and ${session.principal.username} is not one here. ${NOT_SAVED}`,
+      );
+    }
+    const current = await readPrefs(session);
+    if (current.version !== version) return prefsConflict(current.version);
+    const next = applyPrefsChanges(current, changes);
+    const { status, body } = await session.sendAsAdmin("PUT", PREFS_PATH, next, version);
+    const b = (body ?? {}) as Record<string, unknown>;
+    if (status === 409 && b.error === "version_mismatch") {
+      return prefsConflict(Number((b.current as Record<string, unknown> | null)?.version ?? 0));
+    }
+    if (status === 403 && b.reason === "not_an_admin") {
+      throw new ToolInputError(`${session.principal.username} is no longer a project admin here. ${NOT_SAVED}`);
+    }
+    if (status === 400 && b.error === "validation_failed") {
+      const issues = (b.issues as { path?: unknown[]; message?: string }[] | undefined) ?? [];
+      const what = issues.map((i) => `${String(i.path?.[0] ?? "?")}: ${i.message ?? "invalid"}`).join("; ");
+      throw new ToolInputError(`BPtranslate refused the change (${what || "invalid"}). ${NOT_SAVED}`);
+    }
+    if (status !== 200) throw new Error(`BPtranslate write ${PREFS_PATH} returned ${status}`);
+    const saved = ((b.prefs ?? {}) as Record<string, unknown>);
+    const changed = Object.keys(next);
+    const values = Object.fromEntries(changed.map((f) => [f, saved[f] ?? null]));
+    const out = { status: "applied", version: saved.version, changed: values };
+    if (getRowBytes(out) <= PREFS_RESULT_BUDGET) return out;
+    return { status: "applied", version: saved.version, changed_left_out: changed };
+  },
+};
+
+// ── Translation preferences history (issue #798) ────────────────────────────
+// Who changed the preferences, when, from where, and what each save changed:
+// GET /api/translation-memory/prefs/history (#788), admin-only in the web app,
+// so read through sendAsAdmin. Read-only: restoring stays in the web app.
+
+const MAX_HISTORY_PAGE = 50;
+const DEFAULT_HISTORY_PAGE = 10;
+// A stored value can be 50,000 characters, twice per field; each is cut to
+// this many so one call cannot fill the model's context.
+const HISTORY_VALUE_CHARS = 300;
+
+function historyEntryView(e: Record<string, unknown>): { view: Record<string, unknown>; cut: boolean } {
+  let cut = false;
+  // null: the route could not read the stored change; kept null, not {}.
+  let changed: Record<string, Record<string, unknown>> | null = null;
+  if (e.changed && typeof e.changed === "object") {
+    changed = {};
+    for (const [f, ch] of Object.entries(e.changed as Record<string, { prev?: unknown; new?: unknown } | null>)) {
+      const v: Record<string, unknown> = {};
+      for (const side of ["prev", "new"] as const) {
+        const text = ch?.[side] ?? null;
+        if (typeof text === "string" && text.length > HISTORY_VALUE_CHARS) {
+          // Not between the two halves of a character outside the BMP.
+          const keep = /[\uD800-\uDBFF]/.test(text[HISTORY_VALUE_CHARS - 1]) ? HISTORY_VALUE_CHARS - 1 : HISTORY_VALUE_CHARS;
+          v[side] = text.slice(0, keep);
+          v[`${side}_total_chars`] = text.length;
+          cut = true;
+        } else {
+          v[side] = text;
+        }
+      }
+      changed[f] = v;
+    }
+  }
+  const created = Number(e.created_at);
+  return {
+    view: {
+      version: e.new_version,
+      username: e.username ?? null,
+      at: Number.isFinite(created) ? new Date(created * 1000).toISOString() : null,
+      // The route stores null for the web app.
+      source: e.source ?? "web",
+      changed,
+    },
+    cut,
+  };
+}
+
+const getPreferencesHistory: ToolDef = {
+  name: "bpt_get_preferences_history",
+  description:
+    "Who changed this project's translation preferences (the web app's Style page), when, and what each save changed, newest first. Project admins only; anyone else is refused. " +
+    "Each entry has version (the version that save made), username, at (ISO date and time), source (web or chat) and changed: for each field the save changed, its prev and new text. " +
+    `changed is {} for a save that changed nothing, and null when the stored change cannot be read. Text longer than ${HISTORY_VALUE_CHARS} characters is cut to its first ${HISTORY_VALUE_CHARS}, with prev_total_chars or new_total_chars giving the full length; ` +
+    "bpt_get_preferences reads the current text in full. Paged: if next is not null, call again with before set to it for older entries. " +
+    "There is no restore tool: to put back an earlier version, send the reviewer to the web app's Style page, History. Translation projects only. Read-only.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      before: { type: "integer", minimum: 1, description: "next from the previous call, for older entries" },
+      limit: { type: "integer", minimum: 1, maximum: MAX_HISTORY_PAGE, description: `Most entries (default ${DEFAULT_HISTORY_PAGE})` },
+    },
+    required: ["session_token"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const limit = Math.min(intArg(args, "limit", { min: 1 }) ?? DEFAULT_HISTORY_PAGE, MAX_HISTORY_PAGE);
+    // Not intArg: before is an edit_log id, shared by every edit in the
+    // project, so it can pass intArg's 999,999 ceiling.
+    let before: number | undefined;
+    if (args.before !== undefined && args.before !== null) {
+      const raw = args.before;
+      const n = typeof raw === "string" && /^\d{1,15}$/.test(raw.trim()) ? Number(raw) : raw;
+      if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 1) throw new ToolInputError("before must be the next value a previous call returned");
+      before = n;
+    }
+    const session = await prefsSession(args, ctx);
+    if (!(await session.isAdmin())) {
+      throw new ToolInputError(`The translation preferences history is for project admins only, and ${session.principal.username} is not one here.`);
+    }
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (before !== undefined) params.set("before", String(before));
+    const { status, body } = await session.sendAsAdmin("GET", `${PREFS_HISTORY_PATH}?${params}`);
+    const b = (body ?? {}) as Record<string, unknown>;
+    if (status === 403 && b.reason === "not_an_admin") {
+      throw new ToolInputError(`${session.principal.username} is no longer a project admin here.`);
+    }
+    if (status === 400 && b.error === "invalid_before") throw new ToolInputError("before must be the next value a previous call returned");
+    if (status !== 200) throw new Error(`BPtranslate API ${PREFS_HISTORY_PATH} returned ${status}`);
+    const all = (b.entries as Record<string, unknown>[] | undefined) ?? [];
+    const entries: Record<string, unknown>[] = [];
+    let anyCut = false;
+    let bytes = 0;
+    let i = 0;
+    for (; i < all.length; i++) {
+      const { view, cut } = historyEntryView(all[i]);
+      // Measured as it travels (getRowBytes: mcp.ts encodes the result twice).
+      const size = getRowBytes(view);
+      // Always return at least one entry, or before would never move.
+      if (entries.length > 0 && bytes + size > PREFS_RESULT_BUDGET - 1_000) break;
+      entries.push(view);
+      bytes += size;
+      anyCut ||= cut;
+    }
+    // Stopped early for size: the next page starts after the last entry shown.
+    const next = i < all.length ? Number(all[i - 1].id) : ((b.next as number | null | undefined) ?? null);
+    return {
+      entries,
+      next,
+      ...(anyCut
+        ? { cut_note: `Text over ${HISTORY_VALUE_CHARS} characters is cut; the full text of every version is in the web app's Style page, History.` }
+        : {}),
+    };
+  },
+};
+
 // ── AI draft from chat (issue #670 part b) ──────────────────────────────────
 // Starts a translate run for some notes or questions through the same
 // POST /api/pipelines/start the web app uses, as the linked user. Admin-only
@@ -1644,7 +2483,7 @@ const NO_SUCH_JOB = "No job with that id that you started in this project.";
 const jobStatus: ToolDef = {
   name: "bpt_job_status",
   description:
-    "Check on an AI draft run this user started (job_id from bpt_draft). Returns state (queued, dispatching, running, paused_for_outage, paused_for_usage_limit, done, failed, cancelled), queue_position while queued, progress (chapter, step, status) while running, error when it failed, and results: per kind (tn, tq), how many drafts the run proposed, how many were applied and how many rejected (empty until the run's output is staged), and, once done, kept_because_changed_by_people: tn notes the run left as they were because a person changed them after the run was queued (count and ids). Only the user who started the run can see it, and only in this project. Read-only.",
+    "Check on an AI draft run this user started (job_id from bpt_draft). Returns state (queued, dispatching, running, paused_for_outage, paused_for_usage_limit, done, failed, cancelled), queue_position while queued, progress (chapter, step, status) while running, error when it failed, and results: per kind (tn, tq), how many drafts the run proposed, how many were applied and how many rejected (empty until the run's output is staged), and, once done, kept_because_changed_by_people: what the run left as it was because a person changed it after the run was queued, with keys only for the kinds it kept: tn and tn_ids (notes: count and ids), tq and tq_ids (questions: count and ids), articles and article_paths (tW/tA articles: count and paths). Only the user who started the run can see it, and only in this project. Read-only.",
   inputSchema: {
     type: "object",
     properties: {
@@ -1682,12 +2521,21 @@ const jobStatus: ToolDef = {
       ...(cur && state !== "failed" ? { progress: { chapter: cur.chapter ?? null, step: cur.skill ?? null, status: cur.status ?? null } } : {}),
       ...(cur && (cur.error || cur.errorKind) ? { error: { kind: cur.errorKind ?? null, message: cur.error ?? null } } : {}),
       results: await session.jobResults(jobId),
-      // #729: notes the apply left alone because a person changed them after
-      // the run was queued.
+      // #729, #760: notes, questions and tW/tA articles the apply left alone
+      // because a person changed them after the run was queued. A kind's keys
+      // are present only when the report (applySkippedOf) carries that kind.
       ...(b.applySkipped
         ? (() => {
-            const k = b.applySkipped as { tnTouched?: unknown; tnTouchedIds?: unknown };
-            return { kept_because_changed_by_people: { tn: Number(k.tnTouched ?? 0), tn_ids: Array.isArray(k.tnTouchedIds) ? k.tnTouchedIds : [] } };
+            const k = b.applySkipped as Record<string, unknown>;
+            const list = (v: unknown) => (Array.isArray(v) ? v : []);
+            const kept = {
+              ...(k.tnTouched !== undefined ? { tn: Number(k.tnTouched), tn_ids: list(k.tnTouchedIds) } : {}),
+              ...(k.tqTouched !== undefined ? { tq: Number(k.tqTouched), tq_ids: list(k.tqTouchedIds) } : {}),
+              ...(k.articleTouched !== undefined
+                ? { articles: Number(k.articleTouched), article_paths: list(k.articleTouchedPaths) }
+                : {}),
+            };
+            return Object.keys(kept).length ? { kept_because_changed_by_people: kept } : {};
           })()
         : {}),
       updated_at: b.updatedAt ?? null,
@@ -1695,8 +2543,454 @@ const jobStatus: ToolDef = {
   },
 };
 
+// ── Terminology (issue #785) ────────────────────────────────────────────────
+// The Style page's Terminology section (table terminology), through the web
+// app's own GET / POST /api/translation-memory/terms and PATCH / DELETE
+// /terms/:id. Every term route is editor-only and wants a signed-in user, so
+// reads and writes both go through send() as the linked user. The admin desk
+// shows Terminology only to admins (StyleScreen memoryAvailable; classic
+// #/preferences still shows it to editors), and chat follows the desk, so the write
+// tools ask session.isAdmin first, as bpt_edit_preferences does; the route
+// itself accepts the editor-capped principal, so no sendAsAdmin route is
+// needed (Benjamin's call, #785). Every save queues a context export (the
+// routes do it). CSV import and export stay in the web app.
+
+const TERMS_PATH = "/api/translation-memory/terms";
+// GET /terms returns at most this many rows (its own cap).
+const TERMS_FETCH_LIMIT = 2000;
+const DEFAULT_TERMS_PAGE = 50;
+const MAX_TERMS_PAGE = 100;
+const TERM_TEXT_FIELDS = ["concept_id", "source_term", "target_term", "replacement", "comment", "tw_link"] as const;
+type TermTextField = (typeof TERM_TEXT_FIELDS)[number];
+const TERM_REQUIRED_FIELDS: readonly TermTextField[] = ["concept_id", "source_term"];
+// The route's own length limits (translationMemory.ts TermBody).
+const TERM_MAX_CHARS: Record<TermTextField, number> = {
+  concept_id: 200,
+  source_term: 500,
+  target_term: 1000,
+  replacement: 1000,
+  comment: 4000,
+  tw_link: 500,
+};
+
+const TERM_FIELDS_HELP =
+  "concept_id (groups the renderings of one concept, e.g. a tW article name like grace), source_term (the source-language word), " +
+  "target_term (how this project renders it), status (preferred: use this; admitted: also acceptable; deprecated: avoid; " +
+  "forbidden: never use, and replacement says what to use instead; do_not_translate: keep the source form), " +
+  "comment (why, for reviewers), tw_link (rc:// link to the tW article)";
+
+const TERM_STATUS_SCHEMA = { type: "string", enum: [...TERM_STATUSES] };
+
+// Readable by an editor of a translation project; an authoring project has
+// none (the web app shows Terminology on translation projects only).
+async function termsSession(args: Record<string, unknown>, ctx: ToolContext): Promise<McpSession> {
+  return translationSession(args, ctx, "", "Terminology applies to translation projects only, and this project writes its notes in English.");
+}
+
+async function requireTermAdmin(session: McpSession): Promise<void> {
+  if (!(await session.isAdmin())) {
+    throw new ToolInputError(
+      `Changing the terminology is for project admins only, and ${session.principal.username} is not one here. ${NOT_SAVED}`,
+    );
+  }
+}
+
+function termView(raw: unknown): Record<string, unknown> {
+  const t = (raw ?? {}) as Record<string, unknown>;
+  return {
+    id: t.id,
+    version: t.version,
+    concept_id: t.concept_id,
+    source_term: t.source_term,
+    target_term: t.target_term ?? null,
+    status: t.status,
+    replacement: t.replacement ?? null,
+    comment: t.comment ?? null,
+    tw_link: t.tw_link ?? null,
+    source_status: t.source_status,
+  };
+}
+
+function termStatusArg(raw: unknown, key = "status"): (typeof TERM_STATUSES)[number] {
+  if (typeof raw !== "string" || !(TERM_STATUSES as readonly string[]).includes(raw)) {
+    throw new ToolInputError(`${key} must be one of ${TERM_STATUSES.join(", ")}, got ${JSON.stringify(raw)}.`);
+  }
+  return raw as (typeof TERM_STATUSES)[number];
+}
+
+// One text field of a term, trimmed as the web app trims it. Required fields
+// must not be empty; an optional one that is empty (or null) clears it.
+function termTextArg(raw: unknown, f: TermTextField): string | null {
+  const required = TERM_REQUIRED_FIELDS.includes(f);
+  if (raw === null && !required) return null;
+  if (typeof raw !== "string") throw new ToolInputError(`${f} must be text${required ? "" : ", or null to clear it"}. ${NOT_SAVED}`);
+  const v = raw.trim();
+  if (!v) {
+    if (required) throw new ToolInputError(`${f} cannot be empty. ${NOT_SAVED}`);
+    return null;
+  }
+  if (v.length > TERM_MAX_CHARS[f]) throw new ToolInputError(`${f} is longer than ${TERM_MAX_CHARS[f]} characters. ${NOT_SAVED}`);
+  return v;
+}
+
+function termIdArg(args: Record<string, unknown>): number {
+  return intArg(args, "id", { min: 1, required: true })!;
+}
+
+// The route's refusals, as one message each. The duplicate shape carries the
+// term already there, so the assistant can offer to change that one instead.
+function termRefusal(status: number, body: unknown, id?: number): ToolInputError | null {
+  const b = (body ?? {}) as Record<string, unknown>;
+  if (status === 409 && b.error === "duplicate_term") {
+    const cur = b.current ? termView(b.current) : null;
+    const which = cur
+      ? ` (id ${cur.id}, version ${cur.version}: ${JSON.stringify(cur.source_term)} -> ${JSON.stringify(cur.target_term)}, ${cur.status})`
+      : "";
+    return new ToolInputError(
+      `This project already has a term with the same concept_id, source_term, target_term and status${which}. Change that one with bpt_edit_term instead. ${NOT_SAVED}`,
+    );
+  }
+  if (status === 404) return new ToolInputError(`There is no term with id ${id} in this project (it may have been deleted). ${NOT_SAVED}`);
+  if (status === 400 && b.error === "validation_failed") {
+    const issues = (b.issues as { path?: unknown[]; message?: string }[] | undefined) ?? [];
+    const what = issues.map((i) => (i.path?.length ? `${String(i.path[0])}: ` : "") + (i.message ?? "invalid")).join("; ");
+    return new ToolInputError(`BPtranslate refused the change (${what || "invalid"}). ${NOT_SAVED}`);
+  }
+  if (status === 403) return new ToolInputError(`BPtranslate did not allow this change (403). ${NOT_SAVED}`);
+  return null;
+}
+
+// SQLite's BINARY collation, which GET /terms sorts by: UTF-8 bytes, then
+// length. JS < compares UTF-16 code units, which disagrees for characters
+// above U+FFFF, so the cursor compares bytes.
+function compareBinary(a: string, b: string): number {
+  const x = utf8.encode(a);
+  const y = utf8.encode(b);
+  const n = Math.min(x.length, y.length);
+  for (let i = 0; i < n; i++) if (x[i] !== y[i]) return x[i] - y[i];
+  return x.length - y.length;
+}
+
+// Keyset cursor in the route's order: concept_id, source_term, status, id.
+type TermKey = [string, string, string, number];
+const termKeyOf = (t: Record<string, unknown>): TermKey => [String(t.concept_id), String(t.source_term), String(t.status), Number(t.id)];
+function termAfter(a: TermKey, b: TermKey): boolean {
+  for (let i = 0; i < 3; i++) {
+    const c = compareBinary(a[i] as string, b[i] as string);
+    if (c !== 0) return c > 0;
+  }
+  return a[3] > b[3];
+}
+// The cursor also carries the search it was made for, so a cursor reused
+// with another q or status is refused instead of skipping matches.
+const termCursor = (k: TermKey, q: string | undefined, status: string | undefined) => JSON.stringify({ k, q: q ?? "", s: status ?? "" });
+function parseTermCursor(raw: unknown, q: string | undefined, status: string | undefined): TermKey | null {
+  if (raw === undefined || raw === null || raw === "") return null;
+  const c = ((): { k?: unknown; q?: unknown; s?: unknown } | null => {
+    try {
+      const v = JSON.parse(String(raw)) as unknown;
+      return v && typeof v === "object" ? (v as { k?: unknown; q?: unknown; s?: unknown }) : null;
+    } catch {
+      return null;
+    }
+  })();
+  const k = c?.k;
+  if (!c || !Array.isArray(k) || k.length !== 4 || !k.slice(0, 3).every((x) => typeof x === "string") || !Number.isSafeInteger(k[3])) {
+    throw new ToolInputError("cursor is not one this tool returned");
+  }
+  if (c.q !== (q ?? "") || c.s !== (status ?? "")) {
+    throw new ToolInputError("cursor belongs to a different search: pass the same q and status as the call that returned it, or leave cursor out to start again");
+  }
+  return k as TermKey;
+}
+
+const termConflict = (current: unknown, outcome = NOT_SAVED) => ({
+  status: "conflict",
+  current: termView(current),
+  message: `Someone changed this term after the reviewer saw it, so ${outcome.toLowerCase()} Show the reviewer the term as it is now (current) and ask before trying again with its version.`,
+});
+
+const listTerms: ToolDef = {
+  name: "bpt_list_terms",
+  description:
+    `This project's terminology, the list on the web app's Style page that every AI draft and check is told to follow: ${TERM_FIELDS_HELP}. ` +
+    "One concept can have several rows (several renderings, or a preferred and a forbidden one). " +
+    "q finds terms whose concept_id, source_term or target_term contains it; status keeps one status. " +
+    "Returns can_edit (whether this user may change terms: project admins only), total (matching terms), and terms, each with its id and version. " +
+    "Results are paged: if next_cursor is not null, call again with it (and the same q and status) to get the rest; never say the list is complete until it is null and may_be_more is absent. " +
+    "When may_be_more is true, the project may have more matching terms than one read returns: narrow with q or status. " +
+    "Show the reviewer a term before changing it with bpt_edit_term or bpt_delete_term, and pass that term's id and version. " +
+    "Requires edit access; translation projects only. Read-only.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      q: { type: "string", description: "Text to look for in concept_id, source_term or target_term (case-insensitive for A-Z only)" },
+      status: { ...TERM_STATUS_SCHEMA, description: "Only terms with this status" },
+      cursor: { type: "string", description: "next_cursor from the previous page" },
+      limit: { type: "integer", minimum: 1, maximum: MAX_TERMS_PAGE, description: `Most terms per page (default ${DEFAULT_TERMS_PAGE})` },
+    },
+    required: ["session_token"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    let q: string | undefined;
+    if (args.q !== undefined && args.q !== null) {
+      if (typeof args.q !== "string") throw new ToolInputError("q must be text");
+      q = args.q.trim() || undefined;
+      if (q && q.length > 200) throw new ToolInputError("q must be at most 200 characters");
+    }
+    const status = args.status === undefined || args.status === null ? undefined : termStatusArg(args.status);
+    const limit = Math.min(intArg(args, "limit", { min: 1 }) ?? DEFAULT_TERMS_PAGE, MAX_TERMS_PAGE);
+    const cursor = parseTermCursor(args.cursor, q, status);
+    const session = await termsSession(args, ctx);
+    const admin = await session.isAdmin();
+    const params = new URLSearchParams({ limit: String(TERMS_FETCH_LIMIT) });
+    if (q) params.set("q", q);
+    if (status) params.set("status", status);
+    // send, not getJson: the term routes want a signed-in editor.
+    const { status: code, body } = await session.send("GET", `${TERMS_PATH}?${params}`);
+    if (code !== 200) throw new Error(`BPtranslate API ${TERMS_PATH} returned ${code}`);
+    const all = ((body as { terms?: Record<string, unknown>[] } | null)?.terms ?? []);
+    const start = cursor ? all.findIndex((t) => termAfter(termKeyOf(t), cursor)) : 0;
+    const from = start === -1 ? all.length : start;
+    const terms: Record<string, unknown>[] = [];
+    let bytes = 0;
+    let i = from;
+    for (; i < all.length && terms.length < limit; i++) {
+      const t = termView(all[i]);
+      // Measured as it travels (getRowBytes: mcp.ts encodes the result twice).
+      const size = getRowBytes(t);
+      // Always return at least one term, or the cursor would never move.
+      if (terms.length > 0 && bytes + size > PAGE_BYTE_BUDGET) break;
+      terms.push(t);
+      bytes += size;
+    }
+    // The route stops at TERMS_FETCH_LIMIT rows. /terms/count takes the same
+    // q and status filters, so it says whether that was everything.
+    let mayBeMore = all.length >= TERMS_FETCH_LIMIT;
+    if (mayBeMore) {
+      params.delete("limit");
+      const { status: cc, body: cb } = await session.send("GET", `${TERMS_PATH}/count?${params}`);
+      if (cc === 200 && Number((cb as { count?: unknown } | null)?.count) <= all.length) mayBeMore = false;
+    }
+    return {
+      ...(q ? { q } : {}),
+      ...(status ? { status } : {}),
+      can_edit: admin,
+      total: all.length,
+      ...(mayBeMore
+        ? {
+            may_be_more: true,
+            may_be_more_note: `Only the first ${TERMS_FETCH_LIMIT} matching terms can be listed, so there may be more even when next_cursor is null, and total counts only these. Narrow it with q or status.`,
+          }
+        : {}),
+      returned: terms.length,
+      next_cursor: i < all.length ? termCursor(termKeyOf(all[i - 1]), q, status) : null,
+      terms,
+    };
+  },
+};
+
+const termFieldProps = (nullable: boolean) =>
+  Object.fromEntries(
+    TERM_TEXT_FIELDS.map((f) => [
+      f,
+      { type: nullable && !TERM_REQUIRED_FIELDS.includes(f) ? ["string", "null"] : "string", maxLength: TERM_MAX_CHARS[f] },
+    ]),
+  );
+
+const addTerm: ToolDef = {
+  name: "bpt_add_term",
+  description:
+    `Add one term to this project's terminology (the web app's Style page): ${TERM_FIELDS_HELP}. ` +
+    "Every AI draft and check in the project follows it from then on, so add only what the reviewer asked for, show them the exact term, and get a clear yes first. " +
+    "Project admins only; anyone else is refused. concept_id and source_term are required; status defaults to preferred. " +
+    "replacement is only for status forbidden, and a forbidden term must have one. " +
+    "Before adding, look with bpt_list_terms (q) for a term already there: a second rendering of the same concept is fine, but the same concept_id, source_term, target_term and status twice is refused. " +
+    "Returns status added with the new term (its id and version). Errors change nothing.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      ...termFieldProps(true),
+      status: { ...TERM_STATUS_SCHEMA, description: "Default preferred" },
+    },
+    required: ["session_token", "concept_id", "source_term"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const term: Record<string, unknown> = {};
+    for (const f of TERM_TEXT_FIELDS) {
+      if (TERM_REQUIRED_FIELDS.includes(f) || (args[f] !== undefined && args[f] !== null)) term[f] = termTextArg(args[f], f);
+    }
+    const status = args.status === undefined || args.status === null ? "preferred" : termStatusArg(args.status);
+    term.status = status;
+    if (status === "forbidden" && !term.replacement) {
+      throw new ToolInputError(`A forbidden term needs a replacement: what to use instead. ${NOT_SAVED}`);
+    }
+    if (status !== "forbidden" && term.replacement) {
+      throw new ToolInputError(`replacement is only for forbidden terms; this one is ${status}. ${NOT_SAVED}`);
+    }
+    const session = await termsSession(args, ctx);
+    await requireTermAdmin(session);
+    const { status: code, body } = await session.send("POST", TERMS_PATH, term);
+    const refused = termRefusal(code, body);
+    if (refused) throw refused;
+    if (code !== 201) throw new Error(`BPtranslate write ${TERMS_PATH} returned ${code}`);
+    return { status: "added", term: termView(body) };
+  },
+};
+
+const editTerm: ToolDef = {
+  name: "bpt_edit_term",
+  description:
+    `Change one term in this project's terminology (the web app's Style page): ${TERM_FIELDS_HELP}. ` +
+    "Every AI draft and check in the project follows it from then on, so change only what the reviewer asked for, show them the exact new term, and get a clear yes first. " +
+    "Project admins only; anyone else is refused. Give only the fields to change; null or empty clears an optional one (concept_id and source_term cannot be cleared). " +
+    "Setting status to anything but forbidden clears replacement, as the web app does; a forbidden term must have a replacement, and setting a replacement needs status forbidden in the same call. " +
+    "Pass the id and version bpt_list_terms showed; it is saved only if the term is still at that version. " +
+    "Returns status applied with the saved term and its new version, or status conflict with the term as it is now when someone changed it since: nothing was saved, so show the reviewer and ask. " +
+    "Errors change nothing.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      id: { type: "integer", minimum: 1, description: "The term's id from bpt_list_terms" },
+      version: { type: "integer", minimum: 1, description: "The term's version exactly as bpt_list_terms showed it" },
+      ...termFieldProps(true),
+      status: TERM_STATUS_SCHEMA,
+    },
+    required: ["session_token", "id", "version"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const id = termIdArg(args);
+    const version = intArg(args, "version", { min: 1, required: true })!;
+    const patch: Record<string, unknown> = {};
+    for (const f of TERM_TEXT_FIELDS) if (args[f] !== undefined) patch[f] = termTextArg(args[f], f);
+    if (args.status !== undefined && args.status !== null) {
+      const status = termStatusArg(args.status);
+      patch.status = status;
+      if (status !== "forbidden") {
+        if (patch.replacement) throw new ToolInputError(`replacement is only for forbidden terms; this one would be ${status}. ${NOT_SAVED}`);
+        patch.replacement = null;
+      } else if ("replacement" in patch && !patch.replacement) {
+        throw new ToolInputError(`A forbidden term needs a replacement: what to use instead. ${NOT_SAVED}`);
+      }
+    } else if (patch.replacement) {
+      // The tool cannot see the stored status, and a replacement belongs only
+      // on a forbidden term (the web app clears it otherwise).
+      throw new ToolInputError(`To set a replacement, also pass status forbidden. ${NOT_SAVED}`);
+    }
+    if (!Object.keys(patch).length) throw new ToolInputError(`Give at least one field to change. ${NOT_SAVED}`);
+    const session = await termsSession(args, ctx);
+    await requireTermAdmin(session);
+    const path = `${TERMS_PATH}/${id}`;
+    const { status: code, body } = await session.send("PATCH", path, patch, version);
+    const b = (body ?? {}) as Record<string, unknown>;
+    if (code === 409 && b.error === "version_mismatch") return termConflict(b.current);
+    const refused = termRefusal(code, body, id);
+    if (refused) throw refused;
+    if (code !== 200) throw new Error(`BPtranslate write ${path} returned ${code}`);
+    return { status: "applied", term: termView(body) };
+  },
+};
+
+const deleteTerm: ToolDef = {
+  name: "bpt_delete_term",
+  description:
+    "Delete one term from this project's terminology (the web app's Style page). AI drafts and checks stop following it. " +
+    "Project admins only; anyone else is refused. Show the reviewer the term (bpt_list_terms) and get a clear yes first. " +
+    "Pass the id and version bpt_list_terms showed; it is deleted only if the term is still at that version. " +
+    "To undo it, pass the same id and version to bpt_restore_term (adding it again with bpt_add_term would make a new term). " +
+    "Returns status deleted with the id and version (bpt_restore_term needs both, and a deleted term no longer shows in bpt_list_terms), or status conflict with the term as it is now when someone changed it since: nothing was deleted, so show the reviewer and ask. " +
+    "Errors change nothing.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      id: { type: "integer", minimum: 1, description: "The term's id from bpt_list_terms" },
+      version: { type: "integer", minimum: 1, description: "The term's version exactly as bpt_list_terms showed it" },
+    },
+    required: ["session_token", "id", "version"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const id = termIdArg(args);
+    const version = intArg(args, "version", { min: 1, required: true })!;
+    const session = await termsSession(args, ctx);
+    await requireTermAdmin(session);
+    const path = `${TERMS_PATH}/${id}`;
+    const { status: code, body } = await session.send("DELETE", path, undefined, version);
+    const b = (body ?? {}) as Record<string, unknown>;
+    if (code === 409 && b.error === "version_mismatch") return termConflict(b.current, "Nothing was deleted.");
+    const refused = termRefusal(code, body, id);
+    if (refused) throw refused;
+    if (code !== 200) throw new Error(`BPtranslate write ${path} returned ${code}`);
+    return { status: "deleted", id, version };
+  },
+};
+
+const restoreTerm: ToolDef = {
+  name: "bpt_restore_term",
+  description:
+    "Undo bpt_delete_term: bring one deleted term back into this project's terminology (the web app's Style page), with the same id and content. " +
+    "AI drafts and checks follow it again from then on, so restore only what the reviewer asked for and get a clear yes first. " +
+    "Project admins only; anyone else is refused. Pass the id and the version that were passed to bpt_delete_term (a delete does not change the version). " +
+    "Returns status restored with the term and its new version, or status conflict with the term as it is now when someone restored, changed or deleted it again since: nothing was restored, so show the reviewer and ask. " +
+    "Refused, changing nothing, when the term is not deleted, or when the project has since gained a term with the same concept_id, source_term, target_term and status (ignoring case and outer spaces).",
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_token: SESSION_TOKEN_SCHEMA,
+      id: { type: "integer", minimum: 1, description: "The deleted term's id, as bpt_delete_term returned it" },
+      version: { type: "integer", minimum: 1, description: "The deleted term's version, as bpt_delete_term returned it" },
+    },
+    required: ["session_token", "id", "version"],
+    additionalProperties: false,
+  },
+  run: async (args, ctx) => {
+    const id = termIdArg(args);
+    const version = intArg(args, "version", { min: 1, required: true })!;
+    const session = await termsSession(args, ctx);
+    await requireTermAdmin(session);
+    const path = `${TERMS_PATH}/${id}/restore`;
+    const { status: code, body } = await session.send("POST", path, undefined, version);
+    const b = (body ?? {}) as Record<string, unknown>;
+    if (code === 404) throw new ToolInputError(`There is no term with id ${id} in this project. ${NOT_SAVED}`);
+    // The route only answers version_mismatch for a term that is still
+    // deleted, so say so: current is not in bpt_list_terms.
+    if (code === 409 && b.error === "version_mismatch") {
+      return {
+        status: "conflict",
+        current: { ...termView(b.current), deleted: true },
+        message:
+          "Someone restored, changed and deleted this term again since, so nothing was restored. It is still deleted: current shows it as it is now, and it is not in bpt_list_terms. Show the reviewer and ask before trying again with its version.",
+      };
+    }
+    if (code === 409 && b.error === "not_deleted") {
+      throw new ToolInputError(`Term ${id} is not deleted, so there is nothing to restore; bpt_list_terms shows it. ${NOT_SAVED}`);
+    }
+    // termRefusal's duplicate text suggests editing the live term, which is
+    // not what a reviewer who wants the old term back asked for.
+    if (code === 409 && b.error === "duplicate_term") {
+      const cur = b.current ? termView(b.current) : null;
+      const which = cur ? ` (id ${cur.id}: ${JSON.stringify(cur.source_term)} -> ${JSON.stringify(cur.target_term)}, ${cur.status})` : "";
+      throw new ToolInputError(
+        `Term ${id} cannot come back: the project now has a term with the same concept_id, source_term, target_term and status${which}. Show the reviewer that term and ask what they want. ${NOT_SAVED}`,
+      );
+    }
+    const refused = termRefusal(code, body, id);
+    if (refused) throw refused;
+    if (code !== 200) throw new Error(`BPtranslate write ${path} returned ${code}`);
+    return { status: "restored", term: termView(body) };
+  },
+};
+
 export const TOOLS: ToolDef[] = [
-  whoami, linkAccount, listBooks, packageStatus, chunkWork, getRow, chunkList, editRow, approve,
-  templatesForRow, editTemplate, approveTemplate, bulkSetState, draft, jobStatus,
+  whoami, linkAccount, listBooks, packageStatus, chunkWork, getRow, chunkList, getVerses, editRow, approve,
+  templatesForRow, editTemplate, approveTemplate, getArticle, editArticle, approveArticle, bulkSetState, draft, jobStatus,
+  getPreferences, getPreferencesHistory, editPreferences, listTerms, addTerm, editTerm, deleteTerm, restoreTerm,
 ];
 

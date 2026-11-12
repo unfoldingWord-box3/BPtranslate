@@ -32,6 +32,6 @@ Notes work the same way: edit the note, then save it. A note card also has a but
 
 ## The top bar
 - A book picker, chapter arrows (**previous chapter**, **next chapter**) and a **go to ref** box. Type `5`, `5:5`, `oba 1:5` or `ps 1:4` and press Enter.
-- The save status, the AI run menu and **Layouts**, which switch between arrangements of the three columns.
+- The save status, the AI run menu (in a source project, an **Import** button that opens **Import from Door43**) and **Layouts**, which switch between arrangements of the three columns.
 - **More**: **Import from Door43** and **Export USFM** under **Content**; **Articles** and **Note Templates** under **Resources**; text size and interface language under **View**.
 - Your account menu.

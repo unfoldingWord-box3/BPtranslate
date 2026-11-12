@@ -4,6 +4,7 @@
 
 import { exportOwnerFor, type ProjectConfig } from "./projectConfig.ts";
 import { serializeTermsCsv, type TermImport } from "./translationMemoryLib.ts";
+import { slugFromSupportReference } from "./translate/core.ts";
 import {
   contentFileCount,
   hasMinimumContent,
@@ -310,6 +311,102 @@ export function buildValidatedExamples(
   return { ok: true, lines };
 }
 
+const EXAMPLES_PATH = "examples/validated.jsonl";
+
+/** Most recent validated examples kept per (resource, SupportReference slug). */
+export const EXAMPLES_PER_SLUG = 8;
+/** Chapters (across all books) whose validated rows are all kept, most recently approved first. */
+export const EXAMPLE_RECENT_CHAPTERS = 4;
+/**
+ * A chapter's recency is the validated_at of its 5th-newest row, and chapters
+ * with fewer than 5 validated rows rank after all others. Reordering a note,
+ * toggling a hint, or acknowledging a review flag bumps updated_at
+ * (= validated_at) on an already-validated row, so a single touched row in an
+ * old chapter must not count that chapter as "just approved".
+ */
+const CHAPTER_RECENCY_ROWS = 5;
+/**
+ * Hard ceiling on the file, whatever the data: many distinct SupportReference
+ * values or very long chapters could otherwise grow it again. Rows are added
+ * newest first and any row that no longer fits is skipped. Only a set of rows
+ * each larger than the ceiling (a note over 4 MB) could leave nothing, and then
+ * the pack simply has no examples file, which the runners treat as optional.
+ * Well under the runners' 16 MB examples-file cap (contextPack.ts).
+ */
+export const EXAMPLES_MAX_BYTES = 4_000_000;
+
+/** Total order, newest first: same input rows give the same selection and file. */
+function newerFirst(a: JsonlExample, b: JsonlExample): number {
+  if (a.validated_at !== b.validated_at) return b.validated_at - a.validated_at;
+  for (const k of ["book", "resource", "rowId"] as const) {
+    if (a[k] !== b[k]) return a[k] < b[k] ? -1 : 1;
+  }
+  return 0;
+}
+
+/**
+ * Bound examples/validated.jsonl (issue #813). Writing every validated row made
+ * the file grow with the Bible (2.4 MB at 3,270 Arabic rows) while each runner
+ * uses at most 15 per batch. Keep the newest EXAMPLES_PER_SLUG rows of every
+ * (resource, slug) group, plus every row of the EXAMPLE_RECENT_CHAPTERS most
+ * recently approved chapters. Teams work in chapter order, so these are the
+ * chapters just before the one being drafted, and the runners' existing "same
+ * slug first, then most recent" pick lands on them without any reader change.
+ * Groups use the slug the readers match on (slugFromSupportReference), so
+ * spelling variants of one SupportReference share a quota. Output is oldest
+ * first (contract §3.4) in a total order, so the commit is deterministic.
+ */
+export function selectPackExamples(
+  lines: readonly JsonlExample[],
+  perSlug = EXAMPLES_PER_SLUG,
+  recentChapters = EXAMPLE_RECENT_CHAPTERS,
+  maxBytes = EXAMPLES_MAX_BYTES,
+): JsonlExample[] {
+  const newestFirst = lines.slice().sort(newerFirst);
+  const keep = new Set<JsonlExample>();
+
+  const perGroup = new Map<string, number>();
+  for (const l of newestFirst) {
+    const group = `${l.resource}\u0000${slugFromSupportReference(l.supportReference) ?? ""}`;
+    const n = perGroup.get(group) ?? 0;
+    if (n < perSlug) {
+      keep.add(l);
+      perGroup.set(group, n + 1);
+    }
+  }
+
+  const chapterOf = (l: JsonlExample) => `${l.book}\u0000${l.ref.split(":")[0]}`;
+  const chapterRows = new Map<string, JsonlExample[]>();
+  for (const l of newestFirst) {
+    const ch = chapterOf(l);
+    const rows = chapterRows.get(ch);
+    if (rows) rows.push(l);
+    else chapterRows.set(ch, [l]);
+  }
+  const recent = [...chapterRows.entries()]
+    .map(([ch, rows]) => ({
+      ch,
+      rows,
+      full: rows.length >= CHAPTER_RECENCY_ROWS ? 1 : 0,
+      at: rows[Math.min(CHAPTER_RECENCY_ROWS, rows.length) - 1].validated_at,
+    }))
+    .sort((a, b) => (b.full - a.full) || (b.at - a.at) || (a.ch < b.ch ? -1 : a.ch > b.ch ? 1 : 0))
+    .slice(0, recentChapters);
+  for (const { rows } of recent) for (const l of rows) keep.add(l);
+
+  const out: JsonlExample[] = [];
+  const enc = new TextEncoder();
+  let bytes = 0;
+  for (const l of newestFirst) {
+    if (!keep.has(l)) continue;
+    const size = enc.encode(JSON.stringify(l)).byteLength + 1;
+    if (bytes + size > maxBytes) continue;
+    bytes += size;
+    out.push(l);
+  }
+  return out.reverse();
+}
+
 export function renderValidatedJsonl(lines: readonly JsonlExample[]): string {
   if (lines.length === 0) return "";
   return lines.map((l) => JSON.stringify(l)).join("\n") + "\n";
@@ -401,8 +498,14 @@ export function renderContextPack(input: {
     files.push({ path: "terminology/terms.csv", content: serializeTermsCsv([...input.terms]) });
   }
 
-  if (examples.lines.length > 0) {
-    files.push({ path: "examples/validated.jsonl", content: renderValidatedJsonl(examples.lines) });
+  const selectedExamples = selectPackExamples(examples.lines);
+  // The shrink guard counts the D1 pool and leaves this file out of its bytes,
+  // so it cannot see the file vanish. Fail closed rather than delete it.
+  if (examples.lines.length > 0 && selectedExamples.length === 0) {
+    return { ok: false, reason: "examples_selection_empty" };
+  }
+  if (selectedExamples.length > 0) {
+    files.push({ path: EXAMPLES_PATH, content: renderValidatedJsonl(selectedExamples) });
   }
 
   const templatesTsv = renderTemplatesTsv(input.templates);
@@ -411,6 +514,10 @@ export function renderContextPack(input: {
     files.push({ path: "templates/templates.tsv", content: templatesTsv });
   }
 
+  // The shrink guard compares these with the previous export, so the example
+  // counts measure the D1 pool the file is selected from (every validated row),
+  // not the bounded file. The byte check uses guardBytes, which leaves the
+  // examples file out: its size moves day to day as the recent chapters change.
   const stats: ContextPackStats = {
     terms: input.terms.length,
     examplesTn: examples.lines.filter((l) => l.resource === "tn").length,
@@ -418,6 +525,7 @@ export function renderContextPack(input: {
     templates: templatesRowCount,
     contentFiles: contentFileCount(files),
     totalBytes: totalBytes(files),
+    guardBytes: totalBytes(files.filter((f) => f.path !== EXAMPLES_PATH)),
   };
 
   return { ok: true, files, stats };

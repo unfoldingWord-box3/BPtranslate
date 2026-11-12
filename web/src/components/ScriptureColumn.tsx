@@ -20,7 +20,8 @@ import {
 } from "../sync/laneFreeze";
 import { DocColumn } from "./DocColumn";
 import { useProjectConfig } from "../hooks/useProjectConfig";
-import { versionLabel, versionIsRtl } from "../lib/versionLabels";
+import { versionDirection, versionLabel, versionIsRtl } from "../lib/versionLabels";
+import { TargetDirectionGate } from "./TargetDirectionGate";
 import type { TextLaneCheck } from "../lib/laneChecks";
 import type { FindMatch } from "./FindReplaceOverlay";
 import { HebrewLine } from "./HebrewLine";
@@ -217,6 +218,14 @@ function ScriptureColumnInner({
 }: Props) {
   const { t } = useTranslation();
   const projectConfig = useProjectConfig();
+  // Every lane but the originals takes its direction from the project config,
+  // which is null until it loads with nothing cached. The body waits on it
+  // rather than guessing LTR, which painted Arabic lanes backwards (issue
+  // #728, as #451 did for the verse view). Stacked mode always shows ULT and
+  // UST; columns and book mode show the enabled versions, so a view of only
+  // originals never waits.
+  const shownVersions = mode === "stacked" ? ["ULT", "UST"] : enabledVersions;
+  const targetDirKnown = shownVersions.every((v) => versionDirection(projectConfig, v) !== null);
   // Local freeze flag covers the WS→config-refresh window so editors lock
   // immediately (projectConfig.replacementJobId may still be null).
   const freezeEpoch = useSyncExternalStore(
@@ -357,11 +366,14 @@ function ScriptureColumnInner({
     el?.scrollIntoView({ behavior: "smooth", block: "center" });
   }, [findScrollTarget, mode, chapter, activeVerse, onSelectVerse]);
 
+  // targetDirKnown is a dependency because the stacked body mounts only once
+  // the direction gate opens (#728): without it, a deep link opened with no
+  // cached config never scrolls to its verse.
   useEffect(() => {
     if (mode === "stacked") {
       activeRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
     }
-  }, [activeVerse, mode]);
+  }, [activeVerse, mode, targetDirKnown]);
 
   // Stacked mode does its own activeRef scroll; columns/book modes react to
   // the shared scrollNonce. The button asks the shell to bump the nonce, and
@@ -562,6 +574,7 @@ function ScriptureColumnInner({
             />
           </Suspense>
         )}
+        <TargetDirectionGate known={targetDirKnown}>
         {mode === "stacked" ? (
           <StackedBody
             book={book}
@@ -660,6 +673,7 @@ function ScriptureColumnInner({
             ))}
           </Box>
         )}
+        </TargetDirectionGate>
       </Box>
     </Box>
   );

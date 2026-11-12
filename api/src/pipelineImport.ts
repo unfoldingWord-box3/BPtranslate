@@ -36,6 +36,8 @@ import { getText, outKey } from "./translate/storage.ts";
 import { selectRows } from "./translate/core.ts";
 import { rawUrlOriginError } from "./rawUrlPin.ts";
 import { sameDcsName } from "./repoUrl.ts";
+import { HUMAN_TOUCH_ACTIONS, HUMAN_TOUCH_SOURCES } from "./pipelineDedupSql.ts";
+import { houseStyleForProposal, loadEnabledHouseStyleRules, type HouseStyleRule } from "./houseStyle.ts";
 
 interface OutputEntry {
   type?: string;
@@ -554,6 +556,10 @@ export interface ApplyResult {
   tnSkippedTrashed: number;
   // tw/ta article files updated in place by the translate apply (by path).
   articleUpdated: number;
+  // The same for tW/tA articles (#734), by path: edited or approved after the
+  // job was queued.
+  articleSkippedTouched: number;
+  articleSkippedTouchedPaths: string[];
   verseUpdated: number;
   // Distinct chapters that actually received a write, so the caller can fan out
   // one "chapter is stale" hint per changed chapter (not one per row).
@@ -642,6 +648,8 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
     tqSkippedTouchedIds: [],
     tnSkippedTrashed: 0,
     articleUpdated: 0,
+    articleSkippedTouched: 0,
+    articleSkippedTouchedPaths: [],
     verseUpdated: 0,
     affectedChapters: [],
   };
@@ -662,23 +670,34 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
     // after this job was queued keeps their work. One query per kind for the
     // whole job (not one per row), so a whole-chapter apply stays inside the
     // subrequest budget.
-    const requested =
-      tnProposals.length > 0 || tqProposals.length > 0 ? (await translateSelection(env, job.jobId))?.rowIds : null;
-    // Returns, for a proposal, the row id it would write when a person touched
-    // that row after the enqueue, else null.
-    const touchedLookup = async (kind: TouchKind, proposals: PendingImportRow[]) => {
+    const requested = new Set(
+      (tnProposals.length > 0 || tqProposals.length > 0 ? (await translateSelection(env, job.jobId))?.rowIds : null) ?? [],
+    );
+    // #815: this workspace's enabled house-style rules, read once per job (not
+    // per row) and applied to every drafted note / question below.
+    const houseRules =
+      tnProposals.length > 0 || tqProposals.length > 0 ? await loadEnabledHouseStyleRules(env.DB) : [];
+    // Returns, for a proposal, the key it would write (a row id, or an article
+    // path) when a person touched it after the enqueue, else null.
+    const touchedLookup = async (
+      kind: TouchKind,
+      proposals: PendingImportRow[],
+      book: string | null,
+      key: "id" | "path",
+      requestedKeys: Set<string>,
+    ) => {
       const proposalIds = new Map<PendingImportRow, string>();
       for (const p of proposals) {
-        const id = (JSON.parse(p.payload_json) as { id?: unknown }).id;
+        const id = (JSON.parse(p.payload_json) as Record<string, unknown>)[key];
         if (typeof id === "string") proposalIds.set(p, id);
       }
       const touched = await humanTouchedIds(
         env,
         kind,
-        job.book,
+        book,
         { watermark: starter.edit_log_watermark, queuedAt: starter.created_at },
         [...new Set(proposalIds.values())],
-        new Set(requested ?? []),
+        requestedKeys,
       );
       return (p: PendingImportRow): string | null => {
         const id = proposalIds.get(p);
@@ -687,16 +706,16 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
     };
     // A skipped proposal is left unresolved, like a no_match: nothing accepts
     // it later, and the one-retry import path skips it the same way.
-    const skipped: Record<TouchKind, { refs: string[]; firstChapter: number | null }> = {
+    const skipped: Record<"tn" | "tq", { refs: string[]; firstChapter: number | null }> = {
       tn: { refs: [], firstChapter: null },
       tq: { refs: [], firstChapter: null },
     };
-    const recordSkip = (kind: TouchKind, p: PendingImportRow) => {
+    const recordSkip = (kind: "tn" | "tq", p: PendingImportRow) => {
       // Book intro is chapter 0; a chapter intro is verse 0 of its chapter.
       skipped[kind].refs.push(p.chapter === 0 ? "intro" : p.verse === 0 ? `${p.chapter}:intro` : `${p.chapter}:${p.verse}`);
       skipped[kind].firstChapter ??= p.chapter;
     };
-    const tnTouched = await touchedLookup("tn", tnProposals);
+    const tnTouched = await touchedLookup("tn", tnProposals, job.book, "id", requested);
     for (const p of tnProposals) {
       const proposedId = tnTouched(p);
       if (proposedId !== null) {
@@ -705,7 +724,7 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
         recordSkip("tn", p);
         continue;
       }
-      const outcome = await applyTranslateTnRow(env, p, job, userId);
+      const outcome = await applyTranslateTnRow(env, p, job, userId, houseRules);
       if (outcome === "drafted") {
         affected.add(p.chapter);
         result.tnHintExpanded += 1; // reuses the "updated in place" counter
@@ -718,7 +737,7 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
       // won the CAS) — the proposal is left unresolved rather than inserted,
       // preserving the row-identity guarantee. Surfaced via pending_imports.
     }
-    const tqTouched = await touchedLookup("tq", tqProposals);
+    const tqTouched = await touchedLookup("tq", tqProposals, job.book, "id", requested);
     for (const p of tqProposals) {
       const proposedId = tqTouched(p);
       if (proposedId !== null) {
@@ -727,13 +746,39 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
         recordSkip("tq", p);
         continue;
       }
-      const outcome = await applyTranslateTqRow(env, p, job, userId);
+      const outcome = await applyTranslateTqRow(env, p, job, userId, houseRules);
       if (outcome === "drafted") {
         affected.add(p.chapter);
         result.tqUpdated += 1; // reuses the "updated in place" counter
       }
     }
+    // #734: the same for tW/tA articles. Their edit_log rows carry the resource
+    // (tw|ta) as kind, the path as row_key and a NULL book, so the read is one
+    // per resource, keyed on path. Articles have no single-row Redo, so nothing
+    // is `requested`. Known gap: article routes have no lock while the job runs,
+    // so a person's edit or Approve landing after this read and before that
+    // article's write is not caught (applyTranslateArticle re-reads the version
+    // just before its CAS, and Approve does not bump the version anyway).
+    const articleTouched = new Map<PendingImportRow, string>();
+    const articleSkipped: Record<"tw" | "ta", string[]> = { tw: [], ta: [] };
+    for (const resource of ["tw", "ta"] as const) {
+      const proposals = articleProposals.filter(
+        (p) => (JSON.parse(p.payload_json) as { resource?: unknown }).resource === resource,
+      );
+      const touched = await touchedLookup(resource, proposals, null, "path", new Set());
+      for (const p of proposals) {
+        const path = touched(p);
+        if (path !== null) articleTouched.set(p, path);
+      }
+    }
     for (const p of articleProposals) {
+      const path = articleTouched.get(p);
+      if (path !== undefined) {
+        result.articleSkippedTouched += 1;
+        result.articleSkippedTouchedPaths.push(path);
+        articleSkipped[(JSON.parse(p.payload_json) as { resource: "tw" | "ta" }).resource].push(path);
+        continue;
+      }
       const outcome = await applyTranslateArticle(env, p, userId);
       if (outcome === "drafted") result.articleUpdated += 1;
     }
@@ -741,19 +786,29 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
     // all-no-match article run would otherwise complete silently — the job goes
     // 'done', nothing lands, and there is no scripture tab to signal. Surface a
     // banner alert so "0 applied" is visible rather than silent. Only when there
-    // WERE article proposals but none drafted (every target path missed its
-    // article_units row, or a concurrent human edit won the CAS).
-    if (articleProposals.length > 0 && result.articleUpdated === 0) {
-      await recordArticleNoApplyAlert(env, job, userId, articleProposals.length);
+    // WERE article proposals it tried to apply but none drafted (every target
+    // path missed its article_units row, or a concurrent human edit won the
+    // CAS). Articles skipped as touched get the skipped alert below instead.
+    const articleAttempted = articleProposals.length - result.articleSkippedTouched;
+    if (articleAttempted > 0 && result.articleUpdated === 0) {
+      await recordArticleNoApplyAlert(env, job, userId, articleAttempted);
     }
     for (const kind of ["tn", "tq"] as const) {
       const s = skipped[kind];
-      if (s.firstChapter !== null) await recordSkippedTouchedAlert(env, job, userId, kind, s.refs, s.firstChapter);
+      if (s.firstChapter !== null) {
+        // The book intro (chapter 0) is shown on chapter 1.
+        await recordSkippedTouchedAlert(env, job, userId, kind, s.refs, `#/${job.book}/${Math.max(1, s.firstChapter)}`);
+      }
+    }
+    for (const resource of ["tw", "ta"] as const) {
+      const paths = articleSkipped[resource];
+      if (paths.length > 0) await recordSkippedTouchedAlert(env, job, userId, resource, paths, `#/articles/${resource}`);
     }
     // The job result the status and list APIs read (#601): output_json is the
     // bot's own output, so the apply's skip report has its own column. Written
-    // on every tn or tq translate apply, so a retry replaces it rather than adding.
-    if (tnProposals.length > 0 || tqProposals.length > 0) {
+    // on every tn, tq or article translate apply, so a retry replaces it rather
+    // than adding.
+    if (tnProposals.length > 0 || tqProposals.length > 0 || articleProposals.length > 0) {
       const report = applySkippedOf(result);
       await env.DB.prepare(`UPDATE pipeline_jobs SET apply_skipped_json = ?2 WHERE job_id = ?1`)
         .bind(job.jobId, report ? JSON.stringify(report) : null)
@@ -1100,6 +1155,7 @@ async function applyTranslateTnRow(
   p: PendingImportRow,
   job: ImportContext,
   userId: number,
+  houseRules: HouseStyleRule[],
 ): Promise<"drafted" | "no_match" | "trashed"> {
   const payload = JSON.parse(p.payload_json) as Record<string, unknown>;
   const proposedId = typeof payload.id === "string" ? payload.id : null;
@@ -1131,10 +1187,15 @@ async function applyTranslateTnRow(
 
   const now = Math.floor(Date.now() / 1000);
   const newVersion = target.version + 1;
-  const note = (payload.note as string | null | undefined) ?? null;
+  // House-style rules (#815) fix the model's note before it is stored. The
+  // staged payload stays raw; the edit_log payload gains raw_note +
+  // applied_rules only when a rule changed something. Leftover English is
+  // flagged in draft_meta_json, not rewritten.
+  const house = houseStyleForProposal(payload, ["note"], houseRules);
+  const note = house.values.note;
   const tags = (payload.tags as string | null | undefined) ?? null;
   const srcHash = (payload.source_row_hash as string | null | undefined) ?? null;
-  const draftMeta = payload.draft_meta != null ? JSON.stringify(payload.draft_meta) : null;
+  const draftMeta = house.draftMetaJson;
   // Snapshot of the last PUBLISHED content, so the export can keep shipping it
   // until this draft is validated (docs/plan Design 2). Fresh on NULL/'validated'
   // prior state; carried through unchanged on draft-over-draft.
@@ -1177,7 +1238,7 @@ async function applyTranslateTnRow(
              WHERE id = ?1 AND book = ?2 AND version = ?5 AND updated_at = ?8
           )`,
       )
-      .bind(target.id, job.book, userId, target.version, newVersion, JSON.stringify(payload), AI_SOURCE, now),
+      .bind(target.id, job.book, userId, target.version, newVersion, JSON.stringify(house.logPayload), AI_SOURCE, now),
     env.DB
       .prepare(
         `UPDATE pending_imports
@@ -1206,6 +1267,7 @@ async function applyTranslateTqRow(
   p: PendingImportRow,
   job: ImportContext,
   userId: number,
+  houseRules: HouseStyleRule[],
 ): Promise<"drafted" | "no_match"> {
   const payload = JSON.parse(p.payload_json) as Record<string, unknown>;
   const proposedId = typeof payload.id === "string" ? payload.id : null;
@@ -1229,10 +1291,13 @@ async function applyTranslateTqRow(
 
   const now = Math.floor(Date.now() / 1000);
   const newVersion = target.version + 1;
-  const question = (payload.question as string | null | undefined) ?? null;
-  const response = (payload.response as string | null | undefined) ?? null;
+  // House-style rules (#815), as in applyTranslateTnRow, on both the question
+  // and the response (raw_question / raw_response in the edit_log payload).
+  const house = houseStyleForProposal(payload, ["question", "response"], houseRules);
+  const question = house.values.question;
+  const response = house.values.response;
   const srcHash = (payload.source_row_hash as string | null | undefined) ?? null;
-  const draftMeta = payload.draft_meta != null ? JSON.stringify(payload.draft_meta) : null;
+  const draftMeta = house.draftMetaJson;
   // Last-published snapshot for export gating — see applyTranslateTnRow.
   const preDraftJson = nextPreDraftJson(target.translation_state, target.pre_draft_json, {
     question: target.question,
@@ -1271,7 +1336,7 @@ async function applyTranslateTqRow(
              WHERE id = ?1 AND book = ?2 AND version = ?5 AND updated_at = ?8
           )`,
       )
-      .bind(target.id, job.book, userId, target.version, newVersion, JSON.stringify(payload), AI_SOURCE, now),
+      .bind(target.id, job.book, userId, target.version, newVersion, JSON.stringify(house.logPayload), AI_SOURCE, now),
     env.DB
       .prepare(
         `UPDATE pending_imports
@@ -1408,19 +1473,9 @@ async function recordArticleNoApplyAlert(
   }
 }
 
-// edit_log entries that count as a person changing a note (#601, option B) or
-// a question (#725; questions only have content edits and Approve, so the
-// trash/untrash actions never occur for them):
-// a content edit (PATCH, history restore included), Approve, Not needed and
-// Restore. Keep and hint toggles are left out (the translate apply never writes
-// those bits, so they survive it, #602), and so is un-approve (the apply resets
-// the note to ai_draft anyway, #602). Sources: the web app (NULL), the chat
-// (`chat`) and the admin approve sweep (`admin_bulk_state`); machine writers
-// (ai_pipeline, hint_expansion, dcs_reimport, aquifer, nightly_finalize) are
-// not a person. Same action+source reading of edit_log as deleteUnkeptTns and
-// reimportClassify.ts.
-const HUMAN_TOUCH_ACTIONS = ["update", "validate", "trash", "untrash"] as const;
-const HUMAN_TOUCH_SOURCES = ["chat", "admin_bulk_state"] as const;
+// HUMAN_TOUCH_ACTIONS / HUMAN_TOUCH_SOURCES (which edit_log entries count as a
+// person changing a note or question) live in pipelineDedupSql.ts, shared with
+// the /start route's #757 check so the two can't read edit_log differently.
 
 // Ids among `ids` (this job's proposals) that a person touched after the job
 // was queued. Exact when the job carries an edit_log watermark (migration
@@ -1439,12 +1494,16 @@ const HUMAN_TOUCH_SOURCES = ["chat", "admin_bulk_state"] as const;
 // version CAS in applyTranslateTnRow / applyTranslateTqRow. For questions the
 // lock covers PATCH only: /rows/tq/:id/validate is not locked (#725 left that
 // to #602), so an Approve landing inside that window is not caught.
-type TouchKind = "tn" | "tq";
+// tW/tA articles (#734): kind is the resource, ids are paths, and `book` is
+// null (article edit_log rows have a NULL book; `book IS ?1` matches it). The
+// article routes have no lock at all, so for them neither an edit nor an
+// Approve inside that window is caught (see the article loop in applyJobOutput).
+type TouchKind = "tn" | "tq" | "tw" | "ta";
 const TOUCH_ID_CHUNK = 80;
 async function humanTouchedIds(
   env: Env,
   kind: TouchKind,
-  book: string,
+  book: string | null,
   queued: { watermark: number | null; queuedAt: number },
   ids: string[],
   requested: Set<string>,
@@ -1459,7 +1518,7 @@ async function humanTouchedIds(
     const idPlaces = chunk.map((_, j) => `?${j + fixed + 1}`).join(", ");
     const rs = await env.DB.prepare(
       `SELECT row_key, MAX(created_at) AS last_touch FROM edit_log
-        WHERE kind = '${kind}' AND book = ?1 AND ${exact ? "id > ?2" : "created_at >= ?2"}
+        WHERE kind = '${kind}' AND book IS ?1 AND ${exact ? "id > ?2" : "created_at >= ?2"}
           AND action IN (${actions})
           AND (source IS NULL OR source IN (${sources}))
           AND row_key IN (${idPlaces})
@@ -1476,28 +1535,36 @@ async function humanTouchedIds(
 
 /**
  * pipeline_jobs.apply_skipped_json: what a translate apply left alone (#601
- * notes, #725 questions). A kind's keys are present only when it skipped
- * something; a job translates one kind, so in practice one pair is set.
+ * notes, #725 questions, #734 tW/tA articles by path). A kind's keys are
+ * present only when it skipped something; a job translates one kind, so in
+ * practice one pair is set.
  */
 export interface ApplySkipped {
   tnTouched?: number;
   tnTouchedIds?: string[];
   tqTouched?: number;
   tqTouchedIds?: string[];
+  articleTouched?: number;
+  articleTouchedPaths?: string[];
 }
 /** The skip report for an apply, or null when it skipped nothing. */
 export function applySkippedOf(r: ApplyResult): ApplySkipped | null {
-  if (r.tnSkippedTouched === 0 && r.tqSkippedTouched === 0) return null;
+  if (r.tnSkippedTouched === 0 && r.tqSkippedTouched === 0 && r.articleSkippedTouched === 0) return null;
   return {
     ...(r.tnSkippedTouched > 0 ? { tnTouched: r.tnSkippedTouched, tnTouchedIds: r.tnSkippedTouchedIds } : {}),
     ...(r.tqSkippedTouched > 0 ? { tqTouched: r.tqSkippedTouched, tqTouchedIds: r.tqSkippedTouchedIds } : {}),
+    ...(r.articleSkippedTouched > 0
+      ? { articleTouched: r.articleSkippedTouched, articleTouchedPaths: r.articleSkippedTouchedPaths }
+      : {}),
   };
 }
 
-// Banner alert for the job's starter listing the notes or questions the
-// translate apply left alone because a person changed them after the job was
-// queued (#601, #725). Same shape as recordArticleNoApplyAlert: server-side
-// English text, one alert per job (replaced on a retry), best-effort.
+// Banner alert for the job's starter listing the notes, questions or tW/tA
+// articles the translate apply left alone because a person changed them after
+// the job was queued (#601, #725, #734). Same shape as
+// recordArticleNoApplyAlert: server-side English text, one alert per job
+// (replaced on a retry), best-effort. `refs` are verse refs for tn/tq and
+// paths for articles.
 const SKIPPED_REFS_SHOWN = 10;
 async function recordSkippedTouchedAlert(
   env: Env,
@@ -1505,7 +1572,7 @@ async function recordSkippedTouchedAlert(
   userId: number,
   kind: TouchKind,
   refs: string[],
-  chapter: number,
+  linkUrl: string,
 ): Promise<void> {
   try {
     const u = await env.DB.prepare(`SELECT dcs_username FROM users WHERE id = ?1`)
@@ -1526,10 +1593,15 @@ async function recordSkippedTouchedAlert(
           `${one ? "it" : "them"} (${job.book} ${shown}${more}). Someone edited, approved, marked Not needed or ` +
           `restored ${one ? "it" : "them"} while the job waited in the queue, so the AI ${one ? "draft was" : "drafts were"} ` +
           `not applied. Run the AI on a note again if you want a draft for it.`
-        : `AI translation of ${job.book}: ${one ? "1 question was" : `${refs.length} questions were`} left as people ` +
-          `changed ${one ? "it" : "them"} (${job.book} ${shown}${more}). Someone edited or approved ` +
-          `${one ? "it" : "them"} while the job waited in the queue, so the AI ${one ? "draft was" : "drafts were"} ` +
-          `not applied. Run the AI on a question again if you want a draft for it.`;
+        : kind === "tq"
+          ? `AI translation of ${job.book}: ${one ? "1 question was" : `${refs.length} questions were`} left as people ` +
+            `changed ${one ? "it" : "them"} (${job.book} ${shown}${more}). Someone edited or approved ` +
+            `${one ? "it" : "them"} while the job waited in the queue, so the AI ${one ? "draft was" : "drafts were"} ` +
+            `not applied. Run the AI on a question again if you want a draft for it.`
+          : `AI translation of ${kind === "tw" ? "tW" : "tA"} articles: ${one ? "1 article was" : `${refs.length} articles were`} ` +
+            `left as people changed ${one ? "it" : "them"} (${shown}${more}). Someone edited or approved ` +
+            `${one ? "it" : "them"} while the job waited in the queue, so the AI ${one ? "draft was" : "drafts were"} ` +
+            `not applied. Run the AI again if you want a draft for ${one ? "it" : "them"}.`;
     await env.DB.prepare(
       `DELETE FROM system_alerts WHERE username = ?1 AND source = ?2 AND dismissed_at IS NULL`,
     )
@@ -1539,8 +1611,7 @@ async function recordSkippedTouchedAlert(
       `INSERT INTO system_alerts (username, severity, source, message, link_url)
        VALUES (?1, 'info', ?2, ?3, ?4)`,
     )
-      // The book intro (chapter 0) is shown on chapter 1.
-      .bind(username, source, message, `#/${job.book}/${Math.max(1, chapter)}`)
+      .bind(username, source, message, linkUrl)
       .run();
   } catch (e) {
     console.error(`${kind} skipped-touched alert failed`, { error: e instanceof Error ? e.message : String(e) });

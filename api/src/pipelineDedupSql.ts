@@ -209,3 +209,89 @@ export function rowVerseSpan(
   if (!Number.isInteger(start) || start < 1) return undefined;
   return { start, end: Math.max(...verses) };
 }
+
+// ── A row-scoped request whose rows a person touched after the covering job
+//    was queued (#757) ────────────────────────────────────────────────────────
+//
+// The coverage answer above assumes the covering job will redraft the requested
+// rows. It won't redraft a row a person changed after it was queued: its apply
+// skips that row (humanTouchedIds in pipelineImport.ts, #601 notes / #725
+// questions). So when coverage finds a job for a ROW-SCOPED tn/tq request, the
+// route asks this one question; a hit drops the coverage answer and the request
+// starts (it runs after the covering job, serialized on the bot). Exact-identity
+// dups and non-row-scoped requests never ask it.
+//
+// Gap (under-blocks, the safe side): only the covering job the coverage
+// queries return is checked — the earliest. If a person touched the row after
+// that job but before a LATER covering job was queued, the later job would
+// redraft it, yet the request still starts: duplicate work, no lost edit.
+//
+// edit_log entries that count as a person changing a note (#601, option B) or
+// a question (#725; questions only have content edits and Approve, so the
+// trash/untrash actions never occur for them):
+// a content edit (PATCH, history restore included), Approve, Not needed and
+// Restore. Keep and hint toggles are left out (the translate apply never writes
+// those bits, so they survive it, #602), and so is un-approve (the apply resets
+// the note to ai_draft anyway, #602). Sources: the web app (NULL), the chat
+// (`chat`) and the admin approve sweep (`admin_bulk_state`); machine writers
+// (ai_pipeline, hint_expansion, dcs_reimport, aquifer, nightly_finalize) are
+// not a person. Same action+source reading of edit_log as deleteUnkeptTns and
+// reimportClassify.ts. Shared with humanTouchedIds so the apply-time skip and
+// this start-time check read the same entries.
+export const HUMAN_TOUCH_ACTIONS = ["update", "validate", "trash", "untrash"] as const;
+export const HUMAN_TOUCH_SOURCES = ["chat", "admin_bulk_state"] as const;
+
+// Whether the start route should run rowTouchedAfterJobSql for a coverage hit:
+// a translate request scoped by rowIds to notes or questions (the two kinds
+// whose apply skips touched rows).
+export function needsTouchedRowCheck(
+  pipelineType: string,
+  resourceType: string | null,
+  normalizedRowIds: string[] | undefined,
+): resourceType is "tn" | "tq" {
+  return (
+    pipelineType === "translate" &&
+    (resourceType === "tn" || resourceType === "tq") &&
+    normalizedRowIds !== undefined
+  );
+}
+
+// "Did a person touch any of these rows after this job was queued?" — the
+// humanTouchedIds rule for one job. Exact when the job carries an
+// edit_log_watermark (edit_log id above it); otherwise the seconds fallback on
+// created_at, where the enqueue second itself counts. humanTouchedIds narrows
+// that second to a later one only for rows the job itself was asked for by id;
+// a covering job never has rowIds (both coverage clauses require
+// `$.rowIds IS NULL`), so that branch never applies here.
+//
+// Binding: ?1 book  ?2 job.edit_log_watermark (exact) or job.created_at
+//          ?3.. HUMAN_TOUCH_ACTIONS, then HUMAN_TOUCH_SOURCES, then the row ids
+// — rowTouchedAfterJobBindings builds that list. No chunking: translate.rowIds
+// is capped at 50, so at most 58 bindings, under D1's 100-parameter limit. The
+// kind is a literal from the fixed tn|tq union, never input.
+export function rowTouchedAfterJobSql(kind: "tn" | "tq", exact: boolean, count: number): string {
+  const actions = HUMAN_TOUCH_ACTIONS.map((_, i) => `?${i + 3}`).join(", ");
+  const sources = HUMAN_TOUCH_SOURCES.map((_, i) => `?${i + 3 + HUMAN_TOUCH_ACTIONS.length}`).join(", ");
+  const first = 3 + HUMAN_TOUCH_ACTIONS.length + HUMAN_TOUCH_SOURCES.length;
+  const ids = Array.from({ length: count }, (_, i) => `?${i + first}`).join(", ");
+  return `SELECT 1 AS hit FROM edit_log
+          WHERE kind = '${kind}' AND book = ?1 AND ${exact ? "id > ?2" : "created_at >= ?2"}
+            AND action IN (${actions})
+            AND (source IS NULL OR source IN (${sources}))
+            AND row_key IN (${ids})
+          LIMIT 1`;
+}
+
+export function rowTouchedAfterJobBindings(
+  book: string,
+  job: { edit_log_watermark: number | null; created_at: number },
+  rowIds: string[],
+): unknown[] {
+  return [
+    book,
+    job.edit_log_watermark ?? job.created_at,
+    ...HUMAN_TOUCH_ACTIONS,
+    ...HUMAN_TOUCH_SOURCES,
+    ...rowIds,
+  ];
+}
