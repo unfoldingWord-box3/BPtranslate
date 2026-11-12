@@ -18,6 +18,8 @@ import { DatabaseSync } from "node:sqlite";
 import { normalizeRowIds, normalizeTranslateRowIdsJson } from "./translateOptions.ts";
 import {
   PIPELINE_COVERAGE_WHERE,
+  COVERING_WHOLE_CHAPTER_COLUMN,
+  approvedRowInRequestQuery,
   PIPELINE_DEDUP_WHERE,
   PIPELINE_VERSE_RANGE_JOB_WHERE,
   coverageVerseRange,
@@ -58,17 +60,18 @@ function makeDb() {
     CREATE TABLE edit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, row_key TEXT, book TEXT,
                            action TEXT, source TEXT, created_at INTEGER);
     CREATE TABLE tn_rows (id TEXT, book TEXT, chapter INTEGER, verse INTEGER, deleted_at INTEGER,
-                          PRIMARY KEY (book, id));
+                          translation_state TEXT, PRIMARY KEY (book, id));
     CREATE TABLE tq_rows (id TEXT, book TEXT, chapter INTEGER, verse INTEGER, deleted_at INTEGER,
-                          PRIMARY KEY (book, id));
+                          translation_state TEXT, PRIMARY KEY (book, id));
   `);
   let seq = 0;
 
   // A tn/tq row the row-scope lookup (#745) resolves to a verse.
-  function seedRow(table, id, verse, { chapter = 5, deleted = false } = {}) {
+  // `state` is translation_state ('validated' = approved, #794).
+  function seedRow(table, id, verse, { chapter = 5, deleted = false, state = null } = {}) {
     db.prepare(
-      `INSERT INTO ${table} (id, book, chapter, verse, deleted_at) VALUES (?, 'MRK', ?, ?, ?)`,
-    ).run(id, chapter, verse, deleted ? 1 : null);
+      `INSERT INTO ${table} (id, book, chapter, verse, deleted_at, translation_state) VALUES (?, 'MRK', ?, ?, ?, ?)`,
+    ).run(id, chapter, verse, deleted ? 1 : null, state);
   }
 
   // Mirror buildTranslateOptions' persistence: rowIds stored normalized, omitted
@@ -137,7 +140,7 @@ function makeDb() {
   function findCovering(translate, verses = coverageVerseRange(translate?.verseStart, translate?.verseEnd)) {
     return db
       .prepare(
-        `SELECT j.job_id, j.user_id, j.created_at, j.edit_log_watermark
+        `SELECT j.job_id, j.user_id, j.created_at, j.edit_log_watermark, ${COVERING_WHOLE_CHAPTER_COLUMN}
            FROM pipeline_jobs j
           WHERE ${PIPELINE_COVERAGE_WHERE}
           ORDER BY j.created_at ASC
@@ -163,11 +166,20 @@ function makeDb() {
     // person touched after the covering job was queued drops the coverage answer.
     const rt = pipelineType === "translate" ? (translate?.resourceType ?? "tn") : null;
     const norm = normalizeRowIds(translate?.rowIds);
-    if (!needsTouchedRowCheck(pipelineType, rt, norm)) return covering;
-    const touched = db
-      .prepare(rowTouchedAfterJobSql(rt, covering.edit_log_watermark !== null, norm.length))
-      .get(...rowTouchedAfterJobBindings("MRK", covering, norm));
-    return touched ? undefined : covering;
+    if (needsTouchedRowCheck(pipelineType, rt, norm)) {
+      const touched = db
+        .prepare(rowTouchedAfterJobSql(rt, covering.edit_log_watermark !== null, norm.length))
+        .get(...rowTouchedAfterJobBindings("MRK", covering, norm));
+      if (touched) return undefined;
+    }
+    // #794: the route's own query; a whole-chapter covering job keeps approved
+    // rows, so a request naming one is not covered by it.
+    if (covering.whole_chapter === 1) {
+      const verses = coverageVerseRange(translate?.verseStart, translate?.verseEnd);
+      const q = approvedRowInRequestQuery(rt, "MRK", 5, 5, norm, verses);
+      if (q && db.prepare(q.sql).get(...q.bindings)) return undefined;
+    }
+    return covering;
   }
 
   // Both coverage paths (#347 item 1, then #745), as the route runs them.
@@ -731,6 +743,41 @@ console.log("\n[#347 item 3] normalizeTranslateRowIdsJson keeps follow-up rowIds
   );
   // Unparseable JSON → returned verbatim (never throws).
   assert(normalizeTranslateRowIdsJson("translate", "{not json") === "{not json", "unparseable options returned verbatim");
+}
+
+console.log("\n[#794] a narrower request naming an approved row is not covered by a whole-chapter job");
+{
+  // A whole-chapter translate keeps approved rows as they are; the one-note
+  // redo and verse-range runs are how a person redrafts one. So those requests
+  // must start rather than attach to the whole-chapter job.
+  const { seed, seedRow, resolveConflict } = makeDb();
+  seedRow("tn_rows", "n3", 3, { state: "validated" });
+  seedRow("tn_rows", "n4", 4, { state: "ai_draft" });
+  seedRow("tq_rows", "q3", 3, { state: "validated" });
+  seed("jobAll", USER, undefined);
+  seed("jobAllTq", USER, { resourceType: "tq" });
+  assert(resolveConflict({ rowIds: ["n3"] }) === undefined, "chapter-wide tn: a redo of an approved note starts");
+  const n4 = resolveConflict({ rowIds: ["n4"] });
+  assert(n4 && n4.job_id === "jobAll", "chapter-wide tn: a redo of a draft note is still already_running");
+  assert(resolveConflict({ rowIds: ["n3", "n4"] }) === undefined, "one approved row among the requested ones is enough");
+  assert(
+    resolveConflict({ verseStart: 2, verseEnd: 3 }) === undefined,
+    "chapter-wide tn: a verse range holding an approved note starts",
+  );
+  const v4 = resolveConflict({ verseStart: 4, verseEnd: 4 });
+  assert(v4 && v4.job_id === "jobAll", "chapter-wide tn: a verse range with no approved note is still covered");
+  assert(
+    resolveConflict({ resourceType: "tq", rowIds: ["q3"] }) === undefined,
+    "chapter-wide tq: a redo of an approved question starts",
+  );
+}
+{
+  // A verse-range covering job redrafts approved rows, so it still covers them.
+  const { seed, seedRow, resolveConflict } = makeDb();
+  seedRow("tn_rows", "n3", 3, { state: "validated" });
+  seed("jobV24", USER, { verseStart: 2, verseEnd: 4 });
+  const r = resolveConflict({ rowIds: ["n3"] });
+  assert(r && r.job_id === "jobV24", "verse-range tn 2-4: a redo of an approved note on verse 3 is still covered");
 }
 
 console.log("\npipelineRowScopeDedup: all assertions passed");
