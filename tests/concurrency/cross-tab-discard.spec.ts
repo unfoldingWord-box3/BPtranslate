@@ -105,6 +105,8 @@ test("a conflicted save typed in tab B and discarded in tab A: tab B shows the s
   // Tab B, never reloaded, goes back to the server's text with nothing unsaved.
   await expect(questionField(b, tq.id)).toHaveValue(server);
   await expect(saveButton(b, tq.id)).toHaveCount(0);
+  // Its status bar no longer lists the conflict either.
+  await expect(b.getByText(/^1 conflict$/)).toHaveCount(0);
   if (SHOTS) await b.screenshot({ path: `${SHOTS}/cross-tab-discard-tab-b.png` });
 
   await context.close();

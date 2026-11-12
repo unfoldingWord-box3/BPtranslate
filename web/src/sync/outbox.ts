@@ -22,6 +22,7 @@ import { backoffMs } from "./backoff";
 import { isSortOrderOnlyPatch, wouldAutoHeal } from "./rowConflict";
 import { deletesOnFatal, healSettlesAsSaved, rearmOnKeepMine, resultFor409 } from "./conflict409.ts";
 import { isLaneFrozen, laneFreezeReason } from "./laneFreeze";
+import { openRowDropChannel, type RowDrop } from "./rowDropChannel.ts";
 import {
   MAX_ATTEMPTS_SENTINEL,
   eligibleForVersionThread,
@@ -610,6 +611,7 @@ export const outbox = {
           console.warn("outbox drop listener failed", e);
         }
       }
+      rowDropChannel.announce(op);
     }
     void notify();
     void drain();
@@ -761,6 +763,27 @@ export function onOutboxDrop(fn: DropListener): () => void {
   dropListeners.add(fn);
   return () => dropListeners.delete(fn);
 }
+
+// A row op another tab dropped (#637 item 3, rowDropChannel.ts). Only the
+// cached-row rebuild and the editors' refused-save holds hear it; the drafts
+// store is shared, so the dropping tab's own drop listeners already settled it.
+// This tab's status bar re-reads the outbox, so it stops listing the op.
+type RemoteDropListener = (drop: RowDrop) => void;
+const remoteDropListeners = new Set<RemoteDropListener>();
+export function onRemoteRowDrop(fn: RemoteDropListener): () => void {
+  remoteDropListeners.add(fn);
+  return () => remoteDropListeners.delete(fn);
+}
+const rowDropChannel = openRowDropChannel((drop) => {
+  for (const l of remoteDropListeners) {
+    try {
+      l(drop);
+    } catch (e) {
+      console.warn("remote row drop listener failed", e);
+    }
+  }
+  void notify();
+});
 
 async function dispatch(op: OutboxOp): Promise<Result> {
   try {

@@ -198,14 +198,22 @@ function twoTabs() {
   const b = openRowDropChannel((d) => heard.b.push(d));
   return { a, b, heard, close: () => (a.close(), b.close()) };
 }
-const tick = () => new Promise((r) => setTimeout(r, 20));
+// Delivery is async; wait for it rather than for a fixed time (the suite runs
+// files in parallel, so a short sleep can lose the race).
+async function until(pred, ms = 3000) {
+  const end = Date.now() + ms;
+  while (!pred()) {
+    if (Date.now() > end) throw new Error("timed out waiting for a cross-tab message");
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
 
 test("cross-tab: a discarded row save reaches the other tab, which rebuilds that row", async () => {
   const tabs = twoTabs();
   try {
     const current = { ...server, version: 3 };
     tabs.a.announce(op("op-1", { response: "ABC" }, { status: "conflict", conflictCurrent: current }));
-    await tick();
+    await until(() => tabs.heard.b.length > 0);
     assert.deepEqual(tabs.heard.b, [
       { target, action: "patch", patch: { response: "ABC" }, conflictCurrent: current },
     ]);
@@ -219,7 +227,7 @@ test("cross-tab: the other tab's editor ends its hold on the discarded save, as 
   const tabs = twoTabs();
   try {
     tabs.a.announce(op("op-1", { response: "ABC" }, { status: "failed", lastError: "http 422" }));
-    await tick();
+    await until(() => tabs.heard.b.length > 0);
     const [drop] = tabs.heard.b;
     const held = { sent: [], held: [{ patch: { response: "ABC" }, version: 2, fields: { response: "ABC" } }] };
     assert.deepEqual(holdOnDrop(held, drop, target), { state: EMPTY_HOLD, released: { response: "ABC" } });
@@ -235,7 +243,7 @@ test("cross-tab: a discarded delete carries its action, so the other tab may put
   const tabs = twoTabs();
   try {
     tabs.a.announce({ ...op("op-d", undefined), action: "delete", status: "failed", lastError: "http 422" });
-    await tick();
+    await until(() => tabs.heard.b.length > 0);
     assert.equal(tabs.heard.b.length, 1);
     assert.equal(tabs.heard.b[0].action, "delete");
   } finally {
@@ -251,8 +259,11 @@ test("cross-tab: verse ops and malformed messages are ignored; no BroadcastChann
     raw.postMessage({ target: { kind: "row", rowKind: "nope", id: "q-1", book: "ZEC" }, action: "patch", patch: {} });
     raw.postMessage({ target: { kind: "row", rowKind: "tq", id: 7, book: "ZEC" }, action: "patch", patch: {} });
     raw.postMessage("hello");
-    await tick();
-    assert.deepEqual(tabs.heard.b, []);
+    // One valid message last from the same sender: once it arrives, every
+    // earlier one has too (a channel delivers one sender's posts in order).
+    raw.postMessage({ target, action: "patch", patch: { response: "LAST" } });
+    await until(() => tabs.heard.b.length > 0);
+    assert.deepEqual(tabs.heard.b.map((d) => d.patch), [{ response: "LAST" }]);
   } finally {
     raw.close();
     tabs.close();
