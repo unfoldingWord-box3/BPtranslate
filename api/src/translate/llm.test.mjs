@@ -944,6 +944,15 @@ test("gemini adapter: POSTs to :generateContent with the key in the header, neve
   assert.deepEqual(out, { text: "OUT", usage: { inputTokens: 7, outputTokens: 3 }, stopReason: "STOP" });
 });
 
+// Issue #466, option B: ask Gemini to keep its content filter off for translate
+// batches, so a change to Google's defaults can't start blocking scripture.
+const GEMINI_SAFETY_OFF = [
+  { category: "HARM_CATEGORY_HARASSMENT", threshold: "OFF" },
+  { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "OFF" },
+  { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "OFF" },
+  { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "OFF" },
+];
+
 test("gemini request body: thinkingConfig is nested INSIDE generationConfig, not beside it", () => {
   // The whole point of this assertion: the SDK takes a flat config, the wire
   // format does not. At the top level Gemini ignores the thinking setting
@@ -952,7 +961,19 @@ test("gemini request body: thinkingConfig is nested INSIDE generationConfig, not
     systemInstruction: { parts: [{ text: "SYS" }] },
     contents: [{ role: "user", parts: [{ text: "USER" }] }],
     generationConfig: { maxOutputTokens: 32000, thinkingConfig: { thinkingLevel: "high" } },
+    safetySettings: GEMINI_SAFETY_OFF,
   });
+});
+
+test("gemini request body: safetySettings is top-level beside generationConfig, every model, every thinking level", () => {
+  for (const model of ["gemini-3.6-flash", "gemini-2.5-pro"]) {
+    for (const thinking of ["high", "none", null]) {
+      const body = llm.buildGeminiRequest({ model, system: "S", user: "U", thinking });
+      assert.deepEqual(body.safetySettings, GEMINI_SAFETY_OFF, `${model}/${thinking}`);
+      // Inside generationConfig it would be silently ignored, like a misplaced thinkingConfig.
+      assert.ok(!("safetySettings" in body.generationConfig), `${model}/${thinking}: not nested`);
+    }
+  }
 });
 
 test("gemini request body: 3.x takes thinkingLevel, 2.5 takes a token budget, 'none' takes neither", () => {
