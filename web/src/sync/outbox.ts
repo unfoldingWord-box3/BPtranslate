@@ -152,6 +152,11 @@ export interface OutboxOp {
   // When the 409 shows the server already holds the patch, the op is settled
   // as saved instead of resent (healSettlesAsSaved, #886 item 1).
   expectedState?: string | null;
+  // expectedVersion is the older copy a restored NoteCard draft was typed
+  // against (#754), not the row's current version: the server's 409 is what
+  // brings up the conflict prompt, so threadVersionToSiblings leaves it alone
+  // (eligibleForVersionThread). Keep mine drops it (rearmOnKeepMine).
+  originPinned?: boolean;
   // The row's values for the patched fields at the moment we enqueued (the
   // version we branched from). On a 409 this lets us tell a spurious conflict
   // (the server changed a *different* field, or already has our value) from a
@@ -318,6 +323,7 @@ export const outbox = {
       book: string;
       baseline?: Record<string, unknown>;
       draftRef?: { chapter: number; verse: number };
+      originPinned?: boolean;
     },
   ): Promise<OutboxOp> {
     if (isReadOnly()) {
@@ -339,6 +345,7 @@ export const outbox = {
       ...(opts.expectedState !== undefined ? { expectedState: opts.expectedState } : {}),
       ...(opts.baseline !== undefined ? { baseline: opts.baseline } : {}),
       ...(opts.draftRef !== undefined ? { draftRef: opts.draftRef } : {}),
+      ...(opts.originPinned ? { originPinned: true } : {}),
     };
     await putRowOp(op);
     void notify();

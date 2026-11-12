@@ -2020,6 +2020,8 @@ export function Shell({
         ...rest,
         book: row.book,
         baseline,
+        // Not moved up by an earlier write of the row landing first (#754).
+        ...(origin ? { originPinned: true } : {}),
         ...(kind !== "tn" ? { draftRef: { chapter: row.chapter, verse: row.verse } } : {}),
       });
     },

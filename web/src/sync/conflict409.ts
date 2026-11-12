@@ -112,14 +112,25 @@ export function healSettlesAsSaved(
  * expected_state pin (#883 review A2): the user chose to write over the note
  * as it is now, and the pin would only get the resend refused (state_mismatch)
  * and deleted, so the choice would vanish. The row's other waiting saves keep
- * theirs. Mutates and returns `o`.
+ * theirs. Every re-armed op also loses its originPinned mark (#754): it is now
+ * at the server's version by the user's choice, so a write of the row landing
+ * first threads it again instead of bringing the prompt back. Mutates and
+ * returns `o`.
  */
 export function rearmOnKeepMine<
-  T extends { id: string; status: string; expectedVersion: number; conflictCurrent?: unknown; expectedState?: string | null },
+  T extends {
+    id: string;
+    status: string;
+    expectedVersion: number;
+    conflictCurrent?: unknown;
+    expectedState?: string | null;
+    originPinned?: boolean;
+  },
 >(o: T, resolvedId: string, version: number): T {
   o.expectedVersion = version;
   o.status = "pending";
   o.conflictCurrent = undefined;
+  delete o.originPinned;
   if (o.id === resolvedId) delete o.expectedState;
   return o;
 }

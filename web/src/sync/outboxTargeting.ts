@@ -56,7 +56,7 @@ export function targetKey(t: OpTarget): string {
 }
 
 /** The subset of an OutboxOp these predicates actually need to read. */
-export type TargetingOp = Pick<OutboxOp, "status" | "lastError">;
+export type TargetingOp = Pick<OutboxOp, "status" | "lastError" | "originPinned">;
 
 // A `failed` op whose lastError is the max-attempts sentinel WILL auto-revive
 // (reviveMaxAttemptsFailed, triggered by focus/online/authRefresh) and
@@ -82,7 +82,13 @@ export function isMaxAttemptsBlocked(o: TargetingOp): boolean {
 // finds out for itself. Fatal failed ops keep being threaded as before — they
 // never auto-revive, so this carve-out doesn't apply, and threading keeps a
 // user-initiated Retry from failing on a version that's needlessly stale.
+//
+// An op pinned to the older copy a restored draft was typed against (#754,
+// originPinned) is EXCLUDED too: the version a sibling landed at may carry
+// another person's note, and the pinned Save sent there would replace it with
+// a 200 instead of ending in the 409 that brings up the conflict prompt.
 export function eligibleForVersionThread(o: TargetingOp): boolean {
+  if (o.originPinned) return false;
   if (o.status === "pending") return true;
   if (o.status === "failed") return !willRetryOnItsOwn(o.lastError);
   return false;
