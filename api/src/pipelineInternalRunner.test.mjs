@@ -33,6 +33,7 @@ import { templates } from "./templates.ts";
 import { encryptApiKey } from "./aiKeyCrypto.ts";
 import { clearProjectConfigCache } from "./projectConfig.ts";
 import { clearSourceNotesCache } from "./sourceNotes.ts";
+import { isEnglishEcho } from "./pipelineImport.ts";
 import { outKey } from "./translate/storage.ts";
 import { memoryBlobStore } from "./translate/fixtures.mjs";
 
@@ -118,6 +119,10 @@ const realFetch = globalThis.fetch;
 async function withNoFetch(fn) {
   let calls = 0;
   globalThis.fetch = async (url) => {
+    // The apply's English-echo check (#794) reads the English notes from
+    // Door43. That is not the bot, so it is not counted; it still fails, and
+    // the check fails open.
+    if (String(url).startsWith("https://git.door43.org/")) throw new Error(`Door43 is offline in this test`);
     calls++;
     throw new Error(`the internal runner must never call the bot (attempted ${String(url)})`);
   };
@@ -1417,6 +1422,21 @@ test("import (internal, #794): a note draft that is the English source note is n
   assert.match(alerts[0].message, /OBA 1:1/);
   const pending = sqlite.prepare(`SELECT accepted_at FROM pending_imports WHERE payload_json LIKE '%"ab12"%'`).all();
   assert.equal(pending[0].accepted_at, null, "the echoed proposal is left unresolved");
+});
+
+test("isEnglishEcho (#794): the compare rules", () => {
+  // Staging curls quotes and collapses double spaces; NFC and trimming as well.
+  assert.equal(isEnglishEcho("The “vision” of Obadiah", 'The "vision"  of Obadiah '), true);
+  assert.equal(isEnglishEcho("é", "é"), true, "NFC on both sides");
+  assert.equal(isEnglishEcho("رؤيا عوبديا", "The vision of Obadiah"), false);
+  assert.equal(isEnglishEcho("", ""), false, "an empty English never counts");
+  assert.equal(isEnglishEcho("x", undefined), false, "no English for this id");
+  assert.equal(isEnglishEcho(null, "x"), false);
+  // Links only: legitimately the same in every language.
+  assert.equal(isEnglishEcho("[[rc://*/tw/dict/bible/kt/god]]", "[[rc://*/tw/dict/bible/kt/god]]"), false);
+  assert.equal(isEnglishEcho("https://example.org/a", "https://example.org/a"), false);
+  // A link with English words around it is still English.
+  assert.equal(isEnglishEcho("See: [[rc://*/tw/dict/bible/kt/god]]", "See: [[rc://*/tw/dict/bible/kt/god]]"), true);
 });
 
 test("import (proxy, #794): the bot path keeps an approved note and drops an English echo too", async () => {

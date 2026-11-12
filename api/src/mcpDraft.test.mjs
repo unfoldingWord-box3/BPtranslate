@@ -381,6 +381,39 @@ test("bpt_job_status: questions and tW/tA articles kept because a person changed
   });
 });
 
+test("bpt_job_status: rows kept because approved, English echoes not applied and a skipped English check are reported apart (#794)", async () => {
+  const { call, sqlite } = await fresh();
+  await withBot(async () => {
+    const started = await call("bpt_draft", DRAFT);
+    const setReport = (report) =>
+      sqlite
+        .prepare(`UPDATE pipeline_jobs SET state = 'done', apply_skipped_json = ? WHERE job_id = ?`)
+        .run(JSON.stringify(report), started.data.job_id);
+
+    setReport({
+      tnTouched: 1,
+      tnTouchedIds: ["t003"],
+      tnApproved: 2,
+      tnApprovedIds: ["t001", "t002"],
+      tnSameAsEnglish: 1,
+      tnSameAsEnglishIds: ["t004"],
+    });
+    const s = await call("bpt_job_status", { job_id: started.data.job_id });
+    assert.equal(s.isError, false, JSON.stringify(s.data));
+    assert.deepEqual(s.data.kept_because_changed_by_people, { tn: 1, tn_ids: ["t003"] });
+    assert.deepEqual(s.data.kept_because_approved, { tn: 2, tn_ids: ["t001", "t002"] });
+    assert.deepEqual(s.data.not_applied_same_as_english, { tn: 1, tn_ids: ["t004"] });
+    assert.equal(s.data.english_check_not_run, undefined);
+
+    setReport({ tqApproved: 1, tqApprovedIds: ["q1"], tnEnglishCheckNotRun: "Could not read the English notes." });
+    const q = await call("bpt_job_status", { job_id: started.data.job_id });
+    assert.deepEqual(q.data.kept_because_approved, { tq: 1, tq_ids: ["q1"] });
+    assert.equal(q.data.kept_because_changed_by_people, undefined);
+    assert.equal(q.data.not_applied_same_as_english, undefined);
+    assert.equal(q.data.english_check_not_run, "Could not read the English notes.");
+  });
+});
+
 test("bpt_job_status: another user's job, a job in another workspace and an unknown id all get the same not-found answer", async () => {
   const a = await fresh();
   const b = await fresh();

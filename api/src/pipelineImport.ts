@@ -38,6 +38,8 @@ import { rawUrlOriginError } from "./rawUrlPin.ts";
 import { sameDcsName } from "./repoUrl.ts";
 import { HUMAN_TOUCH_ACTIONS, HUMAN_TOUCH_SOURCES } from "./pipelineDedupSql.ts";
 import { houseStyleForProposal, loadEnabledHouseStyleRules, type HouseStyleRule } from "./houseStyle.ts";
+import { readBookSourceNotes, type SourceNotes } from "./sourceNotes.ts";
+import { isTranslationConfig } from "./workflowLayouts.ts";
 
 interface OutputEntry {
   type?: string;
@@ -554,6 +556,20 @@ export interface ApplyResult {
   // the apply ran, so they get no AI draft. Kept apart from the touched count
   // above, which covers only changes made after the job was queued.
   tnSkippedTrashed: number;
+  // Translate apply only (#794, option B): a whole-chapter run (no rowIds, no
+  // verse range) leaves approved notes and questions as they are. A run that
+  // names the row (one-note redo, verse range) still redrafts it.
+  tnSkippedApproved: number;
+  tnSkippedApprovedIds: string[];
+  tqSkippedApproved: number;
+  tqSkippedApprovedIds: string[];
+  // Translate apply only (#794): note drafts that were the English source note
+  // copied back (isEnglishEcho), so they were not applied.
+  tnSkippedEnglish: number;
+  tnSkippedEnglishIds: string[];
+  // Why the English check could not run for a note that was then applied
+  // anyway (it fails open), or null when it ran for every applied note.
+  tnEnglishCheckNotRun: string | null;
   // tw/ta article files updated in place by the translate apply (by path).
   articleUpdated: number;
   // The same for tW/tA articles (#734), by path: edited or approved after the
@@ -647,6 +663,13 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
     tqSkippedTouched: 0,
     tqSkippedTouchedIds: [],
     tnSkippedTrashed: 0,
+    tnSkippedApproved: 0,
+    tnSkippedApprovedIds: [],
+    tqSkippedApproved: 0,
+    tqSkippedApprovedIds: [],
+    tnSkippedEnglish: 0,
+    tnSkippedEnglishIds: [],
+    tnEnglishCheckNotRun: null,
     articleUpdated: 0,
     articleSkippedTouched: 0,
     articleSkippedTouchedPaths: [],
@@ -670,9 +693,19 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
     // after this job was queued keeps their work. One query per kind for the
     // whole job (not one per row), so a whole-chapter apply stays inside the
     // subrequest budget.
-    const requested = new Set(
-      (tnProposals.length > 0 || tqProposals.length > 0 ? (await translateSelection(env, job.jobId))?.rowIds : null) ?? [],
-    );
+    const selection =
+      tnProposals.length > 0 || tqProposals.length > 0 ? await translateSelection(env, job.jobId) : null;
+    const requested = new Set(selection?.rowIds ?? []);
+    // #794: a whole-chapter run (no rowIds, no verse range) keeps approved rows.
+    const keepApproved = selection === null;
+    // #794: the English source notes, read once per job for every chapter with
+    // a note proposal (one Door43 read per source repo, cached per isolate).
+    // A project that writes its notes in English has no English source, so
+    // there is nothing to compare against and nothing is read.
+    const english =
+      tnProposals.length > 0 && isTranslationConfig(job.cfg)
+        ? await readBookSourceNotes(env, job.book, [...new Set(tnProposals.map((p) => p.chapter))])
+        : new Map<number, SourceNotes>();
     // #815: this workspace's enabled house-style rules, read once per job (not
     // per row) and applied to every drafted note / question below.
     const houseRules =
@@ -706,14 +739,24 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
     };
     // A skipped proposal is left unresolved, like a no_match: nothing accepts
     // it later, and the one-retry import path skips it the same way.
-    const skipped: Record<"tn" | "tq", { refs: string[]; firstChapter: number | null }> = {
+    type SkipRefs = { refs: string[]; firstChapter: number | null };
+    const noRefs = (): Record<"tn" | "tq", SkipRefs> => ({
       tn: { refs: [], firstChapter: null },
       tq: { refs: [], firstChapter: null },
+    });
+    // touched: a person changed it after the enqueue (#601/#725); approved:
+    // approved before a whole-chapter run (#794); english: the draft was the
+    // English source note (#794, notes only).
+    const skipped: Record<SkipReason, Record<"tn" | "tq", SkipRefs>> = {
+      touched: noRefs(),
+      approved: noRefs(),
+      english: noRefs(),
     };
-    const recordSkip = (kind: "tn" | "tq", p: PendingImportRow) => {
+    const recordSkip = (reason: SkipReason, kind: "tn" | "tq", p: PendingImportRow) => {
+      const s = skipped[reason][kind];
       // Book intro is chapter 0; a chapter intro is verse 0 of its chapter.
-      skipped[kind].refs.push(p.chapter === 0 ? "intro" : p.verse === 0 ? `${p.chapter}:intro` : `${p.chapter}:${p.verse}`);
-      skipped[kind].firstChapter ??= p.chapter;
+      s.refs.push(p.chapter === 0 ? "intro" : p.verse === 0 ? `${p.chapter}:intro` : `${p.chapter}:${p.verse}`);
+      s.firstChapter ??= p.chapter;
     };
     const tnTouched = await touchedLookup("tn", tnProposals, job.book, "id", requested);
     for (const p of tnProposals) {
@@ -721,13 +764,29 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
       if (proposedId !== null) {
         result.tnSkippedTouched += 1;
         result.tnSkippedTouchedIds.push(proposedId);
-        recordSkip("tn", p);
+        recordSkip("touched", "tn", p);
         continue;
       }
-      const outcome = await applyTranslateTnRow(env, p, job, userId, houseRules);
+      const payload = JSON.parse(p.payload_json) as { id?: unknown; note?: unknown };
+      const id = typeof payload.id === "string" ? payload.id : null;
+      const source = english.get(p.chapter);
+      const englishEcho =
+        source?.ok === true && id !== null && isEnglishEcho(payload.note, source.notes.get(id));
+      const outcome = await applyTranslateTnRow(env, p, job, userId, houseRules, { keepApproved, englishEcho });
       if (outcome === "drafted") {
         affected.add(p.chapter);
         result.tnHintExpanded += 1; // reuses the "updated in place" counter
+        // Fail open (#794): the draft was applied without the English check.
+        if (source && !source.ok) result.tnEnglishCheckNotRun ??= source.reason;
+      } else if (outcome === "approved" && id !== null) {
+        result.tnSkippedApproved += 1;
+        result.tnSkippedApprovedIds.push(id);
+        recordSkip("approved", "tn", p);
+      } else if (outcome === "same_as_english" && id !== null) {
+        // Left unresolved, like a touched skip; the note keeps its text.
+        result.tnSkippedEnglish += 1;
+        result.tnSkippedEnglishIds.push(id);
+        recordSkip("english", "tn", p);
       } else if (outcome === "trashed") {
         // Marked Not needed before the apply: the proposal is left unresolved,
         // like a no_match, and the note keeps its text and state (#735).
@@ -743,13 +802,18 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
       if (proposedId !== null) {
         result.tqSkippedTouched += 1;
         result.tqSkippedTouchedIds.push(proposedId);
-        recordSkip("tq", p);
+        recordSkip("touched", "tq", p);
         continue;
       }
-      const outcome = await applyTranslateTqRow(env, p, job, userId, houseRules);
+      const outcome = await applyTranslateTqRow(env, p, job, userId, houseRules, { keepApproved });
       if (outcome === "drafted") {
         affected.add(p.chapter);
         result.tqUpdated += 1; // reuses the "updated in place" counter
+      } else if (outcome === "approved") {
+        const id = (JSON.parse(p.payload_json) as { id: string }).id;
+        result.tqSkippedApproved += 1;
+        result.tqSkippedApprovedIds.push(id);
+        recordSkip("approved", "tq", p);
       }
     }
     // #734: the same for tW/tA articles. Their edit_log rows carry the resource
@@ -793,16 +857,18 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
     if (articleAttempted > 0 && result.articleUpdated === 0) {
       await recordArticleNoApplyAlert(env, job, userId, articleAttempted);
     }
-    for (const kind of ["tn", "tq"] as const) {
-      const s = skipped[kind];
-      if (s.firstChapter !== null) {
-        // The book intro (chapter 0) is shown on chapter 1.
-        await recordSkippedTouchedAlert(env, job, userId, kind, s.refs, `#/${job.book}/${Math.max(1, s.firstChapter)}`);
+    for (const reason of ["touched", "approved", "english"] as const) {
+      for (const kind of ["tn", "tq"] as const) {
+        const s = skipped[reason][kind];
+        if (s.firstChapter !== null) {
+          // The book intro (chapter 0) is shown on chapter 1.
+          await recordSkippedAlert(env, job, userId, reason, kind, s.refs, `#/${job.book}/${Math.max(1, s.firstChapter)}`);
+        }
       }
     }
     for (const resource of ["tw", "ta"] as const) {
       const paths = articleSkipped[resource];
-      if (paths.length > 0) await recordSkippedTouchedAlert(env, job, userId, resource, paths, `#/articles/${resource}`);
+      if (paths.length > 0) await recordSkippedAlert(env, job, userId, "touched", resource, paths, `#/articles/${resource}`);
     }
     // The job result the status and list APIs read (#601): output_json is the
     // bot's own output, so the apply's skip report has its own column. Written
@@ -1156,7 +1222,8 @@ async function applyTranslateTnRow(
   job: ImportContext,
   userId: number,
   houseRules: HouseStyleRule[],
-): Promise<"drafted" | "no_match" | "trashed"> {
+  guard: { keepApproved: boolean; englishEcho: boolean },
+): Promise<"drafted" | "no_match" | "trashed" | "approved" | "same_as_english"> {
   const payload = JSON.parse(p.payload_json) as Record<string, unknown>;
   const proposedId = typeof payload.id === "string" ? payload.id : null;
   if (!proposedId) return "no_match";
@@ -1184,6 +1251,11 @@ async function applyTranslateTnRow(
   // A note marked Not needed gets no AI draft, as on the English apply path:
   // restoring it later must not bring back AI text nobody reviewed (#735).
   if (target.trashed_at != null) return "trashed";
+  // #794: a whole-chapter run leaves an approved note as it is; only a run
+  // that names the note (one-note redo, verse range) redrafts it.
+  if (guard.keepApproved && target.translation_state === "validated") return "approved";
+  // #794: a draft that is the English source note copied back is not applied.
+  if (guard.englishEcho) return "same_as_english";
 
   const now = Math.floor(Date.now() / 1000);
   const newVersion = target.version + 1;
@@ -1223,9 +1295,12 @@ async function applyTranslateTnRow(
                 version = version + 1,
                 updated_at = ?5,
                 updated_by = ?6
-          WHERE id = ?7 AND book = ?8 AND deleted_at IS NULL AND trashed_at IS NULL AND version = ?9`,
+          WHERE id = ?7 AND book = ?8 AND deleted_at IS NULL AND trashed_at IS NULL AND version = ?9
+            AND (?11 = 0 OR translation_state IS NOT 'validated')`,
       )
-      .bind(note, tags, srcHash, draftMeta, now, userId, target.id, job.book, target.version, preDraftJson),
+      // ?11: an Approve does not bump the version, so the CAS alone would not
+      // catch one landing between the read above and this write (#794).
+      .bind(note, tags, srcHash, draftMeta, now, userId, target.id, job.book, target.version, preDraftJson, guard.keepApproved ? 1 : 0),
     env.DB
       .prepare(
         // Audit gated on the CAS having won (post-update fingerprint present).
@@ -1268,7 +1343,8 @@ async function applyTranslateTqRow(
   job: ImportContext,
   userId: number,
   houseRules: HouseStyleRule[],
-): Promise<"drafted" | "no_match"> {
+  guard: { keepApproved: boolean },
+): Promise<"drafted" | "no_match" | "approved"> {
   const payload = JSON.parse(p.payload_json) as Record<string, unknown>;
   const proposedId = typeof payload.id === "string" ? payload.id : null;
   if (!proposedId) return "no_match";
@@ -1288,6 +1364,8 @@ async function applyTranslateTqRow(
       pre_draft_json: string | null;
     }>();
   if (!target) return "no_match";
+  // #794: a whole-chapter run leaves an approved question as it is.
+  if (guard.keepApproved && target.translation_state === "validated") return "approved";
 
   const now = Math.floor(Date.now() / 1000);
   const newVersion = target.version + 1;
@@ -1321,9 +1399,11 @@ async function applyTranslateTqRow(
                 version = version + 1,
                 updated_at = ?5,
                 updated_by = ?6
-          WHERE id = ?7 AND book = ?8 AND deleted_at IS NULL AND version = ?9`,
+          WHERE id = ?7 AND book = ?8 AND deleted_at IS NULL AND version = ?9
+            AND (?11 = 0 OR translation_state IS NOT 'validated')`,
       )
-      .bind(question, response, srcHash, draftMeta, now, userId, target.id, job.book, target.version, preDraftJson),
+      // ?11: as in applyTranslateTnRow (#794).
+      .bind(question, response, srcHash, draftMeta, now, userId, target.id, job.book, target.version, preDraftJson, guard.keepApproved ? 1 : 0),
     env.DB
       .prepare(
         // Audit gated on the CAS having won (post-update fingerprint present).
@@ -1535,9 +1615,14 @@ async function humanTouchedIds(
 
 /**
  * pipeline_jobs.apply_skipped_json: what a translate apply left alone (#601
- * notes, #725 questions, #734 tW/tA articles by path). A kind's keys are
- * present only when it skipped something; a job translates one kind, so in
- * practice one pair is set.
+ * notes, #725 questions, #734 tW/tA articles by path), each key pair present
+ * only when it skipped something:
+ * - *Touched: a person changed the row after the job was queued.
+ * - *Approved (#794): approved before a whole-chapter run, so kept as it is.
+ * - tnSameAsEnglish (#794): the note draft was the English source note, so it
+ *   was not applied.
+ * - tnEnglishCheckNotRun (#794): why the English check could not run for
+ *   notes that were applied anyway (it fails open).
  */
 export interface ApplySkipped {
   tnTouched?: number;
@@ -1546,30 +1631,66 @@ export interface ApplySkipped {
   tqTouchedIds?: string[];
   articleTouched?: number;
   articleTouchedPaths?: string[];
+  tnApproved?: number;
+  tnApprovedIds?: string[];
+  tqApproved?: number;
+  tqApprovedIds?: string[];
+  tnSameAsEnglish?: number;
+  tnSameAsEnglishIds?: string[];
+  tnEnglishCheckNotRun?: string;
 }
 /** The skip report for an apply, or null when it skipped nothing. */
 export function applySkippedOf(r: ApplyResult): ApplySkipped | null {
-  if (r.tnSkippedTouched === 0 && r.tqSkippedTouched === 0 && r.articleSkippedTouched === 0) return null;
-  return {
+  const report: ApplySkipped = {
     ...(r.tnSkippedTouched > 0 ? { tnTouched: r.tnSkippedTouched, tnTouchedIds: r.tnSkippedTouchedIds } : {}),
     ...(r.tqSkippedTouched > 0 ? { tqTouched: r.tqSkippedTouched, tqTouchedIds: r.tqSkippedTouchedIds } : {}),
     ...(r.articleSkippedTouched > 0
       ? { articleTouched: r.articleSkippedTouched, articleTouchedPaths: r.articleSkippedTouchedPaths }
       : {}),
+    ...(r.tnSkippedApproved > 0 ? { tnApproved: r.tnSkippedApproved, tnApprovedIds: r.tnSkippedApprovedIds } : {}),
+    ...(r.tqSkippedApproved > 0 ? { tqApproved: r.tqSkippedApproved, tqApprovedIds: r.tqSkippedApprovedIds } : {}),
+    ...(r.tnSkippedEnglish > 0
+      ? { tnSameAsEnglish: r.tnSkippedEnglish, tnSameAsEnglishIds: r.tnSkippedEnglishIds }
+      : {}),
+    ...(r.tnEnglishCheckNotRun !== null ? { tnEnglishCheckNotRun: r.tnEnglishCheckNotRun } : {}),
   };
+  return Object.keys(report).length > 0 ? report : null;
+}
+
+// rc:// links (the same token rule as translate/checks.ts RC_LINK_RE) and web
+// links. A note with no letter left once these are removed is links only.
+const NOTE_LINK_RE = /(?:rc|https?):\/\/[^\s\])]+/g;
+
+/**
+ * #794: is this AI note draft the English source note copied back? The staged
+ * draft went through normalizeNoteWhitespace and curlifyText (tnPayload), so
+ * the English gets the same two steps; then both sides are NFC-normalized and
+ * trimmed, and must match exactly. An empty English never counts, nor does a
+ * links-only one (no letter outside its links), which is legitimately the same
+ * in every language.
+ */
+export function isEnglishEcho(draft: unknown, english: string | undefined): boolean {
+  if (typeof draft !== "string" || english == null) return false;
+  const norm = (t: string) => t.normalize("NFC").trim();
+  const e = norm(curlifyText(normalizeNoteWhitespace(english)));
+  if (e === "" || !/\p{L}/u.test(e.replace(NOTE_LINK_RE, ""))) return false;
+  return norm(draft) === e;
 }
 
 // Banner alert for the job's starter listing the notes, questions or tW/tA
-// articles the translate apply left alone because a person changed them after
-// the job was queued (#601, #725, #734). Same shape as
-// recordArticleNoApplyAlert: server-side English text, one alert per job
-// (replaced on a retry), best-effort. `refs` are verse refs for tn/tq and
-// paths for articles.
+// articles the translate apply left alone: because a person changed them after
+// the job was queued (#601, #725, #734), because they were approved before a
+// whole-chapter run (#794), or because the note draft was the English source
+// note (#794). Same shape as recordArticleNoApplyAlert: server-side English
+// text, one alert per job and reason (replaced on a retry), best-effort.
+// `refs` are verse refs for tn/tq and paths for articles.
+type SkipReason = "touched" | "approved" | "english";
 const SKIPPED_REFS_SHOWN = 10;
-async function recordSkippedTouchedAlert(
+async function recordSkippedAlert(
   env: Env,
   job: ImportContext,
   userId: number,
+  reason: SkipReason,
   kind: TouchKind,
   refs: string[],
   linkUrl: string,
@@ -1580,15 +1701,30 @@ async function recordSkippedTouchedAlert(
       .first<{ dcs_username: string }>();
     const username = u?.dcs_username;
     if (!username) return;
-    const source = `translate_${kind}_skipped_touched:${job.jobId}`;
+    const source =
+      reason === "touched"
+        ? `translate_${kind}_skipped_touched:${job.jobId}`
+        : reason === "approved"
+          ? `translate_${kind}_kept_approved:${job.jobId}`
+          : `translate_${kind}_same_as_english:${job.jobId}`;
     const shown = refs.slice(0, SKIPPED_REFS_SHOWN).join(", ");
     const more = refs.length > SKIPPED_REFS_SHOWN ? ` and ${refs.length - SKIPPED_REFS_SHOWN} more` : "";
     const one = refs.length === 1;
+    const noun = kind === "tn" ? "note" : "question";
     // Questions have no Not needed or Restore, so their text names only edit
     // and Approve. A single question can be re-run from the classic editor
     // (Shell.handleTranslateQuestion queues a tq job with rowIds: [id]).
     const message =
-      kind === "tn"
+      reason === "approved"
+        ? `AI translation of ${job.book}: ${one ? `1 approved ${noun} was` : `${refs.length} approved ${noun}s were`} ` +
+          `kept as ${one ? "it is" : "they are"} (${job.book} ${shown}${more}). A run on a whole chapter does not redraft ` +
+          `approved ${noun}s. To get a new draft for one, run the AI on that ${noun} alone.`
+        : reason === "english"
+          ? `AI translation of ${job.book}: the AI returned the English note unchanged for ` +
+            `${one ? "1 note" : `${refs.length} notes`} (${job.book} ${shown}${more}), so ` +
+            `${one ? "that draft was" : "those drafts were"} not applied and ${one ? "the note keeps its" : "the notes keep their"} ` +
+            `current text. Run the AI on a note again to try for a translation.`
+          : kind === "tn"
         ? `AI translation of ${job.book}: ${one ? "1 note was" : `${refs.length} notes were`} left as people changed ` +
           `${one ? "it" : "them"} (${job.book} ${shown}${more}). Someone edited, approved, marked Not needed or ` +
           `restored ${one ? "it" : "them"} while the job waited in the queue, so the AI ${one ? "draft was" : "drafts were"} ` +
@@ -1614,7 +1750,7 @@ async function recordSkippedTouchedAlert(
       .bind(username, source, message, linkUrl)
       .run();
   } catch (e) {
-    console.error(`${kind} skipped-touched alert failed`, { error: e instanceof Error ? e.message : String(e) });
+    console.error(`${kind} skipped-${reason} alert failed`, { error: e instanceof Error ? e.message : String(e) });
   }
 }
 
