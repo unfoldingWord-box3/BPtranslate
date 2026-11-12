@@ -1480,6 +1480,37 @@ test("import (proxy, #794): the bot path keeps an approved note and drops an Eng
   assert.deepEqual(report, { tnApproved: 1, tnApprovedIds: ["cd34"], tnSameAsEnglish: 1, tnSameAsEnglishIds: ["ab12"] });
 });
 
+test("POST /start (#794): a one-note redo of an approved note is not answered by a running whole-chapter job", async () => {
+  const sqlite = freshSqlite();
+  await seedByoKey(sqlite);
+  seedScopeTnRows(sqlite); // ab12 not approved, cd34 approved
+  // The covering job: a whole-chapter tn translate of OBA 1, in flight.
+  seedRunningProxyJob(sqlite, { jobId: "chapter-job", upstreamId: "bot-chapter" });
+  sqlite.prepare(`UPDATE pipeline_jobs SET options_json = ? WHERE job_id = 'chapter-job'`).run(JSON.stringify({ resourceType: "tn" }));
+  const env = freshEnv(sqlite, { JWT_SIGNING_KEY: ROUTE_SIGNING, JWT_ISSUER: ROUTE_ISSUER });
+  const app = routeApp();
+  const tok = await editorToken("1", env.WORKSPACE_SLUG);
+  const start = (rowIds) =>
+    withFetch(
+      async () => new Response(JSON.stringify({ jobId: "bot-new", provider: "claude" }), { status: 200 }),
+      async () => app.request("/api/pipelines/start", postReq(tok, { ...START_TRANSLATE, translate: { rowIds } }), env),
+    );
+
+  const draftRedo = await start(["ab12"]);
+  assert.equal(draftRedo.status, 200, await draftRedo.clone().text());
+  const draftBody = await draftRedo.json();
+  assert.equal(draftBody.status, "already_running", "a note the chapter job will redraft is covered by it");
+  assert.equal(draftBody.jobId, "chapter-job");
+
+  const approvedRedo = await start(["cd34"]);
+  assert.equal(approvedRedo.status, 200, await approvedRedo.clone().text());
+  const approvedBody = await approvedRedo.json();
+  assert.notEqual(approvedBody.status, "already_running", "the chapter job would keep the approved note, so the redo starts");
+  assert.notEqual(approvedBody.jobId, "chapter-job");
+  const started = sqlite.prepare(`SELECT options_json FROM pipeline_jobs WHERE job_id = ?`).all(approvedBody.jobId)[0];
+  assert.deepEqual(JSON.parse(started.options_json).rowIds, ["cd34"], "a new row-scoped job was enqueued");
+});
+
 // ── edit_log watermark (#601, migration 0076) ─────────────────────────────
 // Every enqueue path stamps the highest edit_log.id at queue time, so the
 // translate apply can tell an edit made after the enqueue from one made before,
