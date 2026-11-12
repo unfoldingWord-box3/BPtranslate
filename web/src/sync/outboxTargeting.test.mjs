@@ -134,6 +134,16 @@ check(
   "a pending sibling is still threaded the fresh version, as before",
 );
 
+// #754 round 3 (C-F2): a restored NoteCard draft's Save goes out at the older
+// version its text was typed against, so the server's 409 brings up the
+// conflict prompt. Threading it to the version an earlier write of the row
+// (a reorder) just landed at would send it at a version that already carries
+// another person's note, and it would replace that note with a 200.
+check(
+  eligibleForVersionThread({ status: "pending", originPinned: true }) === false,
+  "#754: a Save pinned to the version its text was typed against is not threaded",
+);
+
 // Fatal failed ops keep the pre-#487 behaviour: they're still threaded, so a
 // user-initiated Retry (which does not reset expectedVersion) doesn't fail
 // on a version that's needlessly stale.

@@ -21,6 +21,16 @@ test("Keep mine re-arms the resolved op without its expected_state pin (#883 rev
   assert.equal("expectedState" in rearmOnKeepMine({ ...held, expectedState: null }, "op1", 5), false);
 });
 
+test("Keep mine drops a restored draft's version pin, so later writes of the row thread it again (#754)", () => {
+  // The user chose to write over the note as it is now; the pin only kept the
+  // Save at the older version so the server would ask (a 409). Kept, a write of
+  // the row landing first would leave it behind and the prompt would come back.
+  const held = { id: "op1", status: "conflict", expectedVersion: 1, conflictCurrent: { version: 3 }, originPinned: true, patch: { note: "x" } };
+  const out = rearmOnKeepMine(held, "op1", 3);
+  assert.equal(out.expectedVersion, 3);
+  assert.equal("originPinned" in out, false);
+});
+
 test("Keep mine re-arms the row's other waiting saves as before, pins kept", () => {
   const sibling = { id: "op2", status: "pending", expectedVersion: 3, expectedState: "edited", patch: { note: "y" } };
   const out = rearmOnKeepMine(sibling, "op1", 5);
