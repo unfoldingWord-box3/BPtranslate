@@ -16,7 +16,8 @@ import { encryptApiKey } from "../aiKeyCrypto.ts";
 import { blockViewerWrites } from "../viewerGuard.ts";
 import { makeAssistantRoutes } from "./assistantRoutes.ts";
 import { makeHelpRoutes } from "../help/helpRoutes.ts";
-import { parseActions, buildAssistantSystemPrompt, withScreenContext } from "./assistantChat.ts";
+import { parseActions, buildAssistantSystemPrompt, withScreenContext, assistantMaxOutputFor } from "./assistantChat.ts";
+import { inputTokenBound, worstCaseMicros } from "../help/helpBudget.ts";
 import { makeGeminiHelpAdapter, buildHelpGeminiRequest, makeChatCompletionsHelpAdapter, makeClaudeHelpAdapter } from "../help/helpChat.ts";
 
 const SIGNING = "test-signing-key-that-is-at-least-32-bytes-long";
@@ -317,6 +318,70 @@ test("status: contract shape, canEdit by role, settings toggle", async () => {
   const s2 = await (await send("GET", "/api/assistant/status")).json();
   assert.equal(s2.enabled, true);
   assert.equal(s2.canAsk, true);
+});
+
+// Issue #864: status sized canAsk on one empty note, so with a few cents left
+// Send stayed on while every real (chapter-sized) request came back 429.
+const status = async (send) => (await send("GET", "/api/assistant/status")).json();
+const setSpent = (db, micros) => {
+  db.prepare("INSERT INTO assistant_chat_usage (user_id, day) VALUES (1, ?) ON CONFLICT(user_id, day) DO NOTHING")
+    .run(new Date().toISOString().slice(0, 10));
+  db.prepare("UPDATE assistant_chat_usage SET spent_micros = ?").run(micros);
+};
+
+test("status: canAsk is false (remaining $0) when the money left covers one note but not a full chapter", async () => {
+  const { send, db } = await setup();
+  setSpent(db, 6_900_000); // $0.10 left: above one note's worst case (~$0.04), below a full body's (~$0.30)
+  const s = await status(send);
+  assert.equal(s.canAsk, false);
+  assert.equal(s.remainingUsd, 0);
+  setSpent(db, 6_650_000); // $0.35 left: a full body fits, so the bound is not inflated
+  const s2 = await status(send);
+  assert.equal(s2.canAsk, true);
+  assert.equal(s2.remainingUsd, 0.35);
+});
+
+// The biggest bodies /chat accepts, built to stress re-serialisation: plain
+// ASCII, and quotes, newlines and 3-byte characters (escaped in the body and
+// again in the screen data), plus the longest history (9 messages: roles alternate and the last is a user turn).
+function bigBodies() {
+  const history = [];
+  for (let i = 0; i < 8; i++) history.push({ role: i % 2 ? "assistant" : "user", content: i % 2 ? 'r"\n中'.repeat(200) : 'q"\n中'.repeat(100) });
+  const body = (noteText, count, messages) => ({
+    lang: "en", screen: "rapid_check",
+    context: { book: "ZEC", chapter: 1, notes: Array.from({ length: count }, (_, i) => ({ id: `n${i}`, ref: `1:${i}`, quote: 'a"中', note: noteText, state: "ai_draft", checked: true })) },
+    messages,
+  });
+  const fill = (noteText, messages) => {
+    let n = 1;
+    while (new TextEncoder().encode(JSON.stringify(body(noteText, n + 1, messages))).length <= 200 * 1024) n++;
+    return body(noteText, n, messages);
+  };
+  return [
+    fill("x".repeat(6000), [{ role: "user", content: "Shorten" }]),
+    fill('a"\n中'.repeat(1500), [...history, { role: "user", content: 'q"\n中'.repeat(500) }]),
+  ];
+}
+
+test("status: canAsk is off whenever the largest accepted /chat body would not fit", async () => {
+  for (const b of bigBodies()) {
+    const bytes = new TextEncoder().encode(JSON.stringify(b)).length;
+    assert.ok(bytes > 190 * 1024 && bytes <= 200 * 1024, `body is ${bytes} bytes`);
+    // What /chat reserves for this body (same helpers, same inputs).
+    const texts = [buildAssistantSystemPrompt(b.lang), ...withScreenContext(b.messages, b.context).map((m) => m.content)];
+    const worst = worstCaseMicros("claude", inputTokenBound(texts), assistantMaxOutputFor("claude"));
+
+    const { send, db, calls } = await setup();
+    setSpent(db, 7_000_000 - (worst - 1)); // one micro-dollar short
+    assert.equal((await send("POST", "/api/assistant/chat", { body: b })).status, 429);
+    assert.equal(calls.length, 0);
+    const s = await status(send);
+    assert.equal(s.canAsk, false, `status must not offer Send when this ${bytes}-byte body would be refused`);
+    assert.equal(s.remainingUsd, 0);
+
+    setSpent(db, 7_000_000 - worst); // exactly enough: /chat reserves this body's worst case, no more
+    assert.equal((await send("POST", "/api/assistant/chat", { body: b })).status, 200);
+  }
 });
 
 // -------------------------------------------------------------------- adapters
