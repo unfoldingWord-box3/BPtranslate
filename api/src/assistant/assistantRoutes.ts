@@ -117,6 +117,26 @@ async function assistantEnabled(db: D1Database): Promise<boolean> {
 const usdOf = (micros: number) => micros / 1_000_000;
 const capOf = (env: Env) => capMicrosFromEnv(env.ASSISTANT_DAILY_CAP_USD, DEFAULT_CAP_USD);
 
+/** What /chat reserves for a call with this many input tokens. */
+const worstFor = (provider: string, inputTokens: number) =>
+  worstCaseMicros(provider, inputTokens, assistantMaxOutputFor(provider));
+
+/**
+ * Input-token bound for the largest request /chat accepts (issue #864): the
+ * system prompt, up to MAX_MESSAGES message texts, and at most MAX_BODY_BYTES
+ * of text inside them, since the notes and messages are carried in a body of
+ * at most that size and its JSON keys and escapes only add to it. The
+ * screen-data wrapper is counted on top, so for any body the app sends this is
+ * a few hundred tokens high. (A hand-built body whose quote or state is cut
+ * mid-emoji grows by 2 bytes per cut field and could pass it by a fraction of
+ * a cent; /chat still enforces the cap.)
+ */
+function largestRequestTokens(lang: string): number {
+  const wrapper = withScreenContext([{ role: "user", content: "" }], { book: "", chapter: 0, notes: [] })[0].content;
+  const texts = [buildAssistantSystemPrompt(lang), wrapper, ...Array<string>(MAX_MESSAGES - 1).fill("")];
+  return inputTokenBound(texts) + MAX_BODY_BYTES;
+}
+
 export function makeAssistantRoutes(deps: AssistantRouteDeps = {}) {
   const app = new Hono<AssistantEnv>();
   const now = deps.now ?? (() => new Date());
@@ -145,13 +165,11 @@ export function makeAssistantRoutes(deps: AssistantRouteDeps = {}) {
     const keyUsable = ai.kind === "configured" && (await keyDecrypts(ai, c.env.AI_KEY_WRAPPING_KEY));
     let canAsk = false;
     if (enabled && ai.kind === "configured" && keyUsable && model) {
-      // Below one minimal call's worst case, /chat can only 429: report $0.
-      const system = buildAssistantSystemPrompt(c.req.query("lang") || "en");
-      const minimal = withScreenContext(
-        [{ role: "user", content: "?" }],
-        { book: "", chapter: 0, notes: [{ id: "", ref: "", quote: null, note: "", state: null, checked: false }] },
-      )[0].content;
-      canAsk = left >= worstCaseMicros(ai.provider, inputTokenBound([system, minimal]), assistantMaxOutputFor(ai.provider));
+      // Send stays on only while the money left covers the largest request
+      // /chat accepts (a full chapter), so it never offers a send that comes
+      // back 429 (#864). Below that, report $0. Up to that amount of the day
+      // goes unused on a small request (option A on the issue).
+      canAsk = left >= worstFor(ai.provider, largestRequestTokens(c.req.query("lang") || "en"));
       if (!canAsk) left = 0;
     }
     const role = c.get("role");
@@ -215,7 +233,7 @@ export function makeAssistantRoutes(deps: AssistantRouteDeps = {}) {
     const cap = capOf(c.env);
     const when = now();
     const day = utcDay(when);
-    const worst = worstCaseMicros(ai.provider, inputTokens, maxOutput);
+    const worst = worstFor(ai.provider, inputTokens);
 
     let reserved: boolean;
     try {
