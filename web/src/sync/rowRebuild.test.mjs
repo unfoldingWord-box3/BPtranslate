@@ -20,6 +20,8 @@ import {
   rebuiltRow,
   rowRebuildAction,
 } from "./outboxTargeting.ts";
+import { openRowDropChannel } from "./rowDropChannel.ts";
+import { holdOnDrop, holdOnSave, EMPTY_HOLD } from "./refusedSaveHold.ts";
 
 const target = { kind: "row", rowKind: "tq", id: "q-1", book: "ZEC" };
 const otherRow = { kind: "row", rowKind: "tq", id: "q-2", book: "ZEC" };
@@ -184,4 +186,83 @@ test("B1: of two overlapping rebuilds for a row, only the one started last appli
     const applied = order.filter((name) => g.isCurrent(key, gens[name]));
     assert.deepEqual(applied, ["second"], `returns in order ${order.join(", ")}`);
   }
+});
+
+// Issue #637 item 3: a row op thrown away in one tab (Discard of a failed or
+// conflicted save, keep theirs) must reach the other open tabs, which rebuild
+// their cached row from the server as the discarding tab does. Each tab opens
+// one channel; Node's BroadcastChannel stands in for the browser's.
+function twoTabs() {
+  const heard = { a: [], b: [] };
+  const a = openRowDropChannel((d) => heard.a.push(d));
+  const b = openRowDropChannel((d) => heard.b.push(d));
+  return { a, b, heard, close: () => (a.close(), b.close()) };
+}
+const tick = () => new Promise((r) => setTimeout(r, 20));
+
+test("cross-tab: a discarded row save reaches the other tab, which rebuilds that row", async () => {
+  const tabs = twoTabs();
+  try {
+    const current = { ...server, version: 3 };
+    tabs.a.announce(op("op-1", { response: "ABC" }, { status: "conflict", conflictCurrent: current }));
+    await tick();
+    assert.deepEqual(tabs.heard.b, [
+      { target, action: "patch", patch: { response: "ABC" }, conflictCurrent: current },
+    ]);
+    assert.deepEqual(tabs.heard.a, [], "the discarding tab already rebuilt from its own drop");
+  } finally {
+    tabs.close();
+  }
+});
+
+test("cross-tab: the other tab's editor ends its hold on the discarded save, as a local Discard does", async () => {
+  const tabs = twoTabs();
+  try {
+    tabs.a.announce(op("op-1", { response: "ABC" }, { status: "failed", lastError: "http 422" }));
+    await tick();
+    const [drop] = tabs.heard.b;
+    const held = { sent: [], held: [{ patch: { response: "ABC" }, version: 2, fields: { response: "ABC" } }] };
+    assert.deepEqual(holdOnDrop(held, drop, target), { state: EMPTY_HOLD, released: { response: "ABC" } });
+    // A save of other text in that tab is not this op: its watch stays.
+    const mine = holdOnSave(EMPTY_HOLD, { response: "MINE" }, 2);
+    assert.equal(holdOnDrop(mine, drop, target).state, mine);
+  } finally {
+    tabs.close();
+  }
+});
+
+test("cross-tab: a discarded delete carries its action, so the other tab may put the row back", async () => {
+  const tabs = twoTabs();
+  try {
+    tabs.a.announce({ ...op("op-d", undefined), action: "delete", status: "failed", lastError: "http 422" });
+    await tick();
+    assert.equal(tabs.heard.b.length, 1);
+    assert.equal(tabs.heard.b[0].action, "delete");
+  } finally {
+    tabs.close();
+  }
+});
+
+test("cross-tab: verse ops and malformed messages are ignored; no BroadcastChannel is a no-op", async () => {
+  const tabs = twoTabs();
+  const raw = new BroadcastChannel("be-row-drop");
+  try {
+    tabs.a.announce({ ...op("op-v", { text: "x" }), target: { kind: "verse", book: "ZEC", chapter: 1, verse: 1, bibleVersion: "ult" } });
+    raw.postMessage({ target: { kind: "row", rowKind: "nope", id: "q-1", book: "ZEC" }, action: "patch", patch: {} });
+    raw.postMessage({ target: { kind: "row", rowKind: "tq", id: 7, book: "ZEC" }, action: "patch", patch: {} });
+    raw.postMessage("hello");
+    await tick();
+    assert.deepEqual(tabs.heard.b, []);
+  } finally {
+    raw.close();
+    tabs.close();
+  }
+  const none = openRowDropChannel(() => assert.fail("never called"), () => null);
+  none.announce(op("op-1", { response: "ABC" }));
+  none.close();
+  const throws = openRowDropChannel(() => undefined, () => {
+    throw new Error("blocked");
+  });
+  throws.announce(op("op-1", { response: "ABC" }));
+  throws.close();
 });
