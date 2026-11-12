@@ -52,29 +52,69 @@ function saveButton(page: Page, id: string) {
   return rowBox(page, id).locator('button:has([data-testid="SaveIcon"])');
 }
 
-// Every PATCH of the row is answered with a 409 that carries no current row:
-// the outbox holds it as a conflict it cannot re-arm, and the status bar
-// offers only to discard it.
-async function conflictPatches(context: BrowserContext, id: string): Promise<() => number> {
+// The row draft's patch as stored in IndexedDB (null when there is none),
+// searched across every "bible-editor-drafts*" database (as in
+// refused-save-rebuilds-row.spec.ts).
+function readDraftPatch(page: Page, key: string) {
+  return page.evaluate(async (k) => {
+    try {
+      const dbs = (await indexedDB.databases()).filter((d) => (d.name ?? "").startsWith("bible-editor-drafts"));
+      for (const meta of dbs) {
+        const db = await new Promise<IDBDatabase>((resolve, reject) => {
+          const req = indexedDB.open(meta.name!, meta.version);
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error);
+        });
+        try {
+          if (!db.objectStoreNames.contains("drafts")) continue;
+          const rec = await new Promise<{ payload?: { patch?: Record<string, unknown> } } | undefined>(
+            (resolve, reject) => {
+              const req = db.transaction("drafts", "readonly").objectStore("drafts").get(k);
+              req.onsuccess = () => resolve(req.result);
+              req.onerror = () => reject(req.error);
+            },
+          );
+          if (rec) return rec.payload?.patch ?? {};
+        } finally {
+          db.close();
+        }
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }, key);
+}
+
+// Every PATCH of the row is answered with `answer`. A 409 that carries no
+// current row is held as a conflict the outbox cannot re-arm (the status bar
+// offers only to discard it); a 422 is a refusal (a failed edit).
+const CONFLICT = { status: 409, body: { error: "version_mismatch" } };
+const REFUSED = { status: 422, body: { error: "validation_failed" } };
+async function answerPatches(
+  context: BrowserContext,
+  id: string,
+  answer: { status: number; body: unknown },
+): Promise<() => number> {
   let n = 0;
   await context.route(`**/api/rows/tq/${id}**`, async (route, request) => {
     if (request.method() !== "PATCH") return route.continue();
     n++;
-    await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "version_mismatch" }) });
+    await route.fulfill({ status: answer.status, contentType: "application/json", body: JSON.stringify(answer.body) });
   });
   return () => n;
 }
 
-// Save `typed` in tab B (a 409), then open tab A on the same chapter, where
-// the status bar lists the conflict from the shared outbox.
-async function conflictInB(context: BrowserContext, tq: TqRow, typed: string) {
+// Save `typed` in tab B (a 409, or a 422 with `answer`), then open tab A on
+// the same chapter, where the status bar lists the edit from the shared outbox.
+async function conflictInB(context: BrowserContext, tq: TqRow, typed: string, answer = CONFLICT) {
   const b = await context.newPage();
-  const seen = await conflictPatches(context, tq.id);
+  const seen = await answerPatches(context, tq.id, answer);
   await openQuestions(b, tq.verse);
   await questionField(b, tq.id).fill(typed);
   await saveButton(b, tq.id).click();
   await expect.poll(seen, { message: "the PATCH should reach the route" }).toBeGreaterThan(0);
-  await expect(b.getByText(/^1 conflict$/).first()).toBeVisible();
+  await expect(b.getByText(answer === CONFLICT ? /^1 conflict$/ : /^1 failed$/).first()).toBeVisible();
   const a = await context.newPage();
   await openQuestions(a, tq.verse);
   return { a, b };
@@ -133,10 +173,43 @@ test("tab B keeps text typed after the conflicted save when tab A discards that 
   await reread;
   await b.waitForTimeout(500);
 
-  // Tab B still shows the newer typing, as unsaved against the server's row.
+  // Tab B still shows the newer typing, as unsaved against the server's row,
+  // and the drafts store still holds it.
   await expect(questionField(b, tq.id)).toHaveValue(newer);
   await expect(saveButton(b, tq.id)).toBeEnabled();
+  await expect
+    .poll(() => readDraftPatch(b, `row:tq:ZEC:${tq.id}`))
+    .toEqual(expect.objectContaining({ question: newer }));
   if (SHOTS) await b.screenshot({ path: `${SHOTS}/cross-tab-discard-keeps-typing-tab-b.png` });
+
+  await context.close();
+});
+
+test("a refused save typed in tab B and discarded in tab A: tab B lets go of the refused text", async ({ browser }) => {
+  // Tab B's editor holds a refused save's text on screen as unsaved
+  // (refusedSaveHold.ts). Discarding that failed edit in tab A ends the hold
+  // in tab B as a local Discard does: the server's text comes back, and the
+  // drafts store (shared, settled by tab A) holds nothing for the row.
+  test.setTimeout(90_000);
+  const tq = await pickRow(2);
+  const key = `row:tq:ZEC:${tq.id}`;
+  const server = tq.question ?? "";
+  const { context } = await newUserContext(browser, "cross-tab-discard-failed");
+  const typed = `CROSS TAB REFUSED ${Date.now()}`;
+  const { a, b } = await conflictInB(context, tq, typed, REFUSED);
+  await expect(questionField(b, tq.id)).toHaveValue(typed);
+  await expect(saveButton(b, tq.id), "the refused text shows as unsaved").toBeEnabled();
+
+  await a.bringToFront();
+  await a.getByText(/^1 failed$/).first().click();
+  const failedLine = a.getByText("http 422", { exact: true }).locator("xpath=../..");
+  await failedLine.locator('button:has([data-testid="DeleteOutlineIcon"])').click();
+  await a.getByRole("dialog").getByRole("button", { name: /^discard$/i }).click();
+
+  await expect(questionField(b, tq.id)).toHaveValue(server);
+  await expect(saveButton(b, tq.id)).toHaveCount(0);
+  await expect.poll(() => readDraftPatch(b, key), { message: "Discard should leave no draft" }).toBeNull();
+  if (SHOTS) await b.screenshot({ path: `${SHOTS}/cross-tab-discard-failed-tab-b.png` });
 
   await context.close();
 });
