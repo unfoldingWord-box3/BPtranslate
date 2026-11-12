@@ -268,6 +268,7 @@ interface Props {
 
 // The server refused a note action because an AI translation will write the
 // note (409 chapter_locked, issue #602) — a stale tab that missed the lock.
+// Approving a question gets the same 409 while any run holds its chapter (#752).
 function isNoteTranslateLocked(e: unknown): boolean {
   return e instanceof ApiError && isChapterLockedBody(e.body);
 }
@@ -1261,6 +1262,11 @@ export function Shell({
         const updated = await api.validateQuestion(id, book, value);
         applyLocalRowReplacement("tq", updated);
       } catch (e) {
+        // An AI run holds this chapter; approving waits for it to finish (#752).
+        if (isNoteTranslateLocked(e)) {
+          pushPipelineToast(t("shell.questionLockedByRun"), "error");
+          return;
+        }
         const msg = e instanceof Error ? e.message : t("appShell.common.unknownError");
         pushPipelineToast(t("shell.couldntApproveNote", { message: msg }), "error");
       }

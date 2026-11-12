@@ -123,7 +123,7 @@ import {
   type PendingRowSave,
 } from "../../sync/draftSaveState";
 import { onOutboxDrop, onOutboxResult, outbox, type OutboxOp } from "../../sync/outbox";
-import { api, ApiError, type ChapterLockedBody, type TqRow } from "../../sync/api";
+import { api, ApiError, isChapterLockedBody, type ChapterLockedBody, type TqRow } from "../../sync/api";
 import { SCRIPTURE_FONT_STACK } from "../../theme";
 
 export interface TranslateQuestionsScreenProps extends FlowScreenContext {
@@ -1061,6 +1061,8 @@ export default function TranslateQuestionsScreen({
       if (hasDiff && !(await saveDraft(row))) return;
       const updated = await api.validateQuestion(row.id, book, true);
       applyLocalRowReplacement("tq", updated);
+      // The server accepted it, so no run holds the chapter any more.
+      setChapterLock(null);
       setStatuses((prev) => ({ ...prev, [row.id]: "approved" }));
       setEditingField(null);
       setToast(t("translation.stateApproved"));
@@ -1068,6 +1070,11 @@ export default function TranslateQuestionsScreen({
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) {
         say(t("flowQuestions.approveNeedsDraft"));
+      } else if (err instanceof ApiError && isChapterLockedBody(err.body)) {
+        // An AI run holds this chapter; the server refuses the approval until
+        // it finishes (#752), the same rule as saving an edit.
+        setChapterLock(err.body);
+        say(t("shell.questionLockedByRun"));
       } else {
         say(
           t("flowQuestions.approveFailed", {
@@ -1354,7 +1361,7 @@ export default function TranslateQuestionsScreen({
     <>
         {chapterLock && (
           // Unlike notes, tq PATCH is NOT lock-exempt: saves are refused with a
-          // 409 while a run holds the chapter. Approve still lands.
+          // 409 while a run holds the chapter, and so is Approve (#752).
           <LockBanner pipelineType={chapterLock.pipelineType} startedAt={chapterLock.startedAt} />
         )}
 
