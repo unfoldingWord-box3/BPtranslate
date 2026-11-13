@@ -24,6 +24,7 @@ import {
   isShaddaVowelOnly,
   MAX_LESSONS,
   LESSONS_HEADING,
+  capText,
 } from "./lessons.ts";
 import { Hono } from "hono";
 import { encryptApiKey } from "./aiKeyCrypto.ts";
@@ -437,4 +438,103 @@ test("routes: admin reads the Off default, switches on and off; editors cannot",
   const editor = appFor(f.env, "editor");
   assert.equal((await editor("/api/translation-memory/lessons", { method: "GET" })).status, 403);
   assert.equal((await put(true, editor)).status, 403);
+});
+
+// ── review round (#817) ─────────────────────────────────────────────────────
+
+test("a failed run does not advance the watermark: the next night mines the same approvals again", async () => {
+  const f = await fresh();
+  f.setReply(() => ({ text: "garbage", usage: { inputTokens: 100, outputTokens: 20 }, stopReason: "end_turn" }));
+  assert.equal((await f.run()).status, "failed");
+  f.setReply(null);
+  const out = await f.run(NIGHT2);
+  assert.equal(out.status, "ok", "no new approval, but the failed night's corrections are retried");
+  assert.equal(f.calls.length, 2);
+  assert.equal((await f.run(NIGHT2 + 86400)).reason, "no_new_approvals", "a successful run does advance it");
+});
+
+test("a run killed mid-way (row left 'running') is marked failed by the next night's run", async () => {
+  const f = await fresh();
+  f.sqlite
+    .prepare(`INSERT INTO lesson_runs (night, started_at, approvals_through, status) VALUES ('2026-11-01', 1, 999999, 'running')`)
+    .run();
+  const out = await f.run();
+  assert.equal(out.status, "ok", "the dead run's watermark does not block tonight");
+  const dead = f.sqlite.prepare(`SELECT status, failure_reason, finished_at FROM lesson_runs WHERE night = '2026-11-01'`).get();
+  assert.equal(dead.status, "failed");
+  assert.equal(dead.failure_reason, "interrupted");
+  assert.ok(dead.finished_at > 0);
+});
+
+test("the outcome says whether the stored set changed", async () => {
+  const f = await fresh();
+  assert.equal((await f.run()).changed, true);
+  f.approveMore();
+  const same = f.calls.length;
+  f.setReply(() => ({
+    text: `${BEGIN_OUTPUT}\n{"lessons": [], "reversed": []}\n${END_OUTPUT}`,
+    usage: { inputTokens: 10, outputTokens: 5 },
+    stopReason: "end_turn",
+  }));
+  const out = await f.run(NIGHT2);
+  assert.equal(f.calls.length, same + 1);
+  assert.equal(out.status, "ok");
+  assert.equal(out.changed, false, "same lessons kept: nothing new to export");
+});
+
+test("evidence is clamped to the notes compared in the run", async () => {
+  const f = await fresh();
+  f.setReply(() => ({
+    text: `${BEGIN_OUTPUT}\n{"lessons": [{"id": null, "lesson": "Big claim.", "before": "a", "after": "b", "evidence": 1e300}], "reversed": []}\n${END_OUTPUT}`,
+    usage: { inputTokens: 10, outputTokens: 5 },
+    stopReason: "end_turn",
+  }));
+  await f.run();
+  const [l] = await loadLessonsForRender(f.env.DB);
+  // Notes compared in MRK 2–3: 7 + 6 يمكنك notes and 4 shadda notes; the
+  // bulk-approved and no-draft notes are not compared.
+  assert.equal(l.evidence, 17);
+  assert.doesNotMatch(renderLessonsSection([l]), /e\+/);
+});
+
+test("PUT on is refused (409) when lessons cannot run; off is always allowed; page and night job agree", async () => {
+  const f = await fresh({ provider: "openai", model: "gpt-5.5", enabled: false });
+  const admin = appFor(f.env, "admin");
+  const put = (enabled) =>
+    admin("/api/translation-memory/lessons", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled }) });
+  let res = await put(true);
+  assert.equal(res.status, 409);
+  assert.deepEqual(await res.json(), { error: "lessons_unavailable", reason: "provider_not_supported" });
+  assert.equal(f.sqlite.prepare(`SELECT COUNT(*) AS n FROM lesson_settings WHERE enabled = 1`).get().n, 0);
+  assert.equal((await put(false)).status, 200);
+
+  // A key that no longer decrypts (wrapping key rotated): the page says so, PUT refuses, the job does not call.
+  const g = await fresh({ enabled: false });
+  g.env.AI_KEY_WRAPPING_KEY = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64");
+  const admin2 = appFor(g.env, "admin");
+  const state = await (await admin2("/api/translation-memory/lessons", { method: "GET" })).json();
+  assert.equal(state.availability.available, false);
+  assert.equal(state.availability.reason, "ai_provider_key_decrypt_failed");
+  res = await admin2("/api/translation-memory/lessons", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: true }) });
+  assert.equal(res.status, 409);
+  await setLessonsEnabled(g.env.DB, true, 9);
+  assert.deepEqual(await g.run(), { ran: false, reason: "ai_provider_key_decrypt_failed" });
+  assert.equal(g.calls.length, 0);
+});
+
+test("shadda: only a vowel present on one side and absent on the other is a preference", () => {
+  assert.equal(isShaddaVowelOnly("إنَّ", "إنّ"), true, "vowel dropped");
+  assert.equal(isShaddaVowelOnly("ربّ", "ربُّ"), true, "vowel added");
+  assert.equal(isShaddaVowelOnly("الربُّ", "الربَّ"), false, "damma → fatha on the shadda is a grammar fix");
+  assert.equal(isShaddaVowelOnly("عدوٌّ", "عدوًّ"), false, "tanween swap on the shadda is a real change");
+  assert.equal(isShaddaVowelOnly("أنَّ قال", "أنّ يقول"), false, "another word changed too");
+});
+
+test("capText counts code points and never splits a letter from its marks", () => {
+  assert.equal(capText("abc", 5), "abc");
+  assert.equal(capText("abcdef", 3), "abc…");
+  const marked = "بَّ".repeat(10); // 3 code points each: letter + two marks
+  assert.equal(capText(marked, 4), "بَّ…");
+  assert.equal(capText(marked, 6), "بَّبَّ…");
+  assert.equal(capText("😀".repeat(5), 2), "😀😀…", "no lone surrogate");
 });
