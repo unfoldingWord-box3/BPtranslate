@@ -20,7 +20,7 @@ import {
 } from "./api";
 import { backoffMs } from "./backoff";
 import { isSortOrderOnlyPatch, wouldAutoHeal } from "./rowConflict";
-import { deletesOnFatal, healSettlesAsSaved, rearmOnKeepMine, resultFor409 } from "./conflict409.ts";
+import { deletesOnFatal, healSettlesAsSaved, rearmOnKeepMine, rearmsOnKeepMine, resultFor409 } from "./conflict409.ts";
 import { isLaneFrozen, laneFreezeReason } from "./laneFreeze";
 import { ROW_DROP_CHANNEL_BASE, hasQueuedTwin, openRowDropChannel, type RowDrop } from "./rowDropChannel.ts";
 import {
@@ -567,7 +567,8 @@ export const outbox = {
     const all = (await tx.store.getAll()) as OutboxOp[];
     for (const o of all) {
       if (targetKey(o.target) !== key) continue;
-      if (o.status === "conflict" || o.status === "pending") {
+      // Not another op pinned to a restored draft's older copy (#754).
+      if (rearmsOnKeepMine(o, opId)) {
         // The resolved op also drops its expected_state pin (#883 review A2).
         await tx.store.put(rearmOnKeepMine(o, opId, newExpectedVersion));
       }

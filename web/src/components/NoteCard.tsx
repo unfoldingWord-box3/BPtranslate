@@ -65,7 +65,7 @@ import {
 } from "../sync/draftSaveState";
 import { onOpDropped, onOutboxResult, outbox, type DroppedOp, type OutboxOp } from "../sync/outbox";
 import { useRefusedSaveHold } from "../hooks/useRefusedSaveHold";
-import { isNoteCardSaveOf, isOwnSaveLanded, type NoteSaveSent } from "../sync/noteOrigin";
+import { isNoteCardSaveOf, isOwnSaveLanded, isWriteFromOrigin, type NoteSaveSent } from "../sync/noteOrigin";
 import { isAquiferDraftRow } from "./flows/translateShared";
 import { noteLockedReadOnly } from "../lib/chapterLock";
 
@@ -585,19 +585,34 @@ function NoteCardInner({
   // note with a 200. Kept apart from `saved`, it survives that rebase (and a
   // remount, through the draft), so the Save goes out at the old version and
   // the server's 409 brings up the conflict prompt. Set when a draft is first
-  // written or restored; moved to the landed row by the card's own saves only
-  // (noteOrigin.ts): their outbox result, or the row moving to what the last
-  // one sent when another tab drained it; cleared by Undo and when the draft
-  // is cleared.
+  // written or restored; moved to the landed row by a write the server took
+  // at its version (noteOrigin.ts): the card's own saves (their outbox result,
+  // or the row moving to what the last one sent when another tab drained it)
+  // and this tab's other writes of the row sent at that version (a quote
+  // build). Let go by Undo and whenever the card holds no unsaved text (the
+  // draft-write effect), so it never outlives the text it was the copy for.
   const originRef = useRef<{
     quote: string | null;
     note: string | null;
     support_reference: string | null;
     version: number;
   } | null>(null);
-  // The card's last Save as sent (patch and If-Match), for isOwnSaveLanded.
+  // The card's last Save as sent (patch, If-Match, copy), for isOwnSaveLanded.
   const lastSentRef = useRef<NoteSaveSent | null>(null);
   const [savePendingVersion, setSavePendingVersion] = useState<number | null>(null);
+  // A Save sent at an older copy than the row's (#754 round 4, item 2), until
+  // it can no longer land. While it is set, the Save gate below opens only on
+  // that op's own end, never on the row moving: the op waits in conflict at
+  // the old version whatever the row does, and a second Save sent meanwhile
+  // would go out at that old version too, so "resolve" would send both.
+  // `pinnedSave` mirrors it for render.
+  const pinnedSaveRef = useRef<PendingRowSave | null>(null);
+  const [pinnedSave, setPinnedSave] = useState(false);
+  const releasePinnedSave = () => {
+    pinnedSaveRef.current = null;
+    setPinnedSave(false);
+    setSavePendingVersion(null);
+  };
   if (row.version !== saved.version) {
     setSaved({
       quote: row.quote,
@@ -616,8 +631,8 @@ function NoteCardInner({
   // without landing (fatal, "locked", discarded) clears it in the save-end
   // listener below instead, since the version never moves (#660). Adjusted during
   // render, in the same pass as the `saved` rebase above, so both react to the
-  // version bump together.
-  if (savePendingVersion !== null && row.version > savePendingVersion) {
+  // version bump together. Not for a pinned Save (pinnedSaveRef above).
+  if (savePendingVersion !== null && !pinnedSave && row.version > savePendingVersion) {
     setSavePendingVersion(null);
   }
 
@@ -877,7 +892,14 @@ function NoteCardInner({
     // else changed meanwhile comes back as a conflict instead of a 200.
     const origin = originRef.current;
     const stale = origin !== null && origin.version !== row.version ? origin : null;
-    lastSentRef.current = { patch, from: stale ? stale.version : row.version };
+    const base = stale ?? savedRef.current;
+    lastSentRef.current = {
+      patch,
+      from: stale ? stale.version : row.version,
+      base: { quote: base.quote, note: base.note, support_reference: base.support_reference },
+    };
+    pinnedSaveRef.current = stale ? sentRef.current : null;
+    setPinnedSave(stale !== null);
     // draftRef: this card made the save, so a refused one is marked on its
     // draft and outlives an AI apply (#724; refusedRowDraft.ts).
     onSave(patch, {
@@ -1017,7 +1039,15 @@ function NoteCardInner({
     onChange(patch);
     sentRef.current = sentSave(patch);
     noteSave(patch, row.version);
-    lastSentRef.current = { patch, from: row.version };
+    lastSentRef.current = {
+      patch,
+      from: row.version,
+      base: {
+        quote: savedRef.current.quote,
+        note: savedRef.current.note,
+        support_reference: savedRef.current.support_reference,
+      },
+    };
     onSave(patch, { restoredFromVersion: fromVersion, draftRef: { chapter: row.chapter, verse: row.verse } });
   };
 
@@ -1199,6 +1229,9 @@ function NoteCardInner({
     const target = { rowKind: "tn", id: row.id, book: row.book };
     const end = (op: DroppedOp, rerun: boolean) => {
       endedOpsRef.current.add(op.id);
+      // A pinned Save that ended (landed, refused, discarded) opens the gate.
+      const pinned = pinnedSaveRef.current;
+      if (pinned && isEditorsPendingSave(pinned, op, target)) releasePinnedSave();
       const sent = sentRef.current;
       if (!sent || !isEditorsPendingSave(sent, op, target)) return;
       sentRef.current = null;
@@ -1210,12 +1243,20 @@ function NoteCardInner({
       }
     };
     const offResult = onOutboxResult((op, result) => {
-      // A NoteCard save of the row landed (#754): unsaved text still in the
-      // card was typed on top of it, so it is now typed against the landed
-      // row, not the copy before it (else the next Save would go out at the
-      // old version and conflict with the translator's own save). Any other
-      // write to the row leaves the copy alone (review A1, isNoteCardSaveOf).
-      if (result.kind === "ok" && originRef.current !== null && isNoteCardSaveOf(op, { id: row.id, book: row.book })) {
+      // A NoteCard save of the row landed (#754), or another write of it that
+      // went out at the copy's version (a quote build, round 4 item 1):
+      // unsaved text still in the card was typed on top of it, so it is now
+      // typed against the landed row, not the copy before it (else the next
+      // Save would go out at the old version and conflict with the
+      // translator's own write). A write sent at a newer version leaves the
+      // copy alone (review A1: a reorder after another person's save).
+      const origin = originRef.current;
+      const ids = { id: row.id, book: row.book };
+      if (
+        result.kind === "ok" &&
+        origin !== null &&
+        (isNoteCardSaveOf(op, ids) || isWriteFromOrigin(op, ids, origin.version))
+      ) {
         const landed = result.updated as Partial<TnRow> | null | undefined;
         originRef.current =
           landed && typeof landed.version === "number"
@@ -1243,6 +1284,19 @@ function NoteCardInner({
   // draft records the moved copy. Version changes only: a same-version row
   // change is this card's own optimistic apply, not the server.
   useEffect(() => {
+    // A pinned Save another tab sent and settled ends without this tab
+    // hearing it: once its op is gone from the outbox, open the gate.
+    const pinned = pinnedSaveRef.current;
+    if (pinned !== null) {
+      const target = { rowKind: "tn", id: row.id, book: row.book };
+      void outbox
+        .listWithUncommitted()
+        .then((ops) => {
+          if (pinnedSaveRef.current !== pinned) return;
+          if (!ops.some((o) => isEditorsPendingSave(pinned, o, target))) releasePinnedSave();
+        })
+        .catch(() => {});
+    }
     const origin = originRef.current;
     if (origin === null || origin.version >= row.version) return;
     if (!isOwnSaveLanded(lastSentRef.current, row as unknown as { version: number } & Record<string, unknown>)) return;
@@ -1303,16 +1357,17 @@ function NoteCardInner({
       // save of this card's stays as the draft (#724): once an AI apply moves
       // the row on, the card shows the AI note but the refused text is still
       // unsaved. `current` is in the form flushPending sends.
-      void drafts
-        .clearRowUnlessHeld(draftKey, {
-          quote: toTsv(quote),
-          note: toTsv(note),
-          support_reference: supportRef,
-        })
-        .then((cleared) => {
-          // No draft left: later typing starts from the row as it is then (#754).
-          if (cleared) originRef.current = null;
-        });
+      // No unsaved text on the card: let go of the copy it was typed against
+      // (#754), so later typing starts from the row as it is then. Done here,
+      // not when the store's clear resolves: the store may already have
+      // deleted the draft itself (a save that landed), and a draft the store
+      // keeps for a refused save keeps its own version for a remount.
+      originRef.current = null;
+      void drafts.clearRowUnlessHeld(draftKey, {
+        quote: toTsv(quote),
+        note: toTsv(note),
+        support_reference: supportRef,
+      });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [

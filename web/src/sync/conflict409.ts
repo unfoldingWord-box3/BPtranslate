@@ -107,14 +107,31 @@ export function healSettlesAsSaved(
 }
 
 /**
+ * Whether Keep mine on op `resolvedId` re-arms `o`, an op of the same row
+ * (outbox.resolveConflict): the resolved op, and the row's other conflicted or
+ * waiting saves so one resolution does not cascade into N prompts. Not another
+ * op still pinned to the older copy a restored NoteCard draft was typed
+ * against (#754 round 4): the user has not chosen to write that one over the
+ * note as it is now, so it keeps its version and its own conflict prompt.
+ */
+export function rearmsOnKeepMine(
+  o: { id: string; status: string; originPinned?: boolean },
+  resolvedId: string,
+): boolean {
+  if (o.status !== "conflict" && o.status !== "pending") return false;
+  return o.id === resolvedId || !o.originPinned;
+}
+
+/**
  * One op of the row a user resolved with Keep mine (outbox.resolveConflict),
  * re-armed at the server's version. The resolved op also loses its
  * expected_state pin (#883 review A2): the user chose to write over the note
  * as it is now, and the pin would only get the resend refused (state_mismatch)
  * and deleted, so the choice would vanish. The row's other waiting saves keep
- * theirs. Every re-armed op also loses its originPinned mark (#754): it is now
+ * theirs. A re-armed op also loses its originPinned mark (#754): it is now
  * at the server's version by the user's choice, so a write of the row landing
- * first threads it again instead of bringing the prompt back. Mutates and
+ * first threads it again instead of bringing the prompt back. Another op's
+ * Keep mine does not re-arm a pinned op at all (rearmsOnKeepMine). Mutates and
  * returns `o`.
  */
 export function rearmOnKeepMine<
