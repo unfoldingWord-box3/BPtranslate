@@ -53,16 +53,19 @@ export type ValidatedTqRow = {
  * asserted in contextExport.test.mjs.
  *
  * `translation_state = 'validated'` alone is NOT enough to call a row
- * human-approved gold. Two code paths write that state in BULK, about a body of
- * imported work rather than about any row someone actually read:
- *   * the admin bulk review-state sweep (reviewState.ts, issue #296), and
- *   * the Aquifer importer's heuristic approve (aquiferImport.ts, issue #393).
- * Both stamp `admin_bulk_state` (migration 0071), and `admin_bulk_state IS NULL`
+ * human-approved gold. Three code paths write that state in BULK, about a body
+ * of work rather than about any row someone actually read:
+ *   * the admin bulk review-state sweep (reviewState.ts, issue #296),
+ *   * the Aquifer importer's heuristic approve (aquiferImport.ts, issue #393), and
+ *   * the web's Approve-all buttons, which send `bulk: true` to
+ *     POST /api/rows/{tn,tq}/:id/validate and stamp the AI drafts nobody
+ *     changed (rows.ts BULK_APPROVAL_CLAUSE, #833).
+ * All stamp `admin_bulk_state` (migration 0071), and `admin_bulk_state IS NULL`
  * here is what keeps them out of the training set. A row approved one-at-a-time
- * through POST /api/rows/{tn,tq}/:id/validate carries no stamp and is gold, as
- * before.
+ * through the same route without `bulk` (including Rapid check's checked-range
+ * Approve) carries no stamp and is gold.
  *
- * If you add a THIRD bulk approver, stamp it too — or this comment becomes a
+ * If you add another bulk approver, stamp it too — or this comment becomes a
  * lie and unreviewed rows start teaching the model.
  */
 export const VALIDATED_TN_EXAMPLES_SQL = `SELECT id, book, ref_raw, support_reference, quote, note, updated_at

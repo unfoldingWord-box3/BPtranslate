@@ -27,7 +27,7 @@ Each item has a chip for its state.
 ## Review and approve one note
 1. Edit the **Quote**, the support reference and the note text in the work card.
 2. Select **Save** to keep your changes. Select **Approve** to approve the item. A note that has never had an AI draft cannot be approved yet.
-3. To approve many at once, select **Approve all notes (N)** (or **Approve all questions (N)**) above the queue. If some fail, the message tells you which one failed first.
+3. To approve many at once, select **Approve all notes (N)** (or **Approve all questions (N)**) above the queue. If some fail, the message tells you which one failed first. AI drafts nobody changed that are approved this way are not used as AI examples, because nobody read them one by one. Items someone edited still count. To make an unchanged draft count, approve it on its own. Approvals made with Approve all before this change still count.
 
 More tools on a note card:
 - **✨ Suggest** asks the AI for a draft. The draft goes into the editor. Select **Save** to keep it. It needs a quote and a support reference.

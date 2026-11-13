@@ -1148,16 +1148,20 @@ function coerceBitValue(raw: 0 | 1 | boolean): 0 | 1 {
 // that put version and state back where they were (bpt_bulk_set_state, #670
 // part c). null = no check.
 // source: edit_log.source for the audit entry (editSource).
-// clearBulkStamp: an approval also ends a bulk approval (HAND_APPROVAL_CLAUSE).
-// The validate routes set it for a person approving one row; Approve-all loops
-// send `bulk: true` and the route leaves it off. Absent = false.
+// bulkStamp: what an approval does to admin_bulk_state (bulkStampClause).
+// "clear" for a person approving one row, "stamp" for an Approve-all loop
+// (`bulk: true`; stamps only an unchanged AI draft, see BULK_APPROVAL_CLAUSE),
+// "keep" when no person is on record. Absent = "keep".
+// An un-approve never touches the stamp.
 interface StateWriteOpts {
   expected: number | null;
   expectedState: TranslationStatePin | null;
   expectedUpdatedAt: number | null;
   source: "chat" | null;
-  clearBulkStamp?: boolean;
+  bulkStamp?: BulkStampMode;
 }
+
+type BulkStampMode = "stamp" | "clear" | "keep";
 
 const TRANSLATION_STATES = ["ai_draft", "edited", "validated"] as const;
 type TranslationStatePin = (typeof TRANSLATION_STATES)[number];
@@ -1194,16 +1198,40 @@ function statePins(opts: StateWriteOpts, first: number, trash: boolean): { sql: 
 // reimport without the stamp: isReimportableRow (reimportClassify.ts) never
 // lets the reimport overwrite a 'validated' row.
 //
-// Approve-all in the review UI is itself a bulk approver: it loops rows through
-// this route with `bulk: true`, which keeps any stamp. An approval with no
-// signed-in user also keeps it (no person is on record as having read the row).
+// Approve-all in the review queue and the classic editor is itself a bulk
+// approver (issue #833, option B: "if it seems pretty clear they've been seen,
+// go with it"). It loops rows through this route with `bulk: true`. An AI draft
+// nobody changed (state 'ai_draft' before the approval) was never clearly seen,
+// so the approval STAMPS it the way the admin sweep does (reviewState.ts
+// decision 3): the stamp holds the state the approval displaced ('ai_draft'),
+// and an existing stamp keeps its first value. An 'edited' row was changed by a
+// person, so it counts like a single approval and gets no new stamp; an
+// existing import/sweep stamp is left as it is, not cleared. A row that is
+// already 'validated' is left as it is too, so a stale Approve-all list cannot
+// turn a hand-approved example back into a bulk one.
+// Rapid check's checked-range Approve is a hand approval: each note sits on
+// screen beside its English source, and it sends no `bulk` flag. An approval
+// with no signed-in user keeps any stamp (no person is on record as having read
+// the row).
 const HAND_APPROVAL_CLAUSE = ", admin_bulk_state = NULL";
+const BULK_APPROVAL_CLAUSE =
+  ", admin_bulk_state = CASE WHEN translation_state = 'ai_draft'" +
+  " THEN COALESCE(admin_bulk_state, translation_state) ELSE admin_bulk_state END";
+
+// The admin_bulk_state SET clause for an approval. SQLite evaluates every SET
+// right-hand side against the row's ORIGINAL values, so translation_state here
+// is the state before the approval.
+function bulkStampClause(mode: BulkStampMode | undefined): string {
+  if (mode === "clear") return HAND_APPROVAL_CLAUSE;
+  if (mode === "stamp") return BULK_APPROVAL_CLAUSE;
+  return "";
+}
 
 // Set the translation_state on a target-language tN row (multilingual review
 // flow; PIPELINE-SPEC §4.1). Like setTnBit, this is a state flip, not a
 // content edit: it does NOT bump `version` (in-flight If-Match preconditions
 // stay valid) and leaves `updated_by` alone; a hand approval also clears a bulk
-// stamp (HAND_APPROVAL_CLAUSE). The audit action ('validate' |
+// stamp and an Approve-all approval sets one (bulkStampClause). The audit action ('validate' |
 // 'unvalidate') is written with source=NULL ('chat' when a chat reviewer
 // approved) — an explicit human approval is a human edit_log entry, which is
 // also what clears the 'ai_pipeline' chip. The
@@ -1229,7 +1257,7 @@ async function setTnTranslationState(
   // DCS as a legacy row. Un-approve leaves the snapshot in place (the once-
   // approved content keeps exporting — accepted, docs/plan Design 2).
   const snapshotClause = approve
-    ? ", pre_draft_json = json_object('note', note, 'tags', tags)" + (opts.clearBulkStamp ? HAND_APPROVAL_CLAUSE : "")
+    ? ", pre_draft_json = json_object('note', note, 'tags', tags)" + bulkStampClause(opts.bulkStamp)
     : "";
   // Only rows that are ALREADY translation drafts (state non-NULL) can be
   // validated/un-validated. Without this guard a validate on a row the
@@ -1266,7 +1294,7 @@ async function setTnTranslationState(
 
 // Set the translation_state on a target-language tQ row — the exact analogue of
 // setTnTranslationState (kind='tq'). State flip, not a content edit: does NOT
-// bump `version` and leaves `updated_by` alone; a hand approval clears a bulk stamp; audit source=NULL or 'chat'
+// bump `version` and leaves `updated_by` alone; a hand approval clears a bulk stamp and Approve-all sets one; audit source=NULL or 'chat'
 // (human approval, which also clears the 'ai_pipeline' chip). Guarded on
 // translation_state IS NOT NULL so a row the translate pipeline never touched
 // can't be validated.
@@ -1284,10 +1312,10 @@ async function setTqTranslationState(
   // tq_rows has no trashed_at: the state pin is the whole guard.
   const auditPins = statePins(opts, 6, false);
   const updatePins = statePins(opts, 5, false);
-  // Approval snapshots the now-published content and ends a bulk stamp — see
-  // setTnTranslationState.
+  // Approval snapshots the now-published content and clears or sets the bulk
+  // stamp — see setTnTranslationState.
   const snapshotClause = approve
-    ? ", pre_draft_json = json_object('question', question, 'response', response)" + (opts.clearBulkStamp ? HAND_APPROVAL_CLAUSE : "")
+    ? ", pre_draft_json = json_object('question', question, 'response', response)" + bulkStampClause(opts.bulkStamp)
     : "";
   // Audit INSERT first, so a state pin sees the row before the UPDATE changes
   // it — see setTnTranslationState.
@@ -1500,12 +1528,19 @@ async function stateWriteMiss(c: Context<{ Bindings: Env; Variables: { userId?: 
 // The validate body: TnBitBody plus the state (and updated_at) the reviewer
 // saw. Validate-only, so /preserve and /hint keep their exact shape.
 // bulk: sent by the web's Approve-all loops. Approve-all is itself a bulk
-// approver, so it keeps admin_bulk_state (#414); see HAND_APPROVAL_CLAUSE.
+// approver, so it stamps admin_bulk_state on an AI draft nobody changed (#833)
+// and keeps any existing stamp (#414); see BULK_APPROVAL_CLAUSE.
 const ValidateBody = TnBitBody.extend({
   expected_state: z.enum(TRANSLATION_STATES).optional(),
   expected_updated_at: z.number().int().nonnegative().optional(),
   bulk: z.boolean().optional(),
 });
+
+// What a validate request does to admin_bulk_state when it approves.
+function validateBulkStamp(bulk: boolean | undefined, userId: number | null): BulkStampMode {
+  if (bulk === true) return "stamp";
+  return userId != null ? "clear" : "keep";
+}
 
 // POST /api/rows/tn/:id/validate — the translation-mode "Approve" action.
 // Body: { value: 0 | 1 | boolean, expected_state? } (1 → validated, 0 → back
@@ -1546,7 +1581,7 @@ rows.post("/tn/:id/validate", requireEditor, async (c) => {
     expectedState: parsed.data.expected_state ?? null,
     expectedUpdatedAt: parsed.data.expected_updated_at ?? null,
     source: editSource(c),
-    clearBulkStamp: parsed.data.bulk !== true && userId != null,
+    bulkStamp: validateBulkStamp(parsed.data.bulk, userId),
   };
   // Only approving is refused during a translate run: the apply would undo it.
   // Un-approve ("Revoke example") is let through — the apply resets the row to
@@ -1608,7 +1643,7 @@ rows.post("/tq/:id/validate", requireEditor, async (c) => {
     expectedState: parsed.data.expected_state ?? null,
     expectedUpdatedAt: parsed.data.expected_updated_at ?? null,
     source: editSource(c),
-    clearBulkStamp: parsed.data.bulk !== true && userId != null,
+    bulkStamp: validateBulkStamp(parsed.data.bulk, userId),
   };
   if (nextState === "validated") {
     const lock = await chapterLockForTqId(c.env, id, book);
