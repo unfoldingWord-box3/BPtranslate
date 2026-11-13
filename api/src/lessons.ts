@@ -495,12 +495,11 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
   if (!(await lessonsEnabledRead(db))) return { ran: false, reason: "off" };
   const night = new Date(now * 1000).toISOString().slice(0, 10);
 
-  const watermark = await approvalWatermark(db);
-  if (watermark == null) return { ran: false, reason: "no_new_approvals" };
   let last: number | null;
   try {
     // A run from an earlier night still 'running' was killed (isolate evicted,
-    // timeout): close it as failed so the page says so.
+    // timeout): close it as failed so the page says so, every night the
+    // switch is on, whether or not tonight runs.
     await db
       .prepare(
         `UPDATE lesson_runs SET status = 'failed', failure_reason = 'interrupted', finished_at = ?2
@@ -521,6 +520,8 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
     if (tableMissing(e)) return { ran: false, reason: "not_migrated" };
     throw e;
   }
+  const watermark = await approvalWatermark(db);
+  if (watermark == null) return { ran: false, reason: "no_new_approvals" };
   if (last != null && watermark <= last) return { ran: false, reason: "no_new_approvals" };
 
   const { availability, apiKey } = await resolveProvider(env, true);

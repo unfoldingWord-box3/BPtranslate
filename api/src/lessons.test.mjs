@@ -538,3 +538,11 @@ test("capText counts code points and never splits a letter from its marks", () =
   assert.equal(capText(marked, 6), "بَّبَّ…");
   assert.equal(capText("😀".repeat(5), 2), "😀😀…", "no lone surrogate");
 });
+
+test("a killed run is closed even on a night with nothing new to mine", async () => {
+  const f = await fresh();
+  await f.run();
+  f.sqlite.prepare(`INSERT INTO lesson_runs (night, started_at, approvals_through, status) VALUES ('2026-11-12b', 1, 0, 'running')`).run();
+  assert.equal((await f.run(NIGHT2)).reason, "no_new_approvals");
+  assert.equal(f.sqlite.prepare(`SELECT status FROM lesson_runs WHERE night = '2026-11-12b'`).get().status, "failed");
+});
