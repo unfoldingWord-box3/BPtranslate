@@ -154,6 +154,39 @@ test("(a) typing in Brief and Common issues survives a history restore, shown as
   await expect(briefBox(page)).toHaveValue(`909a audience ${stamp} TYPED-BRIEF`);
 });
 
+// The three editors share one prefs version (#145): saving Brief must not make
+// this page's own Common issues save conflict, and a landed save clears its
+// draft.
+test("own saves: Brief then Common issues both land, and the drafts clear", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const stamp = Date.now();
+  await putPrefs(setup!.context.request, setup!.csrf, {
+    audience: `909d audience ${stamp}`,
+    common_issues_md: `909d common ${stamp}`,
+  });
+  const { context } = await adminContext(browser, "d");
+  const page = await context.newPage();
+  await openStyle(page, `909d common ${stamp}`);
+  await commonBox(page).click();
+  await page.keyboard.press("End");
+  await page.keyboard.type(" OWN-COMMON");
+  await briefBox(page).click();
+  await page.keyboard.press("End");
+  await page.keyboard.type(" OWN-BRIEF");
+  await expect(page.getByText("2 unsaved").first()).toBeVisible({ timeout: 10_000 });
+
+  expect(await clickSave(page, "brief")).toBe(200);
+  expect(await clickSave(page, "commonIssues")).toBe(200);
+  const prefs = await getPrefs(setup!.context.request);
+  expect(prefs.audience).toBe(`909d audience ${stamp} OWN-BRIEF`);
+  expect(prefs.common_issues_md).toBe(`909d common ${stamp} OWN-COMMON`);
+  await expect(page.getByText(/\d+ unsaved/)).toHaveCount(0, { timeout: 10_000 });
+
+  await page.reload();
+  await expect(commonBox(page)).toHaveValue(`909d common ${stamp} OWN-COMMON`, { timeout: 20_000 });
+  await expect(page.getByText(/\d+ unsaved/)).toHaveCount(0);
+});
+
 // The classic Preferences page has its own editors on the same drafts.
 test("(a, classic Preferences) typing in Common issues survives a history restore", async ({ browser }) => {
   test.setTimeout(90_000);
