@@ -50,6 +50,13 @@ export const ZEC_CHAPTERS = {
       "Read-only screens: ULT alignment hover (ZEC 1:1 has 16 Hebrew words), verse view, " +
       "route landmarks, the classic chapter view. No spec writes here.",
   },
+  crossTabDrafts: {
+    chapter: 2,
+    specs: ["cross-tab-drafts-count.spec.ts"],
+    why:
+      "Two tabs: one types a tQ question or a ULT verse draft (2:1) and discards it from the " +
+      "unsaved menu, the other checks its unsaved count. Nothing is saved to the server.",
+  },
   rapidCheck: {
     chapter: 3,
     specs: ["notes-rapid-check.spec.ts", "notes-rapid-columns.spec.ts"],
@@ -134,6 +141,11 @@ export const ZEC_CHAPTERS = {
       "drafts, which makes them read-only in the classic editor. notes-rapid-verse-placement " +
       "only reads it.",
     seed: "ai_draft",
+  },
+  rowsFastTyping: {
+    chapter: 14,
+    specs: ["rows-fast-typing.spec.ts"],
+    why: "Types into ULT verse boxes 14:1-17 and leaves the drafts unsaved; never writes to the server.",
   },
 } as const satisfies Record<string, ChapterClaim>;
 

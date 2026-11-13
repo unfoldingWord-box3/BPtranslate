@@ -30,6 +30,7 @@ import {
 } from "./refusedRowDraft";
 import { legacyDbNames, workspaceDbName } from "./workspace";
 import { adoptFromLegacyDbs, type LegacySource } from "./legacyAdoption";
+import { DRAFTS_CHANGED_CHANNEL_BASE, openDraftsChangedChannel, orderedReads } from "./draftsChangedChannel.ts";
 
 // Base name; the actual per-workspace DB name is derived via workspaceDbName()
 // so drafts written in one Door43 org never surface in another (issue #228).
@@ -135,6 +136,8 @@ function db() {
 }
 
 const subscribers = new Set<Subscriber>();
+// The subscribers that also hear changes other tabs made (#896).
+const remoteSubscribers = new Set<Subscriber>();
 
 // Called with the key of each draft the user discarded (drafts.discard).
 const discardListeners = new Set<(key: string) => void>();
@@ -174,10 +177,32 @@ async function listAll(): Promise<DraftRecord[]> {
   return all;
 }
 
+// Every read of the store for subscribers goes through here, so each one gets
+// results in the order the reads started (orderedReads, #896 review).
+const readFor = orderedReads<DraftRecord[]>();
+async function tell(to: Set<Subscriber>) {
+  if (to.size === 0) return;
+  await readFor(listAll, to);
+}
+
+// The store is shared by every tab of the workspace, so a change made here is
+// announced to the other tabs (#896), which re-read it for their subscribers
+// that opted in (subscribe's `remote`): the "N unsaved" count re-counts
+// without a reload. Editors do not opt in: they copy a stored draft into a box
+// only when the box opens (#903) and otherwise trust the box's own text, so
+// another tab's typing would only mark this tab's box dirty without showing
+// that text. A received message only re-reads, never
+// announces, so tabs cannot ping-pong. Named per workspace, as the database is.
+// tell() never rejects (orderedReads logs a failed read), so `void` is safe.
+const changedChannel = openDraftsChangedChannel(workspaceDbName(DRAFTS_CHANGED_CHANNEL_BASE), () => {
+  void tell(remoteSubscribers);
+});
+
+// After a committed change in this tab. Every caller awaits the write's
+// transaction first, so another tab that re-reads on the message sees it.
 async function notify() {
-  if (subscribers.size === 0) return;
-  const all = await listAll();
-  for (const s of subscribers) s(all);
+  changedChannel.announce();
+  await tell(subscribers);
 }
 
 // Delete a row draft only if `settled` accepts it. Read + conditional delete
@@ -290,10 +315,18 @@ export function templateKey(templateId: string): string {
 }
 
 export const drafts = {
-  subscribe(fn: Subscriber): () => void {
+  // `remote: true` also calls `fn` after another tab of this workspace changed
+  // the store (#896). Only the "N unsaved" count opts in; see changedChannel.
+  subscribe(fn: Subscriber, opts?: { remote?: boolean }): () => void {
     subscribers.add(fn);
-    void listAll().then(fn);
-    return () => subscribers.delete(fn);
+    if (opts?.remote) remoteSubscribers.add(fn);
+    // The first list, ordered with every other read: a newer one already
+    // delivered to `fn` wins over this one landing late.
+    void readFor(listAll, [fn]);
+    return () => {
+      subscribers.delete(fn);
+      remoteSubscribers.delete(fn);
+    };
   },
 
   async set(
