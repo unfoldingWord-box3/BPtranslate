@@ -16,7 +16,8 @@ a chapter, plus tW/tA articles), which runs on the organization's own AI key.
 **Update (2026-11, #726):** the server code for `generate` / `notes` / `tqs` is
 gone. `/api/pipelines/start` accepts only `translate` (any other type gets a
 400), a queued old job fails at dispatch as `pipeline_type_retired`, and a
-still-running one is failed on its done poll without importing its output. The
+still-running one is failed on the poll that sees it end upstream (done, with
+or without output, failed or cancelled), without importing its output. The
 `followUpOptions` / `followUpChain` start fields and the chain they drove are
 gone too. Old rows keep their `pipeline_type`, so the job history still names
 past runs. The sections below on those three types describe the contract as it

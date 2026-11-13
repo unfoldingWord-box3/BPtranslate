@@ -1416,7 +1416,9 @@ rows.post("/tn/:id/preserve", requireEditor, async (c) => {
 
 // POST /api/rows/tn/:id/hint — toggle the "queue as AI-pipeline hint" bit.
 // hint=1 rows used to be sent into a notes run as options.hints and expanded by
-// its apply. The notes pipeline is retired (#726), so nothing reads the bit now.
+// its apply; the notes pipeline is retired (#726), so no AI run reads the bit
+// any more. The book reimport still treats hint=1 rows as kept (its hint = 0
+// guards in bookReimport.ts).
 rows.post("/tn/:id/hint", requireEditor, async (c) => {
   const id = c.req.param("id");
   const book = c.req.query("book");

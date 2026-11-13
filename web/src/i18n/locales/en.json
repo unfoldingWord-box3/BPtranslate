@@ -1684,7 +1684,7 @@
       "lane_fenced": "The project's source text changed or was locked after this run was queued, so it did not start. Nothing was changed — start a new run.",
       "pipeline_api_disabled": "The external AI service isn't set up on this server, so this run could not start. An admin needs to check the AI settings.",
       "ai_needs_org_key": "This needs your organization's AI key, and it can't use one yet, so this run did not start. Nothing was changed.",
-      "pipeline_type_retired": "This kind of AI run is no longer offered, so it was stopped. Nothing was changed."
+      "pipeline_type_retired": "This kind of AI run has been retired, so the app did not use its result. Start a Translate run instead."
     }
   },
   "flowTranslate": {
