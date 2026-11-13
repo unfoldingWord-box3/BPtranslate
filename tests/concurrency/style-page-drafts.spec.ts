@@ -948,3 +948,64 @@ test("913 C1: a stale first load does not replace another tab's newer saved row"
   const p = await getPrefs(setup!.context.request);
   expect(p.audience).toBe(`c1 audience ${stamp} A`);
 });
+
+// Review round 3, D1: tab A's own save response arrives late, after tab B
+// saved a newer row that A already took from B's broadcast. A settles on
+// the newest row it knows, not its own older response: it shows B's Purpose
+// with nothing unsaved, and its next save of a box nobody typed in lands.
+test("913 D1: a late save response does not move the editor back to an older row", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const stamp = Date.now();
+  await putPrefs(setup!.context.request, setup!.csrf, {
+    audience: `d1 audience ${stamp}`,
+    purpose: `d1 purpose ${stamp}`,
+    common_issues_md: `d1 common ${stamp}`,
+  });
+  const { context } = await adminContext(browser, "a");
+  const pageA = await context.newPage();
+  await openStyle(pageA, `d1 common ${stamp}`);
+  const pageB = await context.newPage();
+  await openStyle(pageB, `d1 common ${stamp}`);
+
+  // A's save reaches the server now; its response is held.
+  await pageA.bringToFront();
+  await briefBox(pageA).click();
+  await pageA.keyboard.press("End");
+  await pageA.keyboard.type(" A");
+  let release = () => {};
+  const gate = new Promise<void>((r) => (release = r));
+  await pageA.route(`**${PREFS}`, async (route) => {
+    if (route.request().method() !== "PUT") return route.continue();
+    const res = await route.fetch();
+    await gate;
+    await route.fulfill({ response: res });
+  });
+  const answered = pageA.waitForResponse((r) => r.url().includes(PREFS) && r.request().method() === "PUT");
+  await saveIn(pageA, "brief").click();
+  await expect.poll(async () => (await getPrefs(setup!.context.request)).audience).toBe(`d1 audience ${stamp} A`);
+
+  // B saves Purpose on top (a 409 first: B's row is older), and broadcasts.
+  await pageB.bringToFront();
+  await purposeBox(pageB).click();
+  await pageB.keyboard.press("End");
+  await pageB.keyboard.type(" B");
+  await saveBrief(pageB);
+  await pageA.waitForTimeout(1000);
+
+  release();
+  expect((await answered).status()).toBe(200);
+  await pageA.bringToFront();
+  await pageA.waitForTimeout(500);
+  await expect(purposeBox(pageA)).toHaveValue(`d1 purpose ${stamp} B`);
+  await expect(briefBox(pageA)).toHaveValue(`d1 audience ${stamp} A`);
+  await expect(pageA.getByText(/\d+ unsaved/)).toHaveCount(0);
+
+  await pageA.unroute(`**${PREFS}`);
+  await scriptNotesBox(pageA).click();
+  await pageA.keyboard.press("End");
+  await pageA.keyboard.type(" D1");
+  expect(await clickSave(pageA, "brief")).toBe(200);
+  const p = await getPrefs(setup!.context.request);
+  expect(p.purpose).toBe(`d1 purpose ${stamp} B`);
+  expect(p.audience).toBe(`d1 audience ${stamp} A`);
+});
