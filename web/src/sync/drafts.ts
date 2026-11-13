@@ -30,6 +30,7 @@ import {
 } from "./refusedRowDraft";
 import { legacyDbNames, workspaceDbName } from "./workspace";
 import { adoptFromLegacyDbs, type LegacySource } from "./legacyAdoption";
+import { DRAFTS_CHANGED_CHANNEL_BASE, openDraftsChangedChannel } from "./draftsChangedChannel.ts";
 
 // Base name; the actual per-workspace DB name is derived via workspaceDbName()
 // so drafts written in one Door43 org never surface in another (issue #228).
@@ -174,10 +175,27 @@ async function listAll(): Promise<DraftRecord[]> {
   return all;
 }
 
-async function notify() {
+// Tell this tab's subscribers the store changed.
+async function notifyLocal() {
   if (subscribers.size === 0) return;
   const all = await listAll();
   for (const s of subscribers) s(all);
+}
+
+// The store is shared by every tab of the workspace, so a change made here
+// also reaches the other tabs' subscribers (#896): their "N unsaved" chip
+// re-counts without a reload. A received message only re-reads (notifyLocal),
+// never announces, so tabs cannot ping-pong. Named per workspace, as the
+// database is.
+const changedChannel = openDraftsChangedChannel(workspaceDbName(DRAFTS_CHANGED_CHANNEL_BASE), () => {
+  void notifyLocal();
+});
+
+// After a committed change in this tab. Every caller awaits the write's
+// transaction first, so another tab that re-reads on the message sees it.
+async function notify() {
+  changedChannel.announce();
+  await notifyLocal();
 }
 
 // Delete a row draft only if `settled` accepts it. Read + conditional delete
