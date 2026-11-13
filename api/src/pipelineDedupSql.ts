@@ -295,3 +295,49 @@ export function rowTouchedAfterJobBindings(
     ...rowIds,
   ];
 }
+
+// ── A narrower request that names an approved row, covered by a whole-chapter
+//    job (#794) ────────────────────────────────────────────────────────────────
+//
+// A whole-chapter translate (no rowIds, no verse range) keeps approved notes and
+// questions as they are (pipelineImport.ts applyJobOutput, keepApproved). A
+// one-note redo or a verse-range run is how a person redrafts an approved row,
+// so such a request must not be answered with a covering whole-chapter job that
+// would keep the row. A covering job is whole-chapter exactly when it has no
+// verseStart (PIPELINE_COVERAGE_WHERE already excludes rowIds, and its shape (b)
+// requires a verseStart) — the same test translateSelection makes at apply.
+// Select this column next to the covering job to read it.
+export const COVERING_WHOLE_CHAPTER_COLUMN = `(json_extract(j.options_json, '$.verseStart') IS NULL) AS whole_chapter`;
+
+// The query asking "is any row this request names approved?", or null when the
+// request is not a tn/tq row-scoped or verse-range one (an end-only verse
+// selection is whole-chapter at apply, so it keeps approved rows too). Row ids
+// are unique per book (primary key), so the row form needs no chapter.
+// No chunking: translate.rowIds is capped at 50.
+export function approvedRowInRequestQuery(
+  resourceType: string | null,
+  book: string,
+  startChapter: number,
+  endChapter: number,
+  rowIds: string[] | undefined,
+  verses: { start: number; end: number },
+): { sql: string; bindings: unknown[] } | null {
+  const table = resourceType === "tn" ? "tn_rows" : resourceType === "tq" ? "tq_rows" : null;
+  if (!table) return null;
+  const approved = `deleted_at IS NULL AND translation_state = 'validated'`;
+  if (rowIds && rowIds.length > 0) {
+    const ids = rowIds.map((_, i) => `?${i + 2}`).join(", ");
+    return {
+      sql: `SELECT 1 AS hit FROM ${table} WHERE book = ?1 AND ${approved} AND id IN (${ids}) LIMIT 1`,
+      bindings: [book, ...rowIds],
+    };
+  }
+  if (verses.start > 0) {
+    return {
+      sql: `SELECT 1 AS hit FROM ${table}
+             WHERE book = ?1 AND chapter BETWEEN ?2 AND ?3 AND ${approved} AND verse BETWEEN ?4 AND ?5 LIMIT 1`,
+      bindings: [book, startChapter, endChapter, verses.start, verses.end],
+    };
+  }
+  return null;
+}

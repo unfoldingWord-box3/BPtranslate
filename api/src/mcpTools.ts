@@ -2483,7 +2483,7 @@ const NO_SUCH_JOB = "No job with that id that you started in this project.";
 const jobStatus: ToolDef = {
   name: "bpt_job_status",
   description:
-    "Check on an AI draft run this user started (job_id from bpt_draft). Returns state (queued, dispatching, running, paused_for_outage, paused_for_usage_limit, done, failed, cancelled), queue_position while queued, progress (chapter, step, status) while running, error when it failed, and results: per kind (tn, tq), how many drafts the run proposed, how many were applied and how many rejected (empty until the run's output is staged), and, once done, kept_because_changed_by_people: what the run left as it was because a person changed it after the run was queued, with keys only for the kinds it kept: tn and tn_ids (notes: count and ids), tq and tq_ids (questions: count and ids), articles and article_paths (tW/tA articles: count and paths). Only the user who started the run can see it, and only in this project. Read-only.",
+    "Check on an AI draft run this user started (job_id from bpt_draft). Returns state (queued, dispatching, running, paused_for_outage, paused_for_usage_limit, done, failed, cancelled), queue_position while queued, progress (chapter, step, status) while running, error when it failed, and results: per kind (tn, tq), how many drafts the run proposed, how many were applied and how many rejected (empty until the run's output is staged), and, once done, kept_because_changed_by_people: what the run left as it was because a person changed it after the run was queued, with keys only for the kinds it kept: tn and tn_ids (notes: count and ids), tq and tq_ids (questions: count and ids), articles and article_paths (tW/tA articles: count and paths). Also once done, only when present: kept_because_approved (tn/tn_ids, tq/tq_ids): approved rows a whole-chapter run left as they are (a run on chosen rows or a verse range still redrafts approved rows); not_applied_same_as_english (tn, tn_ids): notes whose AI draft was the English source note copied back, so it was not applied and the note kept its text; english_check_not_run: why that English check could not run, in which case the drafts were applied unchecked. Only the user who started the run can see it, and only in this project. Read-only.",
   inputSchema: {
     type: "object",
     properties: {
@@ -2524,6 +2524,9 @@ const jobStatus: ToolDef = {
       // #729, #760: notes, questions and tW/tA articles the apply left alone
       // because a person changed them after the run was queued. A kind's keys
       // are present only when the report (applySkippedOf) carries that kind.
+      // #794: approved rows a whole-chapter run kept, note drafts not applied
+      // because they were the English source note, and why the English check
+      // could not run (the drafts were then applied unchecked).
       ...(b.applySkipped
         ? (() => {
             const k = b.applySkipped as Record<string, unknown>;
@@ -2535,7 +2538,18 @@ const jobStatus: ToolDef = {
                 ? { articles: Number(k.articleTouched), article_paths: list(k.articleTouchedPaths) }
                 : {}),
             };
-            return Object.keys(kept).length ? { kept_because_changed_by_people: kept } : {};
+            const approved = {
+              ...(k.tnApproved !== undefined ? { tn: Number(k.tnApproved), tn_ids: list(k.tnApprovedIds) } : {}),
+              ...(k.tqApproved !== undefined ? { tq: Number(k.tqApproved), tq_ids: list(k.tqApprovedIds) } : {}),
+            };
+            return {
+              ...(Object.keys(kept).length ? { kept_because_changed_by_people: kept } : {}),
+              ...(Object.keys(approved).length ? { kept_because_approved: approved } : {}),
+              ...(k.tnSameAsEnglish !== undefined
+                ? { not_applied_same_as_english: { tn: Number(k.tnSameAsEnglish), tn_ids: list(k.tnSameAsEnglishIds) } }
+                : {}),
+              ...(typeof k.tnEnglishCheckNotRun === "string" ? { english_check_not_run: k.tnEnglishCheckNotRun } : {}),
+            };
           })()
         : {}),
       updated_at: b.updatedAt ?? null,

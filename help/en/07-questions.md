@@ -49,6 +49,8 @@ In a translation project it is a sparkle icon, **Start an AI run**. It opens a m
 
 After **Translate chapter** or **Translate questions**, a confirm window opens: type a chapter or a range under **Chapter or range** and press **Start**.
 
+A **Translate questions** run does not redraft questions that are already approved. It keeps them as they are, and when the run ends a banner lists them. To get a new AI draft for an approved question, run the AI on that question alone.
+
 In a source project, one that does not translate from another language (such as unfoldingWord's English), the icon is a download icon, **Import from Door43**. It opens the import window straight away, with no menu.
 
 On a phone the icon is not in the top bar. It is the first item in your account menu, with the same name.

@@ -24,6 +24,8 @@ import { exportOwnerFor, getProjectConfig } from "./projectConfig.ts";
 import { buildTranslateOptions, normalizeRowIds, normalizeTranslateRowIdsJson } from "./translateOptions.ts";
 import {
   PIPELINE_COVERAGE_WHERE,
+  COVERING_WHOLE_CHAPTER_COLUMN,
+  approvedRowInRequestQuery,
   PIPELINE_DEDUP_WHERE,
   PIPELINE_VERSE_RANGE_JOB_WHERE,
   coverageVerseRange,
@@ -1691,8 +1693,8 @@ pipelines.post("/start", requireEditor, async (c) => {
   const conflictColumns = `j.job_id, j.user_id, j.pipeline_type, j.book, j.start_chapter,
             j.end_chapter, j.state, j.current_skill, j.current_status,
             j.created_at, j.updated_at, u.dcs_username AS started_by_username,
-            j.edit_log_watermark`;
-  type ConflictRow = PublicJobSummary & { user_id: number; edit_log_watermark: number | null };
+            j.edit_log_watermark, ${COVERING_WHOLE_CHAPTER_COLUMN}`;
+  type ConflictRow = PublicJobSummary & { user_id: number; edit_log_watermark: number | null; whole_chapter: number };
   let dup: ConflictRow | null = await c.env.DB.prepare(
     `SELECT ${conflictColumns}
        FROM pipeline_jobs j
@@ -1818,6 +1820,21 @@ pipelines.post("/start", requireEditor, async (c) => {
       .bind(...rowTouchedAfterJobBindings(book, dup, dedupNormRowIds!))
       .first<{ hit: number }>();
     if (touched) dup = null;
+  }
+  // #794 — a whole-chapter covering job keeps approved rows as they are. A
+  // row-scoped or verse-range request is how a person redrafts an approved row,
+  // so when it names one, drop the coverage answer and let it start. A
+  // verse-range covering job still redrafts approved rows; it keeps its answer.
+  if (dup && !exactDup && dup.whole_chapter === 1) {
+    const q = approvedRowInRequestQuery(
+      dedupResourceType,
+      book,
+      startChapter,
+      endChapter,
+      dedupNormRowIds,
+      coverageVerses,
+    );
+    if (q && (await c.env.DB.prepare(q.sql).bind(...q.bindings).first<{ hit: number }>())) dup = null;
   }
   if (dup) {
     if (dup.user_id === userId) {

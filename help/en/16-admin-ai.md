@@ -20,6 +20,8 @@ screenshots:
 
 Only one job runs at a time. The other jobs wait in line. When AI drafts are ready, a banner on the page tells you to review them.
 
+A run on a whole chapter does not redraft notes or questions that are already approved. It keeps them as they are, and when the run ends a banner lists them. To get a new AI draft for one approved note or question, run the AI on that one alone (for a note, **Redo** on the note). If the AI returns a note unchanged from the English, that draft is not applied: the note keeps its text, and a banner lists it.
+
 The same **AI** menu also has **Import from Door43**. Admins on a translation project also see **Pull Aquifer drafts** and **Re-source notes from English**. Re-sourcing replaces the book from Door43 and discards local edits, so the app asks you to confirm.
 
 AI runs are only for translation projects. In a source project, one that does not translate from another language (such as unfoldingWord's English), the page says so under its title, and the button reads **Import** instead of **AI**. Choose a **Book**, then press **Import**: it opens **Import from Door43** straight away, with no menu. The **Book** list holds only books already in the project, and this import updates chapters of that book from Door43. To bring in a new book, use **Bring in OBA…** (with your book's code) on the **Books** screen; see [Books and the book package](#help:books). The same import is on a book's package and on the Scripture, Notes and Questions screens, as the download icon in their top bar. On a phone those screens move it into your account menu, as the item **Import from Door43**.

@@ -1884,6 +1884,10 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
         // The job finished but left this note alone: someone changed it after
         // the job was queued (#601). Nothing new landed, so the draft stays.
         say(t("flowTranslate.redoKeptYourEdit"), "info");
+      } else if (outcome === "english") {
+        // The AI returned the English note unchanged, so the draft was not
+        // applied (#794). Nothing new landed; the note keeps its text.
+        say(t("flowTranslate.redoSameAsEnglish"), "warning");
       } else if (outcome === "drafted") {
         void drafts.clear(rowKey("tn", book, pending.rowId));
         void refetch().then(() => setReloadNonce((n) => n + 1));

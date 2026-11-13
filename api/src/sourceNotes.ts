@@ -150,29 +150,20 @@ export async function bookSourcePlansForClient(
   return { tnNoteSources, tqQuestionSources };
 }
 
-// One source file's notes, restricted to the chapters that resolve to that
-// source (see the header): the Door43 read, the per-isolate cache, and the
-// failure reasons, shared by readSourceNotes and readBookSourceNotes.
-async function loadSourceFile(
+// One tN file's rows at one ref: the Door43 read, the per-isolate cache (keyed
+// by URL, which names the ref) and the failure reasons. Shared by
+// loadSourceFile (master) and readPinnedSourceNotes (a translate job's ref).
+async function fetchSourceRows(
   env: Env,
-  plan: { base: RepoRef | null; ranges: ResolvedSourceRange[] },
   ref: RepoRef,
   book: string,
-): Promise<SourceNotes> {
+): Promise<{ ok: true; source: string; rows: Map<string, SourceRow> } | { ok: false; reason: string }> {
   const source = `${ref.owner}/${ref.repo}`;
   const file = `tn_${book}.tsv`;
-  const url = dcsRawUrl(env, ref.owner, ref.repo, file);
-  const forChapters = (rows: Map<string, SourceRow>): SourceNotes => {
-    const notes = new Map<string, string>();
-    for (const [id, r] of rows) {
-      const s = sourceForChapter(plan, r.chapter);
-      if (s && sameRepo(s, ref)) notes.set(id, r.note);
-    }
-    return { ok: true, source, notes };
-  };
+  const url = dcsRawUrl(env, ref.owner, ref.repo, file, ref.ref);
 
   const hit = cache.get(url);
-  if (hit && Date.now() - hit.at < TTL_MS) return forChapters(hit.rows);
+  if (hit && Date.now() - hit.at < TTL_MS) return { ok: true, source, rows: hit.rows };
 
   const res = await fetchAnonymous(url);
   if (res.text === null) {
@@ -197,7 +188,45 @@ async function loadSourceFile(
   cache.delete(url);
   cache.set(url, { at: Date.now(), rows });
   while (cache.size > MAX_ENTRIES) cache.delete(cache.keys().next().value as string);
-  return forChapters(rows);
+  return { ok: true, source, rows };
+}
+
+// One source file's notes on master, restricted to the chapters that resolve
+// to that source (see the header). Shared by readSourceNotes and
+// readBookSourceNotes.
+async function loadSourceFile(
+  env: Env,
+  plan: { base: RepoRef | null; ranges: ResolvedSourceRange[] },
+  ref: RepoRef,
+  book: string,
+): Promise<SourceNotes> {
+  const res = await fetchSourceRows(env, { ...ref, ref: "master" }, book);
+  if (!res.ok) return res;
+  const notes = new Map<string, string>();
+  for (const [id, r] of res.rows) {
+    const s = sourceForChapter(plan, r.chapter);
+    if (s && sameRepo(s, ref)) notes.set(id, r.note);
+  }
+  return { ok: true, source: res.source, notes };
+}
+
+// #794: the English notes of a translate job's own source, "org/repo@ref" as
+// stored in its options_json.sourceRef: every note in the book's file at that
+// ref (the job translated from that one file, whatever the chapter). One read,
+// cached like the others. A malformed ref is reported, never thrown.
+export async function readPinnedSourceNotes(env: Env, sourceRef: string, book: string): Promise<SourceNotes> {
+  const m = /^([^/@\s]+)\/([^/@\s]+)@(.+)$/.exec(sourceRef.trim());
+  if (!m) return { ok: false, reason: `The job's English source "${sourceRef}" is not org/repo@ref.` };
+  try {
+    const res = await fetchSourceRows(env, { owner: m[1], repo: m[2], ref: m[3] }, book);
+    if (!res.ok) return res;
+    const notes = new Map<string, string>();
+    for (const [id, r] of res.rows) notes.set(id, r.note);
+    return { ok: true, source: `${m[1]}/${m[2]}@${m[3]}`, notes };
+  } catch (e) {
+    console.error("readPinnedSourceNotes failed", e instanceof Error ? e.message : String(e));
+    return { ok: false, reason: READ_FAILED };
+  }
 }
 
 const NOT_TRANSLATING = "This project writes its notes in English, so they have no separate English source.";
