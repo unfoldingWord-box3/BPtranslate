@@ -40,8 +40,10 @@ async function pickRow(): Promise<TqRow> {
   const auth = await mintToken(probe, "probe-896");
   const chapter = await fetchChapter(probe, auth.token, "ZEC", CHAPTER);
   await probe.dispose();
-  const rows = (chapter.tq as TqRow[]).filter((r) => r.verse > 1);
-  expect(rows.length, `expected tQ rows after verse 1 on ZEC ${CHAPTER}`).toBeGreaterThan(0);
+  // gotoVerse waits for a tN card, so the question's verse must have notes too.
+  const noteVerses = new Set((chapter.tn as Array<{ verse: number }>).map((n) => n.verse));
+  const rows = (chapter.tq as TqRow[]).filter((r) => r.verse > 1 && noteVerses.has(r.verse));
+  expect(rows.length, `expected a tQ row after verse 1 on ZEC ${CHAPTER} on a verse with notes`).toBeGreaterThan(0);
   return rows[0];
 }
 
@@ -89,6 +91,7 @@ test("tab A types then discards a draft: tab B's unsaved count follows without a
 
   // Tab B, never reloaded, counts it.
   await expect(b.getByText(ONE_UNSAVED).first()).toBeVisible({ timeout: 10_000 });
+  if (SHOTS) await b.screenshot({ path: `${SHOTS}/cross-tab-drafts-count-tab-b-unsaved.png` });
 
   // Tab A discards it from the "1 unsaved" jump menu (top-bar chip, then the
   // Status popover's chip, then the draft's discard button).
