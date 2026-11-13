@@ -662,11 +662,90 @@ test("bpt_draft preview: a long selection lists the first 100 rows and says how 
     assert.equal(p.data.more_rows_not_listed, 13);
     assert.equal(p.data.approved_will_be_replaced, 113);
     assert.equal(p.data.approved_ids.length, 100);
-    assert.equal(tokenBody(p.data.confirm_token).r.length, 113);
+    assert.equal(tokenBody(p.data.confirm_token).n, 113, "the token counts every row, not just the listed ones");
     assert.ok(Buffer.byteLength(JSON.stringify(p.data)) < 16_000, "well under BT Servant's 32 KB result limit");
     const r = await call("bpt_draft", { ...DRAFT, confirm_token: p.data.confirm_token });
     assert.equal(r.data.status, "running", JSON.stringify(r.data));
     assert.equal(jobs().length, 1);
+  });
+});
+
+// Review of #747 (Grok, open model, Claude F5): the token must not grow with the
+// selection, or a big range pushes the result past BT Servant's 32 KB limit and
+// the reviewer can never confirm. It carries a fixed-size digest of the rows.
+test("bpt_draft preview: 800 rows stay well under 32 KB as sent, and a change to any one of them still refuses the confirm", async () => {
+  for (const changed of ["m000", "m799"]) {
+    const { call, sqlite, jobs } = await fresh();
+    const tn = sqlite.prepare(`INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, note, sort_order, version, translation_state) VALUES (?, ?, 1, 3, '1:3', 'n', 30, 1, 'validated')`);
+    for (let i = 0; i < 800; i++) tn.run(`m${String(i).padStart(3, "0")}`, BOOK);
+    await withBot(async (calls) => {
+      const p = await call("bpt_draft", DRAFT);
+      assert.equal(p.isError, false, JSON.stringify(p.data).slice(0, 500));
+      assert.equal(p.data.will_redraft, 803);
+      // mcp.ts sends the result as JSON text inside the JSON-RPC reply, so it
+      // is encoded twice on the wire.
+      const wire = Buffer.byteLength(JSON.stringify(JSON.stringify(p.data)));
+      assert.ok(wire < 20_000, `result is ${wire} bytes as sent`);
+      assert.ok(p.data.confirm_token.length < 600, `token is ${p.data.confirm_token.length} characters`);
+      sqlite.prepare(`UPDATE tn_rows SET version = version + 1 WHERE id = ?`).run(changed);
+      const r = await call("bpt_draft", { ...DRAFT, confirm_token: p.data.confirm_token });
+      assert.equal(r.isError, true, JSON.stringify(r.data));
+      assert.match(r.data.error, /changed since the preview/);
+      assert.equal(calls.length, 0);
+      assert.equal(jobs().length, 0);
+    });
+  }
+});
+
+// Review of #747 (Codex, Claude F4, open model): the whole-chapter guard must use
+// the same reference-overlap selection the run uses. A range whose start is past
+// the first row's verse can still select every row through a spanning reference.
+test("bpt_draft: a range or id list that selects every live row of the chapter is refused as a whole chapter, preview and confirm", async () => {
+  const { call, sqlite, jobs } = await fresh();
+  // TIT 2 questions: 2:1-2, 2:2, 2:3. Verses 2-3 overlap all three.
+  sqlite.prepare(`UPDATE tq_rows SET ref_raw = '2:1-2' WHERE id = 'q001'`).run();
+  // TIT 3: one note on 3:4-5. Verse 5 overlaps it.
+  sqlite.prepare(`INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, note, sort_order, version, translation_state) VALUES ('s045', ?, 3, 4, '3:4-5', 'n', 10, 1, 'validated')`).run(BOOK);
+  await withBot(async (calls) => {
+    for (const args of [
+      { book: BOOK, kind: "tq", chapter: 2, verse_start: 2, verse_end: 3 },
+      { book: BOOK, kind: "tn", chapter: 3, verse_start: 5 },
+    ]) {
+      const r = await call("bpt_draft", args);
+      assert.equal(r.isError, true, JSON.stringify([args, r.data]));
+      assert.match(r.data.error, /whole chapter/);
+    }
+    // A note marked Not needed is no reason to call the rest a part of the
+    // chapter: verses 2-6 select every live verse note once t001 is trashed,
+    // and so do ids naming every live note.
+    sqlite.prepare(`UPDATE tn_rows SET trashed_at = 100 WHERE id = 't001'`).run();
+    const range = { book: BOOK, kind: "tn", chapter: 1, verse_start: 2, verse_end: 6 };
+    assert.match((await call("bpt_draft", range)).data.error, /whole chapter/);
+    const idsArgs = { book: BOOK, kind: "tn", chapter: 1, ids: ["in01", "t002", "t003", "t004", "t005", "t006"] };
+    assert.match((await call("bpt_draft", idsArgs)).data.error, /whole chapter/);
+    // The confirm checks it too: a token from before the trash no longer starts.
+    sqlite.prepare(`UPDATE tn_rows SET trashed_at = NULL WHERE id = 't001'`).run();
+    const p = await call("bpt_draft", range);
+    assert.equal(p.isError, false, JSON.stringify(p.data));
+    sqlite.prepare(`UPDATE tn_rows SET trashed_at = 100 WHERE id = 't001'`).run();
+    const c = await call("bpt_draft", { ...range, confirm_token: p.data.confirm_token });
+    assert.equal(c.isError, true, JSON.stringify(c.data));
+    assert.match(c.data.error, /whole chapter/);
+    assert.equal(calls.length, 0);
+    assert.equal(jobs().length, 0);
+  });
+});
+
+test("bpt_draft confirm: a repeated id is sent once, in order", async () => {
+  const { call, jobs } = await fresh();
+  await withBot(async (calls) => {
+    const args = { book: BOOK, kind: "tn", chapter: 1, ids: ["t003", "t002", "t003"] };
+    const p = await call("bpt_draft", args);
+    assert.equal(p.data.will_redraft, 2, JSON.stringify(p.data));
+    const r = await call("bpt_draft", { ...args, confirm_token: p.data.confirm_token });
+    assert.equal(r.data.status, "running", JSON.stringify(r.data));
+    assert.deepEqual(JSON.parse(jobs()[0].options_json).rowIds, ["t002", "t003"]);
+    assert.deepEqual(calls.find((x) => x.url.endsWith("/api/pipeline/start")).body.options.rowIds, ["t002", "t003"]);
   });
 });
 
