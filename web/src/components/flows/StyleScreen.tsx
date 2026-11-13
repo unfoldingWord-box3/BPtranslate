@@ -40,7 +40,7 @@ import {
   type ContextExportStatus,
   type Register,
 } from "../../sync/api";
-import { currentPrefsFromConflict } from "../../sync/prefsConflict";
+import { prefsConflictRow } from "../../sync/prefsConflict";
 import { briefFields, commonIssuesFields, instructionsFields } from "../../sync/prefsDraft";
 import { usePrefsDraft } from "../../hooks/usePrefsDraft";
 import { useUnsavedGuard } from "../../hooks/useUnsavedGuard";
@@ -190,22 +190,24 @@ function BriefPanel({ prefsState }: { prefsState: PrefsState }) {
   // Unsaved typing lives in the drafts store (#909): restored after a remount
   // (history restore) or a reload, and a save is refused with 409 when the
   // Brief fields changed on the server since the typing started.
-  const prefsDraft = usePrefsDraft("brief", prefs, briefFields);
+  const prefsDraft = usePrefsDraft("brief", prefs, briefFields, true);
   const draft = prefsDraft.text;
   const setDraft = prefsDraft.change;
   const save = useSaveState();
 
   const onSave = async () => {
-    const version = prefsDraft.versionToSend();
-    if (!draft || version === null) return;
+    const plan = prefsDraft.toSave();
+    if (!plan) return;
+    // Typed boxes, and the server's value for the rest (prefsSavePayload).
+    const f = plan.fields;
     save.setSaving(true);
     try {
-      const res = await api.putTranslationPrefs(version, {
-        audience: draft.audience,
-        purpose: draft.purpose,
-        register: draft.register as Register,
-        script_notes: draft.script_notes,
-        notes: draft.notes,
+      const res = await api.putTranslationPrefs(plan.version, {
+        audience: f.audience,
+        purpose: f.purpose,
+        register: f.register as Register,
+        script_notes: f.script_notes,
+        notes: f.notes,
       });
       apply(res.prefs);
       prefsDraft.saved(res.prefs);
@@ -214,7 +216,7 @@ function BriefPanel({ prefsState }: { prefsState: PrefsState }) {
       if (e instanceof ApiError && e.status === 409) {
         // Someone else saved first. Adopt the fresh row from the 409 body so
         // the next save carries the right If-Match; typed text is kept.
-        const current = currentPrefsFromConflict(e.body);
+        const current = await prefsConflictRow(e.body, () => api.getTranslationPrefs().then((r) => r.prefs));
         if (current) {
           apply(current);
           prefsDraft.conflicted(current);
@@ -335,7 +337,12 @@ function MarkdownPrefPanel({
   // restore, a lesson moved into Common issues) or a reload restores it. null
   // = not yet read (loading gate below): never "" over saved content, or a
   // Save from that state would null the field on the server.
-  const prefsDraft = usePrefsDraft(field, prefs, field === "instructions_md" ? instructionsFields : commonIssuesFields);
+  const prefsDraft = usePrefsDraft(
+    field,
+    prefs,
+    field === "instructions_md" ? instructionsFields : commonIssuesFields,
+    true,
+  );
   const value = prefsDraft.text ? (prefsDraft.text[field] ?? "") : null;
   const setValue = (v: string) => prefsDraft.change({ [field]: v });
   const [preview, setPreview] = useState(false);
@@ -351,17 +358,17 @@ function MarkdownPrefPanel({
   useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
 
   const onSave = async () => {
-    const version = prefsDraft.versionToSend();
-    if (value === null || version === null) return;
+    const plan = prefsDraft.toSave();
+    if (!plan) return;
     save.setSaving(true);
     try {
-      const res = await api.putTranslationPrefs(version, { [field]: value || null });
+      const res = await api.putTranslationPrefs(plan.version, { [field]: plan.fields[field] || null });
       apply(res.prefs);
       prefsDraft.saved(res.prefs);
       save.setMsg(t("moreTools.style.saved"));
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
-        const current = currentPrefsFromConflict(e.body);
+        const current = await prefsConflictRow(e.body, () => api.getTranslationPrefs().then((r) => r.prefs));
         if (current) {
           apply(current);
           prefsDraft.conflicted(current);
@@ -607,6 +614,8 @@ export default function StyleScreen({ role, me }: StyleScreenProps) {
   const [current, setCurrent] = useState<SectionKey>("qa");
   // The prefs editors keep unsaved typing in the drafts store (#909); warn
   // before a reload or tab close like the other draft-keeping screens.
+  // `false`: this page holds no unsaved state outside that store; the guard
+  // itself checks the store (stored drafts, and a write still in flight).
   useUnsavedGuard(false);
   // Bumped by a restore from the preferences history (#788) to remount the
   // prefs editors: one with nothing typed shows the restored text, one with

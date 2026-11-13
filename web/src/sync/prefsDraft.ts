@@ -6,7 +6,12 @@
 // the field values it was typed against, and that row's version. All three
 // editors save into one prefs row with one version (#145), so a newer version
 // alone says nothing about this editor's fields: a sibling's save bumps it.
-// Whether this editor's text is stale is judged by its own fields.
+// Whether this editor's text is stale is judged by its own fields, and within
+// Brief box by box: a box is "typed" when its text differs from its base, and
+// only typed boxes are the editor's own. Every other box (and the hidden
+// `notes`) takes the server's value whenever the editor learns it, so a
+// remount or a "save again" never brings back a stale copy of a box nobody
+// typed in (#909 gate review H1).
 
 import type { TranslationPrefs } from "./api";
 
@@ -34,24 +39,56 @@ export function sameFields(a: PrefsFields, b: PrefsFields): boolean {
   return true;
 }
 
+// The boxes typed in: text differs from the value it was typed against.
+export function typedKeys(text: PrefsFields, base: PrefsFields): string[] {
+  return Object.keys(text).filter((k) => text[k] !== base[k]);
+}
+
 // The If-Match version for a Save. `server` is this editor's fields as the
-// page last saw them, at `serverVersion`. While they still equal `base`,
-// nothing this page knows of changed them, so the current version goes (a
-// sibling's save does not conflict). Once they differ, the typed-against
-// version goes, so the server answers 409 instead of the text overwriting a
-// change made since.
+// page last saw them, at `serverVersion`. While every typed box (every box,
+// when none is typed) still has its base value there, nothing this page knows
+// of changed it, so the current version goes (a sibling's save does not
+// conflict). Otherwise the typed-against version goes, so the server answers
+// 409 instead of the text overwriting a change made since.
 export function prefsVersionToSend(
   server: PrefsFields,
   serverVersion: number,
+  text: PrefsFields,
   base: PrefsFields,
   baseVersion: number,
 ): number {
-  return sameFields(server, base) ? serverVersion : baseVersion;
+  const typed = typedKeys(text, base);
+  const keys = typed.length ? typed : Object.keys(base);
+  return keys.every((k) => server[k] === base[k]) ? serverVersion : baseVersion;
 }
 
-// On mount: a stored draft whose text differs from the server's comes back
-// with its own base; one that equals the server's (or is not this editor's
-// shape) holds nothing unsaved and is dropped.
+// What a Save sends: the typed boxes, and the server's value for every other
+// field (the PUT always carries Brief's whole field set). With nothing typed,
+// the shown text, which prefsVersionToSend makes a 409 when it is stale.
+export function prefsSavePayload<F extends PrefsFields>(server: F, text: F, base: F): F {
+  const typed = typedKeys(text, base);
+  if (!typed.length) return text;
+  const out = { ...server };
+  for (const k of typed) (out as PrefsFields)[k] = text[k];
+  return out;
+}
+
+// Keep the typed boxes of `text` (against `base`); every other box takes
+// `server`'s value as text and base.
+function mergeTyped<F extends PrefsFields>(text: F, base: F, server: F): { text: F; base: F; typed: string[] } {
+  const typed = typedKeys(text, base).filter((k) => text[k] !== server[k]);
+  const t = { ...server };
+  const b = { ...server };
+  for (const k of typed) {
+    (t as PrefsFields)[k] = text[k];
+    (b as PrefsFields)[k] = base[k];
+  }
+  return { text: t, base: b, typed };
+}
+
+// On mount: a stored draft's typed boxes come back with their own base; every
+// other box shows the server's value. A draft with no typed box left (or not
+// this editor's shape) holds nothing unsaved and is dropped.
 export function hydratePrefsDraft<F extends PrefsFields>(
   server: F,
   serverVersion: number,
@@ -66,29 +103,50 @@ export function hydratePrefsDraft<F extends PrefsFields>(
     isFields(p.base) &&
     sameKeys(p.text, server) &&
     sameKeys(p.base, server);
-  if (!ok || sameFields(p.text as F, server)) return { ...fresh, clearStored: true };
-  return { text: p.text as F, base: p.base as F, baseVersion: stored.expectedVersion, clearStored: false };
+  if (!ok) return { ...fresh, clearStored: true };
+  const m = mergeTyped(p.text as F, p.base as F, server);
+  if (!m.typed.length) return { ...fresh, clearStored: true };
+  return { text: m.text, base: m.base, baseVersion: stored.expectedVersion, clearStored: false };
 }
 
-// After a 409 carrying the server's row. Typed text is kept and rebased on
-// that row, so the next Save goes through ("save again to apply"). An editor
-// with nothing typed takes the server's text, so a second click cannot write
-// the stale copy over it.
+// After a 409 carrying the server's row. Typed boxes are kept and rebased on
+// that row, so the next Save goes through ("save again to apply"); every other
+// box takes the server's value, so a second click cannot write a stale copy.
 export function afterPrefsConflict<F extends PrefsFields>(
   text: F,
   base: F,
   current: F,
   currentVersion: number,
 ): PrefsDraftState<F> {
-  const typed = !sameFields(text, base);
-  return { text: typed ? text : current, base: current, baseVersion: currentVersion };
+  const out = { ...current };
+  for (const k of typedKeys(text, base)) (out as PrefsFields)[k] = text[k];
+  return { text: out, base: current, baseVersion: currentVersion };
 }
 
-// After a 200: the saved fields are the new base. `text` is what the editor
-// shows now, which may hold typing done while the save was in flight.
-export function afterPrefsSave<F extends PrefsFields>(text: F, saved: F, savedVersion: number): PrefsDraftState<F> {
-  return { text, base: saved, baseVersion: savedVersion };
+// After a 200: the saved fields are the new base. A box typed in keeps what it
+// shows now (typing may have gone on while the save was in flight); every
+// other box shows the saved value.
+export function afterPrefsSave<F extends PrefsFields>(
+  text: F,
+  base: F,
+  saved: F,
+  savedVersion: number,
+): PrefsDraftState<F> {
+  const out = { ...saved };
+  for (const k of typedKeys(text, base)) (out as PrefsFields)[k] = text[k];
+  return { text: out, base: saved, baseVersion: savedVersion };
 }
+
+// Whether a stored prefs draft may be deleted by this tab: only when it holds
+// one of `texts` (what this tab last wrote, or what it is settling to). The
+// store is shared by every tab of the workspace, so another tab's newer typing
+// under the same key is never cleared (#909 gate review H5).
+export function prefsDraftClearable(payload: unknown, texts: PrefsFields[]): boolean {
+  const p = payload as Partial<PrefsDraftPayload> | null;
+  if (!p || !isFields(p.text)) return false;
+  return texts.some((t) => sameFields(p.text as PrefsFields, t));
+}
+
 
 function isFields(v: unknown): v is PrefsFields {
   if (!v || typeof v !== "object" || Array.isArray(v)) return false;

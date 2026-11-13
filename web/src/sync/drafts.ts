@@ -619,6 +619,14 @@ export const drafts = {
     );
   },
 
+  // Delete a draft only if `settled` accepts the stored record, read and
+  // deleted in one transaction. The prefs editors fence their clears with it
+  // (prefsDraftClearable, #909): another tab's newer text under the same key
+  // is kept.
+  clearIf(key: string, settled: (rec: DraftRecord) => boolean): Promise<boolean> {
+    return clearRowIf(key, settled);
+  },
+
   async list(): Promise<DraftRecord[]> {
     return listAll();
   },
