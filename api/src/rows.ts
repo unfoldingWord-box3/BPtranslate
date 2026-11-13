@@ -1561,10 +1561,27 @@ rows.post("/tn/:id/validate", requireEditor, async (c) => {
   return c.json(updated);
 });
 
+// The run, if any, holding this tq row's chapter: the same rule as PATCH
+// /tq/:id (activePipelineForChapter). Approve checks it (#752). An unknown row
+// returns null so the route still answers 404.
+async function chapterLockForTqId(env: Env, id: string, book: string) {
+  const row = await env.DB.prepare(
+    `SELECT book, chapter FROM tq_rows WHERE id = ?1 AND deleted_at IS NULL${bookClause(2)}`,
+  )
+    .bind(id, book)
+    .first<{ book: string; chapter: number }>();
+  if (!row) return null;
+  return activePipelineForChapter(env, row.book, row.chapter);
+}
+
 // POST /api/rows/tq/:id/validate — the translationQuestions "Approve" action,
 // the exact analogue of /tn/:id/validate. Body: { value: 0 | 1 | boolean,
 // expected_state?, expected_updated_at? } (1 → validated, 0 → back to edited);
-// If-Match, expected_state and expected_updated_at pin as there. Lock-exempt, non-version-bumping.
+// If-Match, expected_state and expected_updated_at pin as there. Non-version-
+// bumping. Approving (value=1) is refused (409 chapter_locked) while any AI run
+// holds the question's chapter (#752), since applyTranslateTqRow resets
+// translation_state to ai_draft and the version CAS cannot see an approve.
+// Un-approve stays allowed, as for notes.
 rows.post("/tq/:id/validate", requireEditor, async (c) => {
   const id = c.req.param("id");
   const book = c.req.query("book");
@@ -1591,6 +1608,10 @@ rows.post("/tq/:id/validate", requireEditor, async (c) => {
     source: editSource(c),
     clearBulkStamp: parsed.data.bulk !== true && userId != null,
   };
+  if (nextState === "validated") {
+    const lock = await chapterLockForTqId(c.env, id, book);
+    if (lock) return c.json(lockedResponseBody(lock), 409);
+  }
   const updated = await setTqTranslationState(c.env, id, book, userId, nextState, pins);
   if (!updated) return stateWriteMiss(c, "tq", id, book, pins);
   c.executionCtx.waitUntil(
