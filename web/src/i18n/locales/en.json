@@ -624,11 +624,11 @@
     "switchOff": "Off",
     "toggleAria": "Learn from editor corrections",
     "statusOff": "Off. The AI is NOT learning from editor corrections. New drafts get only your brief, instructions, terms, templates and examples. Turn this on when your editors have approved enough notes, for example after a few weeks of work.",
-    "statusOn": "On. On a night with new approvals, the app reads the corrections in the 2 most recently approved chapters and updates the lessons below. AI drafts made after the next context pack export are given them. A night that failed or ran out of time is finished the next night.",
+    "statusOn": "On. On a night with new approvals, the app reads the corrections in the 2 most recently approved chapters and updates the lessons below. AI drafts made after the next context pack export are given them. A night that failed or ran out of time is finished on the following nights.",
     "unavailableProvider": "Not available with your AI provider ({{provider}}). Lessons need Claude or Gemini. The AI is NOT learning from editor corrections.",
     "unavailableNoKey": "Cannot run: the AI service is not set up, or its key cannot be used. Check AI service. The AI is NOT learning from editor corrections.",
     "unavailableNotTranslation": "Lessons are for translation projects only. The AI is NOT learning from editor corrections.",
-    "cost": "On each night it runs, the app makes one call to your AI service: a night with new approvals, or the night after a run that failed or ran out of time. Your project's AI account pays for it.",
+    "cost": "The app makes at most one call to your AI service a night, and only when there are corrections to learn from: on a night with new approvals, or on the nights after a run that failed or ran out of time, until its notes have all been compared (that can be two nights after a run that ran out of time, even with no new approvals). A night with nothing to learn from makes no call. Your project's AI account pays for each call.",
     "run": {
       "never": "Last run: not run yet.",
       "summary": "Last run: {{when}}, {{status}}. {{cost}}",
@@ -652,10 +652,41 @@
       "noKey": "the AI service is not set up, or its key cannot be used.",
       "notTranslation": "lessons are for translation projects only."
     },
-    "readOnly": "Lessons cannot be edited or removed here yet.",
+    "pinned": "Pinned: kept every night as it is",
+    "actions": {
+      "pin": "Pin",
+      "unpin": "Unpin",
+      "delete": "Delete",
+      "promote": "Move to Common issues"
+    },
+    "editHelp": "Pin a lesson to keep it, word for word, every night. Delete removes it; a night brings it back only if editors make the same correction again in notes approved later. Move to Common issues adds it to the end of Common issues and removes it from this list. Every change is saved as a new version of the list, so you can restore an earlier one below.",
+    "promoted": "The lesson was added to the end of Common issues.",
+    "error": {
+      "stale": "The lessons changed since this page loaded (a night's run or another admin). The list is up to date now. Try again.",
+      "runInProgress": "Tonight's lessons run is in progress. Try again in a few minutes.",
+      "prefsChanged": "Common issues was just changed somewhere else. Try again.",
+      "commonIssuesFull": "Common issues is full (50,000 characters). Shorten it first.",
+      "failed": "Could not change the lessons. Try again."
+    },
+    "sets": {
+      "title": "Earlier versions of this list",
+      "intro": "Each night's lessons and each change made here is kept. Restore makes an earlier version the current list again; the list you have now stays in this history.",
+      "line": "{{when}} · {{label}} · {{n}} lessons",
+      "current": "Current",
+      "night": "written by the nightly run",
+      "delete": "after a lesson was deleted",
+      "pin": "after a lesson was pinned",
+      "unpin": "after a lesson was unpinned",
+      "promote": "after a lesson was moved to Common issues",
+      "restore": "an earlier version, restored",
+      "edit": "changed by an admin",
+      "restoreButton": "Restore",
+      "restoreAria": "Restore the list from {{when}}",
+      "restored": "The earlier list is the current list again."
+    },
     "loadFailed": "Could not load the lessons. Reload the page to try again.",
     "saveFailed": "Could not change the setting. Try again.",
-    "notMigrated": "Lessons are not available yet: the server database needs an update (migration 0085)."
+    "notMigrated": "Lessons are not available yet: the server database needs an update (migrations 0085 to 0087)."
   },
   "houseStyle": {
     "title": "House style",

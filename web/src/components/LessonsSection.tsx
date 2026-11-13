@@ -1,7 +1,16 @@
 import { useEffect, useState } from "react";
-import { Alert, Box, CircularProgress, FormControlLabel, Stack, Switch, Typography } from "@mui/material";
+import { Alert, Box, Button, Chip, CircularProgress, FormControlLabel, Stack, Switch, Typography } from "@mui/material";
 import { useTranslation } from "react-i18next";
-import { api, type Lesson, type LessonRun, type LessonsState } from "../sync/api";
+import {
+  ApiError,
+  api,
+  type Lesson,
+  type LessonEditAction,
+  type LessonRun,
+  type LessonSetSummary,
+  type LessonsState,
+  type TranslationPrefs,
+} from "../sync/api";
 import { formatEpochSecondsDateTime } from "../lib/formatDate";
 
 // ── Lessons from editor corrections (issue #817, admin-only) ────────────────
@@ -10,9 +19,13 @@ import { formatEpochSecondsDateTime } from "../lib/formatDate";
 // list of lessons, and adds them to instructions.md in the context pack
 // (api/src/lessons.ts). Off by default for every project, and the page must say
 // plainly when it is off or cannot run, so nobody expects drafts to improve
-// when they will not. Read-only list for now; delete / pin / promote is part 2.
-// Mounted in classic Preferences (section "lessons") and on the desk's Style
-// page. `heading` is false where the host already renders a title.
+// when they will not. An admin can pin, delete or move a lesson to Common
+// issues, and restore an earlier list (#908); each change is saved on the
+// server as a new version of the list. Mounted in classic Preferences
+// (section "lessons") and on the desk's Style page. `heading` is false where
+// the host already renders a title; `onPrefsChanged` gets the saved
+// Translation preferences after a lesson moved to Common issues, so the host
+// can show the new line in its Common issues editor without a reload.
 
 // Text from the data (often Arabic) inside UI text in either direction.
 function Sample({ text }: { text: string }) {
@@ -27,10 +40,21 @@ function Sample({ text }: { text: string }) {
   );
 }
 
-function LessonCard({ lesson }: { lesson: Lesson }) {
+function LessonCard({
+  lesson,
+  busy,
+  onAction,
+}: {
+  lesson: Lesson;
+  busy: boolean;
+  onAction: (action: LessonEditAction) => void;
+}) {
   const { t } = useTranslation();
   return (
-    <Box sx={{ border: 1, borderColor: "divider", borderRadius: 1.5, p: 1.5 }}>
+    <Box sx={{ border: 1, borderColor: lesson.pinned ? "primary.main" : "divider", borderRadius: 1.5, p: 1.5 }} data-testid="lesson-card">
+      {lesson.pinned && (
+        <Chip size="small" color="primary" variant="outlined" label={t("lessons.pinned")} sx={{ mb: 0.75 }} />
+      )}
       <Typography variant="body2" dir="auto">
         {lesson.lesson}
       </Typography>
@@ -49,8 +73,55 @@ function LessonCard({ lesson }: { lesson: Lesson }) {
       <Typography variant="caption" color="text.secondary" component="p" sx={{ mt: 0.75 }}>
         {t("lessons.meta", { n: lesson.evidence, date: formatEpochSecondsDateTime(lesson.firstSeenAt) })}
       </Typography>
+      <Stack direction="row" flexWrap="wrap" gap={1} sx={{ mt: 1 }}>
+        <Button size="small" variant="outlined" disabled={busy} onClick={() => onAction(lesson.pinned ? "unpin" : "pin")}>
+          {lesson.pinned ? t("lessons.actions.unpin") : t("lessons.actions.pin")}
+        </Button>
+        <Button size="small" variant="outlined" disabled={busy} onClick={() => onAction("promote")}>
+          {t("lessons.actions.promote")}
+        </Button>
+        <Button size="small" color="error" disabled={busy} onClick={() => onAction("delete")}>
+          {t("lessons.actions.delete")}
+        </Button>
+      </Stack>
     </Box>
   );
+}
+
+function setLabel(s: LessonSetSummary, t: (k: string, o?: Record<string, unknown>) => string): string {
+  if (s.kind === "night") return t("lessons.sets.night");
+  switch (s.action) {
+    case "delete":
+      return t("lessons.sets.delete");
+    case "pin":
+      return t("lessons.sets.pin");
+    case "unpin":
+      return t("lessons.sets.unpin");
+    case "promote":
+      return t("lessons.sets.promote");
+    case "restore":
+      return t("lessons.sets.restore");
+    default:
+      return t("lessons.sets.edit");
+  }
+}
+
+// What a refused change (409/413) means, in words; the server's fresh state
+// comes with a 409 and replaces the page's copy.
+function editErrorText(e: unknown, t: (k: string) => string): string {
+  const code = e instanceof ApiError && e.body && typeof e.body === "object" ? (e.body as { error?: unknown }).error : null;
+  switch (code) {
+    case "stale_set":
+      return t("lessons.error.stale");
+    case "run_in_progress":
+      return t("lessons.error.runInProgress");
+    case "prefs_changed":
+      return t("lessons.error.prefsChanged");
+    case "common_issues_full":
+      return t("lessons.error.commonIssuesFull");
+    default:
+      return t("lessons.error.failed");
+  }
 }
 
 function runSummary(run: LessonRun, t: (k: string, o?: Record<string, unknown>) => string): string {
@@ -72,12 +143,20 @@ function runSummary(run: LessonRun, t: (k: string, o?: Record<string, unknown>) 
   return t("lessons.run.summary", { when, status, cost });
 }
 
-export function LessonsSection({ heading = true }: { heading?: boolean }) {
+export function LessonsSection({
+  heading = true,
+  onPrefsChanged,
+}: {
+  heading?: boolean;
+  onPrefsChanged?: (prefs: TranslationPrefs) => void;
+}) {
   const { t } = useTranslation();
   const [state, setState] = useState<LessonsState | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [busy, setBusy] = useState(false);
   const [saveError, setSaveError] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -104,6 +183,36 @@ export function LessonsSection({ heading = true }: { heading?: boolean }) {
     } finally {
       setBusy(false);
     }
+  };
+
+  // Pin / delete / promote / restore: each answers with the new state. A
+  // refusal carries the server's current state, which replaces ours.
+  const change = async (run: () => Promise<LessonsState & { prefs?: TranslationPrefs }>, done?: string) => {
+    setBusy(true);
+    setEditError(null);
+    setNotice(null);
+    try {
+      const next = await run();
+      setState(next);
+      if (next.prefs) onPrefsChanged?.(next.prefs);
+      if (done) setNotice(done);
+    } catch (e) {
+      setEditError(editErrorText(e, t));
+      const fresh = e instanceof ApiError && e.body && typeof e.body === "object" ? (e.body as { state?: LessonsState }).state : undefined;
+      if (fresh) setState(fresh);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const edit = (position: number, action: LessonEditAction) => {
+    if (state?.setId == null) return;
+    const setId = state.setId;
+    void change(() => api.editLesson(setId, position, action), action === "promote" ? t("lessons.promoted") : undefined);
+  };
+  const restore = (setId: number) => {
+    if (state?.setId == null) return;
+    const current = state.setId;
+    void change(() => api.restoreLessonSet(setId, current), t("lessons.sets.restored"));
   };
 
   const availability = state?.availability;
@@ -143,6 +252,16 @@ export function LessonsSection({ heading = true }: { heading?: boolean }) {
       {saveError && (
         <Alert severity="error" onClose={() => setSaveError(false)}>
           {t("lessons.saveFailed")}
+        </Alert>
+      )}
+      {editError && (
+        <Alert severity="error" onClose={() => setEditError(null)} data-testid="lessons-edit-error">
+          {editError}
+        </Alert>
+      )}
+      {notice && (
+        <Alert severity="success" onClose={() => setNotice(null)} data-testid="lessons-notice">
+          {notice}
         </Alert>
       )}
       {loadError ? (
@@ -198,7 +317,7 @@ export function LessonsSection({ heading = true }: { heading?: boolean }) {
             ) : (
               <Stack spacing={1}>
                 {state.lessons.map((l, i) => (
-                  <LessonCard key={i} lesson={l} />
+                  <LessonCard key={`${state.setId}-${i}`} lesson={l} busy={busy} onAction={(a) => edit(i + 1, a)} />
                 ))}
               </Stack>
             )}
@@ -208,9 +327,43 @@ export function LessonsSection({ heading = true }: { heading?: boolean }) {
               </Typography>
             )}
             <Typography variant="caption" color="text.secondary" component="p" sx={{ mt: 1 }}>
-              {t("lessons.readOnly")}
+              {t("lessons.editHelp")}
             </Typography>
           </Box>
+          {state.sets.length > 1 && (
+            <Box data-testid="lessons-sets">
+              <Typography variant="subtitle2" sx={{ mb: 0.5 }}>
+                {t("lessons.sets.title")}
+              </Typography>
+              <Typography variant="caption" color="text.secondary" component="p" sx={{ mb: 1 }}>
+                {t("lessons.sets.intro")}
+              </Typography>
+              <Stack spacing={0.5}>
+                {state.sets.map((s, i) => {
+                  const when = s.at != null ? formatEpochSecondsDateTime(s.at) : "?";
+                  return (
+                    <Stack key={s.id} direction="row" alignItems="center" gap={1} flexWrap="wrap">
+                      <Typography variant="body2" sx={{ flex: 1, minWidth: 0 }}>
+                        {t("lessons.sets.line", { when, label: setLabel(s, t), n: s.count })}
+                      </Typography>
+                      {i === 0 ? (
+                        <Chip size="small" label={t("lessons.sets.current")} />
+                      ) : (
+                        <Button
+                          size="small"
+                          disabled={busy}
+                          onClick={() => restore(s.id)}
+                          aria-label={t("lessons.sets.restoreAria", { when })}
+                        >
+                          {t("lessons.sets.restoreButton")}
+                        </Button>
+                      )}
+                    </Stack>
+                  );
+                })}
+              </Stack>
+            </Box>
+          )}
         </>
       )}
     </Stack>

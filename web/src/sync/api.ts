@@ -1252,7 +1252,22 @@ export interface Lesson {
   after: string;
   evidence: number;
   firstSeenAt: number;
+  /** Pinned by an admin (#908): every night keeps it as it is. */
+  pinned: boolean;
 }
+
+/** One stored lesson set, for the restore list (#908). */
+export interface LessonSetSummary {
+  id: number;
+  at: number | null;
+  /** "night" = written by a nightly run; "edit" = an admin change. */
+  kind: "night" | "edit";
+  /** For an edit: delete | pin | unpin | promote | restore. */
+  action: string | null;
+  count: number;
+}
+
+export type LessonEditAction = "delete" | "pin" | "unpin" | "promote";
 
 export interface LessonRun {
   id: number;
@@ -1278,8 +1293,13 @@ export interface LessonsState {
   /** Whether a night's run could call the AI (only Claude and Gemini can). */
   availability: { available: true; provider: string; model: string } | { available: false; reason: string; provider: string | null };
   lessons: Lesson[];
+  /** The current set's id; an admin change names it (409 stale_set if it moved). */
+  setId: number | null;
   setAt: number | null;
+  /** The last nightly run (admin changes are not runs). */
   lastRun: LessonRun | null;
+  /** Recent sets, newest first; the first is the current one. */
+  sets: LessonSetSummary[];
   maxLessons: number;
 }
 
@@ -2542,6 +2562,20 @@ export const api = {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ enabled }),
+    }),
+  // Part 2 (#908): each change writes a new set. A promote also answers with
+  // the saved Translation preferences (Common issues gained a line).
+  editLesson: (setId: number, position: number, action: LessonEditAction) =>
+    request<LessonsState & { prefs?: TranslationPrefs }>(`/api/translation-memory/lessons/edit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ setId, position, action }),
+    }),
+  restoreLessonSet: (setId: number, currentSetId: number) =>
+    request<LessonsState>(`/api/translation-memory/lessons/restore`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ setId, currentSetId }),
     }),
 
   // ── Org-wide AI provider config (migration 0065) ──

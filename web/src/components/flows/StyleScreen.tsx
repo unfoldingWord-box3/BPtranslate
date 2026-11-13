@@ -746,7 +746,13 @@ export default function StyleScreen({ role, me }: StyleScreenProps) {
                 </Panel>
                 {/* #817: admin-only like the house-style panel above. */}
                 <Panel id="lessons" title={t("moreTools.style.sectionLessons")} intro={t("moreTools.style.lessonsIntro")}>
-                  <LessonsSection heading={false} />
+                  <LessonsSection
+                    heading={false}
+                    onPrefsChanged={(p) => {
+                      prefsState.apply(p);
+                      setPrefsGen((g) => g + 1);
+                    }}
+                  />
                 </Panel>
               </>
             )}
