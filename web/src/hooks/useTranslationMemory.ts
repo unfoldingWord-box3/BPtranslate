@@ -18,6 +18,7 @@ export function useTranslationPrefs(enabled: boolean): {
   error: Error | null;
   refetch: () => void;
   apply: (p: TranslationPrefs) => void;
+  applyConflict: (p: TranslationPrefs) => void;
 } {
   const [prefs, setPrefs] = useState<TranslationPrefs | null>(null);
   const [loading, setLoading] = useState(false);
@@ -35,6 +36,14 @@ export function useTranslationPrefs(enabled: boolean): {
   // Adopt a prefs object we already have in hand (a PUT response, or the
   // `current` row from a 409 conflict body) without a round-trip refetch.
   const apply = take;
+  // The `current` row of a 409: the server's row right now, taken even when
+  // its version is lower than the one held. An admin database restore or row
+  // reset can lower it, and keeping the higher one made every Save conflict
+  // until a reload (#922 item 2).
+  const applyConflict = useCallback((p: TranslationPrefs) => {
+    newest.current = p;
+    setPrefs(p);
+  }, []);
 
   useEffect(() => {
     if (!enabled) {
@@ -77,7 +86,7 @@ export function useTranslationPrefs(enabled: boolean): {
     });
   }, [enabled, take]);
 
-  return { prefs, loading, error, refetch, apply };
+  return { prefs, loading, error, refetch, apply, applyConflict };
 }
 
 /** Latest context-pack export status — gates the assisted-mode toggle. */

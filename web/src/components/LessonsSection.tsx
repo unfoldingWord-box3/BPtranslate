@@ -162,8 +162,9 @@ export function LessonsSection({
   /**
    * Asked right before a move is sent, for a host whose `promoteBlocked`
    * follows an async source (classic Preferences reads the drafts store,
-   * #909): true (or a failed check) refuses that one move and shows the same
-   * hint as a message; the button itself follows `promoteBlocked` only, so
+   * #909): true refuses that one move and shows the same hint as a message
+   * (a failed check refuses it too, saying the check failed); the button
+   * itself follows `promoteBlocked` only, so
    * the next click asks again.
    */
   promoteBlockedNow?: () => Promise<boolean>;
@@ -235,10 +236,12 @@ export function LessonsSection({
       inFlight.current = true;
       setBusy(true);
       let blocked = false;
+      let unchecked = false;
       try {
         // A failed check refuses the move: it cannot tell that Common issues
         // has no unsaved typing the move would come back under (#913 item 4).
-        blocked = await promoteBlockedNow().catch(() => true);
+        // It says the check failed, not that there is typing (#922 item 4).
+        blocked = await promoteBlockedNow().catch(() => (unchecked = true));
       } finally {
         inFlight.current = false;
         setBusy(false);
@@ -246,7 +249,7 @@ export function LessonsSection({
       if (blocked) {
         // This click only: the next one checks again (round 3, K1).
         setNotice(null);
-        setEditError(t("lessons.promoteBlocked"));
+        setEditError(t(unchecked ? "lessons.promoteUnchecked" : "lessons.promoteBlocked"));
         return;
       }
     }

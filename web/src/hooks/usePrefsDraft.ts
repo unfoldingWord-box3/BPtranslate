@@ -81,14 +81,20 @@ export function usePrefsDraft<F extends PrefsFields>(
   }, [key]);
 
   // Store typed state as this editor's draft, stamped with who typed it.
-  // `ifAbsent`: only when no record is stored (the write-back below, B4).
+  // `ifAbsent`: only when no record is stored (the write-back below, B4), and
+  // only while the box still shows that typing: another tab's discard handled
+  // after the write-back started has reset it (#922 item 1).
   const write = useCallback(
     (s: PrefsDraftState<F>, ifAbsent = false) => {
       lastWritten.current = s.text;
       const owner = currentUserId();
       const payload = { text: s.text, base: s.base, ...(owner != null ? { owner } : {}) };
       const meta = { kind: "prefs" as const, section };
-      if (ifAbsent) void drafts.setIfAbsent(key, payload, s.baseVersion, meta);
+      const still = () => {
+        const cur = stateRef.current;
+        return !!cur && sameFields(cur.text, s.text) && typedKeys(cur.text, cur.base).length > 0;
+      };
+      if (ifAbsent) void drafts.setIfAbsent(key, payload, s.baseVersion, meta, still);
       else void drafts.set(key, payload, s.baseVersion, meta);
     },
     [key, section],
@@ -257,11 +263,13 @@ export function usePrefsDraft<F extends PrefsFields>(
       const latest = newestPrefs(prefsRef.current, row);
       commit(afterPrefsSave(s.text, textAtSave.current ?? s.text, pick(latest), latest.version));
     },
+    // The 409's row is the server's truth, taken even when older than the
+    // row this page holds (an admin database restore can lower the version,
+    // #922 item 2). A late 409 body overtaken by a newer save costs one more
+    // 409 at most: the next Save sends the older version and gets the newest.
     conflicted: (current: TranslationPrefs) => {
       const s = stateRef.current;
-      // The same for a late 409 body older than the row this page holds.
-      const latest = newestPrefs(prefsRef.current, current);
-      if (s) commit(afterPrefsConflict(s.text, s.base, pick(latest), latest.version));
+      if (s) commit(afterPrefsConflict(s.text, s.base, pick(current), current.version));
     },
   };
 }
