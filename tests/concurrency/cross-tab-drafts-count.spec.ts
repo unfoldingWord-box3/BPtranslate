@@ -8,11 +8,12 @@ import { fetchChapter, gotoVerse, mintToken, newUserContext } from "./helpers";
 // workspace, but a tab's "N unsaved" chip re-counted only after a change made
 // in that same tab. When tab A typed, saved or discarded a draft, tab B kept
 // its old count until a reload. Now drafts.ts announces each committed change
-// on a BroadcastChannel (draftsChangedChannel.ts) and tab B re-reads the store.
+// on a BroadcastChannel (draftsChangedChannel.ts) and tab B re-reads the store
+// for its count (the only subscriber that opts in).
 //
 // Both pages live in ONE browser context: tabs share IndexedDB and
-// BroadcastChannel only within a context. Tab B stays on another verse so no
-// editor there holds the draft. Nothing is saved, so the server fixture is
+// BroadcastChannel only within a context. In the first test tab B stays on
+// another verse; the second puts both tabs on one verse. Nothing is saved, so the server fixture is
 // untouched; ZEC 2 is used because no other spec opens it.
 
 const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
@@ -22,6 +23,7 @@ const CHAPTER = 2;
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const EN = JSON.parse(readFileSync(resolve(repoRoot, "web/src/i18n/locales/en.json"), "utf8")) as {
   sync: { unsaved: string; discardThisEdit: string };
+  shell: { saveEdits: string };
 };
 const ONE_UNSAVED = `1 ${EN.sync.unsaved}`;
 
@@ -67,6 +69,16 @@ async function countDraftMessages(page: Page): Promise<() => Promise<number>> {
   return () => page.evaluate(() => (window as unknown as { __draftMsgs: number }).__draftMsgs);
 }
 
+// Discard tab `page`'s one draft from the "1 unsaved" jump menu (top-bar chip,
+// then the Status popover's chip, then the draft's discard button).
+async function discardFromChip(page: Page) {
+  await page.bringToFront();
+  await page.getByText(ONE_UNSAVED).first().click();
+  await page.getByRole("presentation").getByText(ONE_UNSAVED).click();
+  await page.getByRole("button", { name: EN.sync.discardThisEdit }).click();
+  await expect(page.getByText(ONE_UNSAVED)).toHaveCount(0);
+}
+
 test("tab A types then discards a draft: tab B's unsaved count follows without a reload", async ({ browser }) => {
   test.setTimeout(90_000);
   const tq = await pickRow();
@@ -93,13 +105,7 @@ test("tab A types then discards a draft: tab B's unsaved count follows without a
   await expect(b.getByText(ONE_UNSAVED).first()).toBeVisible({ timeout: 10_000 });
   if (SHOTS) await b.screenshot({ path: `${SHOTS}/cross-tab-drafts-count-tab-b-unsaved.png` });
 
-  // Tab A discards it from the "1 unsaved" jump menu (top-bar chip, then the
-  // Status popover's chip, then the draft's discard button).
-  await a.bringToFront();
-  await a.getByText(ONE_UNSAVED).first().click();
-  await a.getByRole("presentation").getByText(ONE_UNSAVED).click();
-  await a.getByRole("button", { name: EN.sync.discardThisEdit }).click();
-  await expect(a.getByText(ONE_UNSAVED)).toHaveCount(0);
+  await discardFromChip(a);
 
   // Tab B's chip drops, and stays dropped.
   await expect(b.getByText(ONE_UNSAVED)).toHaveCount(0, { timeout: 10_000 });
@@ -113,4 +119,49 @@ test("tab A types then discards a draft: tab B's unsaved count follows without a
   expect(settled, "tab B heard tab A's write and discard").toBeGreaterThanOrEqual(2);
   await b.waitForTimeout(1500);
   expect(await heard()).toBe(settled);
+});
+
+// Only the count follows another tab. The rows-view verse box copies a draft's
+// text into itself the first time it sees that draft, so if it heard tab A's
+// typing it would show a stale snapshot of it, with Save on, and keep that
+// text after A discards. Tab B's box keeps the server text throughout.
+test("same verse in both tabs: tab B's count follows tab A's draft, its verse box does not", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const { context } = await newUserContext(browser, "cross-tab-drafts-896-same-verse");
+  openContexts.push(context);
+  const cellSel = `[data-find-cell="${CHAPTER}-1-ULT"][contenteditable="true"]`;
+
+  const b = await context.newPage();
+  await b.setViewportSize({ width: 1280, height: 900 });
+  await gotoVerse(b, "ZEC", CHAPTER, 1);
+  const bCell = b.locator(cellSel).first();
+  await bCell.waitFor();
+  const server = await bCell.textContent();
+  const bUnchanged = async () => {
+    expect(await bCell.textContent()).toBe(server);
+    expect(await bCell.getAttribute("data-dirty")).toBeNull();
+    expect(await b.locator(`button[aria-label="${EN.shell.saveEdits}"]:not([disabled])`).count()).toBe(0);
+  };
+
+  const a = await context.newPage();
+  await a.setViewportSize({ width: 1280, height: 900 });
+  await gotoVerse(a, "ZEC", CHAPTER, 1);
+  const aCell = a.locator(cellSel).first();
+  await aCell.click();
+  await a.keyboard.press("End");
+  await a.keyboard.type(" SAME VERSE", { delay: 50 });
+  await expect(a.getByText(ONE_UNSAVED).first()).toBeVisible({ timeout: 15_000 });
+
+  await expect(b.getByText(ONE_UNSAVED).first()).toBeVisible({ timeout: 10_000 });
+  const end = Date.now() + 1000;
+  do {
+    await bUnchanged();
+    await b.waitForTimeout(100);
+  } while (Date.now() < end);
+  if (SHOTS) await b.screenshot({ path: `${SHOTS}/cross-tab-drafts-count-same-verse-tab-b.png` });
+
+  await discardFromChip(a);
+  await expect(b.getByText(ONE_UNSAVED)).toHaveCount(0, { timeout: 10_000 });
+  await bUnchanged();
+  if (SHOTS) await b.screenshot({ path: `${SHOTS}/cross-tab-drafts-count-same-verse-tab-b-after.png` });
 });
