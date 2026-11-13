@@ -46,6 +46,8 @@ const API_KEY = "sk-ant-api03-PLAINTEXT-MUST-NEVER-LEAVE-DISPATCH";
 
 function makeDb(sqlite) {
   const mk = (sql, args) => ({
+    sql,
+    args,
     bind: (...a) => mk(sql, a),
     async all() {
       return { results: sqlite.prepare(sql).all(...args), success: true };
@@ -1437,6 +1439,73 @@ test("isEnglishEcho (#794): the compare rules", () => {
   assert.equal(isEnglishEcho("https://example.org/a", "https://example.org/a"), false);
   // A link with English words around it is still English.
   assert.equal(isEnglishEcho("See: [[rc://*/tw/dict/bible/kt/god]]", "See: [[rc://*/tw/dict/bible/kt/god]]"), true);
+});
+
+// The job translated from a pinned English commit, and the English on master
+// has moved on since. The echo check must compare against the English the job
+// actually translated from (options_json.sourceRef), not master.
+const PINNED_SHA = "0123456789abcdef0123456789abcdef01234567";
+const EN_TN_MASTER_TSV = [
+  "Reference\tID\tTags\tSupportReference\tQuote\tOccurrence\tNote",
+  "1:1\tab12\t\t\tחֲז֖וֹן\t1\tA reworded English note on master",
+  "1:2\tcd34\t\t\tקָטֹ֛ן\t1\t[[rc://*/ta/man/translate/figs-metaphor]]",
+].join("\n");
+
+test("import (internal, #794): the English echo check reads the English at the job's pinned sourceRef", async () => {
+  const sqlite = freshSqlite();
+  seedEchoTnRows(sqlite);
+  clearSourceNotesCache();
+  const urls = [];
+  await runScopedImport(sqlite, {
+    manifest: MANIFEST,
+    file: "tn_OBA.tsv",
+    bytes: ECHO_TN_TSV,
+    options: { resourceType: "tn", sourceRef: `unfoldingWord/en_tn@${PINNED_SHA}` },
+    fetchImpl: async (url) => {
+      const u = String(url);
+      urls.push(u);
+      if (u.endsWith(`/unfoldingWord/en_tn/raw/commit/${PINNED_SHA}/tn_OBA.tsv`)) return new Response(EN_TN_TSV, { status: 200 });
+      if (u.endsWith("/raw/branch/master/tn_OBA.tsv")) return new Response(EN_TN_MASTER_TSV, { status: 200 });
+      throw new Error(`unexpected fetch ${u}`);
+    },
+  });
+
+  assert.deepEqual(
+    tnRow(sqlite, "ab12"),
+    { note: "The vision of Obadiah", translation_state: null, version: 1 },
+    "the draft equals the English at the pinned commit, so it is not applied",
+  );
+  const report = JSON.parse(jobRow(sqlite).apply_skipped_json);
+  assert.deepEqual(report.tnSameAsEnglishIds, ["ab12"]);
+  assert.equal(urls.length, 1, "one English read for the job");
+});
+
+test("import (internal, #794): an Approve landing between the row read and the write is reported as kept-approved", async () => {
+  const sqlite = freshSqlite();
+  seedScopeTnRows(sqlite);
+  sqlite.prepare(`UPDATE tn_rows SET translation_state = NULL WHERE id = 'cd34'`).run();
+  seedRunningInternalJob(sqlite, wf("done", { status: "done" }, MANIFEST), { options: { resourceType: "tn" } });
+  const env = freshEnv(sqlite);
+  env.blobs.map.set(outKey(env.WORKSPACE_SLUG, "job-1", "tn_OBA.tsv"), REDO_TN_TSV);
+  env.blobs.map.set(outKey(env.WORKSPACE_SLUG, "job-1", "translate-report-1-1.json"), "{}");
+  // A reviewer approves cd34 just before its guarded UPDATE runs. Approve does
+  // not bump the version, so only the state guard stops the write.
+  const batch = env.DB.batch.bind(env.DB);
+  let fired = 0;
+  env.DB.batch = async (stmts) => {
+    const s = stmts[0];
+    if (/UPDATE tn_rows\s+SET note/.test(s?.sql ?? "") && (s.args ?? []).includes("cd34")) {
+      fired++;
+      sqlite.prepare(`UPDATE tn_rows SET translation_state = 'validated' WHERE id = 'cd34'`).run();
+    }
+    return batch(stmts);
+  };
+  await withNoFetch(async () => pollAllNonTerminal(env));
+
+  assert.equal(fired, 1, "the approval landed inside the apply's window");
+  assert.deepEqual(tnRow(sqlite, "cd34"), { note: "ملاحظة عربية معتمدة", translation_state: "validated", version: 7 });
+  const report = JSON.parse(jobRow(sqlite).apply_skipped_json);
+  assert.deepEqual(report.tnApprovedIds, ["cd34"], "the late approval is listed as kept");
 });
 
 test("import (proxy, #794): the bot path keeps an approved note and drops an English echo too", async () => {
