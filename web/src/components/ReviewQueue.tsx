@@ -17,7 +17,10 @@
 //            tq/twl are locked.
 //   DELETE — locked for EVERY kind, tn included ("no carve-out for tn here").
 //   POST /api/rows — locked (a run will rearrange the row set when it lands).
-//   /validate /preserve /hint /trash /restore — no lock check at all.
+//   /validate (approve only) — tn: refused while a translate run will write
+//            the note (#602); tq: refused while any run holds the chapter (#752).
+//   /trash /restore — tn: refused while a translate run will write the note (#602).
+//   /preserve /hint — no lock check at all.
 // The card disables exactly what the server would actually reject — no more.
 // Disabling note editing during a run would block writes the server accepts.
 //

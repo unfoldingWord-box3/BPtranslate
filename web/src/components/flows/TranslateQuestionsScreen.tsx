@@ -34,10 +34,11 @@
 //     { pipelineType: "translate", translate: { resourceType: "tq", rowIds } }).
 //     If users ask for per-question redo, bring the button back wired to that.
 //
-//   * Chapter lock: unlike tn, tq PATCH is NOT lock-exempt (api/src/rows.ts:597
-//     — the carve-out covers tn only), so a save during an AI run comes back 409
-//     locked and is dropped rather than overwritten. /validate IS lock-exempt
-//     (rows.ts:1173). The banner therefore says something real here.
+//   * Chapter lock: unlike tn, tq PATCH is NOT lock-exempt (api/src/rows.ts —
+//     the carve-out covers tn only), so a save during an AI run comes back 409
+//     locked and is dropped rather than overwritten. Approve (/validate) is
+//     refused the same way while any run holds the chapter (#752); un-approve
+//     is not. The banner therefore says something real here.
 //
 // ── 2026-08-10 responsive layouts (Benjamin) ─────────────────────────────────
 //
