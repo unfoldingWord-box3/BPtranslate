@@ -101,8 +101,9 @@ const NON_TERMINAL_STATES = new Set([
 
 // Client-supplied translate overrides (all optional — the server derives the
 // full option set from the active project config; these only override defaults).
-// The server transforms this into the bot's `options` shape (bp-bot/translate-pipeline/PLAN.md §1). Single-note /
-// verse-scope selection (rowIds / verseStart / verseEnd) rides here too.
+// The server transforms this into the bot's `options` shape
+// (bp-bot/translate-pipeline/PLAN.md §1). Single-note / verse-scope selection
+// (rowIds / verseStart / verseEnd) rides here too.
 const TranslateOptions = z
   .object({
     // Which row-keyed TSV resource to translate. Defaults to 'tn' (the pilot);
@@ -899,9 +900,10 @@ async function pollPipelineJob(
     }
   }
 
-  // On any terminal transition the bot slot is now free — pull the next job. A first import
-  // failure holds the job at 'running' (one retry) so it won't free the slot
-  // here; a repeated one force-fails above and falls into this branch.
+  // On any terminal transition the bot slot is now free — pull the next job.
+  // A first import failure holds the job at 'running' (one retry) so it won't
+  // free the slot here; a repeated one force-fails above and falls into this
+  // branch.
   if (effectiveState === "done" || effectiveState === "failed") {
     try {
       await dispatchNext(env);
