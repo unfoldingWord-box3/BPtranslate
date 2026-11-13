@@ -775,6 +775,8 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
     prev = await db
       .prepare(`SELECT chapters_json, truncated FROM lesson_runs WHERE status IN ('ok', 'no_changes') ORDER BY id DESC LIMIT 1`)
       .first<{ chapters_json: string; truncated: number }>();
+    // Read here so a database without 0087 reads as not_migrated; read again
+    // after the claim below, since an admin change can land before it.
     deleted = await loadDeletedLessons(db);
   } catch (e) {
     // A missing table or column (a migration behind): not_migrated, never a
@@ -877,7 +879,9 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
     }
 
     const cfg = await getProjectConfig(env);
-    const [current, prefs, termRs, templateRs] = await Promise.all([
+    // Read after the claim: from here on no admin change can land (#908), so
+    // the set and the deletions are the ones this run's merge must respect.
+    const [current, prefs, termRs, templateRs, deletedNow] = await Promise.all([
       loadCurrentLessons(db),
       db
         .prepare(`SELECT instructions_md, common_issues_md FROM translation_prefs WHERE id = 1`)
@@ -895,7 +899,9 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
             WHERE deleted_at IS NULL AND target_md IS NOT NULL AND TRIM(target_md) <> ''`,
         )
         .all<{ target_md: string }>(),
+      loadDeletedLessons(db),
     ]);
+    deleted = deletedNow;
     const terms = termRs.results ?? [];
     const { system, user } = buildLessonsPrompt({
       languageName: cfg.languageName,
@@ -1335,6 +1341,8 @@ export async function editLesson(
           ],
   });
   if (!ok) return refusal(env, args.setId, now);
+  // Prefs only when Common issues changed: the page then remounts its editors.
+  if (!changed) return { ok: true };
   return { ok: true, prefs: await db.prepare(`SELECT * FROM translation_prefs WHERE id = 1`).first<PrefsRow>() };
 }
 
