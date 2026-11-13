@@ -243,6 +243,18 @@ export async function recentApprovedChapters(db: Db, n = RECENT_CHAPTERS): Promi
   return (rs.results ?? []).map((r) => ({ book: r.book, chapter: r.chapter }));
 }
 
+/** True when one of the chapters holds a hand approval newer than `after` (any, when null). */
+async function newApprovalIn(db: Db, chapters: readonly ChapterRef[], after: number | null): Promise<boolean> {
+  for (const ch of chapters) {
+    const r = await db
+      .prepare(`SELECT 1 AS x ${HAND_APPROVAL_JOIN} AND t.book = ?1 AND t.chapter = ?2 AND (?3 IS NULL OR e.id > ?3) LIMIT 1`)
+      .bind(ch.book, ch.chapter, after)
+      .first();
+    if (r) return true;
+  }
+  return false;
+}
+
 const SHORT_VOWEL = /[ً-ِ]/u;
 const SHADDA = "ّ";
 
@@ -841,7 +853,11 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
     // run mines that run's chapters, not the newest ones, so the approvals it
     // left are compared even when editors moved to another chapter since.
     const newest = await recentApprovedChapters(db);
-    const resume = prev?.truncated ? parseChapters(prev.chapters_json) : [];
+    // A stored resume whose chapters no longer hold a hand approval newer than
+    // the watermark (its notes were un-approved since) is stale, however old:
+    // mine the newest chapters instead (#908 leftover 4).
+    const stored = prev?.truncated ? parseChapters(prev.chapters_json) : [];
+    const resume = stored.length > 0 && (await newApprovalIn(db, stored, last)) ? stored : [];
     chapters = resume.length > 0 ? resume : newest;
     const mined = await mineChanges(db, chapters, { after: last, cells: deps.cells });
     changes = mined.groups.length;

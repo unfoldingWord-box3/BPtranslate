@@ -1169,3 +1169,15 @@ test("leftover 6: a database with 0085 but not 0086 reads as not_migrated, not a
   await setLessonsEnabled(db, true, null);
   assert.deepEqual(await runNightlyLessons({ DB: db, WORKSPACE_SLUG: "x" }, { now: NIGHT1 }), { ran: false, reason: "not_migrated" });
 });
+
+test("leftover 4: a stored resume whose approvals were un-approved since is stale; the newest chapters are mined (#908)", async () => {
+  const f = await fresh();
+  await f.runWith(NIGHT1, { cells: 1 });
+  assert.equal(f.runs().at(-1).truncated, 1, "night 1 stopped among new approvals in MRK 3 + MRK 2");
+  // Every note of MRK 2 and MRK 3 is sent back to draft, then editors approve in MRK 4.
+  f.sqlite.prepare(`UPDATE tn_rows SET translation_state = 'draft' WHERE chapter IN (2, 3)`).run();
+  approveIn(f, 4, "c401");
+  const out = await f.run(NIGHT2);
+  assert.equal(out.status, "ok");
+  assert.match(f.calls[1].user, /Chapters: MRK 4, MRK 1\./, "not the stale MRK 3, MRK 2");
+});
