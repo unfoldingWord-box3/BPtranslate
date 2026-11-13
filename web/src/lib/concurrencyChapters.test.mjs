@@ -12,7 +12,10 @@
 //      chapter as a number instead of `ZEC_CHAPTERS.<key>.chapter`;
 //   3. a file uses an entry whose `specs` list does not name it, or uses the
 //      table in any form other than `ZEC_CHAPTERS.<key>.chapter`;
-//   4. a `specs` list names a file that does not exist.
+//   4. a `specs` list names a file that does not exist;
+//   5. a *.spec.ts file that mentions ZEC is in no entry's `specs` (so a new
+//      spec has to pick its chapter in the table, even if it hides the number
+//      behind its own constant).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -57,6 +60,7 @@ const LITERAL_PATTERNS = [
   /\$\{[\w.]*(?:BOOK|book)\}[/ ]\d/, //    `/#/${RTL_FIXTURE.book}/1`
   /\bchapter\s*[:=]\s*\d/i, //             chapter: 6, CHAPTER = 3, SQL "chapter = 13"
   /\bref_raw\s*:\s*["'`]\d/, //            ref_raw: "6:1"
+  /\$\{\d+\}/, //                          ref_raw: `${6}:${verse}`
 ];
 
 /**
@@ -87,8 +91,8 @@ function fileProblems(table, file, src) {
     for (const m of line.matchAll(/\bZEC_CHAPTERS\b(\.(\w+)\.chapter\b)?/g)) {
       const key = m[2];
       if (!key) {
-        // The import line itself is the only other allowed mention.
-        if (/^\s*import\b/.test(line)) continue;
+        // The import is the only other allowed mention, on one line or wrapped.
+        if (/^\s*import\b/.test(line) || /^\s*ZEC_CHAPTERS,?\s*$/.test(line)) continue;
         problems.push(`${file}:${i + 1} uses ZEC_CHAPTERS other than as ZEC_CHAPTERS.<key>.chapter (${line.trim()}).`);
         continue;
       }
@@ -107,6 +111,16 @@ function fileProblems(table, file, src) {
   return problems;
 }
 
+/** A *.spec.ts that mentions ZEC but is in no entry's `specs`. */
+function unregisteredSpec(table, file, src) {
+  if (!file.endsWith(".spec.ts") || !/\bZEC\b/.test(src)) return [];
+  if (Object.values(table).some((e) => e.specs.includes(file))) return [];
+  return [
+    `${file} uses the ZEC fixture but no entry in ${TABLE_FILE} lists it. ` +
+      `Add it to the entry for the chapter it uses, or add an entry on an unused chapter.`,
+  ];
+}
+
 function concurrencyFiles() {
   return readdirSync(specDir).filter((f) => f.endsWith(".ts"));
 }
@@ -120,7 +134,8 @@ test("tests/concurrency files take their ZEC chapter from chapters.ts, and only 
   const problems = [];
   for (const file of concurrencyFiles()) {
     if (file === TABLE_FILE) continue;
-    problems.push(...fileProblems(ZEC_CHAPTERS, file, readFileSync(path.join(specDir, file), "utf8")));
+    const src = readFileSync(path.join(specDir, file), "utf8");
+    problems.push(...unregisteredSpec(ZEC_CHAPTERS, file, src), ...fileProblems(ZEC_CHAPTERS, file, src));
   }
   assert.deepEqual(problems, [], problems.join("\n"));
 });
@@ -144,6 +159,7 @@ test("the checks catch what they are for", () => {
     `const CHAPTER = 13;`,
     `data: { book: "ZEC", chapter: 13, verse: 1, ref_raw: "13:1" },`,
     "`UPDATE tn_rows SET x = 1 WHERE book = 'ZEC' AND chapter = 13;`",
+    "ref_raw: `${13}:${verse}`,",
   ]) {
     assert.match(fileProblems(one, "x.spec.ts", literal).join("\n"), /writes a ZEC chapter as a number/, literal);
   }
@@ -154,4 +170,11 @@ test("the checks catch what they are for", () => {
     /c\.spec\.ts:1 uses ZEC 13 \(entry "a"\) but is not in that entry's specs\. ZEC 13 belongs to a\.spec\.ts: AI drafts\./,
   );
   assert.match(fileProblems(one, "a.spec.ts", `const all = ZEC_CHAPTERS;`).join("\n"), /other than as/);
+  assert.deepEqual(fileProblems(one, "a.spec.ts", `import {\n  ZEC_CHAPTERS,\n} from "./chapters";`), []);
+
+  // A new spec that hides its chapter behind its own constant still has to be listed.
+  const hidden = `const BOOK = "ZEC";\nconst CH = 7 * 2;\nawait fetchChapter(p, t, BOOK, CH);`;
+  assert.match(unregisteredSpec(one, "new.spec.ts", hidden).join("\n"), /new\.spec\.ts uses the ZEC fixture but no entry/);
+  assert.deepEqual(unregisteredSpec(one, "a.spec.ts", hidden), []);
+  assert.deepEqual(unregisteredSpec(one, "helpers.ts", hidden), []);
 });

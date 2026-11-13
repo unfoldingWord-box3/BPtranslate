@@ -17,7 +17,8 @@
 //   - two entries name the same chapter,
 //   - a file in tests/concurrency uses a ZEC chapter number outside this file,
 //   - a file uses an entry whose `specs` list does not name it,
-//   - a `specs` list names a file that does not exist.
+//   - a `specs` list names a file that does not exist,
+//   - a *.spec.ts that mentions ZEC is in no entry's `specs`.
 //
 // To give a new spec a chapter: add an entry on a chapter no entry uses. To
 // share one: add the spec to that entry's `specs` and say in `why` why it is safe.
