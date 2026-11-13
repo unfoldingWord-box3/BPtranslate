@@ -142,6 +142,11 @@ export const ZEC_CHAPTERS = {
       "only reads it.",
     seed: "ai_draft",
   },
+  rowsFastTyping: {
+    chapter: 14,
+    specs: ["rows-fast-typing.spec.ts"],
+    why: "Types into ULT verse boxes 14:1-17 and leaves the drafts unsaved; never writes to the server.",
+  },
 } as const satisfies Record<string, ChapterClaim>;
 
 /** Chapters whose tN notes global-setup seeds as `ai_draft`. */
