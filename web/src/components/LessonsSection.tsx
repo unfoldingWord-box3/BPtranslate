@@ -148,7 +148,8 @@ function runSummary(run: LessonRun, t: (k: string, o?: Record<string, unknown>) 
 export function LessonsSection({
   heading = true,
   onPrefsChanged,
-  promoteBlocked = false,
+  promoteBlocked: promoteBlockedProp = false,
+  promoteBlockedNow,
 }: {
   heading?: boolean;
   onPrefsChanged?: (prefs: TranslationPrefs) => void;
@@ -158,8 +159,23 @@ export function LessonsSection({
    * replace that text (#908).
    */
   promoteBlocked?: boolean;
+  /**
+   * Asked right before a move is sent, for a host whose `promoteBlocked`
+   * follows an async source (classic Preferences reads the drafts store,
+   * #909): true refuses the move and shows the same hint.
+   */
+  promoteBlockedNow?: () => Promise<boolean>;
 }) {
   const { t } = useTranslation();
+  const [blockedAtClick, setBlockedAtClick] = useState(false);
+  const promoteBlocked = promoteBlockedProp || blockedAtClick;
+  // A refusal at click time holds until the host's own flag catches up and
+  // later clears.
+  const [prevProp, setPrevProp] = useState(promoteBlockedProp);
+  if (prevProp !== promoteBlockedProp) {
+    setPrevProp(promoteBlockedProp);
+    if (!promoteBlockedProp) setBlockedAtClick(false);
+  }
   const [state, setState] = useState<LessonsState | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -213,9 +229,16 @@ export function LessonsSection({
       setBusy(false);
     }
   };
-  const edit = (position: number, action: LessonEditAction) => {
+  const edit = async (position: number, action: LessonEditAction) => {
     if (state?.setId == null) return;
     const setId = state.setId;
+    if (action === "promote" && promoteBlockedNow) {
+      const blocked = await promoteBlockedNow().catch(() => false);
+      if (blocked) {
+        setBlockedAtClick(true);
+        return;
+      }
+    }
     void change(() => api.editLesson(setId, position, action), action === "promote" ? t("lessons.promoted") : undefined);
   };
   const restore = (setId: number) => {
@@ -336,7 +359,7 @@ export function LessonsSection({
                     lesson={l}
                     busy={busy}
                     promoteBlocked={promoteBlocked}
-                    onAction={(a) => edit(i + 1, a)}
+                    onAction={(a) => void edit(i + 1, a)}
                   />
                 ))}
               </Stack>

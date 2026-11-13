@@ -185,6 +185,9 @@ export function PreferencesWorkspace({ onNavigate, onBack, section, role }: Prop
       ),
     [],
   );
+  // The subscription above lands a moment after the store changes, so a move
+  // clicked straight after typing re-reads the store first (round 2, J3).
+  const commonIssuesDraftNow = async () => !!(await drafts.get(prefsDraftKey("common_issues_md")));
 
   // Deep-link / rail-driven anchor scroll: when the routed section is a memory
   // section and the long page is available, scroll it into view. Runs on mount
@@ -398,6 +401,7 @@ export function PreferencesWorkspace({ onNavigate, onBack, section, role }: Prop
           ) : section === "lessons" && role === "admin" ? (
             <LessonsSection
               promoteBlocked={commonIssuesDraft}
+              promoteBlockedNow={commonIssuesDraftNow}
               onPrefsChanged={(p) => {
                 prefsState.apply(p);
                 setPrefsGen((g) => g + 1);

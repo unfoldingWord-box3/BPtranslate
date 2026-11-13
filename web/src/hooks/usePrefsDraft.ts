@@ -45,6 +45,9 @@ export function usePrefsDraft<F extends PrefsFields>(
   // The text this tab last wrote under `key`: a clear only deletes a record
   // holding it (or the text being settled to), never another tab's (H5).
   const lastWritten = useRef<F | null>(null);
+  // What the boxes showed when the last Save was clicked (toSave), so a change
+  // made while that save was in flight survives its 200 (round 2, J2).
+  const textAtSave = useRef<F | null>(null);
   const prefsRef = useRef(prefs);
   useEffect(() => {
     prefsRef.current = prefs;
@@ -83,8 +86,19 @@ export function usePrefsDraft<F extends PrefsFields>(
 
   useEffect(() => {
     if (stateRef.current || !prefs || !stored) return;
-    const h = hydratePrefsDraft(pick(prefs), prefs.version, canSave ? stored.rec : undefined);
-    if (stored.rec && (h.clearStored || !canSave)) void drafts.clear(key);
+    const rec = stored.rec;
+    const h = hydratePrefsDraft(pick(prefs), prefs.version, canSave ? rec : undefined);
+    // Delete only the record that was read, not one written since (by another
+    // tab, say).
+    if (rec && (h.clearStored || !canSave)) {
+      void drafts.clearIf(key, (r) => r.generation === rec.generation && r.updatedAt === rec.updatedAt);
+    } else if (rec) {
+      // The restored record is this editor's own: a later "nothing typed any
+      // more" (a save, an undo) clears it even though the merged text shown
+      // differs from it (round 2, J1).
+      const restored = (rec.payload as { text?: F } | null)?.text;
+      if (restored) lastWritten.current = restored;
+    }
     const next = { text: h.text, base: h.base, baseVersion: h.baseVersion };
     stateRef.current = next;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- seeds once from two async sources (the prefs row and the IndexedDB draft read).
@@ -122,6 +136,7 @@ export function usePrefsDraft<F extends PrefsFields>(
       const s = stateRef.current;
       if (!s || !prefs) return null;
       const server = pick(prefs);
+      textAtSave.current = s.text;
       return {
         version: prefsVersionToSend(server, prefs.version, s.text, s.base, s.baseVersion),
         fields: prefsSavePayload(server, s.text, s.base),
@@ -129,7 +144,7 @@ export function usePrefsDraft<F extends PrefsFields>(
     },
     saved: (row: TranslationPrefs) => {
       const s = stateRef.current;
-      if (s) commit(afterPrefsSave(s.text, s.base, pick(row), row.version));
+      if (s) commit(afterPrefsSave(s.text, textAtSave.current ?? s.text, pick(row), row.version));
     },
     conflicted: (current: TranslationPrefs) => {
       const s = stateRef.current;

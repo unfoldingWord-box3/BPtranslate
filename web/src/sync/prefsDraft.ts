@@ -123,17 +123,19 @@ export function afterPrefsConflict<F extends PrefsFields>(
   return { text: out, base: current, baseVersion: currentVersion };
 }
 
-// After a 200: the saved fields are the new base. A box typed in keeps what it
-// shows now (typing may have gone on while the save was in flight); every
-// other box shows the saved value.
+// After a 200: the saved fields are the new base. `textAtSave` is what the
+// boxes showed when Save was clicked. A box changed since then (typing, or an
+// undo, while the save was in flight) keeps what it shows now, as typing
+// against the saved value; every other box shows the saved value (round 2,
+// J2: comparing with the old base instead lost an undo made in flight).
 export function afterPrefsSave<F extends PrefsFields>(
-  text: F,
-  base: F,
+  textNow: F,
+  textAtSave: F,
   saved: F,
   savedVersion: number,
 ): PrefsDraftState<F> {
   const out = { ...saved };
-  for (const k of typedKeys(text, base)) (out as PrefsFields)[k] = text[k];
+  for (const k of typedKeys(textNow, textAtSave)) (out as PrefsFields)[k] = textNow[k];
   return { text: out, base: saved, baseVersion: savedVersion };
 }
 
