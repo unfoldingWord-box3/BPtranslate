@@ -1335,13 +1335,13 @@ function ActiveLine({
   // hydrates from any saved draft on mount. The subscription fires once
   // immediately with the current list, and again on each set/clear.
   const [hasDraft, setHasDraft] = useState(false);
-  const hydratedFromDraftRef = useRef(false);
   useEffect(() => {
     if (!draftKey) {
       // eslint-disable-next-line react-hooks/set-state-in-effect -- clears hasDraft when the row has no draft key and skips the drafts-store subscription; drafts.subscribe has no getSnapshot, and its callback also hydrates the DOM once, so useSyncExternalStore would not be equivalent.
       setHasDraft(false);
       return;
     }
+    let firstCallback = true;
     return drafts.subscribe((all) => {
       const rec = all.find((d) => d.key === draftKey);
       setHasDraft(!!rec);
@@ -1350,8 +1350,15 @@ function ActiveLine({
       // (saved / undone / no-op). onInput also flips it true ahead of the
       // async draft write so the reset effect is protected in the meantime.
       dirtyRef.current = !!rec;
+      // Restore a draft that already existed when this verse's box opened,
+      // on the first (mount-snapshot) callback only, as DocColumn and
+      // BookView do. A draft first seen later is one the user is typing right
+      // now, and the store notifies asynchronously, so its text can be a
+      // keystroke or two behind the box: copying it in dropped those
+      // characters and moved the caret to the start (#903).
+      if (!firstCallback) return;
+      firstCallback = false;
       if (
-        !hydratedFromDraftRef.current &&
         rec &&
         typeof (rec.payload as { plainText?: unknown }).plainText === "string" &&
         elRef.current
@@ -1361,7 +1368,6 @@ function ActiveLine({
           elRef.current.textContent = plain;
           lastSetRef.current = plain;
         }
-        hydratedFromDraftRef.current = true;
       }
     });
   }, [draftKey]);
@@ -1592,7 +1598,6 @@ function ActiveLine({
               onClick={() => {
                 void drafts.clear(draftKey);
                 dirtyRef.current = false;
-                hydratedFromDraftRef.current = false;
                 if (elRef.current) {
                   // Re-render from the editable baseline so chips are
                   // restored, not just plain text.
