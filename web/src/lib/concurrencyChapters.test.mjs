@@ -11,7 +11,8 @@
 //   2. a .ts file in tests/concurrency (other than chapters.ts) writes a ZEC
 //      chapter as a number instead of `ZEC_CHAPTERS.<key>.chapter`;
 //   3. a file uses an entry whose `specs` list does not name it, or uses the
-//      table in any form other than `ZEC_CHAPTERS.<key>.chapter`;
+//      table in any form other than `ZEC_CHAPTERS.<key>.chapter` (an import
+//      under another name included);
 //   4. a `specs` list names a file that does not exist;
 //   5. a *.spec.ts file that mentions ZEC is in no entry's `specs` (so a new
 //      spec has to pick its chapter in the table, even if it hides the number
@@ -61,6 +62,8 @@ const LITERAL_PATTERNS = [
   /\bchapter\s*[:=]\s*\d/i, //             chapter: 6, CHAPTER = 3, SQL "chapter = 13"
   /\bref_raw\s*:\s*["'`]\d/, //            ref_raw: "6:1"
   /\$\{\d+\}/, //                          ref_raw: `${6}:${verse}`
+  // The helpers take (..., book, chapter, ...): fetchChapter, gotoVerse, waitForServerNote.
+  /\b(?:BOOK|book)\s*,\s*\d/, //           gotoVerse(page, BOOK, 6, 1), fetchChapter(p, t, RTL_FIXTURE.book, 6)
 ];
 
 /**
@@ -78,7 +81,17 @@ function stripComments(src) {
 function fileProblems(table, file, src) {
   const problems = [];
   const lines = stripComments(src).split("\n");
+  let inImport = false;
   lines.forEach((line, i) => {
+    // Inside an import statement, from `import` to its `from "..."` line.
+    const importLine = inImport || /^\s*import\b/.test(line);
+    inImport = importLine && !/\bfrom\s*["']/.test(line);
+    if (/\bZEC_CHAPTERS\s+as\b/.test(line)) {
+      problems.push(
+        `${file}:${i + 1} imports ZEC_CHAPTERS under another name (${line.trim()}). ` +
+          `Import it as ZEC_CHAPTERS so the check can see which entries the file uses.`,
+      );
+    }
     for (const re of LITERAL_PATTERNS) {
       if (re.test(line)) {
         problems.push(
@@ -92,7 +105,7 @@ function fileProblems(table, file, src) {
       const key = m[2];
       if (!key) {
         // The import is the only other allowed mention, on one line or wrapped.
-        if (/^\s*import\b/.test(line) || /^\s*ZEC_CHAPTERS,?\s*$/.test(line)) continue;
+        if (importLine) continue;
         problems.push(`${file}:${i + 1} uses ZEC_CHAPTERS other than as ZEC_CHAPTERS.<key>.chapter (${line.trim()}).`);
         continue;
       }
