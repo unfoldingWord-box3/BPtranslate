@@ -58,7 +58,7 @@ import {
   coveredByTerm,
   coveredByTemplate,
   coveredByCommonIssues,
-  DIFF_CELL_BUDGET,
+  DIFF_SEGMENT_CAP,
   type InboxTerm,
 } from "./suggestionInbox.ts";
 import { resolveProvider, type Availability } from "./templateDraftMissing.ts";
@@ -221,7 +221,6 @@ export async function mineChanges(
   chapters: readonly ChapterRef[],
 ): Promise<{ groups: ChangeGroup[]; compared: number; changed: number }> {
   const byKey = new Map<string, ChangeGroup>();
-  const budget = { cells: DIFF_CELL_BUDGET };
   let compared = 0;
   let changed = 0;
   for (const ch of chapters) {
@@ -231,9 +230,15 @@ export async function mineChanges(
       .all<{ id: string; final_note: string | null; draft_note: unknown }>();
     for (const r of rs.results ?? []) {
       if (typeof r.draft_note !== "string" || r.final_note == null) continue;
+      // Each note gets its own budget, enough for the largest diff noteChanges
+      // accepts (DIFF_SEGMENT_CAP tokens a side). A budget shared across the
+      // window ran out on long rewrites and silently skipped every later note,
+      // whose corrections the watermark then moved past. A note too long to
+      // diff is not counted as compared.
+      const changes = noteChanges(r.draft_note, r.final_note, { cells: DIFF_SEGMENT_CAP * DIFF_SEGMENT_CAP });
+      if (!changes) continue;
       compared++;
-      const changes = noteChanges(r.draft_note, r.final_note, budget);
-      if (!changes || changes.length === 0) continue;
+      if (changes.length === 0) continue;
       const seen = new Set<string>();
       for (const c of changes) {
         if (seen.has(c.key) || isShaddaVowelOnly(c.before, c.after)) continue;
