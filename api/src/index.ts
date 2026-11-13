@@ -674,15 +674,22 @@ export default {
         });
       }
     }
-    // Lessons (#817) only after every workspace's export has been requested.
+    // Lessons (#817) only after every workspace's export has been requested,
+    // and all workspaces at once: one AI call can take up to 2 minutes, so
+    // running them one after another could push later workspaces past the
+    // scheduled invocation's wall-clock limit. Each is isolated.
     if (controller.cron === CONTEXT_CRON || controller.cron === EXPORT_CRON) {
-      for (const ws of workspaces) {
-        try {
-          await runNightlyLessonsTick(workspaceEnv(env, ws));
-        } catch (e) {
-          console.error("nightly lessons failed for workspace", { slug: ws.slug, error: e instanceof Error ? e.message : String(e) });
+      const results = await Promise.allSettled(
+        workspaces.map(async (ws) => runNightlyLessonsTick(workspaceEnv(env, ws))),
+      );
+      results.forEach((r, i) => {
+        if (r.status === "rejected") {
+          console.error("nightly lessons failed for workspace", {
+            slug: workspaces[i].slug,
+            error: r.reason instanceof Error ? r.reason.message : String(r.reason),
+          });
         }
-      }
+      });
     }
   },
 } satisfies ExportedHandler<Env>;
