@@ -303,15 +303,20 @@ function signingKey(env: Env): Uint8Array | null {
   return new TextEncoder().encode(env.JWT_SIGNING_KEY);
 }
 
+// The chat tools that issue a confirm token. Each signs under its own prefix,
+// so a token one tool issued can never confirm the other (#747).
+export type ChatConfirmPurpose = "bpt_bulk_set_state" | "bpt_draft";
+
 // HMAC-SHA256 (base64url) of a chat confirm token's body (mcpTools.ts
-// bpt_bulk_set_state), under the JWT signing key. The fixed prefix keeps
-// these MACs apart from JWT signatures made with the same key. null when the
-// key is not configured: the tool then refuses rather than sign with nothing.
-export async function chatConfirmMac(env: Env, data: string): Promise<string | null> {
+// bpt_bulk_set_state, bpt_draft), under the JWT signing key. The per-tool
+// prefix keeps these MACs apart from JWT signatures made with the same key,
+// and from each other. null when the key is not configured: the tool then
+// refuses rather than sign with nothing.
+export async function chatConfirmMac(env: Env, data: string, purpose: ChatConfirmPurpose): Promise<string | null> {
   const key = signingKey(env);
   if (!key) return null;
   const k = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const mac = await crypto.subtle.sign("HMAC", k, new TextEncoder().encode(`bpt_bulk_set_state:v1\n${data}`));
+  const mac = await crypto.subtle.sign("HMAC", k, new TextEncoder().encode(`${purpose}:v1\n${data}`));
   return btoa(String.fromCharCode(...new Uint8Array(mac))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 

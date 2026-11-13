@@ -60,9 +60,10 @@ export interface McpSession {
   // per-chapter override, else the project's translationSource (sourceNotes.ts).
   // Never throws.
   sourceNotes: (book: string, chapter: number) => Promise<SourceNotes>;
-  // HMAC of a bpt_bulk_set_state confirm token body under a server secret
-  // (auth.ts chatConfirmMac); null when the secret is not configured.
-  confirmMac: (data: string) => Promise<string | null>;
+  // HMAC of a bpt_bulk_set_state or bpt_draft confirm token body under a
+  // server secret, signed for that one tool (auth.ts chatConfirmMac); null
+  // when the secret is not configured.
+  confirmMac: (data: string, purpose: ChatConfirmPurpose) => Promise<string | null>;
   // The linked user's real role in this workspace is admin (chatLinks.ts
   // chatIsAdmin). principal.role is capped at editor; bpt_draft asks this.
   isAdmin: () => Promise<boolean>;
@@ -88,6 +89,8 @@ export interface ToolContext {
 }
 
 import type { ChatPrincipal } from "./chatLinks.ts";
+import type { ChatConfirmPurpose } from "./auth.ts";
+import { refVerseRange } from "./translate/tsvCodec.ts";
 import { derivePlainText } from "./alignmentCanonical.ts";
 import { isTsMilestone } from "./tsMilestone.ts";
 import { articleIdForTa, articleIdForTw, parseTaRef, parseTwRef, taPaths, twPath } from "./articlePopulate.ts";
@@ -1679,16 +1682,36 @@ function sameMac(a: string, b: string): boolean {
 
 const NOT_CHANGED = "Nothing was changed.";
 
-// No JWT_SIGNING_KEY: refuse in plain words rather than as an internal error.
-async function signedMac(session: McpSession, body: string): Promise<string> {
-  const mac = await session.confirmMac(body);
-  if (!mac) {
-    throw new ToolInputError(
-      `Moving a range back to needs review is not set up on this server (it has no signing key). Ask a BPtranslate admin. ${NOT_CHANGED}`,
-    );
-  }
+// No JWT_SIGNING_KEY: refuse in plain words (notSetUp) rather than as an
+// internal error. purpose picks the tool's own MAC prefix (auth.ts
+// chatConfirmMac), so one tool's token never verifies for another.
+async function signedMac(session: McpSession, body: string, purpose: ChatConfirmPurpose, notSetUp: string): Promise<string> {
+  const mac = await session.confirmMac(body, purpose);
+  if (!mac) throw new ToolInputError(notSetUp);
   return mac;
 }
+
+// A confirm token's body once its MAC checks out for this tool and it has not
+// expired; otherwise bad() throws the refusal. The caller then compares the
+// body with its own arguments and session.
+async function verifiedTokenBody<T extends { exp: number }>(
+  raw: unknown,
+  session: McpSession,
+  purpose: ChatConfirmPurpose,
+  notSetUp: string,
+  bad: (why: string) => never,
+): Promise<T> {
+  if (typeof raw !== "string") return bad("confirm_token must be the text the preview returned.");
+  const [body, mac, extra] = raw.split(".");
+  if (!body || !mac || extra !== undefined || !sameMac(mac, await signedMac(session, body, purpose, notSetUp))) {
+    return bad("That confirm_token is not one this tool issued.");
+  }
+  const t = JSON.parse(fromB64url(body)) as T;
+  if (t.exp <= Math.floor(Date.now() / 1000)) return bad("That confirm_token has expired (they last 10 minutes).");
+  return t;
+}
+
+const BULK_NOT_SET_UP = `Moving a range back to needs review is not set up on this server (it has no signing key). Ask a BPtranslate admin. ${NOT_CHANGED}`;
 
 // The confirm token's body, or a refusal saying why. A token is good only for
 // the link it was issued to and exactly the arguments of its dry run.
@@ -1696,13 +1719,9 @@ async function openToken(raw: unknown, session: McpSession, want: Omit<BulkToken
   const bad = (why: string): never => {
     throw new ToolInputError(`${why} Run the preview again (call without confirm_token) and show the reviewer the new count. ${NOT_CHANGED}`);
   };
-  if (typeof raw !== "string") return bad("confirm_token must be the text the preview returned.");
-  const [body, mac, extra] = raw.split(".");
-  if (!body || !mac || extra !== undefined || !sameMac(mac, await signedMac(session, body))) {
-    return bad("That confirm_token is not one this tool issued.");
-  }
-  const t = JSON.parse(fromB64url(body)) as BulkTokenBody;
-  if (t.exp <= Math.floor(Date.now() / 1000)) return bad("That confirm_token has expired (they last 10 minutes).");
+  const t = await verifiedTokenBody<BulkTokenBody>(raw, session, "bpt_bulk_set_state", BULK_NOT_SET_UP, bad);
+  // Only another tool's token carries a purpose tag (bpt_draft: p).
+  if ((t as { p?: unknown }).p !== undefined) return bad("That confirm_token is not one this tool issued.");
   const same =
     t.ws === session.workspace.slug && t.link === session.principal.linkId && t.book === want.book &&
     t.kind === want.kind && t.chapter === want.chapter && t.vs === want.vs && t.ve === want.ve;
@@ -1769,7 +1788,7 @@ const bulkSetState: ToolDef = {
 
     if (args.confirm_token === undefined || args.confirm_token === null || args.confirm_token === "") {
       // A preview with no way to sign its token is refused before any read.
-      await signedMac(session, "");
+      await signedMac(session, "", "bpt_bulk_set_state", BULK_NOT_SET_UP);
       // updated_at has 1-second resolution. A row last written in this second
       // (or later, if the clock that wrote it runs ahead) is left out of the
       // token: a web un-approve and re-approve later in this same second would
@@ -1821,7 +1840,7 @@ const bulkSetState: ToolDef = {
       const body = toB64url(JSON.stringify(t));
       return {
         ...preview,
-        confirm_token: `${body}.${await signedMac(session, body)}`,
+        confirm_token: `${body}.${await signedMac(session, body, "bpt_bulk_set_state", BULK_NOT_SET_UP)}`,
         expires_at: new Date(exp * 1000).toISOString(),
         message: `${NOT_CHANGED} Tell the reviewer that ${r.length} approved ${kind} rows would go back to needs review, and call again with confirm_token only if they say yes.`,
       };
@@ -2335,15 +2354,61 @@ const getPreferencesHistory: ToolDef = {
 // workspace. No daily cap for the pilot. Starting a job writes no edit_log
 // row; the chat origin is the job's session_key (chat/link-<id>), and the
 // apply later audits as source 'ai_pipeline' like any other run.
+//
+// Two calls (#747, Benjamin chose option B): a preview starts nothing and
+// returns the rows the run would redo, how many of them are approved, and a
+// confirm token signed for bpt_draft alone (auth.ts chatConfirmMac purpose,
+// plus the body's p tag), so a bpt_bulk_set_state token can never start a
+// draft. The confirm starts the run only for the same arguments and the same
+// rows, each at the same version and approval state.
 
 const NOT_STARTED = "Nothing was started.";
 // The bot takes verses 1 to 200 (bp-assistant StartBodySchema).
 const MAX_DRAFT_VERSE = 200;
+// BT Servant drops a tool result over 32 KB, and with it the confirm token, so
+// the preview lists at most this many rows and approved ids (the counts and
+// the token cover them all).
+const DRAFT_LIST_CAP = 100;
+const DRAFT_NOT_SET_UP = `Starting an AI draft from chat is not set up on this server (it has no signing key to confirm it with). Ask a BPtranslate admin, or start it in the web app. ${NOT_STARTED}`;
+
+// What a bpt_draft confirm token binds: the tool (p), the link and workspace
+// it was issued to (from the session, never an argument), the arguments as the
+// preview read them (ids sorted and deduplicated, or the verse range with
+// verse_end filled in), the rows the run would redo as a count (n) and a
+// digest (d, draftRowsDigest), and its expiry (unix seconds). The version in
+// the digest pins the text the reviewer agreed to replace; the approved flag
+// pins approvals, which do not bump the version. A digest rather than the list
+// keeps the token the same size for any selection: BT Servant drops a result
+// over 32 KB, token and all (#747 review).
+interface DraftTokenBody {
+  p: "bpt_draft";
+  ws: string;
+  link: number;
+  book: string;
+  kind: "tn" | "tq";
+  chapter: number;
+  ids: string[] | null;
+  vs: number | null;
+  ve: number | null;
+  n: number;
+  d: string;
+  exp: number;
+}
+
+// SHA-256 (base64url) over the rows sorted by id, one "id:version:approved"
+// line each. Only ever compared inside a body the MAC already vouched for.
+async function draftRowsDigest(rows: [string, number, 0 | 1][]): Promise<string> {
+  const text = rows.map(([id, version, approved]) => `${id}:${version}:${approved}`).join("\n");
+  const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", utf8.encode(text)));
+  return btoa(String.fromCharCode(...hash)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
 
 const draft: ToolDef = {
   name: "bpt_draft",
   description:
-    "Start an AI draft (translate run) for some translation notes (kind tn) or questions (kind tq) in one chapter: either the rows with the given ids, or the rows of a verse range. Project admins only; anyone else is refused. Not for a whole chapter (use the web app): a range or id list that covers every row of that kind in the chapter is refused. The AI draft REPLACES the current text of every selected row, approved rows included, and they then need review again; the last approved text keeps publishing to Door43 only until the row is approved again. While it runs, tn drafts make only the selected notes read-only, but tq drafts make all of the chapter's questions read-only, for everyone in the project. It costs the project's AI budget. So tell the reviewer what will be replaced and get a clear yes first. Returns job_id and status running, queued (with queue_position: one run at a time per server) or already_running (this user already started the same draft; job_id is that run); follow it with bpt_job_status. status busy means another user's run already covers these rows: nothing new was started, and only that user (or the web app) can follow their run. Refused, with nothing started, when the book or chapter has no rows of that kind in this project, when the project has no AI key of its own set up (an admin adds one in the web app), or when it is not a gateway-language project. If the AI service refuses the run, the answer names the failed job and why; nothing is running then.",
+    "Start an AI draft (translate run) for some translation notes (kind tn) or questions (kind tq) in one chapter: either the rows with the given ids, or the rows of a verse range. Project admins only; anyone else is refused. Not for a whole chapter (use the web app): a range or id list that takes in every row of that kind in the chapter (a note marked Not needed aside; a range takes in every note whose reference overlaps it) is refused. The AI draft REPLACES the current text of every selected row, approved rows included, and they then need review again; the last approved text keeps publishing to Door43 only until the row is approved again. While it runs, tn drafts make only the selected notes read-only, but tq drafts make all of the chapter's questions read-only, for everyone in the project. It costs the project's AI budget. Always two calls. 1) Call without confirm_token: a preview that starts nothing and returns will_redraft (how many rows the draft would replace), rows (id, ref and state of each, at most the first " +
+    `${DRAFT_LIST_CAP}` +
+    "), approved_will_be_replaced and approved_ids (the approved rows among them: a draft on chosen rows or a verse range replaces approved text too), left_alone (rows in the selection the draft leaves as they are: notes marked Not needed), and a confirm_token. Tell the reviewer what will be replaced and how many of those are approved, and get a clear yes. 2) Call again with exactly the same book, kind, chapter and ids or verse_start/verse_end plus confirm_token: only then does the draft start. If any of those rows was edited, approved or un-approved, added or marked Not needed since the preview, nothing starts: preview again and show the reviewer the new list. The token lasts 10 minutes and works only for this user's link, this tool and the same arguments; otherwise nothing starts. The confirm returns job_id and status running, queued (with queue_position: one run at a time per server) or already_running (this user already started the same draft; job_id is that run); follow it with bpt_job_status. status busy means another user's run already covers these rows: nothing new was started, and only that user (or the web app) can follow their run. Refused, with nothing started, when the book or chapter has no rows of that kind in this project, when the project has no AI key of its own set up (an admin adds one in the web app), or when it is not a gateway-language project. If the AI service refuses the run, the answer names the failed job and why; nothing is running then.",
   inputSchema: {
     type: "object",
     properties: {
@@ -2354,6 +2419,7 @@ const draft: ToolDef = {
       ids: { type: "array", items: { type: "string", maxLength: 16 }, minItems: 1, maxItems: 50, description: "Row ids to draft. Use this or verse_start, not both." },
       verse_start: { type: "integer", minimum: 1, maximum: MAX_DRAFT_VERSE, description: "First verse to draft. Use this or ids, not both." },
       verse_end: { type: "integer", minimum: 1, maximum: MAX_DRAFT_VERSE, description: "Last verse, inclusive; defaults to verse_start" },
+      confirm_token: { type: "string", description: "The confirm_token from the preview, once the reviewer said yes. Omit for the preview." },
     },
     required: ["session_token", "book", "kind", "chapter"],
     additionalProperties: false,
@@ -2390,6 +2456,35 @@ const draft: ToolDef = {
     for (const [key, v] of [["verse_start", vs], ["verse_end", ve]] as const) {
       if (v !== undefined && v > MAX_DRAFT_VERSE) throw new ToolInputError(`${key} must be at most ${MAX_DRAFT_VERSE}. ${NOT_STARTED}`);
     }
+    // The arguments as a token records them: same list in any order, and an
+    // omitted verse_end, mean the same draft.
+    const want = {
+      book,
+      kind,
+      chapter,
+      ids: ids ? [...new Set(ids)].sort() : null,
+      vs: ids ? null : vs!,
+      ve: ids ? null : (ve ?? vs!),
+    };
+    const confirming = !(args.confirm_token === undefined || args.confirm_token === null || args.confirm_token === "");
+    let token: DraftTokenBody | null = null;
+    if (confirming) {
+      // Refuse a token for anything else before reading a row.
+      const bad = (why: string): never => {
+        throw new ToolInputError(`${why} Run the preview again (call without confirm_token) and show the reviewer the new list. ${NOT_STARTED}`);
+      };
+      const t = await verifiedTokenBody<DraftTokenBody>(args.confirm_token, session, "bpt_draft", DRAFT_NOT_SET_UP, bad);
+      if (t.p !== "bpt_draft") bad("That confirm_token is not one this tool issued.");
+      const same =
+        t.ws === session.workspace.slug && t.link === session.principal.linkId && t.book === want.book &&
+        t.kind === want.kind && t.chapter === want.chapter && JSON.stringify(t.ids) === JSON.stringify(want.ids) &&
+        t.vs === want.vs && t.ve === want.ve;
+      if (!same) bad("That confirm_token was issued for a different preview (another book, kind, chapter, ids, verse range or chat link).");
+      token = t;
+    } else {
+      // A preview with no way to sign its token is refused before any read.
+      await signedMac(session, "", "bpt_draft", DRAFT_NOT_SET_UP);
+    }
     // Only start a paid run that has rows to write: the chapter's rows of this
     // kind, as the web app reads them. A selection covering all of them is a
     // whole-chapter run, which belongs in the web app.
@@ -2403,18 +2498,100 @@ const draft: ToolDef = {
       const have = new Set(rows.map((r) => String(r.id)));
       const missing = ids.filter((id) => !have.has(id));
       if (missing.length) throw new ToolInputError(`${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} not a ${kind} row in ${where}. ${NOT_STARTED}`);
-      if (new Set(ids).size >= have.size) throw new ToolInputError(WHOLE);
-    } else {
-      const end = ve ?? vs!;
-      const verses = rows.map((r) => Number(r.verse)).filter((v) => Number.isInteger(v) && v >= 1);
-      if (!verses.some((v) => v >= vs! && v <= end)) {
-        throw new ToolInputError(`There are no ${kind} notes in ${where}:${vs}${end !== vs ? `-${end}` : ""}, so there is nothing to draft. ${NOT_STARTED}`);
-      }
-      if (vs! <= Math.min(...verses) && end >= Math.max(...verses)) throw new ToolInputError(WHOLE);
     }
-    const translate = ids
-      ? { resourceType: kind, rowIds: ids }
-      : { resourceType: kind, verseStart: vs, verseEnd: ve ?? vs };
+    // The rows the run would redo. A verse range selects by overlap with each
+    // row's reference, the rule the run and its import use (translate/core.ts
+    // selectRows on the TSV Reference), so a note on 1:4-5 is in a run on
+    // verse 5.
+    const verseRange = (r: Record<string, unknown>) =>
+      refVerseRange(typeof r.ref_raw === "string" ? r.ref_raw : `${chapter}:${String(r.verse)}`);
+    const inRange = (r: Record<string, unknown>) => {
+      const vr = verseRange(r);
+      return vr !== null && vr.start <= want.ve! && vr.end >= want.vs!;
+    };
+    const selected = ids ? rows.filter((r) => want.ids!.includes(String(r.id))) : rows.filter(inRange);
+    if (!ids && !selected.length) {
+      throw new ToolInputError(
+        `There are no ${kind} notes in ${where}:${want.vs}${want.ve !== want.vs ? `-${want.ve}` : ""}, so there is nothing to draft. ${NOT_STARTED}`,
+      );
+    }
+    // A selection that takes in every live row of the chapter is a whole
+    // chapter in all but name, judged on the same selection the run uses
+    // (#747 review): run as a narrowed draft it would replace the approved rows
+    // a whole-chapter run keeps (#794). A note marked Not needed is no part of
+    // the work, so it does not count. A verse range can never select the
+    // chapter introduction, so for a range only rows with a verse reference
+    // count, as the verse bounds check beside it has always done.
+    const chosen = new Set(selected.map((r) => String(r.id)));
+    const takesAll = (pool: Record<string, unknown>[]) => pool.length > 0 && pool.every((r) => chosen.has(String(r.id)));
+    const live = rows.filter((r) => !r.trashed_at);
+    if (ids) {
+      if (want.ids!.length >= rows.length || takesAll(live)) throw new ToolInputError(WHOLE);
+    } else {
+      const verses = rows.map((r) => Number(r.verse)).filter((v) => Number.isInteger(v) && v >= 1);
+      const coversBounds = want.vs! <= Math.min(...verses) && want.ve! >= Math.max(...verses);
+      if (coversBounds || takesAll(live.filter((r) => verseRange(r) !== null))) throw new ToolInputError(WHOLE);
+    }
+    // The apply leaves a note marked Not needed as it is (#735,
+    // pipelineImport.ts applyTranslateTnRow "trashed"), so it is not counted.
+    // Questions have no Not needed mark.
+    const leftAlone = selected.filter((r) => r.trashed_at);
+    const redo = selected
+      .filter((r) => !r.trashed_at)
+      .sort((a, b) => (String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0));
+    // Every chat draft is narrowed (ids or a verse range; whole chapters are
+    // refused above), and a narrowed run redrafts approved rows: only a
+    // whole-chapter run keeps them (#794, pipelineImport.ts keepApproved =
+    // selection === null). So every approved row here would be replaced.
+    const approved = (r: Record<string, unknown>) => r.translation_state === "validated";
+    const pinned = redo.map((r): [string, number, 0 | 1] => [String(r.id), Number(r.version), approved(r) ? 1 : 0]);
+    if (!redo.length) {
+      throw new ToolInputError(`Every ${kind} row in that selection is marked Not needed, which an AI draft leaves as it is, so there is nothing to draft. ${NOT_STARTED}`);
+    }
+    const scope = { book, kind, chapter, ...(ids ? { ids } : { verse_start: want.vs, verse_end: want.ve }) };
+    if (!token) {
+      const approvedIds = redo.filter(approved).map((r) => String(r.id));
+      const exp = Math.floor(Date.now() / 1000) + CONFIRM_TTL_SECONDS;
+      const t: DraftTokenBody = {
+        p: "bpt_draft",
+        ws: session.workspace.slug,
+        link: session.principal.linkId,
+        ...want,
+        n: pinned.length,
+        d: await draftRowsDigest(pinned),
+        exp,
+      };
+      const tokenText = toB64url(JSON.stringify(t));
+      const what = kind === "tn" ? "notes" : "questions";
+      return {
+        status: "preview",
+        ...scope,
+        will_redraft: redo.length,
+        rows: redo.slice(0, DRAFT_LIST_CAP).map((x) => ({
+          id: x.id,
+          ref: `${book} ${x.ref_raw ?? `${chapter}:${x.verse}`}`,
+          state: x.translation_state ?? null,
+        })),
+        ...(redo.length > DRAFT_LIST_CAP ? { more_rows_not_listed: redo.length - DRAFT_LIST_CAP } : {}),
+        approved_will_be_replaced: approvedIds.length,
+        approved_ids: approvedIds.slice(0, DRAFT_LIST_CAP),
+        left_alone: leftAlone.length
+          ? [{ reason: "trashed", why: "marked Not needed: an AI draft leaves it as it is", count: leftAlone.length, ids: leftAlone.slice(0, DRAFT_LIST_CAP).map((x) => String(x.id)) }]
+          : [],
+        confirm_token: `${tokenText}.${await signedMac(session, tokenText, "bpt_draft", DRAFT_NOT_SET_UP)}`,
+        expires_at: new Date(exp * 1000).toISOString(),
+        message: `${NOT_STARTED} This AI draft would replace the text of ${redo.length} ${what} in ${where}, ${approvedIds.length} of them approved (those would need review again). It costs the project's AI budget. Tell the reviewer, and call again with the same arguments plus confirm_token only if they say yes.`,
+      };
+    }
+    if (token.n !== pinned.length || token.d !== (await draftRowsDigest(pinned))) {
+      throw new ToolInputError(
+        `The rows in this selection changed since the preview (a row was edited, approved or un-approved, added, or marked Not needed). Run the preview again (call without confirm_token) and show the reviewer the new list. ${NOT_STARTED}`,
+      );
+    }
+    // Exactly the scope the token covers: ids sorted and deduplicated.
+    const translate = want.ids
+      ? { resourceType: kind, rowIds: want.ids }
+      : { resourceType: kind, verseStart: want.vs!, verseEnd: want.ve! };
     const { status, body } = await session.send("POST", "/api/pipelines/start", {
       pipelineType: "translate",
       book,
@@ -2424,7 +2601,6 @@ const draft: ToolDef = {
       translate,
     });
     const b = (body ?? {}) as Record<string, unknown>;
-    const scope = { book, kind, chapter, ...(ids ? { ids } : { verse_start: vs, verse_end: ve ?? vs }) };
     if (status === 200) {
       const st = String(b.status);
       return {

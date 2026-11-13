@@ -158,7 +158,7 @@ function fresh({ preset = "ar-bsoj" } = {}) {
     },
     packageRefs: async () => ({}),
     sourceNotes: async () => ({ ok: false, reason: "test" }),
-    confirmMac: (data) => chatConfirmMac(env, data),
+    confirmMac: (data, purpose) => chatConfirmMac(env, data, purpose),
   });
   const sessions = {
     [EDITOR]: sessionFor({ userId: 9, username: "reviewer", role: "editor", linkId: 1 }),
