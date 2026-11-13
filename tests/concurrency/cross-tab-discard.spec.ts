@@ -1,5 +1,6 @@
 import { expect, test, request as apiRequest, type BrowserContext, type Page } from "@playwright/test";
 import { fetchChapter, gotoVerse, mintToken, newUserContext, noteTextarea } from "./helpers";
+import { ZEC_CHAPTERS } from "./chapters";
 
 // Honor BE_BASE_URL so the suite runs on a relocated port (mirrors s8).
 const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
@@ -16,7 +17,7 @@ const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
 // and BroadcastChannel only within a context. The 409 is answered by
 // context.route and never reaches the server. ZEC 5 is used because no other
 // spec writes to it; globalSetup re-imports ZEC each run.
-const CHAPTER = 5;
+const CHAPTER = ZEC_CHAPTERS.crossTabDiscard.chapter;
 const SHOTS = process.env.BE_SHOT_DIR;
 
 interface TqRow {

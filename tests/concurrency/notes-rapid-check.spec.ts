@@ -1,5 +1,6 @@
 import { expect, test, type BrowserContext } from "@playwright/test";
 import { authedRequest, fetchChapter, newUserContext, type TnRow } from "./helpers";
+import { ZEC_CHAPTERS } from "./chapters";
 
 // Rapid check: the dense, keyboard-driven layout of the flows notes screen
 // (#/notes), laptop size and up. It renders the same queue, cursor and editor
@@ -12,7 +13,7 @@ import { authedRequest, fetchChapter, newUserContext, type TnRow } from "./helpe
 // other spec in this suite opens.
 
 const BOOK = "ZEC";
-const CHAPTER = 3;
+const CHAPTER = ZEC_CHAPTERS.rapidCheck.chapter;
 
 test.describe.configure({ timeout: 120_000 });
 

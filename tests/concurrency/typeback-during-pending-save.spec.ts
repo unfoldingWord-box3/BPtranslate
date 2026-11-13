@@ -1,5 +1,6 @@
 import { expect, test, request as apiRequest, type Page } from "@playwright/test";
 import { fetchChapter, gotoVerse, mintToken, newUserContext, noteTextarea, saveNote, waitForServerNote } from "./helpers";
+import { ZEC_CHAPTERS } from "./chapters";
 
 // Honor BE_BASE_URL so the suite runs on a relocated port (mirrors s8).
 const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
@@ -15,7 +16,9 @@ const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
 // The PATCH is held by page.route and then passed on to the local server, so
 // the save really lands. ZEC 10 is used because no other spec writes to it;
 // globalSetup re-imports ZEC each run.
-const CHAPTER = 10;
+const CHAPTER = ZEC_CHAPTERS.typeback.chapter;
+// Where the specs go to unmount CHAPTER; only visited, never edited.
+const AWAY_CHAPTER = ZEC_CHAPTERS.keepsText.chapter;
 
 interface NoteRow {
   id: string;
@@ -114,9 +117,9 @@ test("tN card: a note typed back during a pending save, plus a quote edit, survi
       .toEqual(expect.objectContaining({ quote: q1 }));
 
     // Leave the chapter (the card unmounts), then let the save land.
-    await page.evaluate(() => {
-      location.hash = "#/ZEC/9/2";
-    });
+    await page.evaluate((hash) => {
+      location.hash = hash;
+    }, `#/ZEC/${AWAY_CHAPTER}/2`);
     await page.locator(`[data-note-id="${row.id}"]`).waitFor({ state: "detached", timeout: 10_000 });
     release();
     await waitForServerNote(context.request, auth.token, "ZEC", CHAPTER, row.id, (n) => n === n1);
@@ -132,9 +135,9 @@ test("tN card: a note typed back during a pending save, plus a quote edit, survi
     );
 
     // Reopen: the card shows N0 marked unsaved, not the server's N1 as clean.
-    await page.evaluate((v) => {
-      location.hash = `#/ZEC/10/${v}`;
-    }, row.verse);
+    await page.evaluate((hash) => {
+      location.hash = hash;
+    }, `#/ZEC/${CHAPTER}/${row.verse}`);
     await expect(noteTextarea(page, row.id)).toHaveValue(n0);
     await expect(quoteTextarea(page, row.id)).toHaveValue(q1);
     await expect(
@@ -173,15 +176,15 @@ test("tN card: a note typed back during a pending save survives a remount before
   });
 
   const leave = async () => {
-    await page.evaluate(() => {
-      location.hash = "#/ZEC/9/2";
-    });
+    await page.evaluate((hash) => {
+      location.hash = hash;
+    }, `#/ZEC/${AWAY_CHAPTER}/2`);
     await page.locator(`[data-note-id="${row.id}"]`).waitFor({ state: "detached", timeout: 10_000 });
   };
   const reopen = async () => {
-    await page.evaluate((v) => {
-      location.hash = `#/ZEC/10/${v}`;
-    }, row.verse);
+    await page.evaluate((hash) => {
+      location.hash = hash;
+    }, `#/ZEC/${CHAPTER}/${row.verse}`);
     await noteTextarea(page, row.id).waitFor({ timeout: 10_000 });
   };
 
@@ -306,19 +309,19 @@ test("flows notes: a note typed back during a pending save survives leaving and 
   const shown = () => page.locator('[role="button"][dir="auto"]').first();
   const editor = () => page.locator('textarea:not([aria-hidden="true"])').first();
   const open = async () => {
-    await page.evaluate((v) => {
-      location.hash = `#/notes/ZEC/10/${v}`;
-    }, row.verse);
+    await page.evaluate((hash) => {
+      location.hash = hash;
+    }, `#/notes/ZEC/${CHAPTER}/${row.verse}`);
   };
   const leave = async () => {
-    await page.evaluate(() => {
-      location.hash = "#/ZEC/9/2";
-    });
+    await page.evaluate((hash) => {
+      location.hash = hash;
+    }, `#/ZEC/${AWAY_CHAPTER}/2`);
     await page.locator('[role="button"][dir="auto"]').first().waitFor({ state: "detached", timeout: 10_000 });
   };
 
   try {
-    await page.goto(`/#/notes/ZEC/10/${row.verse}`);
+    await page.goto(`/#/notes/ZEC/${CHAPTER}/${row.verse}`);
     // The tests above may have saved this row already; read what the screen shows.
     await expect(shown()).not.toHaveText("", { timeout: 15_000 });
     const start = await shown().innerText();
@@ -399,13 +402,13 @@ test("tN card: after a remount, a type-back protection ends when the save is ref
     await expect.poll(async () => (await readDraft(page, key))?.patch).toEqual(expect.objectContaining({ note: n0 }));
 
     // Remount with the save still held.
-    await page.evaluate(() => {
-      location.hash = "#/ZEC/9/2";
-    });
+    await page.evaluate((hash) => {
+      location.hash = hash;
+    }, `#/ZEC/${AWAY_CHAPTER}/2`);
     await page.locator(`[data-note-id="${row.id}"]`).waitFor({ state: "detached", timeout: 10_000 });
-    await page.evaluate((v) => {
-      location.hash = `#/ZEC/10/${v}`;
-    }, row.verse);
+    await page.evaluate((hash) => {
+      location.hash = hash;
+    }, `#/ZEC/${CHAPTER}/${row.verse}`);
     await expect(noteTextarea(page, row.id)).toHaveValue(n0);
     const q1 = `${q0} EDITED`;
     await quoteTextarea(page, row.id).fill(q1);
