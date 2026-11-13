@@ -687,7 +687,7 @@
     },
     "loadFailed": "Could not load the lessons. Reload the page to try again.",
     "saveFailed": "Could not change the setting. Try again.",
-    "notMigrated": "Lessons are not available yet: the server database needs an update (migrations 0085 to 0088)."
+    "notMigrated": "Lessons are not available yet: the server database needs an update (migrations 0085 to 0087)."
   },
   "houseStyle": {
     "title": "House style",

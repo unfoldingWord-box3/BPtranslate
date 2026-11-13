@@ -1379,6 +1379,28 @@ test("#915: a resume that stops again leaves no approval in the newest chapters 
   assert.equal(f.calls.length, 4);
 });
 
+test("#915: a stop inside a chapter's owed approvals (below the watermark) keeps the watermark and resumes that chapter", async () => {
+  const f = await fresh();
+  stoppedRun(f);
+  // MRK 4 first, then MRK 3: MRK 4's approvals are all older than the resume's.
+  approveIn(f, 4, "c401", "قال الكاتب", "كتب الكاتب");
+  approveIn(f, 4, "c402", "ذهب الرجل", "مضى الرجل");
+  approveIn(f, 3, "m301");
+  const m302 = approveIn(f, 3, "m302");
+  assert.equal((await f.runWith(NIGHT1, { cells: 1 })).status, "ok");
+  assert.equal((await f.runWith(NIGHT2, { cells: 1 })).status, "ok");
+  assert.equal(f.runs().at(-1).truncated, 0, "nights 1 and 2 finish the resume");
+  assert.equal(f.runs().at(-1).approvals_through, m302);
+  assert.equal((await f.runWith(NIGHT3, { cells: 1 })).status, "ok");
+  assert.match(f.calls[2].user, SAID, "night 3 diffs MRK 4's c401");
+  assert.equal(f.runs().at(-1).truncated, 1, "and stops at c402");
+  assert.equal(f.runs().at(-1).approvals_through, m302, "the watermark never goes below where it was");
+  assert.equal((await f.runWith(NIGHT3 + 86400, { cells: 1 })).status, "ok");
+  assert.match(f.calls[3].user, WENT, "night 4 resumes MRK 4 from c402");
+  assert.equal((await f.runWith(NIGHT3 + 2 * 86400, { cells: 1 })).reason, "no_new_approvals");
+  assert.equal(f.calls.length, 4);
+});
+
 test("#915: an approval a resume left owed is mined even after editors moved on to other chapters", async () => {
   const f = await fresh();
   stoppedRun(f);
@@ -1423,7 +1445,7 @@ test("#915: a finished resume's own later approval is not new again: a one-note 
   assert.equal(f.calls.length, 3, "a2 is never sent to the model a second time");
 });
 
-test("#915: a database with 0087 but not 0088 reads as not_migrated, on the night and on the page", async () => {
+test("#915: a database with 0087 but not 0088 reads as not_migrated on the night, not a failure", async () => {
   const sqlite = new DatabaseSync(":memory:");
   const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations");
   for (const file of readdirSync(dir).filter((x) => x.endsWith(".sql") && x < "0088").sort()) {
@@ -1432,7 +1454,6 @@ test("#915: a database with 0087 but not 0088 reads as not_migrated, on the nigh
   const env = { DB: makeDb(sqlite), WORKSPACE_SLUG: "x" };
   await setLessonsEnabled(env.DB, true, null);
   assert.deepEqual(await runNightlyLessons(env, { now: NIGHT1 }), { ran: false, reason: "not_migrated" });
-  assert.equal((await readLessonsState(env)).notMigrated, true);
 });
 
 test("#915: no paid call when the only approval above the watermark is one the resume already mined", async () => {
