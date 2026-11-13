@@ -953,6 +953,7 @@
     "couldntDeleteNote": "Couldn't delete note: {{message}}",
     "couldntRestoreNote": "Couldn't restore note: {{message}}",
     "noteLockedByTranslate": "An AI translation is writing this note. Try again after it finishes.",
+    "questionLockedByRun": "An AI run is working on this chapter, so its questions can't be approved yet. Try again after it finishes.",
     "couldntApproveNote": "Couldn't approve note: {{message}}",
     "couldntTranslateNote": "Couldn't start translation: {{message}}",
     "cantPreserveAlignment": "This edit can't preserve word alignment on words you didn't change, so it wasn't saved ({{ref}} {{bibleVersion}}{{affected}}). Please note this verse ({{ref}}) for your admin to file a bug-fix review, or re-align in the alignment panel.",
@@ -2925,6 +2926,7 @@
       "applying": "Applying…",
       "errForbidden": "Only admins can change review state in bulk.",
       "errLockedByTranslate": "An AI translation is rewriting notes in this range, so they can't be approved yet. Try again after it finishes.",
+      "errLockedQuestions": "An AI run is working on a chapter in this range, so its questions can't be approved yet. Try again after it finishes.",
       "errMaybeApplied": "The change could not be confirmed ({{detail}}). It may have been partly or fully applied, so check the counts below before trying again."
     },
     "scorecard": {

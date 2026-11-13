@@ -2333,7 +2333,9 @@ export const api = {
     }),
 
   // Translation-mode "Approve" for translationQuestions — the tQ analogue of
-  // validateNote. value=true → 'validated'; value=false → 'edited'.
+  // validateNote. value=true → 'validated'; value=false → 'edited'. Approving is
+  // refused (409 chapter_locked) while any AI run holds the question's chapter,
+  // the same rule as saving a question edit (#752).
   validateQuestion: (id: string, book: string, value: boolean, opts?: { bulk?: boolean }) =>
     request<TqRow>(`/api/rows/tq/${encodeURIComponent(id)}/validate?book=${encodeURIComponent(book)}`, {
       method: "POST",

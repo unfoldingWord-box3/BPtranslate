@@ -268,6 +268,7 @@ interface Props {
 
 // The server refused a note action because an AI translation will write the
 // note (409 chapter_locked, issue #602) — a stale tab that missed the lock.
+// Approving a question gets the same 409 while any run holds its chapter (#752).
 function isNoteTranslateLocked(e: unknown): boolean {
   return e instanceof ApiError && isChapterLockedBody(e.body);
 }
@@ -1261,6 +1262,11 @@ export function Shell({
         const updated = await api.validateQuestion(id, book, value);
         applyLocalRowReplacement("tq", updated);
       } catch (e) {
+        // An AI run holds this chapter; approving waits for it to finish (#752).
+        if (isNoteTranslateLocked(e)) {
+          pushPipelineToast(t("shell.questionLockedByRun"), "error");
+          return;
+        }
         const msg = e instanceof Error ? e.message : t("appShell.common.unknownError");
         pushPipelineToast(t("shell.couldntApproveNote", { message: msg }), "error");
       }
@@ -1322,10 +1328,17 @@ export function Shell({
   const approveAllQuestionsInFlightRef = useRef(false);
   const handleApproveAllQuestions = useCallback(async () => {
     if (!data || approveAllQuestionsInFlightRef.current) return;
+    // Any AI run on the chapter locks its questions, and the server refuses
+    // each approval until it finishes (#752).
+    if (chapterLock) {
+      pushPipelineToast(t("shell.questionLockedByRun"), "error");
+      return;
+    }
     const list = data.tq.filter(isApprovableRow);
     if (list.length === 0) return;
     approveAllQuestionsInFlightRef.current = true;
     let approved = 0;
+    let locked = false;
     let firstFailure: { row: TqRow; status: number | null } | null = null;
     for (const row of list) {
       try {
@@ -1333,13 +1346,21 @@ export function Shell({
         applyLocalRowReplacement("tq", updated);
         approved += 1;
       } catch (e) {
+        // A run this tab had not heard of yet: the lock covers the whole
+        // chapter, so every remaining row would be refused the same way.
+        if (isNoteTranslateLocked(e)) {
+          locked = true;
+          break;
+        }
         const status = e instanceof ApiError ? e.status : null;
         if (!firstFailure) firstFailure = { row, status };
         if (status === 401 || status === 403) break;
       }
     }
     approveAllQuestionsInFlightRef.current = false;
-    if (firstFailure) {
+    if (locked) {
+      pushPipelineToast(t("shell.questionLockedByRun"), "error");
+    } else if (firstFailure) {
       const total = list.length;
       const failed = total - approved;
       const extra = firstFailure.status === 404 ? t("flowReview.queue.approveAllExtraNoDraft") : "";
@@ -1355,7 +1376,7 @@ export function Shell({
         "error",
       );
     }
-  }, [data, book, applyLocalRowReplacement, pushPipelineToast, t]);
+  }, [data, book, chapterLock, applyLocalRowReplacement, pushPipelineToast, t]);
 
   const handleTranslateQuestion = useCallback(
     async (id: string) => {

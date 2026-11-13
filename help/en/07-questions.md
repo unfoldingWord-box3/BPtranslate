@@ -55,10 +55,10 @@ In a source project, one that does not translate from another language (such as 
 
 On a phone the icon is not in the top bar. It is the first item in your account menu, with the same name.
 
-While a **Translate chapter** or **Translate questions** run is starting, running or paused on a chapter, that chapter's questions can't be saved. A run that is still waiting in line locks nothing. Admins follow the runs in [AI studio](#help:admin-ai).
+While any AI run is starting, running or paused on a chapter, that chapter's questions can't be saved or approved. A run that is still waiting in line locks nothing. Admins follow the runs in [AI studio](#help:admin-ai).
 
 ## Good to know
 - Your typing is kept in your browser until you select **Save**. The top bar shows **N unsaved**. See [Saving and working offline](#help:save-and-sync).
-- If an AI run is rewriting the chapter, a save is refused. The screen says your edit was dropped. Try again when the run ends.
+- If an AI run is rewriting the chapter, a save is refused. The screen says your edit was dropped. **Save & Approve** is refused too, and the screen says the questions can't be approved yet. Try again when the run ends.
 - If another editor saved the question first, a banner says your version was not saved. Select **Reload question**.
 - If you only have view access, you can read the questions but not edit them.
