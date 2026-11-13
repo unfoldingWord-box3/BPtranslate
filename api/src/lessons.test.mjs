@@ -25,7 +25,9 @@ import {
   MAX_LESSONS,
   LESSONS_HEADING,
 } from "./lessons.ts";
+import { Hono } from "hono";
 import { encryptApiKey } from "./aiKeyCrypto.ts";
+import { translationMemory } from "./translationMemory.ts";
 import { loadContextPackInputs, renderContextPack, renderInstructionsMd } from "./contextExport.ts";
 import { contextShrinkRefused } from "./contextExportLib.ts";
 import { clearProjectConfigCache } from "./projectConfig.ts";
@@ -386,4 +388,53 @@ test("context pack loader: a database without the lesson tables loads no lessons
   assert.deepEqual(inputs.lessons, []);
   const state = await runNightlyLessons({ DB: makeDb(sqlite), WORKSPACE_SLUG: "x" });
   assert.deepEqual(state, { ran: false, reason: "off" });
+});
+
+// ── routes ──────────────────────────────────────────────────────────────────
+
+function appFor(env, role) {
+  const app = new Hono();
+  app.use("*", async (c, next) => {
+    c.set("userId", 9);
+    c.set("role", role);
+    await next();
+  });
+  app.route("/api/translation-memory", translationMemory);
+  return (path, init) => app.request(path, init, env);
+}
+
+test("routes: admin reads the Off default, switches on and off; editors cannot", async () => {
+  const f = await fresh({ enabled: false });
+  const admin = appFor(f.env, "admin");
+  let res = await admin("/api/translation-memory/lessons", { method: "GET" });
+  assert.equal(res.status, 200);
+  let body = await res.json();
+  assert.equal(body.enabled, false);
+  assert.equal(body.notMigrated, false);
+  assert.equal(body.availability.available, true);
+  assert.equal(body.availability.provider, "claude");
+  assert.deepEqual(body.lessons, []);
+  assert.equal(body.lastRun, null);
+  assert.equal(body.maxLessons, MAX_LESSONS);
+
+  const put = (enabled, who = admin) =>
+    who("/api/translation-memory/lessons", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled }) });
+  res = await put(true);
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).enabled, true);
+  await f.run();
+  body = await (await admin("/api/translation-memory/lessons", { method: "GET" })).json();
+  assert.equal(body.lessons.length, 1);
+  assert.equal(body.lessons[0].evidence, 13);
+  assert.equal(body.lastRun.status, "ok");
+  assert.ok(body.lastRun.costUsd > 0);
+  assert.equal(body.setAt != null, true);
+
+  res = await put(false);
+  assert.equal((await res.json()).enabled, false);
+  assert.equal((await put("yes")).status, 400);
+
+  const editor = appFor(f.env, "editor");
+  assert.equal((await editor("/api/translation-memory/lessons", { method: "GET" })).status, 403);
+  assert.equal((await put(true, editor)).status, 403);
 });

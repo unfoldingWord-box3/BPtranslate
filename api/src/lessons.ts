@@ -41,7 +41,11 @@
 //
 // Imports carry .ts suffixes so the node strip-types test runner resolves them.
 
+import { Hono } from "hono";
+import { z } from "zod";
 import type { Env } from "./index";
+import { currentUserId, requireAdmin } from "./auth.ts";
+import { queueContextExport } from "./contextExportQueue.ts";
 import { getProjectConfig } from "./projectConfig.ts";
 import { nfc } from "./contextExportLib.ts";
 import { SCORECARD_ROWS_SQL } from "./draftScorecard.ts";
@@ -673,4 +677,42 @@ export async function setLessonsEnabled(db: Db, enabled: boolean, userId: number
     )
     .bind(enabled ? 1 : 0, userId)
     .run();
+}
+
+// ---------------------------------------------------------------------------
+// Routes (mounted at /api/translation-memory/lessons). Admin-only both ways:
+// switching on spends the workspace's own AI account every night that has new
+// approvals. Either change queues a context export, so the lessons section
+// appears in (or leaves) instructions.md without waiting for the night.
+// ---------------------------------------------------------------------------
+
+type RouteEnv = { Bindings: Env; Variables: { userId?: number } };
+
+const PutBody = z.object({ enabled: z.boolean() }).strict();
+
+export function lessonsRoutes() {
+  const app = new Hono<RouteEnv>();
+
+  app.get("/", requireAdmin, async (c) => c.json(await readLessonsState(c.env)));
+
+  app.put("/", requireAdmin, async (c) => {
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "invalid_json" }, 400);
+    }
+    const parsed = PutBody.safeParse(body);
+    if (!parsed.success) return c.json({ error: "validation_failed", issues: parsed.error.issues }, 400);
+    try {
+      await setLessonsEnabled(c.env.DB, parsed.data.enabled, currentUserId(c));
+    } catch (e) {
+      if (tableMissing(e)) return c.json({ error: "not_migrated" }, 503);
+      throw e;
+    }
+    queueContextExport(c);
+    return c.json(await readLessonsState(c.env));
+  });
+
+  return app;
 }
