@@ -5,7 +5,8 @@
 -- workspace's own AI model once for a short list of "lessons", and renders that
 -- list into the context pack's instructions.md (api/src/lessons.ts,
 -- api/src/contextExport.ts). Additive only: three new tables, nothing existing
--- is touched.
+-- is touched (no index on edit_log either: building one on a large log could
+-- exceed D1's statement limit, and it would add a write to every save).
 --
 -- lesson_settings  the per-workspace (= per database) on/off switch. NO ROW
 --                  MEANS OFF: every workspace starts off until an admin turns it
@@ -56,7 +57,3 @@ CREATE TABLE IF NOT EXISTS lessons (
   PRIMARY KEY (run_id, position)
 );
 
--- The job's two edit_log reads (newest approval, most recently approved
--- chapters) look only at tN 'validate' entries; without this they scan the
--- whole log, which gains a row per saved keystroke.
-CREATE INDEX IF NOT EXISTS edit_log_kind_action ON edit_log(kind, action, id);
