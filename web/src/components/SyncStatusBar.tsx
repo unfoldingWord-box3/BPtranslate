@@ -145,9 +145,10 @@ export function useSyncSummary(): SyncSummary {
 
   // Draft count — unsaved typing the user hasn't clicked Save on yet.
   // Distinct from outbox "saving N": those are in-flight to the server;
-  // drafts haven't left the browser.
+  // drafts haven't left the browser. The drafts store is shared by every tab,
+  // so this count also follows changes other tabs make (`remote`, #896).
   const [draftList, setDraftList] = useState<DraftRecord[]>([]);
-  useEffect(() => drafts.subscribe(setDraftList), []);
+  useEffect(() => drafts.subscribe(setDraftList, { remote: true }), []);
   const activeDrafts = draftList.filter((d) => !d.quarantined);
   const quarantinedDrafts = draftList.filter((d) => !!d.quarantined);
   const draftCount = activeDrafts.length;

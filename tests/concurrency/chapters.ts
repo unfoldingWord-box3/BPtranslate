@@ -50,6 +50,13 @@ export const ZEC_CHAPTERS = {
       "Read-only screens: ULT alignment hover (ZEC 1:1 has 16 Hebrew words), verse view, " +
       "route landmarks, the classic chapter view. No spec writes here.",
   },
+  crossTabDrafts: {
+    chapter: 2,
+    specs: ["cross-tab-drafts-count.spec.ts"],
+    why:
+      "Two tabs: one types a tQ question or a ULT verse draft (2:1) and discards it from the " +
+      "unsaved menu, the other checks its unsaved count. Nothing is saved to the server.",
+  },
   rapidCheck: {
     chapter: 3,
     specs: ["notes-rapid-check.spec.ts", "notes-rapid-columns.spec.ts"],
