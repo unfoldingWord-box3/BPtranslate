@@ -1341,6 +1341,95 @@ test("#912 item 2 (left open): a resume that stops again still moves the waterma
   assert.match(f.calls[0].user, /Chapters: MRK 3, MRK 2\./, "the resume");
 });
 
+// ── a resume's per-chapter progress (#915) ──────────────────────────────────
+
+// A finished night run that stopped among MRK 3 + MRK 2, every approval up to now mined.
+function stoppedRun(f) {
+  const w1 = maxApproval(f);
+  f.sqlite
+    .prepare(
+      `INSERT INTO lesson_runs (night, started_at, finished_at, status, approvals_through, chapters_json, truncated)
+       VALUES ('2026-11-11', 1, 1, 'no_changes', ?, ?, 1)`,
+    )
+    .run(w1, JSON.stringify([MRK(3), MRK(2)]));
+  return w1;
+}
+const SAID = /«قال» → «كتب»/;
+const WENT = /«ذهب» → «مضى»/;
+
+test("#915: a resume that stops again leaves no approval in the newest chapters unmined", async () => {
+  const f = await fresh();
+  stoppedRun(f);
+  // Between nights: one approval in MRK 4, then two more back in MRK 3.
+  approveIn(f, 4, "c401", "قال الكاتب", "كتب الكاتب");
+  approveIn(f, 3, "m301");
+  approveIn(f, 3, "m302");
+  assert.equal((await f.runWith(NIGHT1, { cells: 1 })).status, "ok");
+  assert.equal(f.runs().at(-1).truncated, 1, "night 1: the resume stops again");
+  // Between nights 1 and 2: one more in MRK 4.
+  approveIn(f, 4, "c402", "ذهب الرجل", "مضى الرجل");
+  const nights = [NIGHT2, NIGHT3, NIGHT3 + 86400, NIGHT3 + 2 * 86400];
+  for (const night of nights.slice(0, 3)) assert.equal((await f.runWith(night, { cells: 1 })).status, "ok");
+  assert.match(f.calls[1].user, /Chapters: MRK 3, MRK 2\./, "night 2 finishes the resume");
+  assert.match(f.calls[2].user, /Chapters: MRK 4, MRK 3\./, "night 3 mines the newest chapters");
+  assert.match(f.calls[2].user, SAID, "MRK 4's first approval (made before night 1) reaches the model");
+  assert.match(f.calls[3].user, WENT, "night 4 finishes MRK 4: its second approval reaches the model");
+  assert.equal((await f.runWith(nights[3], { cells: 1 })).reason, "no_new_approvals", "then nothing is left");
+  assert.equal(f.calls.length, 4);
+});
+
+test("#915: an approval a resume left owed is mined even after editors moved on to other chapters", async () => {
+  const f = await fresh();
+  stoppedRun(f);
+  approveIn(f, 4, "c401", "قال الكاتب", "كتب الكاتب");
+  approveIn(f, 3, "m301");
+  approveIn(f, 3, "m302");
+  assert.equal((await f.runWith(NIGHT1, { cells: 1 })).status, "ok");
+  assert.equal(f.runs().at(-1).truncated, 1, "night 1: the resume stops again; MRK 4 waits");
+  // Editors move on: MRK 5 and MRK 6 are now the newest chapters, MRK 4 is not.
+  approveIn(f, 5, "c501");
+  approveIn(f, 6, "c601");
+  assert.equal((await f.runWith(NIGHT2, { cells: 1 })).status, "ok");
+  assert.match(f.calls[1].user, /Chapters: MRK 3, MRK 2\./, "night 2 finishes the resume");
+  assert.equal(f.runs().at(-1).truncated, 0);
+  assert.equal((await f.run(NIGHT3)).status, "ok");
+  assert.match(f.calls[2].user, /Chapters: MRK 6, MRK 5, MRK 4\./, "the newest chapters, plus the one the resume left owed");
+  assert.match(f.calls[2].user, SAID);
+  assert.equal((await f.run(NIGHT3 + 86400)).reason, "no_new_approvals");
+});
+
+// Interleaved approvals: newest chapter MRK 4 gets c1, then resumed MRK 3 gets a2 > c1.
+async function interleaved() {
+  const f = await fresh();
+  await f.runWith(NIGHT1, { cells: 1 }); // stops among MRK 3 + MRK 2
+  const c1 = approveIn(f, 4, "c401", "قال الكاتب", "كتب الكاتب");
+  const a2 = approveIn(f, 3, "m301", "ذهب الرجل", "مضى الرجل");
+  assert.equal((await f.run(NIGHT2)).status, "ok");
+  assert.match(f.calls[1].user, /Chapters: MRK 3, MRK 2\./, "night 2 finishes the resume, a2 included");
+  assert.match(f.calls[1].user, WENT);
+  return { f, c1, a2 };
+}
+
+test("#915: a finished resume's own later approval is not new again: a one-note night diffs c1 and is done", async () => {
+  const { f, a2 } = await interleaved();
+  const out3 = await f.runWith(NIGHT3, { cells: 1 });
+  assert.equal(out3.status, "ok");
+  assert.match(f.calls[2].user, /Chapters: MRK 3, MRK 4\./);
+  assert.match(f.calls[2].user, SAID, "night 3 diffs MRK 4's c1");
+  assert.equal(f.runs().at(-1).truncated, 0, "a2 is not left over as a new approval");
+  assert.equal(f.runs().at(-1).approvals_through, a2);
+  assert.equal((await f.runWith(NIGHT3 + 86400, { cells: 1 })).reason, "no_new_approvals");
+  assert.equal(f.calls.length, 3, "a2 is never sent to the model a second time");
+});
+
+test("#915: no paid call when the only approval above the watermark is one the resume already mined", async () => {
+  const { f } = await interleaved();
+  // c1 goes back to draft: what is left above the watermark is a2, mined on night 2.
+  f.sqlite.prepare(`UPDATE tn_rows SET translation_state = 'draft' WHERE id = 'c401'`).run();
+  assert.equal((await f.run(NIGHT3)).reason, "no_new_approvals");
+  assert.equal(f.calls.length, 2);
+});
+
 test("#912 item 3: a deleted lesson's example, shared by a kept lesson, does not stop that lesson's rewording", () => {
   const current = [L("Keep B.", "x", "y")];
   const deleted = [{ lesson: "Gone A.", before: "x", after: "y", approvalsThrough: 100 }];
