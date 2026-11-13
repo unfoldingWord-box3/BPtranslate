@@ -171,10 +171,10 @@ export function tnPayload(book: string, refRaw: string, row: Record<string, stri
       // Collapse bp-assistant's double-space-after-punctuation artifact so the
       // stored note matches DCS master's normalized form (see
       // normalizeNoteWhitespace) — the apply and the edit_log audit read this
-      // same staged note. Curl
-      // straight quotes with the SAME contextual rule verse text ingest uses
+      // same staged note. Curl straight quotes with the SAME contextual rule
+      // verse text ingest uses
       // (curlifyText, not tsvFormat.ts's educateQuotes — see the module
-      // comment above curlifyVerseObjects in importParsers.ts for why the two
+      // comment above curlifyText in importParsers.ts for why the two
       // ingest paths must share one rule) so an AI-authored note never lands
       // with straight ' / " and never disagrees with an AI-authored verse
       // curled in the same run.

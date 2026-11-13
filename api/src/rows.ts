@@ -1415,8 +1415,8 @@ rows.post("/tn/:id/preserve", requireEditor, async (c) => {
 });
 
 // POST /api/rows/tn/:id/hint — toggle the "queue as AI-pipeline hint" bit.
-// hint=1 rows are sent into the next /api/pipelines/start as options.hints
-// and are excluded from deleteUnkeptTns; AI expansion clears the bit.
+// hint=1 rows used to be sent into a notes run as options.hints and expanded by
+// its apply. The notes pipeline is retired (#726), so nothing reads the bit now.
 rows.post("/tn/:id/hint", requireEditor, async (c) => {
   const id = c.req.param("id");
   const book = c.req.query("book");

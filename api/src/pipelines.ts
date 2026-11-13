@@ -693,7 +693,7 @@ export async function dispatchNext(env: Env): Promise<void> {
     .run();
 }
 
-// Shared "fetch upstream, run import, update DB, fire follow-up" body used
+// Shared "fetch upstream, run import, update DB" body used
 // by both the GET handler and the scheduled cron poller. Returns the raw
 // upstream response so callers that need to pass it through can do so;
 // scheduled callers discard.
@@ -794,7 +794,7 @@ async function pollPipelineJob(
       );
       if (importResult.claimLost) {
         // A concurrent poll (the other of cron / open-tab) owns this import and
-        // may still be mid-apply. Do NOT fall through to the finalize+follow-up
+        // may still be mid-apply. Do NOT fall through to the finalize
         // block: writing output_json / state='done' here would mark the import
         // complete before the owning poll's apply finishes, and if that poll
         // then fails the set output_json would suppress the retry. Return the
@@ -1284,7 +1284,7 @@ pipelines.post("/start", requireEditor, async (c) => {
   // The BT_API_TOKEN gate moved below the body parse + provider resolve (#467):
   // it must fire only for a job that would actually route to the Fly proxy, so
   // an internal-runner translate job can start on a token-less deployment. See
-  // the gate just before the source-stamp resolve.
+  // the bot-token gate just before the enqueue.
   const userId = currentUserId(c);
   if (!userId) return c.json({ error: "unauthorized" }, 401);
 
@@ -1792,7 +1792,7 @@ pipelines.get("/:jobId", requireEditor, async (c) => {
   if (!jobId) return c.json({ error: "missing_job_id" }, 400);
 
   // Ownership check before any upstream call — prevents jobId enumeration.
-  // pollPipelineJob() handles fetch/import/update/follow-up; we just gate
+  // pollPipelineJob() handles fetch/import/update; we just gate
   // it on the requester owning the job. Read the row first so the capability
   // gate below can consult its stamped runner (#469).
   const owned = await c.env.DB.prepare(

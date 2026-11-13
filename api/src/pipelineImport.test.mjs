@@ -93,10 +93,9 @@ console.log("pipelineImport (claim guard): all assertions passed");
 
 // ─── tnPayload / tqPayload quote curling (AI-pipeline note/question/response) ──
 // Upstream JER 32/33 / NUM 26:53 prod forensics found straight quotes in
-// AI-pipeline output that exported verbatim to Door43 master. Verse text is
-// curled in applyVerseUpdate's self-heal block (curlifyVerseObjects); these
-// pin the sibling fix for note/question/response PROSE, which must use the
-// SAME shared curlifyText (importParsers.ts) as verse text — not
+// AI-pipeline output that exported verbatim to Door43 master. These pin the
+// fix for note/question/response PROSE, which must use the shared curlifyText
+// (importParsers.ts) — not
 // tsvFormat.ts's educateQuotes — so a straight quote curls identically in an
 // AI-drafted verse and an AI-drafted note from the same run.
 // Ported from upstream unfoldingWord/bible-editor 7a535ea (#445).
