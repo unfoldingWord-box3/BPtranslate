@@ -158,19 +158,34 @@ assert.ok(prefsDraftLost(typed, start, false));
 assert.ok(!prefsDraftLost(typed, start, true));
 assert.ok(!prefsDraftLost(start, start, false));
 
-// ── afterPrefsSavedElsewhere (#913 review A2) ─────────────────────────────
-// Another tab saved exactly the text this editor shows: it is clean at the
-// new version. Different text stays as it is.
+// ── afterPrefsSavedElsewhere (#913 review A2, round 2 B1) ─────────────────
+// Another tab saved this editor's fields. When every box typed here holds what
+// was saved, the editor is clean on the saved row: every box shows the saved
+// value at the new version (a box nobody typed in, `notes` included, takes the
+// server's value, so a stale copy never blocks this or goes back in a save).
+// A typed box holding other text keeps the editor as it is.
 assert.deepStrictEqual(afterPrefsSavedElsewhere({ text: typed, base: start, baseVersion: 3 }, typed, 5), {
   text: typed,
   base: typed,
   baseVersion: 5,
 });
 assert.strictEqual(afterPrefsSavedElsewhere({ text: typed, base: start, baseVersion: 3 }, fromB, 5), null);
+const savedT = { ...briefServer, audience: "A0 typed" };
+assert.deepStrictEqual(afterPrefsSavedElsewhere({ text: briefTyped, base: brief0, baseVersion: 3 }, savedT, 8), {
+  text: savedT,
+  base: savedT,
+  baseVersion: 8,
+});
 assert.strictEqual(
-  afterPrefsSavedElsewhere({ text: briefTyped, base: briefServer, baseVersion: 3 }, { ...briefTyped, purpose: "other" }, 5),
+  afterPrefsSavedElsewhere({ text: briefTyped, base: brief0, baseVersion: 3 }, { ...brief0, audience: "other" }, 8),
   null,
 );
+// Nothing typed: the boxes follow the saved row.
+assert.deepStrictEqual(afterPrefsSavedElsewhere({ text: brief0, base: brief0, baseVersion: 3 }, briefServer, 8), {
+  text: briefServer,
+  base: briefServer,
+  baseVersion: 8,
+});
 
 // ── prefsDraftDroppable (#913 item 5) ──────────────────────────────────────
 // Drafts are per workspace, not per user. A user who cannot save drops only a

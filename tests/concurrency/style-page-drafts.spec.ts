@@ -93,6 +93,19 @@ async function prefsDrafts(page: Page): Promise<Record<string, string>> {
     return out;
   });
 }
+// Close the page as a user closing the tab would, and say whether it asked
+// "leave with unsaved changes?" (the unload guard; review B2).
+async function closePrompts(page: Page): Promise<boolean> {
+  let prompted = false;
+  page.on("dialog", (d) => {
+    if (d.type() === "beforeunload") prompted = true;
+  });
+  const closed = page.waitForEvent("close");
+  await page.close({ runBeforeUnload: true });
+  await closed;
+  return prompted;
+}
+const scriptNotesBox = (p: Page) => p.locator('#style-sec-brief textarea:not([aria-hidden="true"])').nth(2);
 const commonBox = (p: Page) => p.locator('#style-sec-commonIssues textarea:not([aria-hidden="true"])').first();
 const saveIn = (p: Page, section: string) => p.locator(`#style-sec-${section}`).getByRole("button", { name: "Save" });
 
@@ -707,6 +720,8 @@ test("913 A1: a discard in one tab resets the other tab showing the same draft",
   expect(await prefsDrafts(pageB)).toEqual({});
   await expect(pageB.getByText(/\d+ unsaved/)).toHaveCount(0);
   await expect(pageA.getByText(/\d+ unsaved/)).toHaveCount(0);
+  // Nothing is unsaved in B, so closing it does not ask (review B2).
+  expect(await closePrompts(pageB)).toBe(false);
 });
 
 // Tab A restores tab B's typing and saves it as it is. B's text is now the
@@ -740,4 +755,145 @@ test("913 A2: a save of this tab's exact text in another tab leaves both tabs cl
   await pageB.keyboard.press("End");
   await pageB.keyboard.type(" B-AGAIN");
   expect(await clickSave(pageB, "commonIssues")).toBe(200);
+  await expect(pageB.getByText(/\d+ unsaved/)).toHaveCount(0);
+  // Nothing is unsaved in B, so closing it does not ask (review B2).
+  expect(await closePrompts(pageB)).toBe(false);
+});
+
+// Review B2, without B saving again: after adopting A's save of its exact
+// text, B closes without the unsaved-changes prompt.
+test("913 B2: a tab made clean by another tab's save closes without a prompt", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const stamp = Date.now();
+  const original = `913-b2 common ${stamp}`;
+  await putPrefs(setup!.context.request, setup!.csrf, { common_issues_md: original });
+  const { context } = await adminContext(browser, "a");
+  const pageB = await context.newPage();
+  await openStyle(pageB, original);
+  await commonBox(pageB).click();
+  await pageB.keyboard.press("End");
+  await pageB.keyboard.type(" B-TYPED");
+  await expect.poll(() => prefsDrafts(pageB)).toHaveProperty("prefs:common_issues_md");
+  const pageA = await context.newPage();
+  await openStyle(pageA, `${original} B-TYPED`);
+  expect(await clickSave(pageA, "commonIssues")).toBe(200);
+  await pageA.waitForTimeout(1000);
+  await expect(pageB.getByText(/\d+ unsaved/)).toHaveCount(0);
+  expect(await closePrompts(pageB)).toBe(false);
+});
+
+// Review B1: a tab that adopts another tab's save takes that save's whole
+// prefs row, not just its version. Its next Brief save keeps every box the
+// other tab saved, and a box nobody typed in saves without a false 409.
+for (const edit of ["audience", "script notes"] as const) {
+  test(`913 B1: after adopting another tab's Brief save, editing ${edit} keeps the other saved box`, async ({
+    browser,
+  }) => {
+    test.setTimeout(90_000);
+    const stamp = Date.now();
+    await putPrefs(setup!.context.request, setup!.csrf, {
+      audience: `b1 audience ${stamp}`,
+      purpose: `b1 purpose ${stamp}`,
+      common_issues_md: `b1 common ${stamp}`,
+    });
+    const { context } = await adminContext(browser, "a");
+    const pageB = await context.newPage();
+    await openStyle(pageB, `b1 common ${stamp}`);
+    await briefBox(pageB).click();
+    await pageB.keyboard.press("End");
+    await pageB.keyboard.type(" B1");
+    await purposeBox(pageB).click();
+    await pageB.keyboard.press("End");
+    await pageB.keyboard.type(" B2");
+    await expect
+      .poll(() => prefsDrafts(pageB))
+      .toEqual({
+        "prefs:brief": expect.stringContaining(`b1 purpose ${stamp} B2`),
+      });
+
+    // A restores both boxes and saves them (T differs from the start in two).
+    const pageA = await context.newPage();
+    await openStyle(pageA, `b1 common ${stamp}`);
+    await expect(briefBox(pageA)).toHaveValue(`b1 audience ${stamp} B1`);
+    await expect(purposeBox(pageA)).toHaveValue(`b1 purpose ${stamp} B2`);
+    expect(await clickSave(pageA, "brief")).toBe(200);
+    await pageA.waitForTimeout(1000);
+    await expect(pageB.getByText(/\d+ unsaved/)).toHaveCount(0);
+
+    await pageB.bringToFront();
+    const box = edit === "audience" ? briefBox(pageB) : scriptNotesBox(pageB);
+    await box.click();
+    await pageB.keyboard.press("End");
+    await pageB.keyboard.type(" B3");
+    expect(await clickSave(pageB, "brief")).toBe(200);
+    const p = (await getPrefs(setup!.context.request)) as Prefs & { script_notes: string | null };
+    expect(p.purpose).toBe(`b1 purpose ${stamp} B2`);
+    if (edit === "audience") expect(p.audience).toBe(`b1 audience ${stamp} B1 B3`);
+    else {
+      expect(p.audience).toBe(`b1 audience ${stamp} B1`);
+      expect(p.script_notes ?? "").toMatch(/B3$/);
+    }
+  });
+}
+
+// Review B3: a discard throws away the discarded text only. Tab B shows Y;
+// tab C changes it to X (the stored draft is now X) and discards X. B keeps
+// Y, and the store ends holding Y.
+test("913 B3: a discard of one tab's text leaves another tab's different typing", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const stamp = Date.now();
+  const original = `913-b3 common ${stamp}`;
+  const y = `${original} Y`;
+  await putPrefs(setup!.context.request, setup!.csrf, { common_issues_md: original });
+  const { context } = await adminContext(browser, "a");
+  const pageB = await context.newPage();
+  await openStyle(pageB, original);
+  await commonBox(pageB).click();
+  await pageB.keyboard.press("End");
+  await pageB.keyboard.type(" Y");
+  await expect
+    .poll(() => prefsDrafts(pageB))
+    .toEqual({ "prefs:common_issues_md": JSON.stringify({ common_issues_md: y }) });
+  const pageC = await context.newPage();
+  await openStyle(pageC, y);
+  await commonBox(pageC).click();
+  await pageC.keyboard.press("End");
+  await pageC.keyboard.type(" X");
+  await expect
+    .poll(() => prefsDrafts(pageC))
+    .toEqual({ "prefs:common_issues_md": JSON.stringify({ common_issues_md: `${y} X` }) });
+
+  await pageC.getByText("1 unsaved").first().click();
+  await pageC.getByRole("presentation").getByText("1 unsaved").click();
+  await pageC.getByRole("button", { name: "Discard this edit" }).click();
+  await expect(commonBox(pageC)).toHaveValue(original);
+  await pageC.waitForTimeout(1000);
+
+  await pageB.bringToFront();
+  await expect(commonBox(pageB)).toHaveValue(y);
+  await expect
+    .poll(() => prefsDrafts(pageB), { timeout: 5_000 })
+    .toEqual({ "prefs:common_issues_md": JSON.stringify({ common_issues_md: y }) });
+});
+
+// Review B4: the item 1 rewrite never replaces a record another tab wrote in
+// the meantime: it writes only when the key is absent, in one transaction.
+test("913 B4: the drafts store's set-if-absent leaves an existing record", async ({ browser }) => {
+  test.setTimeout(60_000);
+  const { context } = await adminContext(browser, "a");
+  const page = await context.newPage();
+  await openStyle(page, (await getPrefs(setup!.context.request)).common_issues_md ?? "");
+  const out = await page.evaluate(async () => {
+    const url = "/src/sync/drafts.ts";
+    const m = await import(/* @vite-ignore */ url);
+    const key = "prefs:913-b4-probe";
+    const meta = { kind: "prefs", section: "common_issues_md" };
+    await m.drafts.clear(key);
+    const first = await m.drafts.setIfAbsent(key, { text: { v: "first" }, base: { v: "" } }, 1, meta);
+    const second = await m.drafts.setIfAbsent(key, { text: { v: "second" }, base: { v: "" } }, 1, meta);
+    const rec = await m.drafts.get(key);
+    await m.drafts.clear(key);
+    return { first, second, text: rec?.payload?.text?.v };
+  });
+  expect(out).toEqual({ first: true, second: false, text: "first" });
 });
