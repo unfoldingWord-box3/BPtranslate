@@ -628,7 +628,7 @@
     "unavailableProvider": "Not available with your AI provider ({{provider}}). Lessons need Claude or Gemini. The AI is NOT learning from editor corrections.",
     "unavailableNoKey": "Cannot run: the AI service is not set up, or its key cannot be used. Check AI service. The AI is NOT learning from editor corrections.",
     "unavailableNotTranslation": "Lessons are for translation projects only. The AI is NOT learning from editor corrections.",
-    "cost": "The app makes at most one call to your AI service a night, and only when there are corrections to learn from: on a night with new approvals, or on the nights after a run that failed or ran out of time, until its notes have all been compared (that can be two nights after a run that ran out of time, even with no new approvals). A night with nothing to learn from makes no call. Your project's AI account pays for each call.",
+    "cost": "The app calls your AI service once on a night with corrections to learn from: on a night with new approvals, or on the nights after a run that failed or ran out of time, until its notes have all been compared (that can be two nights after a run that ran out of time, even with no new approvals). A night with nothing to learn from makes no call. Your project's AI account pays for each call.",
     "run": {
       "never": "Last run: not run yet.",
       "summary": "Last run: {{when}}, {{status}}. {{cost}}",

@@ -1270,14 +1270,16 @@ export async function editLesson(
   // it, so a night does not write it back from the same old notes. (Common
   // issues alone would not stop that: its cover needs a word on both sides of
   // the example, and deletions and punctuation fixes have none.)
-  const through = (await approvalWatermark(db)) ?? 0;
+  // The newest approval is read inside the same batch, so an approval that
+  // commits while the change is in flight never counts as "after the delete".
   const tombstone = (token: string) =>
     db
       .prepare(
         `INSERT INTO lesson_deletions (lesson, example_before, example_after, deleted_at, deleted_by, approvals_through)
-         SELECT ?2, ?3, ?4, ?5, ?6, ?7 WHERE EXISTS (SELECT 1 FROM lesson_runs WHERE night = ?1)`,
+         SELECT ?2, ?3, ?4, ?5, ?6, COALESCE((SELECT MAX(e.id) ${HAND_APPROVAL_JOIN}), 0)
+          WHERE EXISTS (SELECT 1 FROM lesson_runs WHERE night = ?1)`,
       )
-      .bind(token, target.lesson, target.before, target.after, now, args.userId, through);
+      .bind(token, target.lesson, target.before, target.after, now, args.userId);
 
   if (args.action === "delete") {
     const ok = await writeSet(env, {
@@ -1307,7 +1309,8 @@ export async function editLesson(
     basedOn: args.setId,
     userId: args.userId,
     now,
-    prefsVersion: prefs ? prefs.version : null,
+    // Only a promote that changes Common issues depends on its version.
+    prefsVersion: changed ? (prefs ? prefs.version : null) : undefined,
     extra: (token) =>
       !changed
         ? [tombstone(token)]
