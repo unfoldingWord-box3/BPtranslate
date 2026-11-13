@@ -4,7 +4,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isNoteCardSaveOf, isOwnSaveLanded } from "./noteOrigin.ts";
+import { isNoteCardSaveOf, isOwnSaveLanded, isWriteFromOrigin } from "./noteOrigin.ts";
 
 const row = { id: "n-1", book: "ZEC" };
 const target = { kind: "row", rowKind: "tn", id: "n-1", book: "ZEC" };
@@ -23,14 +23,27 @@ test("A1: other writes to the row are not the card's save", () => {
   assert.equal(isNoteCardSaveOf({ action: "patch", target: { ...target, rowKind: "tq" }, draftRef }, row), false);
 });
 
+// The copy the save went out against, for the fields the card edits.
+const base = { quote: "q", note: "old", support_reference: null };
+
 test("A2: the row one version past the save, showing what it sent, is the save landing", () => {
-  const sent = { patch: { note: "mine\\nline two" }, from: 4 };
+  const sent = { patch: { note: "mine\\nline two" }, from: 4, base };
   assert.equal(isOwnSaveLanded(sent, { version: 5, note: "mine\nline two", quote: "q" }), true);
-  assert.equal(isOwnSaveLanded(sent, { version: 5, note: "mine\\nline two" }), true);
+  assert.equal(isOwnSaveLanded(sent, { version: 5, note: "mine\\nline two", quote: "q", support_reference: null }), true);
+});
+
+test("round 4 item 3: a row that shows the sent field but another change is not the save landing", () => {
+  // The save patched the note only; another writer's v5 carries the same note
+  // text but a different quote. Taking it for the card's own save would move
+  // the copy to v5, and a later quote edit would go out at v5 over their quote.
+  const sent = { patch: { note: "mine" }, from: 4, base };
+  assert.equal(isOwnSaveLanded(sent, { version: 5, note: "mine", quote: "their quote", support_reference: null }), false);
+  assert.equal(isOwnSaveLanded(sent, { version: 5, note: "mine", quote: "q", support_reference: "rc://x" }), false);
+  assert.equal(isOwnSaveLanded(sent, { version: 5, note: "mine", quote: "q", support_reference: null }), true);
 });
 
 test("A2: another person's save is not taken for the card's own", () => {
-  const sent = { patch: { note: "mine", support_reference: null }, from: 4 };
+  const sent = { patch: { note: "mine", support_reference: null }, from: 4, base };
   // Their text at the version the save would have landed at.
   assert.equal(isOwnSaveLanded(sent, { version: 5, note: "theirs", support_reference: null }), false);
   // One field matches, another does not.
@@ -42,5 +55,23 @@ test("A2: another person's save is not taken for the card's own", () => {
 
 test("A2: no save sent, or an empty one, never matches", () => {
   assert.equal(isOwnSaveLanded(null, { version: 5, note: "mine" }), false);
-  assert.equal(isOwnSaveLanded({ patch: {}, from: 4 }, { version: 5 }), false);
+  assert.equal(isOwnSaveLanded({ patch: {}, from: 4, base }, { version: 5, ...base }), false);
+});
+
+test("round 4 item 1: any write of the row sent at the copy's version lands on that copy", () => {
+  // The server took it at the version the card's text was typed against, so
+  // nothing else landed in between: a quote build, find/replace or reorder
+  // the translator made, landing on the copy their unsaved text was typed on.
+  assert.equal(isWriteFromOrigin({ action: "patch", target, expectedVersion: 3 }, row, 3), true);
+  assert.equal(isWriteFromOrigin({ action: "patch", target, draftRef, expectedVersion: 3 }, row, 3), true);
+});
+
+test("round 4 item 1: a write sent at a newer version than the copy does not move it (review A1)", () => {
+  // A reorder sent at the row's current version, which already carries
+  // another person's note: the restored draft's Save must still go out old.
+  assert.equal(isWriteFromOrigin({ action: "patch", target, expectedVersion: 4 }, row, 3), false);
+  assert.equal(isWriteFromOrigin({ action: "delete", target, expectedVersion: 3 }, row, 3), false);
+  assert.equal(isWriteFromOrigin({ action: "patch", target: { ...target, id: "n-2" }, expectedVersion: 3 }, row, 3), false);
+  assert.equal(isWriteFromOrigin({ action: "patch", target: { ...target, rowKind: "tq" }, expectedVersion: 3 }, row, 3), false);
+  assert.equal(isWriteFromOrigin({ action: "patch", target }, row, 3), false);
 });

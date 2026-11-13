@@ -42,6 +42,21 @@ test("Keep mine re-arms the row's other waiting saves as before, pins kept", () 
   assert.equal("expectedState" in rearmOnKeepMine({ id: "op1", status: "conflict", expectedVersion: 3, patch: {} }, "op1", 5), false);
 });
 
+test("Keep mine on another op of the row leaves a restored draft's pinned Save alone (#754 round 4)", () => {
+  // The pinned Save was typed against an older copy; the user has not chosen
+  // to write it over the note as it is now. Re-armed with the sibling, it
+  // would lose its pin and replace the newer note with a 200.
+  const pinned = { id: "op2", status: "conflict", expectedVersion: 1, originPinned: true };
+  assert.equal(c409.rearmsOnKeepMine(pinned, "op1"), false);
+  assert.equal(c409.rearmsOnKeepMine({ ...pinned, status: "pending" }, "op1"), false);
+  // Its own Keep mine re-arms it, and the row's other waiting saves as before.
+  assert.equal(c409.rearmsOnKeepMine(pinned, "op2"), true);
+  assert.equal(c409.rearmsOnKeepMine({ id: "op3", status: "pending", expectedVersion: 3 }, "op1"), true);
+  assert.equal(c409.rearmsOnKeepMine({ id: "op3", status: "conflict", expectedVersion: 3 }, "op1"), true);
+  assert.equal(c409.rearmsOnKeepMine({ id: "op3", status: "in_flight", expectedVersion: 3 }, "op1"), false);
+  assert.equal(c409.rearmsOnKeepMine({ id: "op3", status: "failed", expectedVersion: 3 }, "op1"), false);
+});
+
 const row = { id: "n1", version: 4, note: "text", translation_state: "validated", trashed_at: null };
 
 test("a state_mismatch 409 is final and carries the row as it is now", () => {

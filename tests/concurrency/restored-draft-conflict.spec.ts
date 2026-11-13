@@ -573,3 +573,161 @@ test("tN card: a restored draft's Save queued behind a reorder still goes out at
   await probe.dispose();
   await context.close();
 });
+
+// The quote field inside a NoteCard (the first real textarea; see noteTextarea).
+function quoteTextarea(page: Page, rowId: string) {
+  return page.locator(`[data-note-id="${rowId}"]`).locator('textarea:not([aria-hidden="true"])').nth(0);
+}
+
+// Build the note's quote from the source text: open the picker from the card,
+// pick the verse's last Hebrew word (unlikely to be the stored quote), use the
+// selection. The card must be active.
+async function buildQuoteFromLastWord(page: Page, rowId: string) {
+  // The button's accessible name is its tooltip; match its label instead.
+  await page.locator(`[data-note-id="${rowId}"]`).getByRole("button").filter({ hasText: /^build from source$/ }).click();
+  const useSelection = page.getByRole("button", { name: "Use selection" });
+  const picker = page.getByRole("tooltip").filter({ has: useSelection });
+  await picker.locator(".MuiChip-root").filter({ hasText: /[֐-׿]/ }).last().click();
+  await useSelection.click();
+}
+
+for (const [i, withNote] of [false, true].entries()) {
+  test(`tN card: after the card's own quote build lands${withNote ? " (with unsaved note text)" : ""}, a quote edit saves at the current version`, async ({
+    browser,
+  }) => {
+    // Round 4, item 1. A quote build is the translator's own write of the row,
+    // made from the card. Once it lands, the card's next Save must go out at
+    // the landed version: holding on to the copy from before the build sends
+    // it at the old version, and the server's 409 (the quote changed since
+    // that copy) shows a conflict against the translator's own build. With
+    // unsaved note text the card's draft outlives the build, so the copy has
+    // to move with the build rather than be let go with the draft.
+    test.setTimeout(90_000);
+    const probe = await apiRequest.newContext({ baseURL: BASE });
+    const auth = await mintToken(probe, `probe-754-build-${i}`);
+    const [tn] = await pairFromEnd(probe, auth.token, 2 + i);
+    const { context } = await newUserContext(browser, `restored-draft-754-build-${i}`);
+    const page = await context.newPage();
+
+    const sent: Array<{ ifMatch: string | undefined; body: Record<string, unknown>; status: number }> = [];
+    await context.route(`**/api/rows/tn/${tn.id}**`, async (route, request) => {
+      if (request.method() !== "PATCH") return route.continue();
+      const body = (request.postDataJSON() ?? {}) as Record<string, unknown>;
+      const response = await route.fetch();
+      sent.push({ ifMatch: request.headers()["if-match"], body, status: response.status() });
+      return route.fulfill({ response });
+    });
+
+    await gotoVerse(page, "ZEC", CHAPTER, tn.verse);
+    await noteTextarea(page, tn.id).click();
+    const typedNote = `BUILD NOTE 754 ${Date.now()}`;
+    if (withNote) await noteTextarea(page, tn.id).fill(typedNote);
+    await buildQuoteFromLastWord(page, tn.id);
+    await expect
+      .poll(() => sent.filter((s) => "quote" in s.body && s.status === 200).length, {
+        message: "the quote build should land",
+      })
+      .toBe(1);
+    expect(sent[0].ifMatch).toBe(String(tn.version));
+    await page.waitForTimeout(1000);
+
+    const editedQuote = `${await quoteTextarea(page, tn.id).inputValue()} EDITED`;
+    await quoteTextarea(page, tn.id).fill(editedQuote);
+    await saveNote(page, tn.id);
+    await expect.poll(() => sent.length, { message: "the Save should reach the server" }).toBe(2);
+    await page.waitForTimeout(1000);
+    console.log(
+      `[#754 build ${withNote ? "with note" : "quote only"}]`,
+      JSON.stringify({ sent: sent.map((s) => ({ ...s, body: Object.keys(s.body) })) }),
+    );
+    expect(sent[1].ifMatch, "the Save goes out at the version the build landed at").toBe(String(tn.version + 1));
+    expect(
+      sent.map((s) => s.status),
+      "no conflict against the translator's own build",
+    ).toEqual([200, 200]);
+    await expect(page.getByText(/^1 conflict$/)).toHaveCount(0);
+    const after = (await fetchChapter(probe, auth.token, "ZEC", CHAPTER)).tn.find((r) => r.id === tn.id)!;
+    expect(after.quote).toBe(editedQuote);
+    if (withNote) expect(after.note).toBe(typedNote);
+
+    await probe.dispose();
+    await context.close();
+  });
+}
+
+test("tN card: while a restored draft's Save waits in conflict, the row moving on does not allow a second Save", async ({
+  browser,
+}) => {
+  // Round 4, item 2. The Save button stays shut while the card's save is
+  // unresolved. A restored draft's Save ends in a conflict; if the row then
+  // moves again (the other person saves again) the button must stay shut, or
+  // a second Save goes out at the old version too and "resolve" sends both.
+  test.setTimeout(90_000);
+  const probe = await apiRequest.newContext({ baseURL: BASE });
+  const other = await mintToken(probe, "other-754-double");
+  const [tn] = await pairFromEnd(probe, other.token, 4);
+  const key = `row:tn:ZEC:${tn.id}`;
+  const { context } = await newUserContext(browser, "restored-draft-754-double");
+  const page = await context.newPage();
+
+  const sent: Array<{ ifMatch: string | undefined; status: number }> = [];
+  await context.route(`**/api/rows/tn/${tn.id}**`, async (route, request) => {
+    if (request.method() !== "PATCH") return route.continue();
+    const response = await route.fetch();
+    sent.push({ ifMatch: request.headers()["if-match"], status: response.status() });
+    return route.fulfill({ response });
+  });
+  // Live updates for this row reaching the page.
+  let pushes = 0;
+  page.on("websocket", (ws) =>
+    ws.on("framereceived", (f) => {
+      if (String(f.payload).includes(tn.id)) pushes++;
+    }),
+  );
+
+  await gotoVerse(page, "ZEC", CHAPTER, tn.verse);
+  const typed = `DOUBLE 754 ${Date.now()}`;
+  await noteTextarea(page, tn.id).fill(typed);
+  await expect
+    .poll(async () => (await readDraft(page, key))?.payload?.patch ?? null)
+    .toEqual(expect.objectContaining({ note: typed }));
+  await gotoVerse(page, "ZEC", AWAY_CHAPTER, 1);
+
+  const api = authedRequest(probe, other.token, other.csrf);
+  const res = await api.patch(`/api/rows/tn/${tn.id}?book=ZEC`, { note: `OTHER 754 DOUBLE ${Date.now()}` }, tn.version);
+  expect(res.status()).toBe(200);
+
+  await page.goto(`/#/ZEC/${CHAPTER}/${tn.verse}`);
+  await page.reload();
+  await page.locator("[data-note-id]").first().waitFor({ timeout: 10_000 });
+  await expect(noteTextarea(page, tn.id)).toHaveValue(typed);
+  await page.waitForTimeout(1000);
+  await saveNote(page, tn.id);
+  await expect.poll(() => sent.length).toBe(1);
+  expect(sent[0]).toEqual({ ifMatch: String(tn.version), status: 409 });
+  await expect(page.getByText(/^1 conflict$/).first()).toBeVisible({ timeout: 10_000 });
+
+  // The other person saves again; wait for the live update to reach the page.
+  const before = pushes;
+  const res2 = await api.patch(
+    `/api/rows/tn/${tn.id}?book=ZEC`,
+    { note: `OTHER 754 DOUBLE AGAIN ${Date.now()}` },
+    tn.version + 1,
+  );
+  expect(res2.status()).toBe(200);
+  await expect
+    .poll(() => pushes, { message: "the live update should reach the page", timeout: 10_000 })
+    .toBeGreaterThan(before);
+  await page.waitForTimeout(1000);
+
+  const save = page.locator(`[data-note-id="${tn.id}"]`).locator('button:has([data-testid="SaveIcon"])');
+  const enabled = (await save.count()) > 0 && (await save.isEnabled());
+  if (enabled) await save.click();
+  await page.waitForTimeout(1500);
+  console.log("[#754 double]", JSON.stringify({ saveEnabledAfterMove: enabled, sent }));
+  expect(enabled, "Save stays shut while the first Save waits in conflict").toBe(false);
+  expect(sent, "only one Save went out").toHaveLength(1);
+
+  await probe.dispose();
+  await context.close();
+});
