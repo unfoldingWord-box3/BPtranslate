@@ -847,7 +847,7 @@ translationMemory.get("/terms/count", requireEditor, async (c) => {
 // different book's published TSV, not this row. Known gap; see PR review notes.
 //
 // Rows only ever approved in bulk (admin_bulk_state set: the admin review-state
-// sweep or the Aquifer importer) are skipped, the same rule as the AI few-shot
+// sweep, the Aquifer importer or Approve-all, #833) are skipped, the same rule as the AI few-shot
 // selectors in contextExport.ts: nobody may have read them (issue #414). A hand
 // approval clears the stamp (rows.ts HAND_APPROVAL_CLAUSE) and brings the row in.
 // ---------------------------------------------------------------------------

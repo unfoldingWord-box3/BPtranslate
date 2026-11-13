@@ -9,12 +9,14 @@
 // skips that row, and 401/403 stop the run (ReviewQueue.handleApproveAll).
 //
 // Decisions (see the PR for #829):
-// - Approve sends `bulk: true`. A checked range is not a one-at-a-time read of
-//   each note, so it keeps any admin_bulk_state stamp (api/src/rows.ts,
-//   HAND_APPROVAL_CLAUSE): a stamped row stays out of the AI examples until a
-//   person approves it on its own. The open note with an unsaved edit goes
-//   through the screen's handleApprove (save, then approve), which is a hand
-//   approval like Ctrl+Enter.
+// - Approve is a hand approval: it sends no `bulk` flag (issue #833, option B).
+//   Each checked note's text sits on screen beside the English note, so a
+//   checked range counts as read. The approval becomes an AI example and clears
+//   any admin_bulk_state stamp (api/src/rows.ts, HAND_APPROVAL_CLAUSE), the same
+//   as approving the note on its own. Only the Approve-all buttons (review queue,
+//   classic editor) send `bulk: true` and stamp. The open note with an unsaved
+//   edit goes through the screen's handleApprove (save, then approve), which is
+//   a hand approval like Ctrl+Enter.
 // - Approve has no Undo: un-approving sets 'edited', not the state the note
 //   had before (validateNote(id, book, false)), so an "Undo" would not undo.
 // - Not needed has Undo: trash only sets trashed_at, and restore clears it.
@@ -265,7 +267,6 @@ export function useRapidBulk(a: RapidBulkArgs) {
           // Approve exactly what is on screen: a peer's edit or set-aside
           // since then comes back 409 instead of being approved unseen.
           const updated = await api.validateNote(id, book, true, {
-            bulk: true,
             expectedVersion: r.version,
             expectedState: r.translation_state === "ai_draft" || r.translation_state === "edited" ? r.translation_state : undefined,
           });
