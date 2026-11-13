@@ -1167,6 +1167,9 @@ export interface TnQuickResponse {
 // Types mirror the bp-assistant client-side contract; both sides change
 // together if the contract is revised.
 
+// translate is the only type that can start (#726). generate/notes/tqs are
+// retired; they stay in this union because old job rows still carry them and
+// the job history labels them.
 export type PipelineType = "generate" | "notes" | "tqs" | "translate";
 
 // Translate-pipeline overrides (only meaningful when pipelineType ===
@@ -1587,54 +1590,31 @@ export type PipelineErrorKind =
   | "merge_failed"
   | "merge_shrink_refused"
   // Dispatch-time failures written by api/src/pipelines.ts dispatchNext.
+  // lane_fenced came from the retired generate type's stamp check (#726); it
+  // is still on old failed rows.
   | "lane_fenced"
   | "pipeline_api_disabled"
-  // #551: a queued generate/notes/tqs job, which can't run on the org's own key yet.
-  | "ai_needs_org_key";
+  // #551: a queued generate/notes/tqs job, which couldn't run on the org's own
+  // key. Still on old failed rows.
+  | "ai_needs_org_key"
+  // #726: a queued or running job of a retired type (generate/notes/tqs).
+  | "pipeline_type_retired";
 // The union is hand-kept; the wire value is any string. Fields that carry an
 // errorKind from the server are typed `string`, and lib/aiErrorCopy.ts falls
 // back for a kind it doesn't know. lib/aiErrorCopy.test.mjs scans api/src and
 // fails when the server can write a kind that has no copy.
 
-// Mirrors the bp-assistant contract (docs/ai-pipeline-integration.md §3).
-// Server validates with .strict(); unknown keys are rejected. Per-pipeline-type
-// flag mixing (e.g. contentTypes on a "notes" run) is also rejected.
-export interface PipelineRequestOptions {
-  model?: "sonnet" | "opus";
-  /** Clear prior checkpoint + outputs. Useful for retrying a failed run. */
-  fresh?: boolean;
-
-  // -- generate-only --
-  /** Restrict to a subset of content types. Default is both. */
-  contentTypes?: ("ult" | "ust")[];
-  /** Skip alignment + repo-insert; USFM is NOT pushed to Door43. */
-  noAlign?: boolean;
-  /** Reuse already-generated USFM and only run alignment + repo-insert. */
-  alignOnly?: boolean;
-  /** Push the unaligned USFM to Door43 (no alignment performed). */
-  textOnly?: boolean;
-
-  // -- notes-only --
-  /** Skip the chapter intro generation step. */
-  noIntro?: boolean;
-  /** Pause before generating Alternate Translations so a human can review. */
-  pauseBeforeATs?: boolean;
-}
-
 export interface PipelineStartRequest {
-  pipelineType: PipelineType;
+  pipelineType: "translate";
   // Optional for article translate jobs (tw/ta), which are scoped by
-  // translate.articleId, not book/chapter. Row-keyed jobs (generate/notes/
-  // tqs and tn/tq translate) still pass both.
+  // translate.articleId, not book/chapter. tn/tq translate jobs pass both.
   book?: string;
   startChapter?: number;
   endChapter?: number;
   sessionKey: string;
-  options?: PipelineRequestOptions;
   /**
-   * Translate-pipeline overrides (only meaningful when pipelineType ===
-   * 'translate'; ignored otherwise). The server builds the full option set
-   * from the active project config and folds these in.
+   * Translate-pipeline overrides. The server builds the full option set from
+   * the active project config and folds these in.
    */
   translate?: TranslateRequestOptions;
 }

@@ -26,7 +26,7 @@ import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 import { SignJWT } from "jose";
 
-import { dispatchNext, enqueueFollowUp, enqueueFollowUpFromChain, pollAllNonTerminal, pipelines } from "./pipelines.ts";
+import { dispatchNext, pollAllNonTerminal, pipelines } from "./pipelines.ts";
 import { attachAuth } from "./auth.ts";
 import { tnQuick } from "./tnQuick.ts";
 import { templates } from "./templates.ts";
@@ -450,8 +450,8 @@ test("dispatchNext (#575): a queued translate job whose stored key can't be decr
   }
 });
 
-test("dispatchNext (#551 switch-off): a queued legacy generate/notes/tqs job fails as ai_needs_org_key, even with an org key, and nothing is posted", async () => {
-  for (const type of ["generate", "notes", "tqs"]) {
+test("dispatchNext (#726): a queued job of a retired type (generate/notes/tqs, or anything not translate) fails as pipeline_type_retired, even with an org key, and nothing is posted", async () => {
+  for (const type of ["generate", "notes", "tqs", "made-up"]) {
     for (const withKey of [false, true]) {
       const sqlite = freshSqlite();
       sqlite
@@ -475,12 +475,13 @@ test("dispatchNext (#551 switch-off): a queued legacy generate/notes/tqs job fai
       assert.equal(env.created.length, 0, `${tag}: no Workflow instance`);
       const row = jobRow(sqlite, "job-legacy");
       assert.equal(row.state, "failed", tag);
-      assert.equal(row.error_kind, "ai_needs_org_key", tag);
+      assert.equal(row.error_kind, "pipeline_type_retired", tag);
+      assert.match(row.error_message, new RegExp(`'${type}'`), `${tag}: the reason names the type`);
     }
   }
 });
 
-test("dispatchNext (#551 switch-off): legacy jobs queued ahead of a translate job are failed and the translate job dispatches in the same call", async () => {
+test("dispatchNext (#726): retired-type jobs queued ahead of a translate job are failed and the translate job dispatches in the same call", async () => {
   const sqlite = freshSqlite();
   for (const [jobId, type, created] of [["legacy-a", "notes", 10], ["legacy-b", "generate", 20]]) {
     sqlite
@@ -506,7 +507,7 @@ test("dispatchNext (#551 switch-off): legacy jobs queued ahead of a translate jo
   for (const id of ["legacy-a", "legacy-b"]) {
     const row = jobRow(sqlite, id);
     assert.equal(row.state, "failed", id);
-    assert.equal(row.error_kind, "ai_needs_org_key", id);
+    assert.equal(row.error_kind, "pipeline_type_retired", id);
   }
   assert.equal(jobRow(sqlite).state, "running", "the translate job was not left waiting for the next cron tick");
 });
@@ -609,7 +610,7 @@ test("POST /start (#551): translate with an org key gets past the key check and 
   );
 });
 
-test("POST /start (#551 switch-off): generate/notes/tqs are refused with 409 ai_needs_org_key, even with an org key; nothing is enqueued", async () => {
+test("POST /start (#726): generate/notes/tqs are retired and refused with 400, even with an org key; nothing is enqueued", async () => {
   for (const pipelineType of ["generate", "notes", "tqs"]) {
     for (const withKey of [false, true]) {
       const sqlite = freshSqlite();
@@ -628,8 +629,8 @@ test("POST /start (#551 switch-off): generate/notes/tqs are refused with 409 ai_
         return { res, fetchCount: count() };
       });
 
-      assert.equal(res.status, 409, tag);
-      assert.deepEqual(await res.json(), { error: "ai_needs_org_key" }, tag);
+      assert.equal(res.status, 400, tag);
+      assert.equal((await res.json()).error, "validation_failed", tag);
       assert.equal(fetchCount, 0, `${tag}: no fetch`);
       const jobs = sqlite.prepare(`SELECT COUNT(*) AS n FROM pipeline_jobs`).all()[0].n;
       assert.equal(jobs, 0, `${tag}: no pipeline_jobs row was enqueued`);
@@ -637,23 +638,100 @@ test("POST /start (#551 switch-off): generate/notes/tqs are refused with 409 ai_
   }
 });
 
-test("POST /start (#551 switch-off): a translate job whose followUpChain holds a legacy step is refused; nothing is enqueued", async () => {
+test("POST /start (#726): stale followUpOptions / followUpChain keys are ignored; the translate job starts with no follow-up", async () => {
   const sqlite = freshSqlite();
   await seedByoKey(sqlite);
   const env = freshEnv(sqlite, { JWT_SIGNING_KEY: ROUTE_SIGNING, JWT_ISSUER: ROUTE_ISSUER });
   const tok = await editorToken("1", env.WORKSPACE_SLUG);
-  const { res, fetchCount } = await withNoFetch(async (count) => {
-    const res = await routeApp().request(
-      "/api/pipelines/start",
-      postReq(tok, { ...START_TRANSLATE, followUpChain: [{ pipelineType: "notes" }] }),
-      env,
+  await withFetch(
+    async () => new Response(JSON.stringify({ jobId: "bot-stale", provider: "claude" }), { status: 200 }),
+    async () => {
+      const res = await routeApp().request(
+        "/api/pipelines/start",
+        postReq(tok, {
+          ...START_TRANSLATE,
+          options: { model: "opus" },
+          followUpOptions: { model: "opus" },
+          followUpChain: [{ pipelineType: "notes" }],
+        }),
+        env,
+      );
+      assert.equal(res.status, 200, await res.clone().text());
+    },
+  );
+  const rows = sqlite.prepare(`SELECT pipeline_type, follow_up_options, follow_up_chain FROM pipeline_jobs`).all();
+  assert.equal(rows.length, 1);
+  assert.deepEqual({ ...rows[0] }, { pipeline_type: "translate", follow_up_options: null, follow_up_chain: null });
+});
+
+test("pollAllNonTerminal (#726): a running job of a retired type that finishes upstream is failed at once, its output not imported", async () => {
+  const sqlite = freshSqlite();
+  sqlite
+    .prepare(
+      `INSERT INTO pipeline_jobs
+         (job_id, user_id, pipeline_type, book, start_chapter, end_chapter, session_key,
+          state, upstream_job_id, runner, created_at, updated_at)
+       VALUES ('legacy-run', 1, 'notes', 'OBA', 1, 1, 'sess-legacy-run', 'running', 'bot-legacy', NULL, unixepoch(), unixepoch())`,
+    )
+    .run();
+  const env = freshEnv(sqlite);
+  const status = {
+    jobId: "bot-legacy",
+    state: "done",
+    current: { chapter: 1, skill: "notes", status: "done" },
+    output: [{ type: "tn", repo: "unfoldingWord/en_tn", path: "tn_OBA.tsv", rawUrl: "https://git.door43.org/x/tn_OBA.tsv" }],
+  };
+  const urls = [];
+  await withFetch(
+    async (url) => {
+      urls.push(String(url));
+      if (String(url).endsWith("/api/pipeline/bot-legacy")) return new Response(JSON.stringify(status), { status: 200 });
+      throw new Error(`unexpected fetch ${url}`);
+    },
+    async () => pollAllNonTerminal(env),
+  );
+  const row = jobRow(sqlite, "legacy-run");
+  assert.equal(row.state, "failed", "terminal on the first poll, not held for an import retry");
+  assert.equal(row.error_kind, "pipeline_type_retired");
+  assert.equal(row.output_json, null, "the output is not recorded as imported");
+  assert.deepEqual(urls.filter((u) => !u.endsWith("/api/pipeline/bot-legacy")), [], "the output was never fetched");
+  assert.equal(sqlite.prepare(`SELECT COUNT(*) AS n FROM pending_imports`).all()[0].n, 0, "nothing staged");
+});
+
+test("pollAllNonTerminal (#726): a retired-type job that ends upstream with no output, or failed/cancelled, is still failed as pipeline_type_retired", async () => {
+  const cases = [
+    ["done, empty output", { state: "done", output: [] }],
+    ["done, no output field", { state: "done" }],
+    ["failed upstream", { state: "failed", current: { chapter: 1, skill: "tqs", status: "failed", errorKind: "sdk_error", error: "boom" } }],
+    ["cancelled upstream", { state: "cancelled" }],
+  ];
+  for (const [label, upstream] of cases) {
+    const sqlite = freshSqlite();
+    sqlite
+      .prepare(
+        `INSERT INTO pipeline_jobs
+           (job_id, user_id, pipeline_type, book, start_chapter, end_chapter, session_key,
+            state, upstream_job_id, runner, created_at, updated_at)
+         VALUES ('legacy-run', 1, 'tqs', 'OBA', 1, 1, 'sess-legacy-run', 'running', 'bot-legacy', NULL, unixepoch(), unixepoch())`,
+      )
+      .run();
+    const env = freshEnv(sqlite);
+    const status = { jobId: "bot-legacy", current: { chapter: 1, skill: "tqs", status: "done" }, ...upstream };
+    const urls = [];
+    await withFetch(
+      async (url) => {
+        urls.push(String(url));
+        if (String(url).endsWith("/api/pipeline/bot-legacy")) return new Response(JSON.stringify(status), { status: 200 });
+        throw new Error(`unexpected fetch ${url}`);
+      },
+      async () => pollAllNonTerminal(env),
     );
-    return { res, fetchCount: count() };
-  });
-  assert.equal(res.status, 409, await res.clone().text());
-  assert.deepEqual(await res.json(), { error: "ai_needs_org_key" });
-  assert.equal(fetchCount, 0);
-  assert.equal(sqlite.prepare(`SELECT COUNT(*) AS n FROM pipeline_jobs`).all()[0].n, 0);
+    const row = jobRow(sqlite, "legacy-run");
+    assert.equal(row.state, "failed", label);
+    assert.equal(row.error_kind, "pipeline_type_retired", label);
+    assert.equal(row.output_json, null, `${label}: nothing recorded as imported`);
+    assert.deepEqual(urls.filter((u) => !u.endsWith("/api/pipeline/bot-legacy")), [], `${label}: no output fetched`);
+  }
 });
 
 function sideRouteApp() {
@@ -1611,60 +1689,3 @@ test("POST /start stamps the job with the edit_log watermark", async () => {
   assert.equal(rows[0].edit_log_watermark, 3);
 });
 
-function seedParent(sqlite, watermark) {
-  sqlite
-    .prepare(
-      `INSERT INTO pipeline_jobs (job_id, user_id, pipeline_type, book, start_chapter, end_chapter, session_key, state, created_at, updated_at, edit_log_watermark)
-       VALUES ('parent', 1, 'translate', 'OBA', 1, 1, 'sess-parent', 'done', 100, 100, ?)`,
-    )
-    .run(watermark);
-}
-
-for (const [label, enqueue] of [
-  [
-    "follow-up",
-    (env) =>
-      enqueueFollowUp(env, {
-        parentJobId: "parent",
-        parentSessionKey: "sess-parent",
-        pipelineType: "translate",
-        book: "OBA",
-        startChapter: 1,
-        endChapter: 1,
-        followUpOptionsJson: JSON.stringify({ resourceType: "tq" }),
-        userId: 1,
-      }),
-  ],
-  [
-    "chain",
-    (env) =>
-      enqueueFollowUpFromChain(env, {
-        parentJobId: "parent",
-        parentSessionKey: "sess-parent",
-        book: "OBA",
-        startChapter: 1,
-        endChapter: 1,
-        chainJson: JSON.stringify([{ pipelineType: "translate", options: { resourceType: "tq" } }]),
-        userId: 1,
-      }),
-  ],
-]) {
-  test(`a ${label} child inherits its parent's edit_log watermark`, async () => {
-    const sqlite = freshSqlite();
-    seedParent(sqlite, 2);
-    seedEditLog(sqlite, 5); // edits between the parent's and the child's enqueue
-    await enqueue(freshEnv(sqlite));
-    const child = sqlite.prepare(`SELECT edit_log_watermark FROM pipeline_jobs WHERE job_id != 'parent'`).all();
-    assert.equal(child.length, 1);
-    assert.equal(child[0].edit_log_watermark, 2, "edits after the parent was queued still count for the child");
-  });
-
-  test(`a ${label} child of a pre-watermark parent gets the current watermark`, async () => {
-    const sqlite = freshSqlite();
-    seedParent(sqlite, null);
-    seedEditLog(sqlite, 4);
-    await enqueue(freshEnv(sqlite));
-    const child = sqlite.prepare(`SELECT edit_log_watermark FROM pipeline_jobs WHERE job_id != 'parent'`).all();
-    assert.equal(child[0].edit_log_watermark, 4);
-  });
-}

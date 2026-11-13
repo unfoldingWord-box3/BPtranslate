@@ -26,8 +26,6 @@ import {
   findSuspiciousDoubleSpaces,
   sanitizeMarkerSpacing,
   sanitizeWordAttributes,
-  dropDuplicateSourceMilestones,
-  curlifyVerseObjects,
   curlifyText,
   extractPlainText,
 } from "./importParsers.ts";
@@ -1081,230 +1079,13 @@ const zalnMs = (attrs, targetText) => ({
   assert(bommed.rows[0]["Reference"] === "1:1", `Reference resolves on a BOM file`);
 }
 
-// --- dropDuplicateSourceMilestones: doubled source token in one compound ------
-// JER 31:33 UST/ULT `אֶת אֶת בֵּית` — a spurious outer H0853 "אֶת" over the real
-// nested H0854 "אֶת" › H1004b "בֵּית"; the card wraps אֶת twice → renders doubled.
-{
-  const doubled = [
-    {
-      tag: "zaln", type: "milestone", strong: "H0853", occurrence: "1", occurrences: "1", content: "אֶת",
-      children: [{
-        tag: "zaln", type: "milestone", strong: "H0854", occurrence: "1", occurrences: "1", content: "אֶת",
-        children: [{
-          tag: "zaln", type: "milestone", strong: "H1004b", occurrence: "1", occurrences: "1", content: "בֵּית",
-          children: [{ tag: "w", type: "word", text: "with" }],
-          endTag: "zaln-e\\*",
-        }],
-        endTag: "zaln-e\\*",
-      }],
-      endTag: "zaln-e\\*",
-    },
-  ];
-  const out = dropDuplicateSourceMilestones(doubled);
-  const strongs = [];
-  const walk = (ns) => { for (const n of ns ?? []) { if (n?.tag === "zaln") strongs.push(n.strong); if (n?.children) walk(n.children); } };
-  walk(out);
-  assert(strongs.length === 2, `doubled אֶת collapsed to 2 milestones (got ${strongs.length}: ${strongs.join(",")})`);
-  assert(strongs.includes("H0854") && !strongs.includes("H0853"), `keeps inner H0854, drops spurious outer H0853`);
-  // Target word preserved.
-  let words = [];
-  const collectW = (ns) => { for (const n of ns ?? []) { if (n?.tag === "w") words.push(n.text); if (n?.children) collectW(n.children); } };
-  collectW(out);
-  assert(words.join(" ") === "with", `target word preserved`);
-}
-{
-  // No-op identity: a clean compound (distinct source tokens) is untouched.
-  const clean = [{
-    tag: "zaln", type: "milestone", strong: "H0854", occurrence: "1", occurrences: "1", content: "אֶת",
-    children: [{
-      tag: "zaln", type: "milestone", strong: "H1004b", occurrence: "1", occurrences: "1", content: "בֵּית",
-      children: [{ tag: "w", type: "word", text: "with" }],
-      endTag: "zaln-e\\*",
-    }],
-    endTag: "zaln-e\\*",
-  }];
-  assert(dropDuplicateSourceMilestones(clean) === clean, `clean compound returns same array reference (identity)`);
-  // Genuine repetition (distinct occurrences) is NOT collapsed.
-  const rep = [{
-    tag: "zaln", type: "milestone", strong: "H7965", occurrence: "1", occurrences: "2", content: "שָׁלוֹם",
-    children: [{
-      tag: "zaln", type: "milestone", strong: "H7965", occurrence: "2", occurrences: "2", content: "שָׁלוֹם",
-      children: [{ tag: "w", type: "word", text: "peace" }],
-      endTag: "zaln-e\\*",
-    }],
-    endTag: "zaln-e\\*",
-  }];
-  assert(dropDuplicateSourceMilestones(rep) === rep, `genuine שלום שלום (distinct occ) left untouched (identity)`);
-}
-
-// ─── curlifyVerseObjects (AI-pipeline verse-ingest quote curling) ───────────
-// Regression coverage for the JER 32/33 / NUM 26:53 prod incident: bp-assistant
-// wrote straight ' / " into ULT/UST verse content_json. See the module comment
-// above curlifyVerseObjects in importParsers.ts.
-
-function countNodes(nodes) {
-  let n = 0;
-  for (const node of nodes ?? []) {
-    if (!node || typeof node !== "object") continue;
-    n += 1;
-    if (Array.isArray(node.children)) n += countNodes(node.children);
-  }
-  return n;
-}
-
-// A JER 33:20-shaped verse: a straight opening quote before a `\zaln-s`-wrapped
-// "Thus", then "says", then a second `\zaln-s`-wrapped "Yahweh". Mirrors the
-// real defect — the AI wrote the straight `"` as a bare leading text node, not
-// inside the `\w` itself (normalizeWordPunctuation already strips outer
-// punctuation off `\w` tokens by the time this stage runs).
-{
-  const verseObjects = [
-    { type: "text", text: '"' },
-    {
-      type: "milestone",
-      tag: "zaln",
-      strong: "H0559",
-      content: "אָמַר",
-      lemma: "אָמַר",
-      morph: "He,Vqp3ms",
-      occurrence: "1",
-      occurrences: "1",
-      children: [{ type: "word", tag: "w", text: "Thus", occurrence: "1", occurrences: "1" }],
-    },
-    { type: "text", text: " says " },
-    {
-      type: "milestone",
-      tag: "zaln",
-      strong: "H3068",
-      content: "יְהוָה",
-      lemma: "יְהוָה",
-      morph: "Np",
-      occurrence: "1",
-      occurrences: "1",
-      children: [{ type: "word", tag: "w", text: "Yahweh", occurrence: "1", occurrences: "1" }],
-    },
-    { type: "text", text: "," },
-  ];
-  const before = JSON.parse(JSON.stringify(verseObjects));
-  const nodeCountBefore = countNodes(verseObjects);
-
-  const changed = curlifyVerseObjects(verseObjects);
-
-  assert(changed === true, "JER 33:20-shaped verse: reports a change");
-  assert(verseObjects[0].text === "“", `leading straight quote curls to an opening “ (got ${JSON.stringify(verseObjects[0].text)})`);
-  assert(verseObjects[2].text === " says ", "unrelated text node untouched");
-  assert(verseObjects[4].text === ",", "trailing punctuation text node untouched");
-
-  // x-content / x-lemma / x-morph / x-strong / occurrence(s) are byte-identical —
-  // the hard constraint: source-language attributes are never touched.
-  for (const key of ["content", "lemma", "morph", "strong", "occurrence", "occurrences"]) {
-    assert(
-      verseObjects[1][key] === before[1][key] && verseObjects[3][key] === before[3][key],
-      `milestone attribute "${key}" is byte-identical before/after`,
-    );
-  }
-  // Target `\w` word text/occurrence untouched (no quotes in them).
-  assert(verseObjects[1].children[0].text === "Thus", "target word text untouched when it holds no quotes");
-  assert(verseObjects[3].children[0].text === "Yahweh", "target word text untouched when it holds no quotes");
-  assert(
-    verseObjects[1].children[0].occurrence === before[1].children[0].occurrence &&
-      verseObjects[3].children[0].occurrence === before[3].children[0].occurrence,
-    "target word occurrence untouched",
-  );
-  // Structure-preserving: same node count (no node added/removed/reordered).
-  assert(countNodes(verseObjects) === nodeCountBefore, "node count unchanged (no split/merge/reorder)");
-}
-
-// Apostrophe / possessive: a straight `'` inside a target `\w` word, flanked by
-// letters, curls to the closing/apostrophe curly quote (’), never the opener.
-{
-  const verseObjects = [
-    { type: "text", text: "the " },
-    { type: "word", tag: "w", text: "LORD's", occurrence: "1", occurrences: "1" },
-    { type: "text", text: " temple" },
-  ];
-  const changed = curlifyVerseObjects(verseObjects);
-  assert(changed === true, "possessive apostrophe: reports a change");
-  assert(verseObjects[1].text === "LORD’s", `possessive apostrophe curls (got ${JSON.stringify(verseObjects[1].text)})`);
-}
-
-// Already-curly verse: a no-op. Byte-identical JSON before/after, reports no
-// change, and mutates nothing (the hard "no-op on clean output" requirement).
-{
-  const verseObjects = [
-    { type: "text", text: "“Thus says " },
-    {
-      type: "milestone",
-      tag: "zaln",
-      strong: "H3068",
-      content: "יְהוָה",
-      lemma: "יְהוָה",
-      morph: "Np",
-      occurrence: "1",
-      occurrences: "1",
-      children: [{ type: "word", tag: "w", text: "Yahweh’s", occurrence: "1", occurrences: "1" }],
-    },
-    { type: "text", text: ",” he said." },
-  ];
-  const before = JSON.stringify(verseObjects);
-  const changed = curlifyVerseObjects(verseObjects);
-  assert(changed === false, "already-curly verse: reports no change");
-  assert(JSON.stringify(verseObjects) === before, "already-curly verse: byte-identical after the pass");
-}
-
-// A verse with no straight quotes at all — a no-op on non-quote content too
-// (plain prose, no ' or " anywhere).
-{
-  const verseObjects = [
-    { type: "text", text: "In the beginning " },
-    { type: "word", tag: "w", text: "God", occurrence: "1", occurrences: "1" },
-    { type: "text", text: " created the heavens." },
-  ];
-  const before = JSON.stringify(verseObjects);
-  const changed = curlifyVerseObjects(verseObjects);
-  assert(changed === false, "no-quote verse: reports no change");
-  assert(JSON.stringify(verseObjects) === before, "no-quote verse: byte-identical after the pass");
-}
-
-// Ordering regression (found in independent review): curling can make two
-// `\w` nodes' text byte-identical — one already curly ("LORD’s"), one
-// AI-written straight ("LORD's") — and recomputeTargetOccurrences keys
-// uniqueness on exact text. pipelineImport.ts's applyVerseUpdate MUST run
-// curlifyVerseObjects BEFORE recomputeTargetOccurrences, or the two words
-// would keep the DISTINCT occurrence numbers stamped while their text still
-// differed, colliding once curling unifies the text (both "LORD’s" at,
-// wrongly, occurrence 1 of 1 — the exact `${text}|${occurrence}` collision
-// recomputeTargetOccurrences exists to prevent). This test locks in the
-// correct order.
-{
-  const verseObjects = [
-    { type: "word", tag: "w", text: "LORD’s", occurrence: "0", occurrences: "0" }, // already curly
-    { type: "text", text: " house and " },
-    { type: "word", tag: "w", text: "LORD's", occurrence: "0", occurrences: "0" }, // AI-written straight
-  ];
-  curlifyVerseObjects(verseObjects); // must run first
-  recomputeTargetOccurrences(verseObjects);
-
-  assert(verseObjects[0].text === "LORD’s", "ordering regression: first word curls/stays curly");
-  assert(verseObjects[2].text === "LORD’s", "ordering regression: second word curls to match");
-  assert(
-    verseObjects[0].occurrence !== verseObjects[2].occurrence,
-    `ordering regression: two now-identical words get DISTINCT occurrence numbers, not a collision ` +
-      `(got ${verseObjects[0].occurrence} and ${verseObjects[2].occurrence})`,
-  );
-  assert(
-    verseObjects[0].occurrences === "2" && verseObjects[2].occurrences === "2",
-    `ordering regression: both words recognize there are 2 total occurrences (got ${verseObjects[0].occurrences}, ${verseObjects[2].occurrences})`,
-  );
-}
-
 // ─── Adjacent same-type quote alternation (independent review finding) ──────
 // Two of the SAME straight quote character sitting directly back-to-back
 // (nothing between them) must alternate open/close rather than both resolving
 // to the same side via the plain context rule. Verified against curlifyText
 // (the standalone-string entry point note/question/response prose uses) since
 // it's simpler to assert on than a verseObjects tree, but the underlying rule
-// (curlifyChar) is shared with curlifyVerseObjects — see the module comment.
+// (curlifyChar) is shared with the rest of the module — see the module comment.
 {
   assert(curlifyText('""') === "“”", `adjacent double quotes curl to an open+close pair, not two opens (got ${JSON.stringify(curlifyText('""'))})`);
   assert(curlifyText("''") === "‘’", `adjacent single quotes curl to an open+close pair, not two opens (got ${JSON.stringify(curlifyText("''"))})`);
@@ -1382,19 +1163,6 @@ function countNodes(nodes) {
     "extractPlainText: descends into milestone children",
   );
 }
-{
-  // Drives the plain_text re-derive fix directly: extractPlainText on the
-  // FINAL curled tree must reflect the curled character, not the original.
-  const verseObjects = [
-    { type: "text", text: '"' },
-    { type: "word", tag: "w", text: "Thus", occurrence: "1", occurrences: "1" },
-    { type: "text", text: " says." },
-  ];
-  curlifyVerseObjects(verseObjects);
-  const plain = extractPlainText({ verseObjects });
-  assert(plain === "“Thus says.", `extractPlainText reflects a curled tree (got ${JSON.stringify(plain)})`);
-}
-
 // ─── #684: `\ts\*` in the usfm-js 3.5.0 shape is an in-flow marker on import ───
 // usfm-js 3.5.0 emits `\ts\*` as {tag:"ts\\*"} (no type, no content). The import
 // parser only knew the legacy {tag:"ts", content:"\\*"}, so a doubled chunk marker

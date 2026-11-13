@@ -21,7 +21,7 @@ import type { Env } from "./index";
 import { currentUserId, requireEditor } from "./auth.ts";
 import { importJobOutput, applySkippedOf, type ApplySkipped } from "./pipelineImport.ts";
 import { exportOwnerFor, getProjectConfig } from "./projectConfig.ts";
-import { buildTranslateOptions, normalizeRowIds, normalizeTranslateRowIdsJson } from "./translateOptions.ts";
+import { buildTranslateOptions, normalizeRowIds } from "./translateOptions.ts";
 import {
   PIPELINE_COVERAGE_WHERE,
   COVERING_WHOLE_CHAPTER_COLUMN,
@@ -50,11 +50,9 @@ import { applyContextRef } from "./assistedContextRef.ts";
 import { getLatestSuccessfulContextExport } from "./contextExportResults.ts";
 import { broadcastChapter } from "./wsEvents.ts";
 import { scriptureStatus, type ScriptureResource } from "./unpublishedScripture.ts";
-import { sameDcsName } from "./repoUrl.ts";
 import { isChapterWideTnTranslate, translateNoteSelection } from "./chapterLock.ts";
 import {
   activeLaneConfig,
-  assertLaneWritable,
   getLaneState,
   type LaneKey,
 } from "./scriptureLane.ts";
@@ -68,16 +66,15 @@ export const pipelines = new Hono<{
 
 const DEFAULT_BASE = "https://uw-bt-bot.fly.dev";
 
-const PIPELINE_TYPES = ["generate", "notes", "tqs", "translate"] as const;
-type PipelineType = (typeof PIPELINE_TYPES)[number];
-
-// #551: every AI call made for an org runs on that org's own AI key. The bot
-// accepts a per-request key only for translate, so these three older types
-// (Generate ULT/UST, Write tN, Write tQ) would still run on unfoldingWord's
-// shared account. They are switched off until they can take the org key:
-// /start refuses them and dispatchNext fails any that are already queued.
-// They stay in PIPELINE_TYPES because history and import code still read them.
-const NEEDS_ORG_KEY_TYPES: ReadonlySet<string> = new Set(["generate", "notes", "tqs"]);
+// #726: translate is the only pipeline type that can start. The bot's older
+// types (generate, notes, tqs: Generate ULT/UST, Write tN, Write tQ) are
+// retired. Their old rows keep their pipeline_type so the job history still
+// names them, but /start rejects them (400), dispatchNext fails any still
+// queued, and the poll fails any still running without importing the output.
+const RETIRED_TYPE_ERROR_KIND = "pipeline_type_retired";
+function retiredTypeMessage(pipelineType: string): string {
+  return `pipeline type '${pipelineType}' is retired; only translate runs can start`;
+}
 
 // States that occupy the single bot slot. While any job is in one of these,
 // dispatchNext refuses to send another job upstream. 'dispatching' is the
@@ -102,48 +99,11 @@ const NON_TERMINAL_STATES = new Set([
   "failed",
 ]);
 
-// Mirrors the bp-assistant contract (docs/ai-pipeline-integration.md §3).
-// .strict() rejects unknown keys so a typo here surfaces as a 400 rather
-// than getting silently dropped on its way upstream. Mutual-exclusion of
-// the align flags is checked client-side AND server-side here AND in
-// bp-assistant — three layers of paranoia is appropriate for a 1h run.
-const PipelineOptions = z
-  .object({
-    model: z.enum(["sonnet", "opus"]).optional(),
-    fresh: z.boolean().optional(),
-    // generate-only
-    contentTypes: z.array(z.enum(["ult", "ust"])).min(1).max(2).optional(),
-    noAlign: z.boolean().optional(),
-    alignOnly: z.boolean().optional(),
-    textOnly: z.boolean().optional(),
-    // notes-only
-    noIntro: z.boolean().optional(),
-    pauseBeforeATs: z.boolean().optional(),
-  })
-  .strict()
-  .refine(
-    (o) => [o.noAlign, o.alignOnly, o.textOnly].filter(Boolean).length <= 1,
-    { message: "align_flags_mutually_exclusive" },
-  );
-
-// One step of a cross-type follow-up chain (e.g. the "Generate everything"
-// macro: generate -> notes -> tqs). Same scope as the parent; only the
-// pipelineType + options differ. The chain is a linked list — each row
-// stores its remainder, and on each done-transition the next step is
-// enqueued with its own remainder.
-const ChainStep = z
-  .object({
-    pipelineType: z.enum(PIPELINE_TYPES),
-    options: PipelineOptions.optional(),
-  })
-  .strict();
-
 // Client-supplied translate overrides (all optional — the server derives the
 // full option set from the active project config; these only override defaults).
-// Kept SEPARATE from PipelineOptions (which is .strict() and generate/notes-
-// shaped) so the two schemas don't collide; the server transforms this into the
-// bot's `options` shape (bp-bot/translate-pipeline/PLAN.md §1). Single-note /
-// verse-scope selection (rowIds / verseStart / verseEnd) rides here too.
+// The server transforms this into the bot's `options` shape
+// (bp-bot/translate-pipeline/PLAN.md §1). Single-note / verse-scope selection
+// (rowIds / verseStart / verseEnd) rides here too.
 const TranslateOptions = z
   .object({
     // Which row-keyed TSV resource to translate. Defaults to 'tn' (the pilot);
@@ -178,36 +138,20 @@ const TranslateOptions = z
   })
   .strict();
 
-const StartBody = z
-  .object({
-    pipelineType: z.enum(PIPELINE_TYPES),
-    // Required for every pipeline EXCEPT an article translate (tw|ta), which is
-    // scoped by translate.articleId/articleUrl instead. Enforced in the handler.
-    book: z.string().min(1).max(8).optional(),
-    startChapter: z.number().int().positive().optional(),
-    endChapter: z.number().int().positive().optional(),
-    sessionKey: z.string().min(1).max(120).regex(/^[A-Za-z0-9_\-/]+$/),
-    options: PipelineOptions.optional(),
-    // Translate-pipeline overrides (only meaningful when pipelineType ===
-    // 'translate'; ignored otherwise). The server builds the full option set
-    // from project config and folds these in.
-    translate: TranslateOptions.optional(),
-    // Optional second pipeline to fire on the parent's done-transition. Used
-    // to express asymmetric ULT/UST alignment (e.g. ULT aligned + UST text-
-    // only) since the upstream contract can't carry asymmetric flags in one
-    // call. Same scope/pipelineType — only the options differ. See
-    // docs/ai-pipeline-handoff.md.
-    followUpOptions: PipelineOptions.optional(),
-    // Optional cross-type chain. First entry fires on the parent's done-
-    // transition; subsequent entries are stored on the new row's
-    // follow_up_chain and fire in turn. Used by the chapter macro to chain
-    // generate -> notes -> tqs. Mutually exclusive with followUpOptions
-    // (we'd otherwise need to define an ordering between them).
-    followUpChain: z.array(ChainStep).min(1).max(4).optional(),
-  })
-  .refine((b) => !(b.followUpOptions && b.followUpChain), {
-    message: "follow_up_options_and_chain_mutually_exclusive",
-  });
+// Non-strict on purpose: a stale client's leftover keys (the old generic
+// `options`, `followUpOptions`, `followUpChain`) are dropped, not rejected.
+const StartBody = z.object({
+  pipelineType: z.literal("translate"),
+  // Required for every pipeline EXCEPT an article translate (tw|ta), which is
+  // scoped by translate.articleId/articleUrl instead. Enforced in the handler.
+  book: z.string().min(1).max(8).optional(),
+  startChapter: z.number().int().positive().optional(),
+  endChapter: z.number().int().positive().optional(),
+  sessionKey: z.string().min(1).max(120).regex(/^[A-Za-z0-9_\-/]+$/),
+  // Translate overrides. The server builds the full option set from project
+  // config and folds these in.
+  translate: TranslateOptions.optional(),
+});
 
 interface StartResponse {
   jobId: string;
@@ -253,161 +197,6 @@ function upstreamBase(env: Env): string {
   return env.PIPELINE_API_BASE || DEFAULT_BASE;
 }
 
-/** Source identity stamped onto a pipeline_jobs row at creation. */
-type PipelineSourceStamp = {
-  source_generation: number | null;
-  source_owner: string | null;
-  source_repo: string | null;
-  source_ref: string | null;
-};
-
-/** Per-lane stamps for dual-lane generate (lit/sim may diverge). */
-type PipelineLaneStamp = {
-  generation: number;
-  owner: string;
-  repo: string;
-  ref: string;
-};
-type PipelineSourceStamps = Partial<Record<LaneKey, PipelineLaneStamp>>;
-
-type ResolvedPipelineStamp = {
-  /** Legacy flat columns (first/primary lane) for older readers. */
-  legacy: PipelineSourceStamp;
-  /** Per-lane JSON persisted in source_stamps_json. */
-  stamps: PipelineSourceStamps;
-  stampsJson: string | null;
-};
-
-const EMPTY_SOURCE_STAMP: PipelineSourceStamp = {
-  source_generation: null,
-  source_owner: null,
-  source_repo: null,
-  source_ref: null,
-};
-
-const EMPTY_RESOLVED: ResolvedPipelineStamp = {
-  legacy: EMPTY_SOURCE_STAMP,
-  stamps: {},
-  stampsJson: null,
-};
-
-function laneStampToLegacy(stamp: PipelineLaneStamp): PipelineSourceStamp {
-  return {
-    source_generation: stamp.generation,
-    source_owner: stamp.owner,
-    source_repo: stamp.repo,
-    source_ref: stamp.ref,
-  };
-}
-
-function parseSourceStampsJson(raw: string | null | undefined): PipelineSourceStamps {
-  if (!raw) return {};
-  try {
-    return JSON.parse(raw) as PipelineSourceStamps;
-  } catch {
-    return {};
-  }
-}
-
-/**
- * For generate pipelines that target ULT/UST, assert the lane(s) are writable
- * and stamp each lane's active generation + source owner/repo/ref independently
- * (GLT/GST and AVD/NAV routinely diverge). Non-scripture pipelines leave stamps null.
- */
-async function resolvePipelineSourceStamp(
-  env: Env,
-  pipelineType: string,
-  options: z.infer<typeof PipelineOptions> | undefined | null,
-): Promise<ResolvedPipelineStamp> {
-  if (pipelineType !== "generate") return EMPTY_RESOLVED;
-  const contentTypes = options?.contentTypes ?? ["ult", "ust"];
-  const lanes: LaneKey[] = [];
-  if (contentTypes.includes("ult")) lanes.push("lit");
-  if (contentTypes.includes("ust")) lanes.push("sim");
-  if (lanes.length === 0) return EMPTY_RESOLVED;
-
-  const stamps: PipelineSourceStamps = {};
-  for (const lane of lanes) {
-    const gate = await assertLaneWritable(env, lane, "pipeline");
-    if (!gate.ok) {
-      throw Object.assign(new Error(gate.error), {
-        status: gate.status,
-        detail: gate.detail,
-      });
-    }
-    stamps[lane] = {
-      generation: gate.generation,
-      owner: gate.config.source.owner,
-      repo: gate.config.source.repo,
-      ref: gate.config.source.ref,
-    };
-  }
-  const primary = stamps.lit ?? stamps.sim!;
-  return {
-    stamps,
-    stampsJson: JSON.stringify(stamps),
-    legacy: laneStampToLegacy(primary),
-  };
-}
-
-/** Re-check stamped generate job still matches live per-lane identity. */
-async function assertPipelineStampStillValid(
-  env: Env,
-  resolved: ResolvedPipelineStamp,
-  contentTypes: string[] | undefined,
-): Promise<{ ok: true } | { ok: false; error: string }> {
-  const lanes: LaneKey[] = [];
-  if ((contentTypes ?? ["ult", "ust"]).includes("ult")) lanes.push("lit");
-  if ((contentTypes ?? ["ult", "ust"]).includes("ust")) lanes.push("sim");
-  if (lanes.length === 0) return { ok: true };
-
-  for (const lane of lanes) {
-    const stamp = resolved.stamps[lane]
-      ?? (resolved.legacy.source_generation != null
-        ? {
-            generation: resolved.legacy.source_generation,
-            owner: resolved.legacy.source_owner!,
-            repo: resolved.legacy.source_repo!,
-            ref: resolved.legacy.source_ref!,
-          }
-        : null);
-    if (!stamp) return { ok: false, error: "pipeline_source_generation_required" };
-    const gate = await assertLaneWritable(env, lane, "pipeline");
-    if (!gate.ok) return { ok: false, error: gate.error };
-    if (
-      gate.generation !== stamp.generation ||
-      // owner/repo are DCS names (case-insensitive); ref stays exact.
-      !sameDcsName(gate.config.source.owner, stamp.owner) ||
-      !sameDcsName(gate.config.source.repo, stamp.repo) ||
-      gate.config.source.ref !== stamp.ref
-    ) {
-      return { ok: false, error: "pipeline_source_generation_mismatch" };
-    }
-  }
-  return { ok: true };
-}
-
-function resolvedFromJobRow(job: {
-  source_generation: number | null;
-  source_owner: string | null;
-  source_repo: string | null;
-  source_ref: string | null;
-  source_stamps_json?: string | null;
-}): ResolvedPipelineStamp {
-  const stamps = parseSourceStampsJson(job.source_stamps_json);
-  const legacy: PipelineSourceStamp = {
-    source_generation: job.source_generation,
-    source_owner: job.source_owner,
-    source_repo: job.source_repo,
-    source_ref: job.source_ref,
-  };
-  return {
-    legacy,
-    stamps,
-    stampsJson: job.source_stamps_json ?? (Object.keys(stamps).length ? JSON.stringify(stamps) : null),
-  };
-}
-
 // Article translate jobs carry no book/chapter; they reuse the pipeline_jobs
 // scope columns via a stable per-article sentinel so dedup keys per article
 // while fitting the (64-bit) integer chapter column. The full 32-bit hash keeps
@@ -443,13 +232,6 @@ async function resolveUsername(c: {
 // apply treats a human edit_log row above it as "changed after the job was
 // queued" (pipelineImport.ts humanTouchedIds).
 const EDIT_LOG_WATERMARK_SQL = `(SELECT COALESCE(MAX(id), 0) FROM edit_log)`;
-// A follow-up or chain child inherits its parent's watermark, so an edit made
-// between the parent's and the child's enqueue still counts. A parent queued
-// before the column existed (NULL) gives the child the current watermark.
-function inheritedWatermarkSql(parentParam: number): string {
-  return `COALESCE((SELECT edit_log_watermark FROM pipeline_jobs WHERE job_id = ?${parentParam}), ${EDIT_LOG_WATERMARK_SQL})`;
-}
-
 function parseApplySkipped(json: string): ApplySkipped | null {
   try {
     return JSON.parse(json) as ApplySkipped;
@@ -467,9 +249,6 @@ interface PolledJob {
   start_chapter: number;
   end_chapter: number;
   session_key: string;
-  follow_up_options: string | null;
-  follow_up_chain: string | null;
-  follow_up_job_id: string | null;
   no_output_yet: number;
   // Prior poll's error_kind. Lets us detect a *repeated* import failure so a
   // deterministically-bad apply force-fails instead of holding the slot/lock.
@@ -482,11 +261,6 @@ interface PolledJob {
   // The internal runner's status channel — TranslateWorkflow writes a
   // bot-shaped StatusResponse here (translate/status.ts). NULL for proxy jobs.
   wf_status_json: string | null;
-}
-
-interface ChainStepValue {
-  pipelineType: PipelineType;
-  options?: unknown;
 }
 
 // Public summary of a single job — same shape the menu's 409 conflict dialog
@@ -614,8 +388,7 @@ export async function dispatchNext(env: Env): Promise<void> {
   // claimed (the NOT EXISTS guard above prevents a second).
   const job = await env.DB.prepare(
     `SELECT job_id, user_id, pipeline_type, book, start_chapter, end_chapter,
-            session_key, options_json,
-            source_generation, source_owner, source_repo, source_ref, source_stamps_json
+            session_key, options_json
        FROM pipeline_jobs WHERE state = 'dispatching' LIMIT 1`,
   ).first<{
     job_id: string;
@@ -626,11 +399,6 @@ export async function dispatchNext(env: Env): Promise<void> {
     end_chapter: number;
     session_key: string;
     options_json: string | null;
-    source_generation: number | null;
-    source_owner: string | null;
-    source_repo: string | null;
-    source_ref: string | null;
-    source_stamps_json: string | null;
   }>();
   if (!job) return;
 
@@ -645,14 +413,13 @@ export async function dispatchNext(env: Env): Promise<void> {
       .run();
   };
 
-  // #551: a legacy generate/notes/tqs job queued before /start began refusing
-  // them (or a follow-up enqueued server-side) would run on the shared account.
-  // Fail it before anything else, so nothing reaches the bot. Then move on to
-  // the next queued job at once, so leftover legacy jobs don't each hold a
-  // job behind them for a cron tick. Bounded: each pass takes one row out of
-  // 'queued', and the failed row frees the slot for the next claim.
-  if (NEEDS_ORG_KEY_TYPES.has(job.pipeline_type)) {
-    await fail("ai_needs_org_key", "this pipeline type cannot run on the organization's own AI key yet");
+  // #726: a job of a retired type (generate/notes/tqs, queued before they were
+  // switched off) must never reach the bot. Fail it before anything else, then
+  // move on to the next queued job at once, so leftover old jobs don't each
+  // hold a job behind them for a cron tick. Bounded: each pass takes one row
+  // out of 'queued', and the failed row frees the slot for the next claim.
+  if (job.pipeline_type !== "translate") {
+    await fail(RETIRED_TYPE_ERROR_KIND, retiredTypeMessage(job.pipeline_type));
     return dispatchNext(env);
   }
 
@@ -687,21 +454,6 @@ export async function dispatchNext(env: Env): Promise<void> {
       options = JSON.parse(job.options_json);
     } catch {
       /* corrupt snapshot — dispatch without options rather than wedge */
-    }
-  }
-
-  // Generate jobs that target scripture must still match the stamp captured at
-  // create. A freeze / activation mid-queue → fail closed (don't POST upstream).
-  if (job.pipeline_type === "generate") {
-    const contentTypes =
-      options && typeof options === "object" && "contentTypes" in options
-        ? (options as { contentTypes?: string[] }).contentTypes
-        : undefined;
-    const stamp = resolvedFromJobRow(job);
-    const check = await assertPipelineStampStillValid(env, stamp, contentTypes);
-    if (!check.ok) {
-      await fail("lane_fenced", check.error);
-      return;
     }
   }
 
@@ -941,7 +693,7 @@ export async function dispatchNext(env: Env): Promise<void> {
     .run();
 }
 
-// Shared "fetch upstream, run import, update DB, fire follow-up" body used
+// Shared "fetch upstream, run import, update DB" body used
 // by both the GET handler and the scheduled cron poller. Returns the raw
 // upstream response so callers that need to pass it through can do so;
 // scheduled callers discard.
@@ -1013,7 +765,17 @@ async function pollPipelineJob(
   // Notes the translate apply left alone (#601); also persisted in
   // apply_skipped_json, echoed here so the polling tab sees it at completion.
   let applySkipped: ApplySkipped | null = null;
-  if (shouldImport && data.output) {
+  // #726: a job of a retired type that was still running when its type was
+  // retired is failed on the poll that sees it end upstream (done with or
+  // without output, failed, or cancelled), at once (no import-retry hold), and
+  // its output is never fetched or applied.
+  const retired =
+    job.pipeline_type !== "translate" &&
+    (data.state === "done" || data.state === "failed" || data.state === "cancelled");
+  if (retired) {
+    importFailed = true;
+    importErrMessage = retiredTypeMessage(job.pipeline_type);
+  } else if (shouldImport && data.output) {
     try {
       const cfg = await getProjectConfig(env);
       const importResult = await importJobOutput(
@@ -1035,7 +797,7 @@ async function pollPipelineJob(
       );
       if (importResult.claimLost) {
         // A concurrent poll (the other of cron / open-tab) owns this import and
-        // may still be mid-apply. Do NOT fall through to the finalize+follow-up
+        // may still be mid-apply. Do NOT fall through to the finalize
         // block: writing output_json / state='done' here would mark the import
         // complete before the owning poll's apply finishes, and if that poll
         // then fails the set output_json would suppress the retry. Return the
@@ -1078,7 +840,7 @@ async function pollPipelineJob(
     data.state !== "failed" &&
     data.state !== "cancelled";
 
-  const importFailedAgain = importFailed && job.error_kind === "import_failed";
+  const importFailedAgain = importFailed && (retired || job.error_kind === "import_failed");
   const effectiveState = importFailed
     ? importFailedAgain
       ? "failed"
@@ -1087,7 +849,9 @@ async function pollPipelineJob(
       ? "failed"
       : (data.state ?? "running");
   const effectiveErrorKind = importFailed
-    ? "import_failed"
+    ? retired
+      ? RETIRED_TYPE_ERROR_KIND
+      : "import_failed"
     : upstreamInterrupted
       ? "interrupted"
       : (data.current?.errorKind ?? null);
@@ -1139,44 +903,10 @@ async function pollPipelineJob(
     }
   }
 
-  // Gate followups on !importFailed: the chain assumes the parent's rows
-  // are in D1 (e.g. the next step's prompt builder reads them). Without
-  // this, an upstream-done-but-import-failed run would still trigger
-  // notes -> tqs against an unimported parent.
-  if (data.state === "done" && !importFailed && !job.follow_up_job_id) {
-    try {
-      const username = await resolveUsernameFromDb(env, job.user_id);
-      if (username && job.follow_up_chain) {
-        await enqueueFollowUpFromChain(env, {
-          parentJobId: job.job_id,
-          parentSessionKey: job.session_key,
-          book: job.book,
-          startChapter: job.start_chapter,
-          endChapter: job.end_chapter,
-          chainJson: job.follow_up_chain,
-          userId: job.user_id,
-        });
-      } else if (username && job.follow_up_options) {
-        await enqueueFollowUp(env, {
-          parentJobId: job.job_id,
-          parentSessionKey: job.session_key,
-          pipelineType: job.pipeline_type as PipelineType,
-          book: job.book,
-          startChapter: job.start_chapter,
-          endChapter: job.end_chapter,
-          followUpOptionsJson: job.follow_up_options,
-          userId: job.user_id,
-        });
-      }
-    } catch (err) {
-      console.error(`[pipelineFollowUp] job=${job.job_id} failed:`, err);
-    }
-  }
-
-  // On any terminal transition the bot slot is now free — pull the next job
-  // (the priority=1 follow-up just enqueued, if any, wins). A first import
-  // failure holds the job at 'running' (one retry) so it won't free the slot
-  // here; a repeated one force-fails above and falls into this branch.
+  // On any terminal transition the bot slot is now free — pull the next job.
+  // A first import failure holds the job at 'running' (one retry) so it won't
+  // free the slot here; a repeated one force-fails above and falls into this
+  // branch.
   if (effectiveState === "done" || effectiveState === "failed") {
     try {
       await dispatchNext(env);
@@ -1196,7 +926,7 @@ async function pollPipelineJob(
       state: effectiveState,
       current: {
         ...(data.current ?? { chapter: 0, skill: "", status: "", startedAt: "" }),
-        errorKind: "import_failed",
+        errorKind: retired ? RETIRED_TYPE_ERROR_KIND : "import_failed",
         error: importErrMessage ?? "import failed",
       },
     };
@@ -1493,8 +1223,7 @@ export async function pollAllNonTerminal(env: Env): Promise<void> {
     .run();
   const rs = await env.DB.prepare(
     `SELECT job_id, upstream_job_id, user_id, pipeline_type, book, start_chapter,
-            end_chapter, session_key, follow_up_options, follow_up_chain,
-            follow_up_job_id, error_kind, (output_json IS NULL) AS no_output_yet,
+            end_chapter, session_key, error_kind, (output_json IS NULL) AS no_output_yet,
             runner, wf_status_json
        FROM pipeline_jobs
       WHERE state IN ('running', 'paused_for_outage', 'paused_for_usage_limit')
@@ -1558,7 +1287,7 @@ pipelines.post("/start", requireEditor, async (c) => {
   // The BT_API_TOKEN gate moved below the body parse + provider resolve (#467):
   // it must fire only for a job that would actually route to the Fly proxy, so
   // an internal-runner translate job can start on a token-less deployment. See
-  // the gate just before the source-stamp resolve.
+  // the bot-token gate just before the enqueue.
   const userId = currentUserId(c);
   if (!userId) return c.json({ error: "unauthorized" }, 401);
 
@@ -1575,18 +1304,6 @@ pipelines.post("/start", requireEditor, async (c) => {
 
   const username = await resolveUsername(c, userId);
   if (!username) return c.json({ error: "username_missing" }, 400);
-
-  // #551: generate/notes/tqs can't run on the org's own key yet, so they are
-  // refused outright (key or no key), before dedup and the bot-token gate.
-  // That includes a followUpChain step of those types: the child would only
-  // fail at dispatch. (followUpOptions makes a same-type child, so a translate
-  // parent can't produce a legacy one that way.)
-  if (
-    NEEDS_ORG_KEY_TYPES.has(parsed.data.pipelineType) ||
-    parsed.data.followUpChain?.some((step) => NEEDS_ORG_KEY_TYPES.has(step.pipelineType))
-  ) {
-    return c.json({ error: "ai_needs_org_key" }, 409);
-  }
 
   // Org-key gate (#551): a translate job runs on the org's own AI key or not at
   // all, so with no key configured (no row, or provider='default' after Clear)
@@ -1867,16 +1584,7 @@ pipelines.post("/start", requireEditor, async (c) => {
     );
   }
 
-  // For notes pipelines, gather any hint=1 stubs the editor has queued in
-  // the chapter range and fold them into options.hints. The proxy is the
-  // authoritative source (not the client) so D1 state at start time wins
-  // over any stale local cache. bp-assistant echoes each hint's rowId back
-  // as the TSV ID column for the expanded row, which is how the apply
-  // phase correlates expansion → stub. See docs/bp-assistant-tn-hints-
-  // contract.md for the full design.
-  // Wider type for mergedOptions: hints is a server-added field, not part of
-  // the client-validated PipelineOptions schema (clients never send it).
-  let mergedOptions: Record<string, unknown> | undefined = parsed.data.options;
+  let mergedOptions: Record<string, unknown> | undefined;
   if (parsed.data.pipelineType === "translate") {
     // Translate options are server-authoritative, derived from the active
     // project config (bp-bot/translate-pipeline/PLAN.md §1). The bot fetches
@@ -1916,43 +1624,13 @@ pipelines.post("/start", requireEditor, async (c) => {
       console.warn("no successful context export; translate runs raw baseline (contextRef omitted)");
     }
     mergedOptions = translateOptions;
-  } else if (parsed.data.pipelineType === "notes") {
-    const hintRows = await c.env.DB.prepare(
-      `SELECT id, verse, quote, support_reference, note
-         FROM tn_rows
-        WHERE book = ?1 AND chapter BETWEEN ?2 AND ?3
-          AND hint = 1 AND deleted_at IS NULL
-        ORDER BY chapter, verse, sort_order ASC NULLS LAST, id`,
-    )
-      .bind(book, startChapter, endChapter)
-      .all<{
-        id: string;
-        verse: number;
-        quote: string | null;
-        support_reference: string | null;
-        note: string | null;
-      }>();
-    const hints = (hintRows.results ?? []).map((r) => ({
-      rowId: r.id,
-      verse: r.verse,
-      // Contract requires quote to be a string ("may be Hebrew, Greek, or
-      // empty") — general-information hints have a null quote in D1, so coerce
-      // to "" rather than sending null (upstream 400s on null). See
-      // docs/bp-assistant-tn-hints-contract.md.
-      quote: r.quote ?? "",
-      supportReference: r.support_reference,
-      seed: r.note,
-    }));
-    if (hints.length > 0) {
-      mergedOptions = { ...(parsed.data.options ?? {}), hints };
-    }
   }
 
   // Bot-token gate (#467), now scoped to jobs that need the bot. A translate
   // job that resolves to the internal runner (BYO key, PIPELINE_MODE=internal,
   // a TSV resource on a ported provider) never touches Fly, so it may start with
-  // no BT_API_TOKEN. Everything else — generate/notes/tqs, an un-ported
-  // provider, an article resource — still routes to the proxy and fails closed
+  // no BT_API_TOKEN. Everything else — an un-ported provider, an article
+  // resource — still routes to the proxy and fails closed
   // here, before the job is ever enqueued. mergedOptions carries the
   // server-resolved resourceType translateRunner reads.
   if (!c.env.BT_API_TOKEN) {
@@ -1964,41 +1642,16 @@ pipelines.post("/start", requireEditor, async (c) => {
     }
   }
 
-  // Stamp lane generation + source identity at create so a mid-run replacement
-  // cannot silently land applies onto a new generation.
-  let sourceStamp: ResolvedPipelineStamp = EMPTY_RESOLVED;
-  try {
-    sourceStamp = await resolvePipelineSourceStamp(
-      c.env,
-      parsed.data.pipelineType,
-      (mergedOptions ?? parsed.data.options) as z.infer<typeof PipelineOptions> | undefined,
-    );
-  } catch (e) {
-    const status = (e as { status?: number }).status;
-    const msg = e instanceof Error ? e.message : String(e);
-    if (status === 403 || status === 409 || status === 422) {
-      return c.json({ error: msg, detail: (e as { detail?: unknown }).detail }, status as 403 | 409 | 422);
-    }
-    throw e;
-  }
-
   // Enqueue. The job goes to the bot only when dispatchNext claims the slot.
   const jobId = crypto.randomUUID();
   const optionsJson = mergedOptions ? JSON.stringify(mergedOptions) : null;
-  const followUpJson = parsed.data.followUpOptions
-    ? JSON.stringify(parsed.data.followUpOptions)
-    : null;
-  const followUpChainJson = parsed.data.followUpChain
-    ? JSON.stringify(parsed.data.followUpChain)
-    : null;
   await c.env.DB.prepare(
     `INSERT INTO pipeline_jobs (
        job_id, user_id, pipeline_type, book, start_chapter, end_chapter,
-       session_key, state, priority, options_json, follow_up_options,
-       follow_up_chain, source_generation, source_owner, source_repo, source_ref,
-       source_stamps_json, created_at, updated_at, edit_log_watermark
-     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', 0, ?8, ?9, ?10,
-               ?11, ?12, ?13, ?14, ?15, unixepoch(), unixepoch(), ${EDIT_LOG_WATERMARK_SQL})`,
+       session_key, state, priority, options_json,
+       created_at, updated_at, edit_log_watermark
+     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', 0, ?8,
+               unixepoch(), unixepoch(), ${EDIT_LOG_WATERMARK_SQL})`,
   )
     .bind(
       jobId,
@@ -2009,13 +1662,6 @@ pipelines.post("/start", requireEditor, async (c) => {
       endChapter,
       parsed.data.sessionKey,
       optionsJson,
-      followUpJson,
-      followUpChainJson,
-      sourceStamp.legacy.source_generation,
-      sourceStamp.legacy.source_owner,
-      sourceStamp.legacy.source_repo,
-      sourceStamp.legacy.source_ref,
-      sourceStamp.stampsJson,
     )
     .run();
 
@@ -2149,13 +1795,12 @@ pipelines.get("/:jobId", requireEditor, async (c) => {
   if (!jobId) return c.json({ error: "missing_job_id" }, 400);
 
   // Ownership check before any upstream call — prevents jobId enumeration.
-  // pollPipelineJob() handles fetch/import/update/follow-up; we just gate
+  // pollPipelineJob() handles fetch/import/update; we just gate
   // it on the requester owning the job. Read the row first so the capability
   // gate below can consult its stamped runner (#469).
   const owned = await c.env.DB.prepare(
     `SELECT job_id, upstream_job_id, user_id, pipeline_type, book, start_chapter,
-            end_chapter, session_key, follow_up_options, follow_up_chain,
-            follow_up_job_id, error_kind, error_message, state, current_skill, current_status,
+            end_chapter, session_key, error_kind, error_message, state, current_skill, current_status,
             created_at, updated_at, (output_json IS NULL) AS no_output_yet,
             runner, wf_status_json, apply_skipped_json
        FROM pipeline_jobs WHERE job_id = ?1`,
@@ -2251,185 +1896,6 @@ pipelines.get("/:jobId", requireEditor, async (c) => {
     headers: { "Content-Type": "application/json" },
   });
 });
-
-interface FollowUpInput {
-  parentJobId: string;
-  parentSessionKey: string;
-  pipelineType: PipelineType;
-  book: string;
-  startChapter: number;
-  endChapter: number;
-  followUpOptionsJson: string;
-  userId: number;
-}
-
-// Enqueues the parent's queued same-type follow-up as a fresh priority=1
-// pipeline_jobs row (asymmetric ULT/UST alignment). It does NOT call the bot —
-// dispatchNext sends it upstream when the slot frees, which (priority=1) is
-// ahead of other users' queued jobs so the pair stays together. The child's
-// job_id is derived deterministically from the parent so two concurrent polls
-// collapse via ON CONFLICT DO NOTHING; the parent claim guard makes the whole
-// thing idempotent.
-export async function enqueueFollowUp(env: Env, input: FollowUpInput): Promise<void> {
-  // Normalize any rowIds a translate child carries so the stored options_json
-  // holds the canonical (sorted+deduped) set the dedupe key compares against (#347).
-  const followUpOptions = normalizeTranslateRowIdsJson(input.pipelineType, input.followUpOptionsJson);
-  // Derive a sessionKey that fits the same character class as the parent's
-  // (POST validator: ^[A-Za-z0-9_\-/]+$). The "/followup" suffix avoids
-  // colliding with the parent on the upstream dedup key.
-  const childSessionKey = `${input.parentSessionKey}/followup`;
-  const childJobId = `${input.parentJobId}:followup`;
-
-  // Inherit the parent's source stamp so the follow-up apply fences the same
-  // generation the parent was started against.
-  const parentStamp = await env.DB.prepare(
-    `SELECT source_generation, source_owner, source_repo, source_ref, source_stamps_json
-       FROM pipeline_jobs WHERE job_id = ?1`,
-  )
-    .bind(input.parentJobId)
-    .first<PipelineSourceStamp & { source_stamps_json: string | null }>();
-
-  // Claim + insert as one atomic batch so a crash between them can't orphan
-  // the child or lose the follow-up. The parent guard (follow_up_job_id IS
-  // NULL) means only the first poll wins; the deterministic childJobId means a
-  // racing second poll's INSERT collapses via ON CONFLICT DO NOTHING.
-  await env.DB.batch([
-    env.DB
-      .prepare(
-        `UPDATE pipeline_jobs SET follow_up_job_id = ?1
-          WHERE job_id = ?2 AND follow_up_job_id IS NULL`,
-      )
-      .bind(childJobId, input.parentJobId),
-    env.DB
-      .prepare(
-        `INSERT INTO pipeline_jobs (
-           job_id, user_id, pipeline_type, book, start_chapter, end_chapter,
-           session_key, state, priority, options_json,
-           source_generation, source_owner, source_repo, source_ref, source_stamps_json,
-           created_at, updated_at, edit_log_watermark
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', 1, ?8,
-                   ?9, ?10, ?11, ?12, ?13, unixepoch(), unixepoch(), ${inheritedWatermarkSql(14)})
-         ON CONFLICT(job_id) DO NOTHING`,
-      )
-      .bind(
-        childJobId,
-        input.userId,
-        input.pipelineType,
-        input.book,
-        input.startChapter,
-        input.endChapter,
-        childSessionKey,
-        followUpOptions,
-        parentStamp?.source_generation ?? null,
-        parentStamp?.source_owner ?? null,
-        parentStamp?.source_repo ?? null,
-        parentStamp?.source_ref ?? null,
-        parentStamp?.source_stamps_json ?? null,
-        input.parentJobId,
-      ),
-  ]);
-}
-
-interface FollowUpChainInput {
-  parentJobId: string;
-  parentSessionKey: string;
-  book: string;
-  startChapter: number;
-  endChapter: number;
-  chainJson: string;
-  userId: number;
-}
-
-// Enqueues the next step of a cross-type chain (e.g. generate -> notes -> tqs)
-// on a parent done-transition. Pops the first chain element, uses it as the
-// child's pipelineType + options, and stores the remainder on the child row
-// so the same logic fires the next step when this child completes. Same
-// priority=1 + atomic-batch + deterministic-id idempotency as enqueueFollowUp.
-export async function enqueueFollowUpFromChain(env: Env, input: FollowUpChainInput): Promise<void> {
-  let chain: ChainStepValue[];
-  try {
-    chain = JSON.parse(input.chainJson) as ChainStepValue[];
-  } catch {
-    throw new Error(`invalid follow_up_chain JSON on ${input.parentJobId}`);
-  }
-  if (!Array.isArray(chain) || chain.length === 0) {
-    return; // nothing to fire
-  }
-  const [next, ...rest] = chain;
-  if (!next || !next.pipelineType) {
-    throw new Error(`malformed chain head on ${input.parentJobId}`);
-  }
-
-  // Each chain link gets its own sessionKey suffix. Counting the depth keeps
-  // upstream's (sessionKey, pipelineType, scope) dedup buckets distinct even
-  // if two adjacent links happen to share a pipelineType.
-  const depth = countChainSuffixes(input.parentSessionKey);
-  const childSessionKey = `${input.parentSessionKey}/chain${depth + 1}`;
-  const childJobId = `${input.parentJobId}:chain${depth + 1}`;
-  const childChainJson = rest.length > 0 ? JSON.stringify(rest) : null;
-  // Normalize any rowIds a translate chain step carries so the stored options_json
-  // holds the canonical (sorted+deduped) set the dedupe key compares against (#347).
-  const childOptionsJson = normalizeTranslateRowIdsJson(
-    next.pipelineType,
-    next.options ? JSON.stringify(next.options) : null,
-  );
-
-  // Re-stamp when the next chain link is a generate job; otherwise inherit.
-  let stamp: ResolvedPipelineStamp = EMPTY_RESOLVED;
-  if (next.pipelineType === "generate") {
-    stamp = await resolvePipelineSourceStamp(env, "generate", next.options ?? null);
-  } else {
-    const parent = await env.DB.prepare(
-      `SELECT source_generation, source_owner, source_repo, source_ref, source_stamps_json
-         FROM pipeline_jobs WHERE job_id = ?1`,
-    )
-      .bind(input.parentJobId)
-      .first<PipelineSourceStamp & { source_stamps_json: string | null }>();
-    if (parent) stamp = resolvedFromJobRow(parent);
-  }
-
-  await env.DB.batch([
-    env.DB
-      .prepare(
-        `UPDATE pipeline_jobs SET follow_up_job_id = ?1
-          WHERE job_id = ?2 AND follow_up_job_id IS NULL`,
-      )
-      .bind(childJobId, input.parentJobId),
-    env.DB
-      .prepare(
-        `INSERT INTO pipeline_jobs (
-           job_id, user_id, pipeline_type, book, start_chapter, end_chapter,
-           session_key, state, priority, options_json, follow_up_chain,
-           source_generation, source_owner, source_repo, source_ref, source_stamps_json,
-           created_at, updated_at, edit_log_watermark
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', 1, ?8, ?9,
-                   ?10, ?11, ?12, ?13, ?14, unixepoch(), unixepoch(), ${inheritedWatermarkSql(15)})
-         ON CONFLICT(job_id) DO NOTHING`,
-      )
-      .bind(
-        childJobId,
-        input.userId,
-        next.pipelineType,
-        input.book,
-        input.startChapter,
-        input.endChapter,
-        childSessionKey,
-        childOptionsJson,
-        childChainJson,
-        stamp.legacy.source_generation,
-        stamp.legacy.source_owner,
-        stamp.legacy.source_repo,
-        stamp.legacy.source_ref,
-        stamp.stampsJson,
-        input.parentJobId,
-      ),
-  ]);
-}
-
-function countChainSuffixes(sessionKey: string): number {
-  const m = sessionKey.match(/\/chain(\d+)$/);
-  return m ? parseInt(m[1], 10) : 0;
-}
 
 // GET /api/pipelines  — list current user's jobs from D1 (no upstream call).
 // Reconciliation surface for the browser when a tab opens/reloads.
@@ -2555,7 +2021,7 @@ interface PipelineRowSelect {
   job_id: string;
   upstream_job_id: string | null;
   user_id: number;
-  pipeline_type: PipelineType;
+  pipeline_type: string;
   book: string;
   start_chapter: number;
   end_chapter: number;

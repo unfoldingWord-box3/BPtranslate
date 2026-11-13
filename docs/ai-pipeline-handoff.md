@@ -2,6 +2,11 @@
 
 You are picking this up mid-flight. Read this end-to-end, then [`docs/ai-pipeline-integration.md`](./ai-pipeline-integration.md) (the contract between bible-editor and bp-assistant), before doing anything else. Both are short.
 
+> **Historical (2026-11, #726):** the `generate` / `notes` / `tqs` pipelines, the
+> follow-up chain and the "Generate everything" macro described here are retired
+> and their server code is removed. Only `translate` can start. See the #726 note
+> in [`ai-pipeline-integration.md`](./ai-pipeline-integration.md).
+
 ## Status (last update: 2026-05-14, after autonomous Phase 3 pass)
 
 **Phase 1 shipped and verified live.** A successful tqs run for `ZEC 3` was triggered from the editor against bp-assistant on `uw-bt-bot.fly.dev`. The pipeline completed; the editor's polling surfaced state transitions correctly; the output landed on Door43 via the bot's existing `repo-insert` flow.
