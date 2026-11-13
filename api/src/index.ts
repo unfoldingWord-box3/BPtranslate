@@ -29,7 +29,7 @@ import { books } from "./bookImport";
 import { populateReferencedArticles } from "./articlePopulate";
 import { templates } from "./templates";
 import { syncTemplates } from "./templateSync";
-import { attachAuth, chatConfirmMac, chatWriteEnv, requireAuth, requireCsrf, mintDevToken, startDcsAuth, callbackDcsAuth, authMe, authLogout, refreshToken, updateLastLocation, currentUserId } from "./auth";
+import { attachAuth, chatConfirmMac, type ChatConfirmPurpose, chatWriteEnv, requireAuth, requireCsrf, mintDevToken, startDcsAuth, callbackDcsAuth, authMe, authLogout, refreshToken, updateLastLocation, currentUserId } from "./auth";
 import { workspaceRoutes } from "./workspaceRoutes";
 import { handleMcp, isMcpPath } from "./mcp";
 import { adminSender } from "./mcpTools";
@@ -604,7 +604,7 @@ export default {
           // Read-only D1 exception to the route-handler rule; see packageRefs.ts.
           packageRefs: (book: string) => readPackageRefs(wsEnv, book),
           sourceNotes: (book: string, chapter: number) => readSourceNotes(wsEnv, book, chapter),
-          confirmMac: (data: string) => chatConfirmMac(env, data),
+          confirmMac: (data: string, purpose: ChatConfirmPurpose) => chatConfirmMac(env, data, purpose),
           isAdmin: () => chatIsAdmin(wsEnv, link.username),
           // Read-only D1 exception to the route-handler rule; see McpSession.
           jobResults: (jobId: string) => jobResultCounts(wsEnv, jobId),
