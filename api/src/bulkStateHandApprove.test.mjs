@@ -5,8 +5,8 @@
 // skip notes that were only ever bulk-approved.
 //
 // #833 (option B): Approve-all in the review queue and the classic editor is
-// itself a bulk approver. It sends `bulk: true`, which STAMPS the row (or keeps
-// an existing stamp), so a note nobody read one at a time is not an AI example,
+// itself a bulk approver. It sends `bulk: true`, which STAMPS an AI draft
+// nobody changed (or keeps an existing stamp), so a note nobody read is not an AI example,
 // a translation-memory suggestion, or a scorecard / suggestion-inbox row.
 // Rapid check's checked-range Approve is a hand approval and sends no flag.
 //
@@ -274,8 +274,8 @@ test("Approve-all (bulk: true) keeps an existing bulk stamp's value; a one-at-a-
   assert.equal(row("tq", "tq01").admin_bulk_state, null, "no flag is a hand approval");
 });
 
-// #833: an AI draft approved by Approve-all is stamped with the state the
-// approval displaced, and drops out of every "a person approved this" reader.
+// #833: an AI draft nobody changed, approved by Approve-all, is stamped with
+// the state the approval displaced ('ai_draft'), and drops out of every "a person approved this" reader.
 test("#833: Approve-all (bulk: true) stamps a tn AI draft; a one-at-a-time approval does not", async () => {
   const { validate, row, fewShotIds, tmIds, scorecardIds } = fresh();
   assert.equal((await validate("tn", "ai02", 1, { bulk: true })).status, 200);
@@ -296,7 +296,7 @@ test("#833: Approve-all (bulk: true) stamps a tn AI draft; a one-at-a-time appro
   assert.deepEqual(scorecardIds(), ["ai02", "ai03"]);
 });
 
-test("#833: Approve-all (bulk: true) stamps a tq AI draft; a one-at-a-time approval does not", async () => {
+test("#833: Approve-all (bulk: true) stamps a tq AI draft; a one-at-a-time approval and an edited question get none", async () => {
   const { sqlite, validate, row, fewShotIds, tmIds } = fresh();
   const tq = sqlite.prepare(
     `INSERT INTO tq_rows (id, book, chapter, verse, ref_raw, question, response, sort_order, version, updated_by, translation_state)
@@ -304,20 +304,37 @@ test("#833: Approve-all (bulk: true) stamps a tq AI draft; a one-at-a-time appro
   );
   tq.run("tq02", BOOK, 1, "2:1", "ai_draft");
   tq.run("tq03", BOOK, 2, "2:2", "edited");
+  tq.run("tq04", BOOK, 3, "2:3", "edited");
   assert.equal((await validate("tq", "tq02", 1, { bulk: true })).status, 200);
   assert.equal((await validate("tq", "tq03", 1)).status, 200);
+  assert.equal((await validate("tq", "tq04", 1, { bulk: true })).status, 200);
   assert.equal(row("tq", "tq02").translation_state, "validated");
   assert.equal(row("tq", "tq02").admin_bulk_state, "ai_draft");
   assert.equal(row("tq", "tq03").admin_bulk_state, null);
-  assert.deepEqual(fewShotIds("tq"), ["tq03"]);
-  assert.deepEqual(await tmIds("tq"), ["tq03"]);
+  assert.equal(row("tq", "tq04").admin_bulk_state, null, "an edited question is not stamped");
+  assert.deepEqual(fewShotIds("tq"), ["tq03", "tq04"]);
+  assert.deepEqual(await tmIds("tq"), ["tq03", "tq04"]);
 });
 
-test("#833: an edited note approved by Approve-all is stamped 'edited'", async () => {
-  const { sqlite, validate, row } = fresh();
+// A person changed an 'edited' note, so it was clearly seen: Approve-all
+// counts it like a single approval and adds no stamp. It does not clear an
+// existing import/sweep stamp either.
+test("#833: an edited note approved by Approve-all gets no stamp and stays an AI example", async () => {
+  const { sqlite, validate, row, fewShotIds, scorecardIds } = fresh();
   sqlite.prepare(`UPDATE tn_rows SET translation_state = 'edited' WHERE id = 'ai02'`).run();
   assert.equal((await validate("tn", "ai02", 1, { bulk: true })).status, 200);
-  assert.equal(row("tn", "ai02").admin_bulk_state, "edited");
+  assert.equal(row("tn", "ai02").translation_state, "validated");
+  assert.equal(row("tn", "ai02").admin_bulk_state, null);
+  assert.deepEqual(fewShotIds("tn"), ["ai02"]);
+  assert.deepEqual(scorecardIds(), ["ai02"]);
+});
+
+test("#833: an already-stamped edited note approved by Approve-all keeps its stamp", async () => {
+  const { sqlite, validate, row, fewShotIds } = fresh();
+  sqlite.prepare(`UPDATE tn_rows SET translation_state = 'edited', admin_bulk_state = 'none' WHERE id = 'ai02'`).run();
+  assert.equal((await validate("tn", "ai02", 1, { bulk: true })).status, 200);
+  assert.equal(row("tn", "ai02").admin_bulk_state, "none");
+  assert.deepEqual(fewShotIds("tn"), []);
 });
 
 test("#833: Approve-all reaching a note already approved by hand leaves it an AI example", async () => {
