@@ -1456,6 +1456,21 @@ test("#915: a database with 0087 but not 0088 reads as not_migrated on the night
   assert.deepEqual(await runNightlyLessons(env, { now: NIGHT1 }), { ran: false, reason: "not_migrated" });
 });
 
+test("#917: the admin page reads not migrated on a database with 0087 but not 0088, and migrated once 0088 is applied", async () => {
+  const sqlite = new DatabaseSync(":memory:");
+  const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations");
+  const files = readdirSync(dir).filter((x) => x.endsWith(".sql")).sort();
+  for (const file of files.filter((x) => x < "0088")) sqlite.exec(readFileSync(join(dir, file), "utf8"));
+  const env = { DB: makeDb(sqlite), WORKSPACE_SLUG: "x" };
+  await setLessonsEnabled(env.DB, true, null);
+  const before = await readLessonsState(env);
+  assert.equal(before.notMigrated, true, "the night returns not_migrated here, so the page must say so");
+  for (const file of files.filter((x) => x >= "0088")) sqlite.exec(readFileSync(join(dir, file), "utf8"));
+  const after = await readLessonsState(env);
+  assert.equal(after.notMigrated, false);
+  assert.equal(after.enabled, true);
+});
+
 test("#915: no paid call when the only approval above the watermark is one the resume already mined", async () => {
   const { f } = await interleaved();
   // c1 goes back to draft: what is left above the watermark is a2, mined on night 2.
