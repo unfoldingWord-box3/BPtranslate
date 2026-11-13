@@ -48,7 +48,7 @@ Good to know:
 1. Open **Draft scorecard** in the admin menu.
 2. Choose the **Book**. The table shows one row per chapter, and **Whole book** at the bottom.
 3. Read the columns:
-   - **Approved notes**: approved translation notes in the chapter.
+   - **Approved notes**: approved translation notes in the chapter. AI drafts nobody changed that were approved with **Approve all notes**, and notes approved by a review-state change, are left out, because nobody read them one by one. Approvals made with Approve all before this change are still counted.
    - **No draft logged**: notes with no AI draft on record. Edit history older than 180 days can be cleared.
    - **Draft was English**: the AI draft was the English note, not translated. These notes are left out of the columns to the right. A note that is the same as the English for a good reason, such as one that holds only links, is counted here too.
    - **Compared**: the notes the other columns are about.
@@ -63,7 +63,7 @@ If the English notes cannot be read for some chapters, a message names those cha
 **Suggestion inbox** finds corrections editors made again and again to the AI's translation-note drafts, so you can fix them once. For example, editors may add a period after the final ] of almost every note, or delete a tag the AI keeps adding.
 
 1. Open **Suggestion inbox** in the admin menu.
-2. Choose the **Book**. The app works the cards out now, from that book's approved notes. There is no nightly run, so a large book can take a few seconds.
+2. Choose the **Book**. The app works the cards out now, from that book's approved notes (the same notes as **Draft scorecard**). There is no nightly run, so a large book can take a few seconds.
 3. Each card shows:
    - the change: the AI's words, then the approved words (**deleted** when the editors removed them). **at the end of the note** means the change was made only at the very end.
    - **Made in X of Y drafts that had it**: X notes had this change made. Y drafts contained the words it changes, including those X.

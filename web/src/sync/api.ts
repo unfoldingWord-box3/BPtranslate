@@ -2301,8 +2301,9 @@ export const api = {
   // bumping, mirrors setPreserveNote. Returns the updated row so the caller can
   // refresh local state (the collapsed/green treatment keys off the new state).
   // `bulk`: set by Approve-all loops. A one-at-a-time approval clears a bulk
-  // approval stamp (the row becomes an AI example again); Approve-all is itself
-  // a bulk approval and keeps it (#414).
+  // approval stamp (the row becomes an AI example again, #414); Approve-all is
+  // itself a bulk approval and stamps an AI draft nobody changed so it is not
+  // an AI example; an edited note counts like a single approval (#833).
   // expectedVersion / expectedState: approve only if the row is still at the
   // version and translation_state the caller showed (If-Match + expected_state;
   // 409 otherwise, and a trashed row is refused). Rapid check's circle sends
