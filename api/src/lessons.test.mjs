@@ -1181,3 +1181,17 @@ test("leftover 4: a stored resume whose approvals were un-approved since is stal
   assert.equal(out.status, "ok");
   assert.match(f.calls[1].user, /Chapters: MRK 4, MRK 1\./, "not the stale MRK 3, MRK 2");
 });
+
+test("a lesson moved to Common issues does not come back from the same notes, even with no word on one side (#908)", async () => {
+  const f = await fresh();
+  // A deletion-shaped lesson: Common issues' own cover needs a word on both sides, so it cannot stop it.
+  const del = [{ id: null, lesson: "Drop «جدا» here.", before: "جدا", after: "", evidence: 3 }];
+  f.setReply(replyWith(del));
+  assert.equal((await f.run()).status, "ok");
+  const { runId } = await loadCurrentLessons(f.env.DB);
+  assert.equal((await editLesson(f.env, { setId: runId, position: 1, action: "promote", userId: 9, now: NIGHT1 + 60 })).ok, true);
+  assert.equal(f.sqlite.prepare(`SELECT COUNT(*) AS n FROM lesson_deletions`).get().n, 1);
+  approveOther(f, "p");
+  assert.equal((await f.run(NIGHT2)).status, "ok");
+  assert.deepEqual((await loadCurrentLessons(f.env.DB)).lessons, [], "not written back the next night");
+});

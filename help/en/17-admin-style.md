@@ -55,7 +55,7 @@ Each lesson has three buttons. Each change is saved as a new version of the list
 
 - **Pin** keeps the lesson, word for word, every night. A night cannot reword it, remove it as reversed, or drop it to make room. **Unpin** lets nights change it again.
 - **Delete** removes the lesson. A night does not bring it back from the notes it was learned from. It comes back only if editors make the same correction again in notes approved after you deleted it.
-- **Move to Common issues** adds the lesson and its example to the end of **Common issues** (above) and removes it from the list. The change to Common issues shows in its **History** like any other save.
+- **Move to Common issues** adds the lesson and its example to the end of **Common issues** (above) and removes it from the list. As with Delete, a night does not write it back from the same notes. The change to Common issues shows in its **History** like any other save.
 
 If a night's run is in progress, or someone else changed the list after you opened the page, the page says so and shows the current list. Try again.
 

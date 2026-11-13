@@ -19,7 +19,8 @@
 -- lesson_deletions          one row per deleted lesson. A night does not
 --                           bring a deleted lesson back (same wording or same
 --                           example) unless a note approved after the delete
---                           shows that example's change again.
+--                           shows that example's change again. A lesson
+--                           moved to Common issues is recorded here too.
 --
 -- Additive only: three nullable/defaulted columns and one new table.
 

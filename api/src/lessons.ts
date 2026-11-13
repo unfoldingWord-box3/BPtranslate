@@ -1243,7 +1243,7 @@ async function refusal(env: Env, baseSetId: number, now: number): Promise<Lesson
  *   pin      every nightly merge keeps it exactly as it is; it is never trimmed.
  *   promote  "- lesson Example: «before» → «after»" is added to the end of
  *            Common issues (a prefs save with its own version and history
- *            entry), and the lesson leaves the set.
+ *            entry), and the lesson leaves the set, remembered like a delete.
  */
 export async function editLesson(
   env: Env,
@@ -1266,9 +1266,20 @@ export async function editLesson(
   }
 
   const rest = current.lessons.filter((_, k) => k !== i);
+  // Delete and promote both take the lesson out of the set, and both remember
+  // it, so a night does not write it back from the same old notes. (Common
+  // issues alone would not stop that: its cover needs a word on both sides of
+  // the example, and deletions and punctuation fixes have none.)
+  const through = (await approvalWatermark(db)) ?? 0;
+  const tombstone = (token: string) =>
+    db
+      .prepare(
+        `INSERT INTO lesson_deletions (lesson, example_before, example_after, deleted_at, deleted_by, approvals_through)
+         SELECT ?2, ?3, ?4, ?5, ?6, ?7 WHERE EXISTS (SELECT 1 FROM lesson_runs WHERE night = ?1)`,
+      )
+      .bind(token, target.lesson, target.before, target.after, now, args.userId, through);
 
   if (args.action === "delete") {
-    const through = (await approvalWatermark(db)) ?? 0;
     const ok = await writeSet(env, {
       baseSetId: args.setId,
       lessons: rest,
@@ -1276,14 +1287,7 @@ export async function editLesson(
       basedOn: args.setId,
       userId: args.userId,
       now,
-      extra: (token) => [
-        db
-          .prepare(
-            `INSERT INTO lesson_deletions (lesson, example_before, example_after, deleted_at, deleted_by, approvals_through)
-             SELECT ?2, ?3, ?4, ?5, ?6, ?7 WHERE EXISTS (SELECT 1 FROM lesson_runs WHERE night = ?1)`,
-          )
-          .bind(token, target.lesson, target.before, target.after, now, args.userId, through),
-      ],
+      extra: (token) => [tombstone(token)],
     });
     return ok ? { ok: true } : refusal(env, args.setId, now);
   }
@@ -1306,8 +1310,9 @@ export async function editLesson(
     prefsVersion: prefs ? prefs.version : null,
     extra: (token) =>
       !changed
-        ? []
+        ? [tombstone(token)]
         : [
+            tombstone(token),
             prefs
               ? db
                   .prepare(
