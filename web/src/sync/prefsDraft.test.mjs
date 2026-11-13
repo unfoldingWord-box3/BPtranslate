@@ -118,16 +118,23 @@ assert.deepStrictEqual(afterPrefsConflict(briefTyped, brief0, briefServer, 9), {
   baseVersion: 9,
 });
 
-// ── afterPrefsSave ─────────────────────────────────────────────────────────
+// ── afterPrefsSave(textNow, textAtSave, saved, version) ────────────────────
 // Saved what is shown: clean.
-assert.deepStrictEqual(afterPrefsSave(typed, start, typed, 8), { text: typed, base: typed, baseVersion: 8 });
+assert.deepStrictEqual(afterPrefsSave(typed, typed, typed, 8), { text: typed, base: typed, baseVersion: 8 });
 // Typing went on while the save was in flight: kept, against the saved base.
 const more = { common_issues_md: "start TYPED more" };
-assert.deepStrictEqual(afterPrefsSave(more, start, typed, 8), { text: more, base: typed, baseVersion: 8 });
+assert.deepStrictEqual(afterPrefsSave(more, typed, typed, 8), { text: more, base: typed, baseVersion: 8 });
+// Round 2 J2: the box was put back (A1 → A0) while the save of A1 was in
+// flight. The undo is kept as typing against the saved A1, not dropped.
+assert.deepStrictEqual(afterPrefsSave({ a: "A0" }, { a: "A1" }, { a: "A1" }, 8), {
+  text: { a: "A0" },
+  base: { a: "A1" },
+  baseVersion: 8,
+});
 // Brief: a stale untyped box takes the saved (server) value, so it does not
 // turn into "typed" text holding the old value.
 const savedBrief = { ...briefServer, audience: "A0 typed" };
-assert.deepStrictEqual(afterPrefsSave(briefTyped, brief0, savedBrief, 10), {
+assert.deepStrictEqual(afterPrefsSave(briefTyped, briefTyped, savedBrief, 10), {
   text: savedBrief,
   base: savedBrief,
   baseVersion: 10,

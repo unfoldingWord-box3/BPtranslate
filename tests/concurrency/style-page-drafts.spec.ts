@@ -348,6 +348,59 @@ test("H1: after a reload, only the typed Brief box comes back from the draft", a
   // Audience did not change on the server: the save lands first time.
   expect(await clickSave(page, "brief")).toBe(200);
   expect((await getPrefs(setup!.context.request)).purpose).toBe(`h1r purpose from B ${stamp}`);
+  // Round 2 J1 (a): the restored draft is cleared by the save.
+  await expect.poll(() => prefsDrafts(page)).toEqual({});
+  await expect(page.getByText(/\d+ unsaved/)).toHaveCount(0);
+});
+
+// Round 2 J1 (b): after a remount brings a draft back, undoing the typing in
+// one step clears the stored draft, so the next mount does not bring it back.
+test("J1: undoing a restored draft in one step clears it", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const stamp = Date.now();
+  const original = `j1 common ${stamp}`;
+  await putPrefs(setup!.context.request, setup!.csrf, { common_issues_md: original });
+  const { context } = await adminContext(browser, "a");
+  const page = await context.newPage();
+  await openStyle(page, original);
+  await commonBox(page).click();
+  await page.keyboard.press("End");
+  await page.keyboard.type(" TYPED");
+  await expect.poll(() => prefsDrafts(page)).toHaveProperty("prefs:common_issues_md");
+  await page.reload();
+  await expect(commonBox(page)).toHaveValue(`${original} TYPED`, { timeout: 20_000 });
+  await commonBox(page).fill(original);
+  await expect.poll(() => prefsDrafts(page)).toEqual({});
+  await page.reload();
+  await expect(commonBox(page)).toHaveValue(original, { timeout: 20_000 });
+  await expect(page.getByText(/\d+ unsaved/)).toHaveCount(0);
+});
+
+// Round 2 J2: the box is put back while its save is in flight. The undo stays
+// in the box as unsaved typing against the saved text.
+test("J2: an undo made while a save is in flight is kept", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const stamp = Date.now();
+  const original = `j2 common ${stamp}`;
+  await putPrefs(setup!.context.request, setup!.csrf, { common_issues_md: original });
+  const { context } = await adminContext(browser, "a");
+  const page = await context.newPage();
+  await openStyle(page, original);
+  await commonBox(page).click();
+  await page.keyboard.press("End");
+  await page.keyboard.type(" A1");
+  await page.route(`**${PREFS}`, async (route) => {
+    if (route.request().method() === "PUT") await new Promise((r) => setTimeout(r, 1500));
+    await route.continue();
+  });
+  const resp = page.waitForResponse((r) => r.url().includes(PREFS) && r.request().method() === "PUT");
+  await saveIn(page, "commonIssues").click();
+  await commonBox(page).fill(original);
+  expect((await resp).status()).toBe(200);
+  expect((await getPrefs(setup!.context.request)).common_issues_md).toBe(`${original} A1`);
+  await page.waitForTimeout(300);
+  await expect(commonBox(page)).toHaveValue(original);
+  await expect(page.getByText("1 unsaved").first()).toBeVisible();
 });
 
 // H2: a user whose save would be refused keeps no prefs draft, and one left
