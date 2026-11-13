@@ -10,7 +10,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { latestOnly, openDraftsChangedChannel } from "./draftsChangedChannel.ts";
+import { openDraftsChangedChannel, orderedReads } from "./draftsChangedChannel.ts";
 
 const CHANNEL = "be-drafts-changed-test";
 
@@ -126,51 +126,81 @@ test("cross-tab drafts: no BroadcastChannel, or one that throws, is a silent no-
   }
 });
 
-// Review (Codex): two messages close together start two re-reads of the store.
-// If the first read resolves after the second, delivering it would put back
-// the older count. Only the newest read started is delivered.
+// Review (Codex): drafts.ts reads the store for a local change (to every
+// subscriber) and for another tab's message (to the count only). Reads can
+// resolve out of order, and the count hears both, so an older read landing
+// after a newer one would put back an older list. orderedReads numbers every
+// read when it starts and gives each subscriber only results newer than the
+// last one it got.
 function deferred() {
   let resolve, reject;
   const promise = new Promise((res, rej) => ((resolve = res), (reject = rej)));
   return { promise, resolve, reject };
 }
 
-test("cross-tab drafts: overlapping re-reads deliver only the newest, even when the older one resolves last", async () => {
-  const reads = [];
-  const delivered = [];
-  const reread = latestOnly(
-    () => {
-      const d = deferred();
-      reads.push(d);
-      return d.promise;
-    },
-    (v) => delivered.push(v),
-  );
-  const first = reread();
-  const second = reread();
-  reads[1].resolve("new");
-  await second;
-  reads[0].resolve("old");
-  await first;
-  assert.deepEqual(delivered, ["new"]);
-  // A later read on its own is delivered as usual.
-  const third = reread();
-  reads[2].resolve("later");
-  await third;
-  assert.deepEqual(delivered, ["new", "later"]);
+function harness() {
+  const errors = [];
+  const readFor = orderedReads((e) => errors.push(e.message));
+  const pending = [];
+  const read = () => {
+    const d = deferred();
+    pending.push(d);
+    return d.promise;
+  };
+  const sub = () => {
+    const got = [];
+    const fn = (v) => got.push(v);
+    fn.got = got;
+    return fn;
+  };
+  return { readFor, read, pending, sub, errors };
+}
+
+test("cross-tab drafts: an older local read landing after a newer remote one skips the count, reaches a local-only subscriber", async () => {
+  const { readFor, read, pending, sub } = harness();
+  const count = sub(); // hears local and remote reads
+  const editor = sub(); // hears local reads only
+  const local = readFor(read, [count, editor]); // read 1: a change in this tab
+  const remote = readFor(read, [count]); // read 2: another tab's message
+  pending[1].resolve("newer list");
+  await remote;
+  pending[0].resolve("older list");
+  await local;
+  assert.deepEqual(count.got, ["newer list"], "the count keeps the newer list");
+  assert.deepEqual(editor.got, ["older list"], "nothing newer reached the editor, so it gets this one");
+  // A later read reaches both, as usual.
+  const later = readFor(read, [count, editor]);
+  pending[2].resolve("latest");
+  await later;
+  assert.deepEqual(count.got, ["newer list", "latest"]);
+  assert.deepEqual(editor.got, ["older list", "latest"]);
 });
 
-// Review (Claude F5): the receive path starts the re-read with `void`, so a
-// failed IndexedDB read must not become an unhandled rejection.
-test("cross-tab drafts: a failed re-read is logged and dropped, not thrown", async () => {
-  const errors = [];
-  const delivered = [];
-  const reread = latestOnly(
-    () => Promise.reject(new Error("idb closed")),
-    (v) => delivered.push(v),
-    (e) => errors.push(e.message),
-  );
-  await reread();
+test("cross-tab drafts: overlapping reads that resolve in order are all delivered", async () => {
+  const { readFor, read, pending, sub } = harness();
+  const count = sub();
+  const first = readFor(read, [count]);
+  const second = readFor(read, [count]);
+  pending[0].resolve("a");
+  await first;
+  pending[1].resolve("b");
+  await second;
+  assert.deepEqual(count.got, ["a", "b"]);
+});
+
+// A failed newer read delivers nothing and records nothing, so an older read
+// that succeeds is still delivered (and the receive path's `void` call never
+// sees a rejection: Claude F5).
+test("cross-tab drafts: a failed newer read does not hold back an older one that succeeds", async () => {
+  const { readFor, read, pending, sub, errors } = harness();
+  const count = sub();
+  const older = readFor(read, [count]);
+  const newer = readFor(read, [count]);
+  pending[1].reject(new Error("idb closed"));
+  await newer;
   assert.deepEqual(errors, ["idb closed"]);
-  assert.deepEqual(delivered, []);
+  assert.deepEqual(count.got, []);
+  pending[0].resolve("older list");
+  await older;
+  assert.deepEqual(count.got, ["older list"]);
 });
