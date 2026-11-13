@@ -1,5 +1,5 @@
 import { expect, test, request as apiRequest, type BrowserContext, type Page } from "@playwright/test";
-import { fetchChapter, gotoVerse, mintToken, newUserContext } from "./helpers";
+import { fetchChapter, gotoVerse, mintToken, newUserContext, noteTextarea } from "./helpers";
 
 // Honor BE_BASE_URL so the suite runs on a relocated port (mirrors s8).
 const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
@@ -210,6 +210,95 @@ test("a refused save typed in tab B and discarded in tab A: tab B lets go of the
   await expect(saveButton(b, tq.id)).toHaveCount(0);
   await expect.poll(() => readDraftPatch(b, key), { message: "Discard should leave no draft" }).toBeNull();
   if (SHOTS) await b.screenshot({ path: `${SHOTS}/cross-tab-discard-failed-tab-b.png` });
+
+  await context.close();
+});
+
+test("tN card, tab B not draining: a refused save discarded in tab A frees tab B's card", async ({ browser }) => {
+  // Review item 1: NoteCard keeps its pending save (sentRef, and the Save gate
+  // savePendingVersion) until it hears that save end. Here tab A drains, so
+  // tab B never hears the 422; only tab A's Discard can end it. Before, tab B
+  // kept the refused note, then (once the row was rebuilt) wrote a stray
+  // "reverted" draft and kept Save disabled until a remount.
+  test.setTimeout(90_000);
+  const probe = await apiRequest.newContext({ baseURL: BASE });
+  const auth = await mintToken(probe, "probe-637-tabs-tn");
+  const chapter = await fetchChapter(probe, auth.token, "ZEC", CHAPTER);
+  await probe.dispose();
+  const notes = chapter.tn as Array<{ id: string; verse: number; note: string | null }>;
+  const byVerse = new Map<number, typeof notes>();
+  for (const n of notes) if (n.verse > 1) byVerse.set(n.verse, [...(byVerse.get(n.verse) ?? []), n]);
+  const pair = [...byVerse.values()].find((list) => list.length >= 2);
+  expect(pair, `expected a verse with two tN rows on ZEC ${CHAPTER}`).toBeTruthy();
+  const [tn, other] = pair!;
+  const key = `row:tn:ZEC:${tn.id}`;
+  const server = tn.note ?? "";
+
+  const { context } = await newUserContext(browser, "cross-tab-discard-tn");
+  let patches = 0;
+  const sentFrom: string[] = [];
+  let pageA: Page | null = null;
+  await context.route(`**/api/rows/tn/${tn.id}**`, async (route, request) => {
+    if (request.method() !== "PATCH") return route.continue();
+    patches++;
+    sentFrom.push(request.frame().page() === pageA ? "A" : "B");
+    await route.fulfill({ status: 422, contentType: "application/json", body: JSON.stringify(REFUSED.body) });
+  });
+
+  // Tab A opens first and holds the outbox's drain lock, so tab B cannot drain.
+  const a = await context.newPage();
+  pageA = a;
+  await gotoVerse(a, "ZEC", CHAPTER, tn.verse);
+  await a.evaluate(
+    () =>
+      new Promise<void>((held) => {
+        void navigator.locks.request("be-outbox-drain", () => {
+          held();
+          return new Promise<void>((release) => {
+            (window as unknown as { __releaseDrain: () => void }).__releaseDrain = release;
+          });
+        });
+      }),
+  );
+
+  const b = await context.newPage();
+  await gotoVerse(b, "ZEC", CHAPTER, tn.verse);
+  const typed = `CROSS TAB NOTE ${Date.now()}`;
+  await noteTextarea(b, tn.id).fill(typed);
+  const save = b.locator(`[data-note-id="${tn.id}"]`).locator('button:has([data-testid="SaveIcon"])');
+  await save.click();
+  // Leave the card, so it follows the row (no editing session open).
+  await noteTextarea(b, other.id).click();
+  await b.waitForTimeout(500);
+  expect(patches, "tab B cannot drain while tab A holds the lock").toBe(0);
+
+  // Tab A lets go of the lock and drains at once (a focus drains).
+  // The release is async, so wait until the lock is free before the focus,
+  // or tab A's drain finds it still held and tab B's 3 s retry wins.
+  await a.bringToFront();
+  await a.evaluate(async () => {
+    (window as unknown as { __releaseDrain: () => void }).__releaseDrain();
+    while ((await navigator.locks.query()).held?.some((l) => l.name === "be-outbox-drain")) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    window.dispatchEvent(new Event("focus"));
+  });
+  await expect.poll(() => patches, { message: "tab A should send the PATCH" }).toBe(1);
+  expect(sentFrom, "tab A should be the one that sent it").toEqual(["A"]);
+  await a.getByText(/^1 failed$/).first().click();
+  const failedLine = a.getByText("http 422", { exact: true }).locator("xpath=../..");
+  await failedLine.locator('button:has([data-testid="DeleteOutlineIcon"])').click();
+  await a.getByRole("dialog").getByRole("button", { name: /^discard$/i }).click();
+
+  // Tab B: the card shows the server's note, leaves no draft behind, and its
+  // Save works again for new text.
+  await expect(noteTextarea(b, tn.id)).toHaveValue(server);
+  await b.waitForTimeout(1000);
+  expect(await readDraftPatch(b, key), "no stray draft for the row").toBeNull();
+  const again = `CROSS TAB NOTE AGAIN ${Date.now()}`;
+  await noteTextarea(b, tn.id).fill(again);
+  await expect(save, "Save should be enabled for new text").toBeEnabled();
+  if (SHOTS) await b.screenshot({ path: `${SHOTS}/cross-tab-discard-tn-tab-b.png` });
 
   await context.close();
 });
