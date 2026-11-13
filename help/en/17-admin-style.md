@@ -60,7 +60,7 @@ Each lesson has three buttons. Each change is saved as a new version of the list
 If a night's run is in progress, or someone else changed the list after you opened the page, the page says so and shows the current list. Try again.
 
 ### Restore an earlier list
-Under **Earlier versions of this list**, each night's list and each change made here is shown with its date and number of lessons. **Restore** makes that version the current list again. The list you had stays in the history, so you can restore it too.
+Under **Earlier versions of this list**, each night's list and each change made here is shown with its date and number of lessons. **Restore** makes that version the current list again. The list you had stays in the history, so you can restore it too. A restored lesson is a current lesson again, even one you had deleted or moved to Common issues. A restore does not change Common issues: a line a lesson added there stays.
 
 ## See who changed the preferences, and undo a change
 Every save of **Brief**, **Instructions** and **Common issues** is kept, whether it was made here or by the chat assistant. Press **History** above the Brief section to see the list, newest first.

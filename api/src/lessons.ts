@@ -655,13 +655,21 @@ export function mergeLessons(
     // A reversed lesson does not come back under its own id, and one id is used
     // once. A pinned lesson is added below, as it is.
     if (prev && (prev.pinned || reversed.has(p.id!) || used.has(p.id!))) continue;
-    const text = cleanLessonText(p.lesson);
+    let text = cleanLessonText(p.lesson);
     if (!text) continue;
-    const before = cap(oneLine(p.before), EXAMPLE_CHAR_CAP);
-    const after = cap(oneLine(p.after), EXAMPLE_CHAR_CAP);
+    let before = cap(oneLine(p.before), EXAMPLE_CHAR_CAP);
+    let after = cap(oneLine(p.after), EXAMPLE_CHAR_CAP);
     if (isShaddaVowelOnly(before, after)) continue;
     if (!prev && covered({ before, after }, ctx)) continue;
-    if (!prev && deletedStill({ lesson: text, before, after }, ctx.deleted ?? [], ctx.changes ?? [])) continue;
+    if (deletedStill({ lesson: text, before, after }, ctx.deleted ?? [], ctx.changes ?? [])) {
+      // A deleted lesson does not come back as a new one, nor as the new
+      // wording or example of a kept one (#908 gate G2): a kept lesson keeps
+      // its own wording and example.
+      if (!prev) continue;
+      text = prev.lesson;
+      before = prev.before;
+      after = prev.after;
+    }
     const key = nfc(text).toLowerCase();
     if (seenText.has(key)) continue;
     seenText.add(key);
@@ -1177,7 +1185,7 @@ export function appendCommonIssue(text: string | null, line: string): string {
 }
 
 export type LessonEditResult =
-  | { ok: true; prefs?: Record<string, unknown> | null }
+  | { ok: true; prefs?: Record<string, unknown> | null; /** Nothing changed: no new set, no export. */ noop?: boolean }
   | { ok: false; status: 400 | 404 | 409 | 413; error: string };
 
 type PrefsRow = Record<string, unknown> & { version: number; common_issues_md: string | null };
@@ -1265,7 +1273,7 @@ export async function editLesson(
 
   if (args.action === "pin" || args.action === "unpin") {
     const pinned = args.action === "pin";
-    if (target.pinned === pinned) return { ok: true };
+    if (target.pinned === pinned) return { ok: true, noop: true };
     const lessons = current.lessons.map((l, k) => (k === i ? { ...l, pinned } : l));
     const ok = await writeSet(env, { baseSetId: args.setId, lessons, action: args.action, basedOn: args.setId, userId: args.userId, now });
     return ok ? { ok: true } : refusal(env, args.setId, now);
@@ -1362,6 +1370,19 @@ export async function restoreLessonSet(
     .first<{ id: number }>();
   if (!exists) return { ok: false, status: 404, error: "set_not_found" };
   const lessons = await loadLessonSet(db, args.setId);
+  // The restored lessons are live again: their deletion records go (same
+  // wording, or the same example), so a night treats them like any current
+  // lesson (#908 gate G4). A promoted lesson's line stays in Common issues.
+  const untomb = (token: string) =>
+    lessons.map((l) =>
+      db
+        .prepare(
+          `DELETE FROM lesson_deletions
+            WHERE (lesson = ?2 OR (?3 || ?4 <> '' AND example_before = ?3 AND example_after = ?4))
+              AND EXISTS (SELECT 1 FROM lesson_runs WHERE night = ?1)`,
+        )
+        .bind(token, l.lesson, l.before, l.after),
+    );
   const ok = await writeSet(env, {
     baseSetId: args.currentSetId,
     lessons,
@@ -1369,6 +1390,7 @@ export async function restoreLessonSet(
     basedOn: args.setId,
     userId: args.userId,
     now,
+    extra: untomb,
   });
   return ok ? { ok: true } : refusal(env, args.currentSetId, now);
 }
@@ -1438,7 +1460,7 @@ export function lessonsRoutes() {
       throw e;
     }
     if (!out.ok) return c.json({ error: out.error, state: await readLessonsState(c.env) }, out.status);
-    await queueContextExport(c);
+    if (!out.noop) await queueContextExport(c);
     return c.json({ ...(await readLessonsState(c.env)), ...(out.prefs !== undefined ? { prefs: out.prefs } : {}) });
   };
 

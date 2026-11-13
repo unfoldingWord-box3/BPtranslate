@@ -32,6 +32,7 @@ import {
   PROMPT_CHAR_CAP,
   RUN_STALE_SECONDS,
   editLesson,
+  restoreLessonSet,
   deletedStill,
   appendCommonIssue,
   promotedLine,
@@ -1194,4 +1195,83 @@ test("a lesson moved to Common issues does not come back from the same notes, ev
   approveOther(f, "p");
   assert.equal((await f.run(NIGHT2)).status, "ok");
   assert.deepEqual((await loadCurrentLessons(f.env.DB)).lessons, [], "not written back the next night");
+});
+
+// ── gate review (#908): G2 kept lessons and tombstones, G3 no-op pin, G4 restore clears tombstones ──
+
+test("G2: a night cannot rewrite a kept lesson into a deleted one from the old notes (#908)", () => {
+  const current = [L("Keep A.", "أ", "ب"), L("Keep B.", "ج", "د")];
+  const deleted = [{ lesson: "Gone.", before: "x", after: "y", approvalsThrough: 100 }];
+  const parsed = {
+    lessons: [
+      { id: "L1", lesson: "Gone.", before: "أ", after: "ب", evidence: 4 },
+      { id: "L2", lesson: "Keep B, reworded.", before: "x", after: "y", evidence: 6 },
+    ],
+    reversed: [],
+  };
+  const out = mergeLessons(current, parsed, { ...ctx, deleted, changes: [{ before: "x", after: "y", lastApproval: 90 }] }, 5);
+  assert.deepEqual(
+    out.map((l) => [l.lesson, l.before, l.after]),
+    [["Keep A.", "أ", "ب"], ["Keep B.", "ج", "د"]],
+    "both kept lessons keep their own wording and example",
+  );
+  assert.equal(out[1].evidence, 6, "the new evidence count is still taken");
+  // Supported anew (a note approved after the delete): the rewrite is allowed.
+  const anew = mergeLessons(current, parsed, { ...ctx, deleted, changes: [{ before: "x", after: "y", lastApproval: 101 }] }, 5);
+  assert.deepEqual(anew[1].lesson, "Keep B, reworded.");
+});
+
+function countingExportEnv(f) {
+  const seen = { lock: 0 };
+  const db = f.env.DB;
+  return {
+    seen,
+    env: {
+      ...f.env,
+      DB: { ...db, prepare: (sql) => (/context_export_lock/.test(sql) && seen.lock++, db.prepare(sql)) },
+      DCS_SERVICE_TOKEN: "service-token",
+      EXPORT_WORKFLOW: { create: async (o) => ({ id: o.id }) },
+    },
+  };
+}
+
+test("G3: pinning a lesson that is already pinned changes nothing and queues no export (#908)", async () => {
+  const f = await withThree();
+  const { seen, env } = countingExportEnv(f);
+  const admin = appFor(env, "admin");
+  const post = (body) =>
+    admin("/api/translation-memory/lessons/edit", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const { runId } = await loadCurrentLessons(f.env.DB);
+  let res = await post({ setId: runId, position: 1, action: "unpin" });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).setId, runId, "no new set");
+  assert.equal(seen.lock, 0, "no context export queued");
+  res = await post({ setId: runId, position: 1, action: "pin" });
+  const pinned = await res.json();
+  assert.notEqual(pinned.setId, runId);
+  assert.ok(seen.lock > 0, "a real change queues the export");
+  const before = seen.lock;
+  res = await post({ setId: pinned.setId, position: 1, action: "pin" });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).setId, pinned.setId);
+  assert.equal(seen.lock, before, "pinning again queues nothing");
+  assert.equal((await post({ setId: runId, position: 1, action: "pin" })).status, 409, "a stale set is still refused");
+});
+
+test("G4: restoring a set clears the tombstones of the lessons it brings back; Common issues is left alone (#908)", async () => {
+  const f = await withThree();
+  const s1 = (await loadCurrentLessons(f.env.DB)).runId;
+  let out = await editLesson(f.env, { setId: s1, position: 1, action: "delete", userId: 9, now: NIGHT1 + 60 });
+  assert.equal(out.ok, true);
+  let cur = (await loadCurrentLessons(f.env.DB)).runId;
+  out = await editLesson(f.env, { setId: cur, position: 2, action: "promote", userId: 9, now: NIGHT1 + 61 });
+  assert.equal(out.ok, true);
+  const ci = out.prefs.common_issues_md;
+  assert.equal(f.sqlite.prepare(`SELECT COUNT(*) AS n FROM lesson_deletions`).get().n, 2);
+  cur = (await loadCurrentLessons(f.env.DB)).runId;
+  assert.equal((await restoreLessonSet(f.env, { setId: s1, currentSetId: cur, userId: 9, now: NIGHT1 + 62 })).ok, true);
+  assert.equal(f.sqlite.prepare(`SELECT COUNT(*) AS n FROM lesson_deletions`).get().n, 0, "both restored lessons are live again");
+  assert.equal(f.sqlite.prepare(`SELECT common_issues_md FROM translation_prefs WHERE id = 1`).get().common_issues_md, ci);
+  // The night that follows may keep, reword or re-add them like any other lesson.
+  assert.deepEqual(deletedStill({ lesson: THREE[0].lesson, before: THREE[0].before, after: THREE[0].after }, [], []), false);
 });
