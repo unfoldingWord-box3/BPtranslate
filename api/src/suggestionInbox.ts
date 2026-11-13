@@ -758,7 +758,7 @@ function coveredByLesson(_s: { before: string; after: string }): boolean {
 // A live term already gives the approved words: a term that is not deprecated or
 // forbidden whose target is them, or a forbidden term whose replacement (the
 // "use instead") is them. A forbidden term's own target is never a cover.
-function coveredByTerm(s: { after: string }, terms: InboxTerm[]): boolean {
+export function coveredByTerm(s: { after: string }, terms: InboxTerm[]): boolean {
   if (wordsOf(s.after).length === 0) return false;
   const after = norm(s.after);
   return terms.some((t) =>
@@ -766,7 +766,7 @@ function coveredByTerm(s: { after: string }, terms: InboxTerm[]): boolean {
   );
 }
 
-function coveredByTemplate(s: { after: string }, templates: string[]): boolean {
+export function coveredByTemplate(s: { after: string }, templates: string[]): boolean {
   if (wordsOf(s.after).length < 2) return false;
   const after = norm(s.after);
   return templates.some((t) => t.includes(after));
@@ -779,7 +779,7 @@ const hasWholeWord = (line: string, w: string) =>
 // One line of the Common issues text is either exactly the line the page copies
 // ("- «before» → «after»", either arrow, ∅ for a deletion), or holds before and
 // after (both with a word) as whole words. No bare substring matching.
-function coveredByCommonIssues(s: { before: string; after: string }, commonIssues: string): boolean {
+export function coveredByCommonIssues(s: { before: string; after: string }, commonIssues: string): boolean {
   const before = norm(s.before);
   const after = norm(s.after);
   const target = after === "" ? "∅" : `«${after}»`;
