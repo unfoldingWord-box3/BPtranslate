@@ -4,6 +4,8 @@
 // GET  /api/suggestion-inbox/:book          the cards for one book (admin only)
 // POST /api/suggestion-inbox/:book/approve  {key} → an enabled house-style rule
 // POST /api/suggestion-inbox/:book/reject   {key} → never suggested again
+// GET  /api/suggestion-inbox/not-needed-kinds and POST .../dismiss: note kinds
+//      marked Not needed (#158 part A), see api/src/notNeededKinds.ts.
 //
 // The issue says "nightly". There is no cron: the inbox is computed when an
 // admin opens it, for ONE book per request (the bound), with no AI call. The
@@ -115,6 +117,7 @@ import { currentUserId, requireAdmin } from "./auth.ts";
 import { BOOK_NUMBERS } from "./dcsSources.ts";
 import { SCORECARD_ROWS_SQL } from "./draftScorecard.ts";
 import { loadLessonsForRender } from "./lessonsRender.ts";
+import { computeNotNeededKinds, dismissNotNeededKind } from "./notNeededKinds.ts";
 import {
   boldRanges,
   compileRule,
@@ -1052,6 +1055,28 @@ const bookParam = (raw: string | undefined) => {
   const book = (raw ?? "").toUpperCase();
   return BOOK_NUMBERS[book] ? book : null;
 };
+
+// Note kinds marked Not needed (#158 part A, api/src/notNeededKinds.ts). Not
+// per book. Registered before GET /:book, which would otherwise take
+// "not-needed-kinds" for a book code and answer 400.
+const notNeededOpts = { minNotes: MIN_HITS, minChapters: MIN_CHAPTERS };
+
+suggestionInbox.get("/not-needed-kinds", requireAdmin, async (c) => {
+  return c.json(await computeNotNeededKinds(c.env.DB, notNeededOpts));
+});
+
+const DismissBody = z.object({ kind: z.string().min(1) }).strict();
+
+// Only a kind listed now can be dismissed (else 404), like Reject.
+suggestionInbox.post("/not-needed-kinds/dismiss", requireAdmin, async (c) => {
+  const parsed = DismissBody.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json({ error: "bad_kind" }, 400);
+  const list = await computeNotNeededKinds(c.env.DB, notNeededOpts);
+  if (list.notMigrated) return c.json({ error: "not_migrated" }, 503);
+  if (!list.kinds.some((k) => k.kind === parsed.data.kind)) return c.json({ error: "kind_not_found" }, 404);
+  await dismissNotNeededKind(c.env.DB, parsed.data.kind, currentUserId(c));
+  return c.json({ ok: true });
+});
 
 suggestionInbox.get("/:book", requireAdmin, async (c) => {
   const book = bookParam(c.req.param("book"));

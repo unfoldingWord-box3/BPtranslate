@@ -3,7 +3,7 @@ id: admin-progress
 title: Progress, review state, draft scorecard and suggestion inbox (admin)
 routes: [admin/progress, admin/review, admin/scorecard, admin/suggestions]
 roles: [admin]
-keywords: [progress, review state, approve, approved, validated, bulk, sweep, reopen, needs review, chapter, book, notes, questions, dashboard, percent, scorecard, draft quality, AI draft, unchanged, similarity, context pack, closing period, suggestion inbox, suggestions, repeated corrections, house style, rule, reject]
+keywords: [progress, review state, approve, approved, validated, bulk, sweep, reopen, needs review, chapter, book, notes, questions, dashboard, percent, scorecard, draft quality, AI draft, unchanged, similarity, context pack, closing period, suggestion inbox, suggestions, repeated corrections, house style, rule, reject, not needed, note kinds, support reference, dismiss]
 screenshots:
   - admin-progress-1 #/admin/progress
   - admin-progress-2 #/admin/review
@@ -76,3 +76,10 @@ If the English notes cannot be read for some chapters, a message names those cha
    - **Reject** hides the card for good, in every book.
 
 A card appears only when the same change was made in at least 10 notes across at least 3 chapters. Spaces and line breaks are ignored, and changes inside a bold Scripture quote and rewrites longer than a few words are left out. A change is not shown when a house-style rule already makes it (even a rule that is switched off), a term already gives the approved words, a template already contains them, or the Common issues text already lists them. A card you sent to another editor goes away once that editor's text covers it. If it still shows after your edit, reject it.
+
+## See which note kinds are marked Not needed
+Below the cards, **Note kinds marked Not needed** lists the kinds of translation notes (the translationAcademy article a note points to, such as figs-yousingular) that editors keep marking **Not needed**. It counts all books, not only the one you chose. It only informs you: it does not switch any kind off.
+
+- A kind is listed when at least 10 of its notes, in at least 3 chapters, were marked **Not needed** in the last 30 days. A note still counts after the nightly export removes it for good. A note that was restored does not count.
+- Each card shows the kind, how many notes were marked, in how many chapters, and which books.
+- **Dismiss** hides the kind from this list for good.

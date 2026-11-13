@@ -3105,7 +3105,18 @@
       "howExcluded": "A change is not shown when a house-style rule already makes it (even a rule that is off), a term already gives the approved wording, a note template already contains it, or the Common issues text already lists it.",
       "howHome": "Suggested home: a house-style rule only for three kinds of change that are safe everywhere: the period after a final ], deleting a tag in parentheses or brackets such as (مُكيَّف), and changing only the marks (vowels, tanween) on one word. The rule is tried on every draft of this book: it must change at least 10 of them, and give exactly the approved text in at least 8 of every 10 it changes (9 of 10 for marks). The card shows these numbers. Otherwise a note template when the old words come from a template; a term for a change of one to three words; else a Common issues line.",
       "howApprove": "Approve on a house-style card asks you to confirm, then adds the rule, switched on, to Style: House style. It changes every AI draft that arrives from then on, in every book, for notes and for questions. On the other cards, Approve copies a line for you to paste into that editor, because those editors cannot be filled in from here. The card goes away once the term, template or Common issues text covers it; if it still shows after your edit, reject it.",
-      "howReject": "Reject hides the card for good, in every book."
+      "howReject": "Reject hides the card for good, in every book.",
+      "notNeededTitle": "Note kinds marked Not needed",
+      "notNeededIntro": "Kinds of translation notes that editors marked Not needed at least {{notes}} times, across at least {{chapters}} chapters, in the last {{days}} days, counting all books. This list only informs you: it switches nothing off. Dismiss hides a kind from this list for good.",
+      "notNeededLoading": "Counting notes marked Not needed…",
+      "notNeededNone": "No note kind was marked Not needed that often.",
+      "notNeededCount_one": "{{count}} note of this kind was marked Not needed in the last {{days}} days, in {{chapters}} chapters.",
+      "notNeededCount_other": "{{count}} notes of this kind were marked Not needed in the last {{days}} days, in {{chapters}} chapters.",
+      "notNeededBooks": "Books: {{books}}",
+      "notNeededDismiss": "Dismiss",
+      "notNeededDismissed": "Dismissed. This kind will not be listed again.",
+      "notNeededGone": "This kind is no longer listed (another admin may have dismissed it). Reload the page.",
+      "notNeededNotMigrated": "The server's database is not up to date yet, so kinds cannot be dismissed."
     }
   },
   "widgets": {

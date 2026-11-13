@@ -189,7 +189,7 @@ export const ADMIN_SURFACES: AdminSurfaceEntry[] = [
       anchor: "function AdminSuggestionInboxScreen",
     },
     notes:
-      "Desk-only by design (#819), like the scorecard: classic #/preferences is slated to retire (#173). Calls GET /api/suggestion-inbox/:book, POST /api/suggestion-inbox/:book/approve (creates an enabled house_style_rules row) and POST /api/suggestion-inbox/:book/reject (only a card currently shown for that book).",
+      "Desk-only by design (#819), like the scorecard: classic #/preferences is slated to retire (#173). Calls GET /api/suggestion-inbox/:book, POST /api/suggestion-inbox/:book/approve (creates an enabled house_style_rules row) and POST /api/suggestion-inbox/:book/reject (only a card currently shown for that book). The same page lists note kinds marked Not needed for all books (#158 part A, informational only; the switch-off is #924): GET /api/suggestion-inbox/not-needed-kinds and POST /api/suggestion-inbox/not-needed-kinds/dismiss (only a kind listed now).",
   },
   {
     id: "aiPipelines",
