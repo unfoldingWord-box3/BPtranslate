@@ -2374,10 +2374,12 @@ const DRAFT_NOT_SET_UP = `Starting an AI draft from chat is not set up on this s
 // What a bpt_draft confirm token binds: the tool (p), the link and workspace
 // it was issued to (from the session, never an argument), the arguments as the
 // preview read them (ids sorted and deduplicated, or the verse range with
-// verse_end filled in), the rows the run would redo as sorted
-// [id, version, approved 1/0], and its expiry (unix seconds). The version pins
-// the text the reviewer agreed to replace; the approved flag pins approvals,
-// which do not bump the version.
+// verse_end filled in), the rows the run would redo as a count (n) and a
+// digest (d, draftRowsDigest), and its expiry (unix seconds). The version in
+// the digest pins the text the reviewer agreed to replace; the approved flag
+// pins approvals, which do not bump the version. A digest rather than the list
+// keeps the token the same size for any selection: BT Servant drops a result
+// over 32 KB, token and all (#747 review).
 interface DraftTokenBody {
   p: "bpt_draft";
   ws: string;
@@ -2388,14 +2390,23 @@ interface DraftTokenBody {
   ids: string[] | null;
   vs: number | null;
   ve: number | null;
-  r: [string, number, 0 | 1][];
+  n: number;
+  d: string;
   exp: number;
+}
+
+// SHA-256 (base64url) over the rows sorted by id, one "id:version:approved"
+// line each. Only ever compared inside a body the MAC already vouched for.
+async function draftRowsDigest(rows: [string, number, 0 | 1][]): Promise<string> {
+  const text = rows.map(([id, version, approved]) => `${id}:${version}:${approved}`).join("\n");
+  const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", utf8.encode(text)));
+  return btoa(String.fromCharCode(...hash)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
 const draft: ToolDef = {
   name: "bpt_draft",
   description:
-    "Start an AI draft (translate run) for some translation notes (kind tn) or questions (kind tq) in one chapter: either the rows with the given ids, or the rows of a verse range. Project admins only; anyone else is refused. Not for a whole chapter (use the web app): a range or id list that covers every row of that kind in the chapter is refused. The AI draft REPLACES the current text of every selected row, approved rows included, and they then need review again; the last approved text keeps publishing to Door43 only until the row is approved again. While it runs, tn drafts make only the selected notes read-only, but tq drafts make all of the chapter's questions read-only, for everyone in the project. It costs the project's AI budget. Always two calls. 1) Call without confirm_token: a preview that starts nothing and returns will_redraft (how many rows the draft would replace), rows (id, ref and state of each, at most the first " +
+    "Start an AI draft (translate run) for some translation notes (kind tn) or questions (kind tq) in one chapter: either the rows with the given ids, or the rows of a verse range. Project admins only; anyone else is refused. Not for a whole chapter (use the web app): a range or id list that takes in every row of that kind in the chapter (a note marked Not needed aside; a range takes in every note whose reference overlaps it) is refused. The AI draft REPLACES the current text of every selected row, approved rows included, and they then need review again; the last approved text keeps publishing to Door43 only until the row is approved again. While it runs, tn drafts make only the selected notes read-only, but tq drafts make all of the chapter's questions read-only, for everyone in the project. It costs the project's AI budget. Always two calls. 1) Call without confirm_token: a preview that starts nothing and returns will_redraft (how many rows the draft would replace), rows (id, ref and state of each, at most the first " +
     `${DRAFT_LIST_CAP}` +
     "), approved_will_be_replaced and approved_ids (the approved rows among them: a draft on chosen rows or a verse range replaces approved text too), left_alone (rows in the selection the draft leaves as they are: notes marked Not needed), and a confirm_token. Tell the reviewer what will be replaced and how many of those are approved, and get a clear yes. 2) Call again with exactly the same book, kind, chapter and ids or verse_start/verse_end plus confirm_token: only then does the draft start. If any of those rows was edited, approved or un-approved, added or marked Not needed since the preview, nothing starts: preview again and show the reviewer the new list. The token lasts 10 minutes and works only for this user's link, this tool and the same arguments; otherwise nothing starts. The confirm returns job_id and status running, queued (with queue_position: one run at a time per server) or already_running (this user already started the same draft; job_id is that run); follow it with bpt_job_status. status busy means another user's run already covers these rows: nothing new was started, and only that user (or the web app) can follow their run. Refused, with nothing started, when the book or chapter has no rows of that kind in this project, when the project has no AI key of its own set up (an admin adds one in the web app), or when it is not a gateway-language project. If the AI service refuses the run, the answer names the failed job and why; nothing is running then.",
   inputSchema: {
@@ -2487,25 +2498,39 @@ const draft: ToolDef = {
       const have = new Set(rows.map((r) => String(r.id)));
       const missing = ids.filter((id) => !have.has(id));
       if (missing.length) throw new ToolInputError(`${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} not a ${kind} row in ${where}. ${NOT_STARTED}`);
-      if (new Set(ids).size >= have.size) throw new ToolInputError(WHOLE);
     }
     // The rows the run would redo. A verse range selects by overlap with each
     // row's reference, the rule the run and its import use (translate/core.ts
     // selectRows on the TSV Reference), so a note on 1:4-5 is in a run on
     // verse 5.
+    const verseRange = (r: Record<string, unknown>) =>
+      refVerseRange(typeof r.ref_raw === "string" ? r.ref_raw : `${chapter}:${String(r.verse)}`);
     const inRange = (r: Record<string, unknown>) => {
-      const vr = refVerseRange(typeof r.ref_raw === "string" ? r.ref_raw : `${chapter}:${String(r.verse)}`);
+      const vr = verseRange(r);
       return vr !== null && vr.start <= want.ve! && vr.end >= want.vs!;
     };
     const selected = ids ? rows.filter((r) => want.ids!.includes(String(r.id))) : rows.filter(inRange);
-    if (!ids) {
+    if (!ids && !selected.length) {
+      throw new ToolInputError(
+        `There are no ${kind} notes in ${where}:${want.vs}${want.ve !== want.vs ? `-${want.ve}` : ""}, so there is nothing to draft. ${NOT_STARTED}`,
+      );
+    }
+    // A selection that takes in every live row of the chapter is a whole
+    // chapter in all but name, judged on the same selection the run uses
+    // (#747 review): run as a narrowed draft it would replace the approved rows
+    // a whole-chapter run keeps (#794). A note marked Not needed is no part of
+    // the work, so it does not count. A verse range can never select the
+    // chapter introduction, so for a range only rows with a verse reference
+    // count, as the verse bounds check beside it has always done.
+    const chosen = new Set(selected.map((r) => String(r.id)));
+    const takesAll = (pool: Record<string, unknown>[]) => pool.length > 0 && pool.every((r) => chosen.has(String(r.id)));
+    const live = rows.filter((r) => !r.trashed_at);
+    if (ids) {
+      if (want.ids!.length >= rows.length || takesAll(live)) throw new ToolInputError(WHOLE);
+    } else {
       const verses = rows.map((r) => Number(r.verse)).filter((v) => Number.isInteger(v) && v >= 1);
-      if (!selected.length) {
-        throw new ToolInputError(
-          `There are no ${kind} notes in ${where}:${want.vs}${want.ve !== want.vs ? `-${want.ve}` : ""}, so there is nothing to draft. ${NOT_STARTED}`,
-        );
-      }
-      if (want.vs! <= Math.min(...verses) && want.ve! >= Math.max(...verses)) throw new ToolInputError(WHOLE);
+      const coversBounds = want.vs! <= Math.min(...verses) && want.ve! >= Math.max(...verses);
+      if (coversBounds || takesAll(live.filter((r) => verseRange(r) !== null))) throw new ToolInputError(WHOLE);
     }
     // The apply leaves a note marked Not needed as it is (#735,
     // pipelineImport.ts applyTranslateTnRow "trashed"), so it is not counted.
@@ -2527,7 +2552,15 @@ const draft: ToolDef = {
     if (!token) {
       const approvedIds = redo.filter(approved).map((r) => String(r.id));
       const exp = Math.floor(Date.now() / 1000) + CONFIRM_TTL_SECONDS;
-      const t: DraftTokenBody = { p: "bpt_draft", ws: session.workspace.slug, link: session.principal.linkId, ...want, r: pinned, exp };
+      const t: DraftTokenBody = {
+        p: "bpt_draft",
+        ws: session.workspace.slug,
+        link: session.principal.linkId,
+        ...want,
+        n: pinned.length,
+        d: await draftRowsDigest(pinned),
+        exp,
+      };
       const tokenText = toB64url(JSON.stringify(t));
       const what = kind === "tn" ? "notes" : "questions";
       return {
@@ -2550,14 +2583,15 @@ const draft: ToolDef = {
         message: `${NOT_STARTED} This AI draft would replace the text of ${redo.length} ${what} in ${where}, ${approvedIds.length} of them approved (those would need review again). It costs the project's AI budget. Tell the reviewer, and call again with the same arguments plus confirm_token only if they say yes.`,
       };
     }
-    if (JSON.stringify(token.r) !== JSON.stringify(pinned)) {
+    if (token.n !== pinned.length || token.d !== (await draftRowsDigest(pinned))) {
       throw new ToolInputError(
         `The rows in this selection changed since the preview (a row was edited, approved or un-approved, added, or marked Not needed). Run the preview again (call without confirm_token) and show the reviewer the new list. ${NOT_STARTED}`,
       );
     }
-    const translate = ids
-      ? { resourceType: kind, rowIds: ids }
-      : { resourceType: kind, verseStart: vs, verseEnd: ve ?? vs };
+    // Exactly the scope the token covers: ids sorted and deduplicated.
+    const translate = want.ids
+      ? { resourceType: kind, rowIds: want.ids }
+      : { resourceType: kind, verseStart: want.vs!, verseEnd: want.ve! };
     const { status, body } = await session.send("POST", "/api/pipelines/start", {
       pipelineType: "translate",
       book,
