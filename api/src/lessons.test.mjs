@@ -546,3 +546,72 @@ test("a killed run is closed even on a night with nothing new to mine", async ()
   assert.equal((await f.run(NIGHT2)).reason, "no_new_approvals");
   assert.equal(f.sqlite.prepare(`SELECT status FROM lesson_runs WHERE night = '2026-11-12b'`).get().status, "failed");
 });
+
+// ── review round 2 (#817) ───────────────────────────────────────────────────
+
+// Long rewrites (no shared word) cost the diff n×m cells each. Enough of them
+// used to spend the whole run's shared cell budget, after which every later
+// note counted as compared but yielded no changes.
+function addRewrites(f, chapter, count) {
+  const tn = f.sqlite.prepare(
+    `INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, support_reference, quote, note, sort_order, version, translation_state, updated_at)
+     VALUES (?, 'MRK', ?, 1, ?, 'x', 'q', ?, 10, 2, 'validated', 1000)`,
+  );
+  const ai = f.sqlite.prepare(
+    `INSERT INTO edit_log (kind, row_key, book, prev_version, new_version, action, source, payload_json)
+     VALUES ('tn', ?, 'MRK', 1, 2, 'update', 'ai_pipeline', ?)`,
+  );
+  const draft = Array.from({ length: 400 }, (_, i) => `d${i}`).join(" ");
+  const final = Array.from({ length: 400 }, (_, i) => `f${i}`).join(" ");
+  f.sqlite.exec("BEGIN");
+  for (let i = 0; i < count; i++) {
+    const id = `b${i.toString(36).padStart(4, "0")}`;
+    tn.run(id, chapter, `${chapter}:1`, final);
+    ai.run(id, JSON.stringify({ id, note: draft }));
+  }
+  f.sqlite.exec("COMMIT");
+}
+
+test("every note gets its own diff budget: long rewrites early in the window do not hide later corrections", async () => {
+  const f = await fresh();
+  addRewrites(f, 3, 1900); // 1900 × 160,000 cells > the old shared 300,000,000
+  await f.run();
+  assert.match(f.calls[0].user, /^- 13× «يمكنك» → «فيمكنك»/m);
+});
+
+test("two books with the same chapter number are mined apart", async () => {
+  const f = await fresh();
+  // TIT 3 approved last: the window becomes TIT 3 + MRK 3, never MRK 3 twice.
+  f.sqlite
+    .prepare(
+      `INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, support_reference, quote, note, sort_order, version, translation_state, updated_at)
+       VALUES ('t001', 'TIT', 3, 1, '3:1', 'x', 'q', 'كتب الرسول', 10, 2, 'validated', 1000)`,
+    )
+    .run();
+  f.sqlite
+    .prepare(
+      `INSERT INTO edit_log (kind, row_key, book, prev_version, new_version, action, source, payload_json)
+       VALUES ('tn', 't001', 'TIT', 1, 2, 'update', 'ai_pipeline', '{"note": "قال الرسول"}')`,
+    )
+    .run();
+  f.sqlite.prepare(`INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action) VALUES ('tn', 't001', 'TIT', 9, 2, 2, 'validate')`).run();
+  await f.run();
+  const { user } = f.calls[0];
+  assert.match(user, /Chapters: TIT 3, MRK 3\./);
+  assert.match(user, /^- 6× «يمكنك» → «فيمكنك»/m, "MRK 3 only: TIT 3 has no يمكنك notes");
+  assert.match(user, /^- 1× «قال» → «كتب»/m);
+});
+
+test("a truncated reply is one billed call: no lower-effort retry, previous set kept", async () => {
+  const f = await fresh();
+  await f.run();
+  f.approveMore();
+  f.setReply(() => ({ text: `${BEGIN_OUTPUT}\n{"lessons": [`, usage: { inputTokens: 100, outputTokens: 32000 }, stopReason: "max_tokens" }));
+  const out = await f.run(NIGHT2);
+  assert.equal(f.calls.length, 2, "one call tonight, no retry");
+  assert.equal(out.status, "failed");
+  assert.equal(out.failureReason, "output_too_long");
+  assert.equal(f.runs().at(-1).calls, 1);
+  assert.ok(f.runs().at(-1).cost_usd > 0);
+  assert.equal((await loadLessonsForRender(f.env.DB)).length, 1);
+});
