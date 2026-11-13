@@ -212,7 +212,7 @@ export function UnsavedToasts({ book, onSaveVerseDraft, onJumpTo, onGoTo }: Prop
           );
           if (onGoTo) {
             const meta = d.meta;
-            const ref = formatDraftMeta(meta);
+            const ref = formatDraftMeta(meta, t);
             // The ref is Latin ("TN ZEC 6:11"); isolate it in <bdi> so it
             // keeps its own order inside an Arabic sentence.
             const [before, after = ""] = t("widgets.toasts.unsavedDraftRef", { ref: REF_SLOT }).split(REF_SLOT);

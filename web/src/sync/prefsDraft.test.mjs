@@ -2,9 +2,14 @@ import assert from "node:assert";
 import {
   afterPrefsConflict,
   afterPrefsSave,
+  afterPrefsSavedElsewhere,
+  newestPrefs,
+  prefsDiscardMatches,
   hydratePrefsDraft,
   prefsDraftClearable,
+  prefsDraftDroppable,
   prefsDraftKey,
+  prefsDraftLost,
   prefsSavePayload,
   prefsVersionToSend,
   sameFields,
@@ -146,6 +151,79 @@ assert.deepStrictEqual(afterPrefsSave(briefTyped, briefTyped, savedBrief, 10), {
 assert.ok(prefsDraftClearable({ text: typed, base: start }, [typed]));
 assert.ok(!prefsDraftClearable({ text: { common_issues_md: "tab B" }, base: start }, [typed, start]));
 assert.ok(!prefsDraftClearable({ content: 1 }, [typed]));
+
+// ── prefsDraftLost (#913 item 1) ───────────────────────────────────────────
+// Another tab that restored this tab's draft can delete the record (its undo
+// or save). While this editor still shows typed text, the record is missing
+// and gets written again; with nothing typed, there is nothing to keep.
+assert.ok(prefsDraftLost(typed, start, false));
+assert.ok(!prefsDraftLost(typed, start, true));
+assert.ok(!prefsDraftLost(start, start, false));
+
+// ── afterPrefsSavedElsewhere (#913 review A2, round 2 B1) ─────────────────
+// Another tab saved this editor's fields. When every box typed here holds what
+// was saved, the editor is clean on the saved row: every box shows the saved
+// value at the new version (a box nobody typed in, `notes` included, takes the
+// server's value, so a stale copy never blocks this or goes back in a save).
+// A typed box holding other text keeps the editor as it is.
+assert.deepStrictEqual(afterPrefsSavedElsewhere({ text: typed, base: start, baseVersion: 3 }, typed, 5), {
+  text: typed,
+  base: typed,
+  baseVersion: 5,
+});
+assert.strictEqual(afterPrefsSavedElsewhere({ text: typed, base: start, baseVersion: 3 }, fromB, 5), null);
+const savedT = { ...briefServer, audience: "A0 typed" };
+assert.deepStrictEqual(afterPrefsSavedElsewhere({ text: briefTyped, base: brief0, baseVersion: 3 }, savedT, 8), {
+  text: savedT,
+  base: savedT,
+  baseVersion: 8,
+});
+assert.strictEqual(
+  afterPrefsSavedElsewhere({ text: briefTyped, base: brief0, baseVersion: 3 }, { ...brief0, audience: "other" }, 8),
+  null,
+);
+// Nothing typed: the boxes follow the saved row.
+assert.deepStrictEqual(afterPrefsSavedElsewhere({ text: brief0, base: brief0, baseVersion: 3 }, briefServer, 8), {
+  text: briefServer,
+  base: briefServer,
+  baseVersion: 8,
+});
+
+// Round 3 C3: a save message not newer than what this editor holds is ignored.
+assert.strictEqual(afterPrefsSavedElsewhere({ text: typed, base: start, baseVersion: 5 }, typed, 5), null);
+assert.strictEqual(afterPrefsSavedElsewhere({ text: typed, base: start, baseVersion: 6 }, typed, 5), null);
+
+// ── prefsDiscardMatches (round 3, C2) ──────────────────────────────────────
+// Another tab discarded a draft whose text was `discarded`. This editor shows
+// that typing when every box it typed in holds the discarded value; boxes it
+// did not type in (Brief's `notes`, or a box showing a newer server value)
+// do not count. Nothing typed here: nothing to throw away.
+assert.ok(prefsDiscardMatches(briefTyped, brief0, { ...briefTyped, notes: "older notes" }));
+assert.ok(prefsDiscardMatches(briefTyped, brief0, briefTyped));
+assert.ok(!prefsDiscardMatches(briefTyped, brief0, { ...briefTyped, audience: "other typing" }));
+assert.ok(!prefsDiscardMatches(brief0, brief0, briefTyped));
+
+// ── newestPrefs (round 3, C1) ──────────────────────────────────────────────
+// The page's prefs row never moves to an older version: a late GET, or a save
+// response overtaken by another tab's newer save, is ignored.
+const v5 = { version: 5, audience: "five" };
+const v6 = { version: 6, audience: "six" };
+assert.strictEqual(newestPrefs(null, v5), v5);
+assert.strictEqual(newestPrefs(v5, v6), v6);
+assert.strictEqual(newestPrefs(v6, v5), v6);
+// Same version: the row in hand is taken (a refetch of the same row).
+const v6b = { version: 6, audience: "six again" };
+assert.strictEqual(newestPrefs(v6, v6b), v6b);
+
+// ── prefsDraftDroppable (#913 item 5) ──────────────────────────────────────
+// Drafts are per workspace, not per user. A user who cannot save drops only a
+// draft they typed themselves (H2: they lost admin since); another user's
+// draft on a shared browser, or one with no author recorded, is left alone.
+assert.ok(prefsDraftDroppable({ text: typed, base: start, owner: 7 }, 7));
+assert.ok(!prefsDraftDroppable({ text: typed, base: start, owner: 7 }, 8));
+assert.ok(!prefsDraftDroppable({ text: typed, base: start }, 7));
+assert.ok(!prefsDraftDroppable({ text: typed, base: start, owner: 7 }, null));
+assert.ok(!prefsDraftDroppable(null, 7));
 
 // ── prefsConflictRow (gate review H3) ──────────────────────────────────────
 const row = { version: 4, error: undefined };

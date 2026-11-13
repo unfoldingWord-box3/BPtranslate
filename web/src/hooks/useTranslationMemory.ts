@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   api,
   type Term,
@@ -6,6 +6,8 @@ import {
   type TranslationExample,
   type ContextExportStatus,
 } from "../sync/api";
+import { onPrefsDraftElsewhere } from "../sync/drafts";
+import { newestPrefs } from "../sync/prefsDraft";
 
 // Preferences singleton (brief + instructions + register + assisted flag).
 // `enabled === false` yields an idle result so the caller can gate on the
@@ -22,9 +24,17 @@ export function useTranslationPrefs(enabled: boolean): {
   const [error, setError] = useState<Error | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const refetch = useCallback(() => setReloadKey((k) => k + 1), []);
+  // The newest row seen while enabled, including one another tab's save sent
+  // before the first load landed. Every row goes through take(), so the page
+  // never moves to an older version (#913 review round 3, C1).
+  const newest = useRef<TranslationPrefs | null>(null);
+  const take = useCallback((p: TranslationPrefs) => {
+    newest.current = newestPrefs(newest.current, p);
+    setPrefs(newest.current);
+  }, []);
   // Adopt a prefs object we already have in hand (a PUT response, or the
   // `current` row from a 409 conflict body) without a round-trip refetch.
-  const apply = useCallback((p: TranslationPrefs) => setPrefs(p), []);
+  const apply = take;
 
   useEffect(() => {
     if (!enabled) {
@@ -32,6 +42,7 @@ export function useTranslationPrefs(enabled: boolean): {
       setPrefs(null);
       setError(null);
       setLoading(false);
+      newest.current = null;
       return;
     }
     let cancelled = false;
@@ -41,7 +52,7 @@ export function useTranslationPrefs(enabled: boolean): {
       .getTranslationPrefs()
       .then((res) => {
         if (cancelled) return;
-        setPrefs(res.prefs);
+        take(res.prefs);
         setLoading(false);
       })
       .catch((e) => {
@@ -52,7 +63,19 @@ export function useTranslationPrefs(enabled: boolean): {
     return () => {
       cancelled = true;
     };
-  }, [enabled, reloadKey]);
+  }, [enabled, reloadKey, take]);
+
+  // Another tab of this workspace saved Brief, Instructions or Common issues:
+  // take the row its save returned, as that tab did, so this page never pairs
+  // the new version with an older row (#913 review B1). An older row (a
+  // message overtaken by a newer save or fetch) is ignored, and one that
+  // arrives before the first load is kept over that load's older row (C1).
+  useEffect(() => {
+    if (!enabled) return;
+    return onPrefsDraftElsewhere((m) => {
+      if (m.type === "prefs-saved") take(m.row as unknown as TranslationPrefs);
+    });
+  }, [enabled, take]);
 
   return { prefs, loading, error, refetch, apply };
 }

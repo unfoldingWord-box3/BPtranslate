@@ -32,6 +32,7 @@ import type { PrefsDraftSection } from "./prefsDraft";
 import { legacyDbNames, workspaceDbName } from "./workspace";
 import { adoptFromLegacyDbs, type LegacySource } from "./legacyAdoption";
 import { DRAFTS_CHANGED_CHANNEL_BASE, openDraftsChangedChannel, orderedReads } from "./draftsChangedChannel.ts";
+import { openPrefsDraftChannel, PREFS_DRAFT_CHANNEL_BASE, type PrefsDraftMessage } from "./prefsDraftChannel.ts";
 
 // Base name; the actual per-workspace DB name is derived via workspaceDbName()
 // so drafts written in one Door43 org never surface in another (issue #228).
@@ -200,12 +201,35 @@ async function tell(to: Set<Subscriber>) {
 // without a reload. Editors do not opt in: they copy a stored draft into a box
 // only when the box opens (#903) and otherwise trust the box's own text, so
 // another tab's typing would only mark this tab's box dirty without showing
-// that text. A received message only re-reads, never
-// announces, so tabs cannot ping-pong. Named per workspace, as the database is.
+// that text. (The prefs editors opt in only to write their own draft again
+// when another tab deleted it while they still show the typing, #913; they
+// never copy another tab's text into a box.) A received message only re-reads,
+// never announces, so tabs cannot ping-pong. Named per workspace, as the database is.
 // tell() never rejects (orderedReads logs a failed read), so `void` is safe.
 const changedChannel = openDraftsChangedChannel(workspaceDbName(DRAFTS_CHANGED_CHANNEL_BASE), () => {
   void tell(remoteSubscribers);
 });
+
+// A prefs draft discarded or saved in another tab, by key (#913 review A1/A2,
+// prefsDraftChannel.ts). The prefs editors listen; discard() and the editors'
+// saves post.
+const prefsListeners = new Set<(m: PrefsDraftMessage) => void>();
+const prefsChannel = openPrefsDraftChannel(workspaceDbName(PREFS_DRAFT_CHANNEL_BASE), (m) => {
+  for (const l of prefsListeners) {
+    try {
+      l(m);
+    } catch (e) {
+      console.warn("prefs draft listener failed", e);
+    }
+  }
+});
+export function onPrefsDraftElsewhere(fn: (m: PrefsDraftMessage) => void): () => void {
+  prefsListeners.add(fn);
+  return () => prefsListeners.delete(fn);
+}
+export function announcePrefsDraft(m: PrefsDraftMessage): void {
+  prefsChannel.announce(m);
+}
 
 // After a committed change in this tab. Every caller awaits the write's
 // transaction first, so another tab that re-reads on the message sees it.
@@ -325,7 +349,8 @@ export function templateKey(templateId: string): string {
 
 export const drafts = {
   // `remote: true` also calls `fn` after another tab of this workspace changed
-  // the store (#896). Only the "N unsaved" count opts in; see changedChannel.
+  // the store (#896). The "N unsaved" count opts in, and the prefs editors to
+  // notice their own draft deleted (#913); see changedChannel.
   subscribe(fn: Subscriber, opts?: { remote?: boolean }): () => void {
     subscribers.add(fn);
     if (opts?.remote) remoteSubscribers.add(fn);
@@ -434,7 +459,20 @@ export const drafts = {
   async discard(key: string): Promise<void> {
     pendingKeys.delete(key);
     latestGenerationByKey.delete(key);
-    await (await db()).delete(STORE, key);
+    const tx = (await db()).transaction(STORE, "readwrite");
+    if (key.startsWith("prefs:")) {
+      // Other tabs showing this prefs draft's text reset their box too, told
+      // before the record is gone so none of them writes it back (#913 review
+      // A1). The message names the text thrown away: a tab showing other
+      // typing keeps it (round 2, B3).
+      const rec = (await tx.store.get(key)) as DraftRecord | undefined;
+      const text = (rec?.payload as { text?: unknown } | undefined)?.text;
+      if (text && typeof text === "object" && !Array.isArray(text)) {
+        prefsChannel.announce({ type: "prefs-discard", key, text: text as Record<string, string | null> });
+      }
+    }
+    await tx.store.delete(key);
+    await tx.done;
     for (const l of discardListeners) {
       try {
         l(key);
@@ -443,6 +481,60 @@ export const drafts = {
       }
     }
     void notify();
+  },
+
+  // Write a draft only when none is stored under `key`, read and written in
+  // one transaction, so it never replaces a record another tab wrote in the
+  // meantime (#913 review B4: a prefs editor writing back its draft after
+  // another tab deleted it). Resolves whether it wrote.
+  async setIfAbsent(key: string, payload: DraftPayload, expectedVersion: number, meta: DraftMeta): Promise<boolean> {
+    if (isReadOnly()) return false;
+    // Marked dirty synchronously, as set() does: this tab is showing the typing.
+    const generation = nextGeneration();
+    const prevGeneration = latestGenerationByKey.get(key);
+    const prevPending = pendingKeys.has(key);
+    pendingKeys.add(key);
+    latestGenerationByKey.set(key, generation);
+    // Nothing written: the generation this tab last wrote is still its latest.
+    const restoreGeneration = () => {
+      if (latestGenerationByKey.get(key) !== generation) return;
+      if (prevGeneration === undefined) latestGenerationByKey.delete(key);
+      else latestGenerationByKey.set(key, prevGeneration);
+    };
+    let existing: unknown;
+    try {
+      const tx = (await db()).transaction(STORE, "readwrite");
+      existing = await tx.store.get(key);
+      if (!existing) {
+        const rec: DraftRecord = { key, payload, expectedVersion, updatedAt: Date.now(), generation, meta };
+        await tx.store.put(rec);
+      }
+      await tx.done;
+    } catch (e) {
+      // Failed: put the marks back as they were (round 3, C4).
+      restoreGeneration();
+      if (!prevPending && latestGenerationByKey.get(key) === prevGeneration) pendingKeys.delete(key);
+      console.warn("draft write-back failed", key, e);
+      return false;
+    }
+    if (existing) {
+      restoreGeneration();
+      return false;
+    }
+    void notify();
+    return true;
+  },
+
+  // Drop this tab's "unsaved here" mark for `key` (pendingKeys), for an editor
+  // that another tab's discard or save made clean (#913 review B2). The
+  // record itself is the other tab's to delete; without this the unload guard
+  // would still warn for typing this tab no longer holds. This tab's
+  // subscribers re-read the store: the unload guard's own copy hears only
+  // this tab's changes, and the other tab's delete was not one of them.
+  forget(key: string): void {
+    pendingKeys.delete(key);
+    latestGenerationByKey.delete(key);
+    void tell(subscribers);
   },
 
   // Delete only the exact draft generation that produced a successful save.
@@ -622,9 +714,14 @@ export const drafts = {
   // Delete a draft only if `settled` accepts the stored record, read and
   // deleted in one transaction. The prefs editors fence their clears with it
   // (prefsDraftClearable, #909): another tab's newer text under the same key
-  // is kept.
-  clearIf(key: string, settled: (rec: DraftRecord) => boolean): Promise<boolean> {
-    return clearRowIf(key, settled);
+  // is kept. When nothing was deleted here, this tab's subscribers re-read
+  // anyway: another tab may have deleted the record first (a save of the same
+  // text there), and this tab's unload guard hears only this tab's changes
+  // (#913 review B2).
+  async clearIf(key: string, settled: (rec: DraftRecord) => boolean): Promise<boolean> {
+    const cleared = await clearRowIf(key, settled);
+    if (!cleared) void tell(subscribers);
+    return cleared;
   },
 
   async list(): Promise<DraftRecord[]> {

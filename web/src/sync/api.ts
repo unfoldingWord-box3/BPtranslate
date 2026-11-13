@@ -323,6 +323,17 @@ export function setIsAdmin(v: boolean) {
   adminRole = v;
 }
 
+// The signed-in user's id, set with the admin flag. The drafts store is per
+// workspace, not per user, so the prefs editors stamp their drafts with it and
+// a user who cannot save drops only their own (#913 item 5).
+let userId: number | null = null;
+export function currentUserId(): number | null {
+  return userId;
+}
+export function setCurrentUserId(v: number | null) {
+  userId = v;
+}
+
 // Surface to the UI that we tried to silently refresh a 401 and it failed.
 // App.tsx subscribes to render a "Session expired — sign in again" banner;
 // the outbox keeps queuing edits in the meantime so nothing is lost.

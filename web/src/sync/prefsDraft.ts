@@ -21,6 +21,9 @@ export type PrefsFields = Record<string, string | null>;
 export interface PrefsDraftPayload {
   text: PrefsFields;
   base: PrefsFields;
+  // The id of the user who typed it (#913 item 5). Absent on drafts written
+  // before it was recorded.
+  owner?: number;
 }
 
 export interface PrefsDraftState<F extends PrefsFields = PrefsFields> {
@@ -139,6 +142,41 @@ export function afterPrefsSave<F extends PrefsFields>(
   return { text: out, base: saved, baseVersion: savedVersion };
 }
 
+// Another tab saved `saved` at `savedVersion` for this editor's fields (#913
+// review A2). When every box typed here holds the saved value, nothing here is
+// unsaved: every box shows the saved value at the new version (a box nobody
+// typed in, the hidden `notes` too, takes the server's value as everywhere
+// else, so a stale copy neither blocks this nor goes back in a save; round 2,
+// B1). A typed box holding other text keeps the editor as it is (null): its
+// Save answers 409 when that box changed, and settles from there.
+export function afterPrefsSavedElsewhere<F extends PrefsFields>(
+  state: PrefsDraftState<F>,
+  saved: F,
+  savedVersion: number,
+): PrefsDraftState<F> | null {
+  // Not newer than what this editor holds: an old or repeated message (C3).
+  if (savedVersion <= state.baseVersion) return null;
+  if (!typedKeys(state.text, state.base).every((k) => state.text[k] === saved[k])) return null;
+  return { text: saved, base: saved, baseVersion: savedVersion };
+}
+
+// Whether another tab's discard of a draft whose text was `discarded` threw
+// away the typing this editor shows: some box is typed here, and every typed
+// box holds the discarded value. Boxes not typed here (Brief's `notes`, or a
+// box showing a newer server value) do not count (round 3, C2).
+export function prefsDiscardMatches(text: PrefsFields, base: PrefsFields, discarded: PrefsFields): boolean {
+  const typed = typedKeys(text, base);
+  return typed.length > 0 && typed.every((k) => text[k] === discarded[k]);
+}
+
+// The prefs row a page should hold after seeing `next`: never an older version
+// than the one it has, so a late first load, or a save response overtaken by
+// another tab's newer save, cannot pair an old row with a newer editor
+// version (round 3, C1). The same version replaces it (a refetch).
+export function newestPrefs<P extends { version: number }>(cur: P | null, next: P): P {
+  return cur && next.version < cur.version ? cur : next;
+}
+
 // Whether a stored prefs draft may be deleted by this tab: only when it holds
 // one of `texts` (what this tab last wrote, or what it is settling to). The
 // store is shared by every tab of the workspace, so another tab's newer typing
@@ -149,6 +187,24 @@ export function prefsDraftClearable(payload: unknown, texts: PrefsFields[]): boo
   return texts.some((t) => sameFields(p.text as PrefsFields, t));
 }
 
+// Whether this editor's draft has gone from the store while the editor still
+// shows typed text: another tab that restored it deleted it (a one-step undo
+// or a save there, #913 item 1). The editor then writes it again, so the
+// "N unsaved" count, the unload warning and a reload still find the typing
+// this tab is showing.
+export function prefsDraftLost(text: PrefsFields, base: PrefsFields, stored: boolean): boolean {
+  return !stored && typedKeys(text, base).length > 0;
+}
+
+// Whether a user who cannot save may delete a stored prefs draft when the
+// editor opens (#909 gate review H2): only one they typed themselves, before
+// they lost the right to save. The store is per workspace, not per user, so on
+// a shared browser it can hold an admin's typing, which is left alone, as is a
+// draft with no author recorded (#913 item 5).
+export function prefsDraftDroppable(payload: unknown, userId: number | null): boolean {
+  const p = payload as Partial<PrefsDraftPayload> | null;
+  return userId != null && !!p && p.owner === userId;
+}
 
 function isFields(v: unknown): v is PrefsFields {
   if (!v || typeof v !== "object" || Array.isArray(v)) return false;

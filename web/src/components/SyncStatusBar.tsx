@@ -500,7 +500,7 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
             variant="caption"
             sx={{ fontFamily: "monospace", display: "block" }}
           >
-            {formatDraftMeta(d.meta)}
+            {formatDraftMeta(d.meta, t)}
           </Typography>
         ))}
       </Stack>
@@ -545,7 +545,7 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
           {activeDrafts.map((d) => (
             <MenuItem key={d.key} onClick={() => navigateToDraft(d.meta)} dense>
               <ListItemText
-                primary={formatDraftMeta(d.meta)}
+                primary={formatDraftMeta(d.meta, t)}
                 secondary={draftPreviewLine(d)}
                 primaryTypographyProps={{ sx: { fontFamily: "monospace", fontSize: 13 } }}
                 secondaryTypographyProps={{
@@ -766,7 +766,7 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
                           fontFamily: "monospace",
                         }}
                       >
-                        {formatDraftMeta(d.meta)}
+                        {formatDraftMeta(d.meta, t)}
                       </Typography>
                       {d.quarantined && (
                         <Typography

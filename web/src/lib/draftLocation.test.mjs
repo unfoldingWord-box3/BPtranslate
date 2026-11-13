@@ -36,5 +36,16 @@ assert.strictEqual(formatDraftMeta(articleTitle), "TA figs-metaphor · title");
 assert.strictEqual(formatDraftMeta(template), "rc://*/ta/man/translate/figs-idiom · t/1");
 assert.strictEqual(formatDraftMeta(prefs), "Style · Common issues");
 assert.strictEqual(formatDraftMeta({ kind: "prefs", section: "brief" }), "Style · Brief");
+// #913 item 7: with the UI's translator, the page and box names are translated.
+const ar = {
+  "moreTools.style.title": "الأسلوب",
+  "moreTools.style.sectionBrief": "الموجز",
+  "moreTools.style.sectionCommonIssues": "المشكلات الشائعة",
+};
+const tAr = (k) => ar[k] ?? k;
+assert.strictEqual(formatDraftMeta({ kind: "prefs", section: "brief" }, tAr), "الأسلوب · الموجز");
+assert.strictEqual(formatDraftMeta(prefs, tAr), "الأسلوب · المشكلات الشائعة");
+// Other kinds name a reference, not a page, and are unchanged.
+assert.strictEqual(formatDraftMeta(verse, tAr), "ULT ZEC 6:1");
 
 console.log("draftLocation: all assertions passed.");
