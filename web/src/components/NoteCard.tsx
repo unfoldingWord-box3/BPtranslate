@@ -63,7 +63,7 @@ import {
   withPendingReverts,
   type PendingRowSave,
 } from "../sync/draftSaveState";
-import { onOutboxDrop, onOutboxResult, outbox, type OutboxOp } from "../sync/outbox";
+import { onOpDropped, onOutboxResult, outbox, type DroppedOp, type OutboxOp } from "../sync/outbox";
 import { useRefusedSaveHold } from "../hooks/useRefusedSaveHold";
 import { isAquiferDraftRow } from "./flows/translateShared";
 import { noteLockedReadOnly } from "../lib/chapterLock";
@@ -1158,7 +1158,7 @@ function NoteCardInner({
   // version re-runs the draft write against the moved baseline.
   useEffect(() => {
     const target = { rowKind: "tn", id: row.id, book: row.book };
-    const end = (op: OutboxOp, rerun: boolean) => {
+    const end = (op: DroppedOp, rerun: boolean) => {
       endedOpsRef.current.add(op.id);
       const sent = sentRef.current;
       if (!sent || !isEditorsPendingSave(sent, op, target)) return;
@@ -1173,7 +1173,8 @@ function NoteCardInner({
     const offResult = onOutboxResult((op, result) => {
       if (rowSaveEnded(result)) end(op, result.kind !== "ok");
     });
-    const offDrop = onOutboxDrop((op) => end(op, true));
+    // A discard in this tab or another (#637 review item 1).
+    const offDrop = onOpDropped((op) => end(op, true));
     return () => {
       offResult();
       offDrop();

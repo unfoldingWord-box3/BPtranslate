@@ -22,7 +22,7 @@ import { backoffMs } from "./backoff";
 import { isSortOrderOnlyPatch, wouldAutoHeal } from "./rowConflict";
 import { deletesOnFatal, healSettlesAsSaved, rearmOnKeepMine, resultFor409 } from "./conflict409.ts";
 import { isLaneFrozen, laneFreezeReason } from "./laneFreeze";
-import { openRowDropChannel, type RowDrop } from "./rowDropChannel.ts";
+import { ROW_DROP_CHANNEL_BASE, openRowDropChannel, type RowDrop } from "./rowDropChannel.ts";
 import {
   MAX_ATTEMPTS_SENTINEL,
   eligibleForVersionThread,
@@ -764,9 +764,10 @@ export function onOutboxDrop(fn: DropListener): () => void {
   return () => dropListeners.delete(fn);
 }
 
-// A row op another tab dropped (#637 item 3, rowDropChannel.ts). Only the
-// cached-row rebuild and the editors' refused-save holds hear it; the drafts
-// store is shared, so the dropping tab's own drop listeners already settled it.
+// A row op another tab dropped (#637 item 3, rowDropChannel.ts). The drop
+// listeners above do not hear it: the drafts store is shared, so the dropping
+// tab's own drop listeners already settled it. The cached-row rebuild hears
+// it here, and editors that track their pending save through onOpDropped.
 // This tab's status bar re-reads the outbox, so it stops listing the op.
 type RemoteDropListener = (drop: RowDrop) => void;
 const remoteDropListeners = new Set<RemoteDropListener>();
@@ -774,7 +775,23 @@ export function onRemoteRowDrop(fn: RemoteDropListener): () => void {
   remoteDropListeners.add(fn);
   return () => remoteDropListeners.delete(fn);
 }
-const rowDropChannel = openRowDropChannel((drop) => {
+
+/** The parts of a dropped op an editor matches its pending save against. */
+export type DroppedOp = Pick<OutboxOp, "id" | "target" | "action" | "patch">;
+// An op dropped in this tab (onOutboxDrop) or a row op dropped in another
+// (onRemoteRowDrop). For an editor that tracks its own pending save: a save
+// discarded from another tab ends it as a local Discard does (#637 review).
+export function onOpDropped(fn: (op: DroppedOp) => void): () => void {
+  const offLocal = onOutboxDrop(fn);
+  const offRemote = onRemoteRowDrop(fn);
+  return () => {
+    offLocal();
+    offRemote();
+  };
+}
+
+// Named per workspace, as the outbox database is (review item 3).
+const rowDropChannel = openRowDropChannel(workspaceDbName(ROW_DROP_CHANNEL_BASE), (drop) => {
   for (const l of remoteDropListeners) {
     try {
       l(drop);
