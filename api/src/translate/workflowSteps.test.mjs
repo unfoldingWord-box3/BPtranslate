@@ -191,7 +191,7 @@ test("full run: source → context → 11 batches → merge reproduces the recor
   const { deps } = s;
 
   const src = await steps.guardAndSourceStep(deps, PARAMS);
-  assert.deepEqual(src, { batchCount: 11, rowCount: 153, coversWholeBook: true });
+  assert.deepEqual(src, { batchCount: 11, rowCount: 153, coversWholeBook: true, approvedLeftOut: 0 });
   for (let i = 0; i < 11; i++) {
     const nn = storage.batchNn(i);
     assert.equal(s.blobs.map.get(`pipeline-output/bsoj/job-1/work/batch-${nn}.tsv`), fixture(`${DRY}work/batch-${nn}.tsv`), `work/batch-${nn}.tsv byte-identical to the bot's`);
@@ -396,7 +396,7 @@ test("by-id subset merges into an existing target book; range merge with an exis
   const rowIds = ["jdr1", "gn3t"]; // 1:1 (recorded batch 01) and 1:8 (recorded batch 05)
   const params = { ...PARAMS, rowIds };
   const src = await steps.guardAndSourceStep(s.deps, params);
-  assert.deepEqual(src, { batchCount: 1, rowCount: 2, coversWholeBook: false });
+  assert.deepEqual(src, { batchCount: 1, rowCount: 2, coversWholeBook: false, approvedLeftOut: 0 });
   const sourceIds = s.blobs.map.get("pipeline-output/bsoj/job-1/work/batch-01.tsv");
   assert.deepEqual(sourceIds.split("\n").slice(1).filter(Boolean).map((l) => l.split("\t")[1]), rowIds, "the single batch holds exactly the selected rows, in source order");
   const ctx = await steps.contextStep(s.deps, params, 1);
@@ -656,6 +656,49 @@ test("merge base guards: an absent target refuses a partial book, and a shrinkin
   assert.equal(g.retryable, false);
   assert.match(g.message, /would leave 2 rows where the fetched base has 153/);
   assert.ok(!t.blobs.map.has("pipeline-output/bsoj/job-1/out/tn_OBA.tsv"), "the shrunken book is never written");
+});
+
+test("#895: approved rows left out of a whole-chapter run do not trip the shrink guard or the absent-target guard", async () => {
+  // 30 approved notes: past the shrink policy's 25-row / 5% floor, so a guard
+  // that counted them as lost would refuse the merge.
+  const ids = fixture("tn_OBA.tsv").split("\n").slice(1).filter(Boolean).map((l) => l.split("\t")[1]);
+  const approved = ids.slice(1, 31); // skip front:intro; all chapter 1
+  const seed = (sqlite) => {
+    const ins = sqlite.prepare(
+      `INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, note, translation_state, version, updated_at)
+       VALUES (?, 'OBA', 1, 1, '1:1', 'معتمدة', 'validated', 1, 0)`,
+    );
+    for (const id of approved) ins.run(id);
+  };
+
+  // Base present: the finished 153-row Arabic book.
+  const s = await scenario({ withTarget: fixture(`${DRY}tn_OBA.tsv`) });
+  seed(s.sqlite);
+  const src = await steps.guardAndSourceStep(s.deps, PARAMS);
+  assert.equal(src.approvedLeftOut, 30);
+  assert.equal(src.rowCount, ids.length - 30);
+  assert.equal(src.coversWholeBook, true, "counted before the approved rows were left out");
+  const ctx = await steps.contextStep(s.deps, PARAMS, src.batchCount);
+  const results = [];
+  for (let i = 0; i < src.batchCount; i++) results.push(await batchStep(s.deps, PARAMS, i, src.batchCount));
+  const sent = s.replay.calls.flatMap((c) =>
+    /-----BEGIN SOURCE CONTENT-----\n([\s\S]*?)\n-----END SOURCE CONTENT-----/.exec(c.user)[1].split("\n").slice(1).filter(Boolean).map((l) => l.split("\t")[1]));
+  assert.deepEqual(sent.filter((id) => approved.includes(id)), [], "no approved row reached the provider");
+  const merged = await steps.mergeReportStep(s.deps, PARAMS, src, ctx, results);
+  assert.equal(merged.rowCount, ids.length - 30);
+  const out = s.blobs.map.get("pipeline-output/bsoj/job-1/out/tn_OBA.tsv");
+  const outIds = out.split("\n").slice(1).filter(Boolean).map((l) => l.split("\t")[1]);
+  assert.deepEqual(outIds.filter((id) => approved.includes(id)), [], "the out file carries no row for them, so the import stages none");
+
+  // Base absent: the run still covered the whole book, so the merge may create it.
+  const a = await scenario();
+  seed(a.sqlite);
+  const asrc = await steps.guardAndSourceStep(a.deps, PARAMS);
+  const actx = await steps.contextStep(a.deps, PARAMS, asrc.batchCount);
+  const ares = [];
+  for (let i = 0; i < asrc.batchCount; i++) ares.push(await batchStep(a.deps, PARAMS, i, asrc.batchCount));
+  const am = await steps.mergeReportStep(a.deps, PARAMS, asrc, actx, ares);
+  assert.equal(am.rowCount, ids.length - 30);
 });
 
 test("context step: a DCS transport failure on the scripture pack retries instead of persisting a context-free pack", async () => {
