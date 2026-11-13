@@ -1681,8 +1681,12 @@ for (const [what, match] of [
 ]) {
   test(`#923 item 2: a D1 error reading ${what} leaves a failed run for the night`, async () => {
     const f = await fresh();
-    hookDb(f, match, "throw");
+    const restore = hookDb(f, match, "throw");
     await assert.rejects(f.run(NIGHT1), /simulated/);
+    restore();
+    const last = (await readLessonsState(f.env)).lastRun;
+    assert.equal(last?.night, "2026-11-12", "the admin page reads the failed night");
+    assert.equal(last?.status, "failed");
     const rows = f.runs();
     assert.equal(rows.length, 1, "the admin page shows the night");
     assert.equal(rows[0].night, "2026-11-12");
@@ -1697,8 +1701,10 @@ test("#923 item 3: a night after the newest approval was un-approved never store
   const f = await fresh();
   const a = approveIn(f, 4, "c401", "قال الكاتب", "كتب الكاتب");
   approveIn(f, 5, "c501");
-  const c = approveIn(f, 5, "c502");
-  // A finished run through c, with MRK 4 left owed below it.
+  approveIn(f, 6, "c601");
+  const c = approveIn(f, 6, "c602");
+  // A finished run through c, with MRK 4 left owed below it; MRK 6 and MRK 5
+  // are the newest chapters, so MRK 4 runs through the owed path.
   f.sqlite
     .prepare(
       `INSERT INTO lesson_runs (night, started_at, finished_at, status, approvals_through, chapters_json, truncated, marks_json)
@@ -1706,8 +1712,9 @@ test("#923 item 3: a night after the newest approval was un-approved never store
     )
     .run(c, JSON.stringify([{ book: "MRK", chapter: 4, through: a - 1 }]));
   // The newest approval goes back to draft: tonight's watermark drops below c.
-  f.sqlite.prepare(`UPDATE tn_rows SET translation_state = 'draft' WHERE id = 'c502'`).run();
+  f.sqlite.prepare(`UPDATE tn_rows SET translation_state = 'draft' WHERE id = 'c602'`).run();
   assert.equal((await f.run(NIGHT1)).status, "ok");
+  assert.match(f.calls[0].user, /Chapters: MRK 6, MRK 5, MRK 4\./, "the newest chapters plus the owed one");
   assert.match(f.calls[0].user, SAID, "MRK 4's owed approval is mined");
   const row = f.runs().at(-1);
   assert.equal(row.approvals_through, c, "never below the last stored watermark");
