@@ -459,10 +459,20 @@ export const drafts = {
   async discard(key: string): Promise<void> {
     pendingKeys.delete(key);
     latestGenerationByKey.delete(key);
-    // Other tabs showing a prefs draft reset their box too, before the record
-    // is gone, so none of them writes it back (#913 review A1).
-    if (key.startsWith("prefs:")) prefsChannel.announce({ type: "prefs-discard", key });
-    await (await db()).delete(STORE, key);
+    const tx = (await db()).transaction(STORE, "readwrite");
+    if (key.startsWith("prefs:")) {
+      // Other tabs showing this prefs draft's text reset their box too, told
+      // before the record is gone so none of them writes it back (#913 review
+      // A1). The message names the text thrown away: a tab showing other
+      // typing keeps it (round 2, B3).
+      const rec = (await tx.store.get(key)) as DraftRecord | undefined;
+      const text = (rec?.payload as { text?: unknown } | undefined)?.text;
+      if (text && typeof text === "object" && !Array.isArray(text)) {
+        prefsChannel.announce({ type: "prefs-discard", key, text: text as Record<string, string | null> });
+      }
+    }
+    await tx.store.delete(key);
+    await tx.done;
     for (const l of discardListeners) {
       try {
         l(key);
@@ -471,6 +481,48 @@ export const drafts = {
       }
     }
     void notify();
+  },
+
+  // Write a draft only when none is stored under `key`, read and written in
+  // one transaction, so it never replaces a record another tab wrote in the
+  // meantime (#913 review B4: a prefs editor writing back its draft after
+  // another tab deleted it). Resolves whether it wrote.
+  async setIfAbsent(key: string, payload: DraftPayload, expectedVersion: number, meta: DraftMeta): Promise<boolean> {
+    if (isReadOnly()) return false;
+    // Marked dirty synchronously, as set() does: this tab is showing the typing.
+    const generation = nextGeneration();
+    const prevGeneration = latestGenerationByKey.get(key);
+    pendingKeys.add(key);
+    latestGenerationByKey.set(key, generation);
+    const tx = (await db()).transaction(STORE, "readwrite");
+    const existing = await tx.store.get(key);
+    if (!existing) {
+      const rec: DraftRecord = { key, payload, expectedVersion, updatedAt: Date.now(), generation, meta };
+      await tx.store.put(rec);
+    }
+    await tx.done;
+    if (existing) {
+      // Nothing written: the generation this tab last wrote is still its latest.
+      if (latestGenerationByKey.get(key) === generation) {
+        if (prevGeneration === undefined) latestGenerationByKey.delete(key);
+        else latestGenerationByKey.set(key, prevGeneration);
+      }
+      return false;
+    }
+    void notify();
+    return true;
+  },
+
+  // Drop this tab's "unsaved here" mark for `key` (pendingKeys), for an editor
+  // that another tab's discard or save made clean (#913 review B2). The
+  // record itself is the other tab's to delete; without this the unload guard
+  // would still warn for typing this tab no longer holds. This tab's
+  // subscribers re-read the store: the unload guard's own copy hears only
+  // this tab's changes, and the other tab's delete was not one of them.
+  forget(key: string): void {
+    pendingKeys.delete(key);
+    latestGenerationByKey.delete(key);
+    void tell(subscribers);
   },
 
   // Delete only the exact draft generation that produced a successful save.

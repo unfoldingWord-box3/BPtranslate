@@ -6,6 +6,7 @@ import {
   type TranslationExample,
   type ContextExportStatus,
 } from "../sync/api";
+import { onPrefsDraftElsewhere } from "../sync/drafts";
 
 // Preferences singleton (brief + instructions + register + assisted flag).
 // `enabled === false` yields an idle result so the caller can gate on the
@@ -53,6 +54,19 @@ export function useTranslationPrefs(enabled: boolean): {
       cancelled = true;
     };
   }, [enabled, reloadKey]);
+
+  // Another tab of this workspace saved Brief, Instructions or Common issues:
+  // take the row its save returned, as that tab did, so this page never pairs
+  // the new version with an older row (#913 review B1). An older row (a
+  // message overtaken by a newer save or fetch) is ignored.
+  useEffect(() => {
+    if (!enabled) return;
+    return onPrefsDraftElsewhere((m) => {
+      if (m.type !== "prefs-saved") return;
+      const row = m.row as unknown as TranslationPrefs;
+      setPrefs((cur) => (cur && row.version > cur.version ? row : cur));
+    });
+  }, [enabled]);
 
   return { prefs, loading, error, refetch, apply };
 }

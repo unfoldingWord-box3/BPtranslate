@@ -6,10 +6,13 @@
 // (#913 item 1). The drafts-changed message carries no key or reason, so on
 // its own a tab could not tell "thrown away" or "saved" from "deleted by
 // mistake". Two messages, by key:
-// - prefs-discard: the user discarded this draft. Every tab showing it puts
-//   the server's text back, as the discarding tab does, and writes nothing.
-// - prefs-saved: this text was saved at `version`. A tab showing exactly that
-//   text takes the version and is clean; one showing other text keeps it.
+// - prefs-discard: the user discarded this draft, whose text was `text`. A tab
+//   showing exactly that text puts the server's text back, as the discarding
+//   tab does, and writes nothing; a tab showing other typing keeps it (round
+//   2, B3).
+// - prefs-saved: `row` is the prefs row the save returned. Every tab takes it
+//   as its prefs row, so it never holds the new version with an old row (B1),
+//   and an editor whose typed boxes hold the saved text is clean.
 // The sender posts before it deletes the record, so a receiving tab has
 // settled before it can see the record missing.
 //
@@ -26,8 +29,8 @@ export const PREFS_DRAFT_CHANNEL_BASE = "be-prefs-draft";
 type Fields = Record<string, string | null>;
 
 export type PrefsDraftMessage =
-  | { type: "prefs-discard"; key: string }
-  | { type: "prefs-saved"; key: string; text: Fields; version: number };
+  | { type: "prefs-discard"; key: string; text: Fields }
+  | { type: "prefs-saved"; key: string; row: Record<string, unknown> & { version: number } };
 
 interface ChannelLike {
   postMessage(message: unknown): void;
@@ -44,9 +47,10 @@ export function parsePrefsDraftMessage(data: unknown): PrefsDraftMessage | null 
   if (!data || typeof data !== "object" || Array.isArray(data)) return null;
   const d = data as Record<string, unknown>;
   if (typeof d.key !== "string" || !d.key.startsWith("prefs:")) return null;
-  if (d.type === "prefs-discard") return { type: "prefs-discard", key: d.key };
-  if (d.type === "prefs-saved" && isFields(d.text) && typeof d.version === "number" && Number.isFinite(d.version)) {
-    return { type: "prefs-saved", key: d.key, text: d.text, version: d.version };
+  if (d.type === "prefs-discard" && isFields(d.text)) return { type: "prefs-discard", key: d.key, text: d.text };
+  const row = d.row as Record<string, unknown> | undefined;
+  if (d.type === "prefs-saved" && row && typeof row === "object" && !Array.isArray(row) && Number.isInteger(row.version)) {
+    return { type: "prefs-saved", key: d.key, row: row as Record<string, unknown> & { version: number } };
   }
   return null;
 }

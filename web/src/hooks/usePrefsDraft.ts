@@ -13,6 +13,7 @@ import {
   prefsDraftLost,
   prefsSavePayload,
   prefsVersionToSend,
+  sameFields,
   typedKeys,
   type PrefsDraftSection,
   type PrefsDraftState,
@@ -56,6 +57,9 @@ export function usePrefsDraft<F extends PrefsFields>(
   // Discarded from the unsaved menu before this editor finished loading: the
   // stored record it read (or is reading) must not come back (#913 item 6).
   const discardedEarly = useRef(false);
+  // The same, when the discard came from another tab: only a record holding
+  // the discarded text is ignored (round 2, B3).
+  const discardedElsewhere = useRef<PrefsFields | null>(null);
   const prefsRef = useRef(prefs);
   useEffect(() => {
     prefsRef.current = prefs;
@@ -75,16 +79,15 @@ export function usePrefsDraft<F extends PrefsFields>(
   }, [key]);
 
   // Store typed state as this editor's draft, stamped with who typed it.
+  // `ifAbsent`: only when no record is stored (the write-back below, B4).
   const write = useCallback(
-    (s: PrefsDraftState<F>) => {
+    (s: PrefsDraftState<F>, ifAbsent = false) => {
       lastWritten.current = s.text;
       const owner = currentUserId();
-      void drafts.set(
-        key,
-        { text: s.text, base: s.base, ...(owner != null ? { owner } : {}) },
-        s.baseVersion,
-        { kind: "prefs", section },
-      );
+      const payload = { text: s.text, base: s.base, ...(owner != null ? { owner } : {}) };
+      const meta = { kind: "prefs" as const, section };
+      if (ifAbsent) void drafts.setIfAbsent(key, payload, s.baseVersion, meta);
+      else void drafts.set(key, payload, s.baseVersion, meta);
     },
     [key, section],
   );
@@ -97,6 +100,10 @@ export function usePrefsDraft<F extends PrefsFields>(
       setState(next);
       if (!canSave) return;
       if (typedKeys(next.text, next.base).length === 0) {
+        // Nothing unsaved here any more, whoever deletes the record: another
+        // tab's clear can get to it first (a save there of the same text), and
+        // this tab's unload guard must not keep warning (review B2).
+        drafts.forget(key);
         const own = [next.text, ...(lastWritten.current ? [lastWritten.current] : [])];
         void drafts.clearIf(key, (rec) => prefsDraftClearable(rec.payload, own));
       } else {
@@ -109,14 +116,15 @@ export function usePrefsDraft<F extends PrefsFields>(
   // Another tab that restored this editor's draft can delete it (a one-step
   // undo or a save there) while this editor still shows the typing. Write it
   // again, so the "N unsaved" count, the unload warning and a reload still
-  // find it (#913 item 1). Only a missing record is rewritten, so two tabs
-  // cannot take turns overwriting each other.
+  // find it (#913 item 1). Only a missing record is rewritten, and only while
+  // it is still missing (one transaction, review B4), so two tabs cannot take
+  // turns overwriting each other and newer typing from another tab is kept.
   useEffect(() => {
     if (!canSave) return;
     return drafts.subscribe(
       (all) => {
         const s = stateRef.current;
-        if (s && prefsDraftLost(s.text, s.base, all.some((d) => d.key === key))) write(s);
+        if (s && prefsDraftLost(s.text, s.base, all.some((d) => d.key === key))) write(s, true);
       },
       { remote: true },
     );
@@ -124,7 +132,12 @@ export function usePrefsDraft<F extends PrefsFields>(
 
   useEffect(() => {
     if (stateRef.current || !prefs || !stored) return;
-    const rec = discardedEarly.current ? undefined : stored.rec;
+    const read = stored.rec;
+    const readText = (read?.payload as { text?: PrefsFields } | null | undefined)?.text;
+    const thrownAway =
+      discardedEarly.current ||
+      (!!discardedElsewhere.current && !!readText && sameFields(readText, discardedElsewhere.current));
+    const rec = thrownAway ? undefined : read;
     const h = hydratePrefsDraft(pick(prefs), prefs.version, canSave ? rec : undefined);
     // Delete only the record that was read, not one written since (by another
     // tab, say). A user who cannot save leaves another user's draft alone.
@@ -173,21 +186,36 @@ export function usePrefsDraft<F extends PrefsFields>(
     [key, discarded],
   );
 
-  // Another tab discarded this draft (A1), or saved this editor's fields (A2):
-  // showing exactly the saved text, this editor is clean at the new version.
+  // Another tab discarded this draft (A1) or saved this editor's fields (A2).
   useEffect(
     () =>
       onPrefsDraftElsewhere((m) => {
         if (m.key !== key) return;
+        const s = stateRef.current;
         if (m.type === "prefs-discard") {
+          if (!s) {
+            discardedElsewhere.current = m.text;
+            return;
+          }
+          // Only the text thrown away is reset; other typing here stays, and
+          // the write-back above stores it once the record is gone (B3).
+          if (!sameFields(s.text, m.text)) return;
           discarded();
+          // This tab no longer holds unsaved typing (B2). If this tab's own
+          // write-back got in first, the discarded text is stored again:
+          // delete it, and only it (B3).
+          drafts.forget(key);
+          void drafts.clearIf(key, (rec) => prefsDraftClearable(rec.payload, [m.text]));
           return;
         }
-        const s = stateRef.current;
-        const next = s && afterPrefsSavedElsewhere(s, m.text, m.version);
+        // Saved: when every box typed here holds the saved text, this editor
+        // is clean on the saved row (the page's prefs state takes that row
+        // too, useTranslationPrefs).
+        const next = s && afterPrefsSavedElsewhere(s, pick(m.row as unknown as TranslationPrefs), m.row.version);
+        // commit() drops this tab's unsaved mark (B2).
         if (next) commit(next);
       }),
-    [key, discarded, commit],
+    [key, discarded, commit, pick],
   );
 
   useShowDraftEditors(state ? [key] : []);
@@ -216,7 +244,7 @@ export function usePrefsDraft<F extends PrefsFields>(
       if (!s) return;
       // Posted before this tab's draft is cleared, so another tab showing the
       // saved text is clean before it can see the record gone (#913 A2).
-      announcePrefsDraft({ type: "prefs-saved", key, text: pick(row), version: row.version });
+      announcePrefsDraft({ type: "prefs-saved", key, row: row as unknown as Record<string, unknown> & { version: number } });
       commit(afterPrefsSave(s.text, textAtSave.current ?? s.text, pick(row), row.version));
     },
     conflicted: (current: TranslationPrefs) => {

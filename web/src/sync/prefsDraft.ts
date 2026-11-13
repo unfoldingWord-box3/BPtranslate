@@ -143,17 +143,19 @@ export function afterPrefsSave<F extends PrefsFields>(
 }
 
 // Another tab saved `saved` at `savedVersion` for this editor's fields (#913
-// review A2). When this editor shows exactly that text, it is saved: the text
-// becomes the base at the new version, so nothing is unsaved and the next Save
-// sends the current version. Other text is kept as it is (null): it is still
-// unsaved, and a Save of it answers 409 and settles from there.
+// review A2). When every box typed here holds the saved value, nothing here is
+// unsaved: every box shows the saved value at the new version (a box nobody
+// typed in, the hidden `notes` too, takes the server's value as everywhere
+// else, so a stale copy neither blocks this nor goes back in a save; round 2,
+// B1). A typed box holding other text keeps the editor as it is (null): its
+// Save answers 409 when that box changed, and settles from there.
 export function afterPrefsSavedElsewhere<F extends PrefsFields>(
   state: PrefsDraftState<F>,
-  saved: PrefsFields,
+  saved: F,
   savedVersion: number,
 ): PrefsDraftState<F> | null {
-  if (!sameFields(state.text, saved)) return null;
-  return { text: state.text, base: state.text, baseVersion: savedVersion };
+  if (!typedKeys(state.text, state.base).every((k) => state.text[k] === saved[k])) return null;
+  return { text: saved, base: saved, baseVersion: savedVersion };
 }
 
 // Whether a stored prefs draft may be deleted by this tab: only when it holds
