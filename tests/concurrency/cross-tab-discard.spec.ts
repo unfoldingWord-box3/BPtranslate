@@ -120,6 +120,17 @@ async function conflictInB(context: BrowserContext, tq: TqRow, typed: string, an
   return { a, b };
 }
 
+// A "stays" check: `check` must hold at every sample for `ms`, not just once
+// after a fixed sleep (a one-shot check can pass before a late change lands).
+async function holdsFor(page: Page, ms: number, check: () => Promise<void>) {
+  const end = Date.now() + ms;
+  do {
+    await check();
+    await page.waitForTimeout(100);
+  } while (Date.now() < end);
+  await check();
+}
+
 async function discardConflict(page: Page) {
   await page.bringToFront();
   await page.getByText(/^1 conflict$/).first().click();
@@ -171,12 +182,13 @@ test("tab B keeps text typed after the conflicted save when tab A discards that 
   await discardConflict(a);
   await expect(questionField(a, tq.id)).toHaveValue(server);
   await reread;
-  await b.waitForTimeout(500);
 
   // Tab B still shows the newer typing, as unsaved against the server's row,
   // and the drafts store still holds it.
-  await expect(questionField(b, tq.id)).toHaveValue(newer);
-  await expect(saveButton(b, tq.id)).toBeEnabled();
+  await holdsFor(b, 1000, async () => {
+    expect(await questionField(b, tq.id).inputValue()).toBe(newer);
+    expect(await saveButton(b, tq.id).isEnabled()).toBe(true);
+  });
   await expect
     .poll(() => readDraftPatch(b, `row:tq:ZEC:${tq.id}`))
     .toEqual(expect.objectContaining({ question: newer }));
@@ -241,7 +253,14 @@ test("tN card, tab B not draining: a refused save discarded in tab A frees tab B
   await context.route(`**/api/rows/tn/${tn.id}**`, async (route, request) => {
     if (request.method() !== "PATCH") return route.continue();
     patches++;
-    sentFrom.push(request.frame().page() === pageA ? "A" : "B");
+    // frame() throws for a request with no frame (a service worker's).
+    let from = "?";
+    try {
+      from = request.frame().page() === pageA ? "A" : "B";
+    } catch {
+      /* no frame */
+    }
+    sentFrom.push(from);
     await route.fulfill({ status: 422, contentType: "application/json", body: JSON.stringify(REFUSED.body) });
   });
 
@@ -269,8 +288,7 @@ test("tN card, tab B not draining: a refused save discarded in tab A frees tab B
   await save.click();
   // Leave the card, so it follows the row (no editing session open).
   await noteTextarea(b, other.id).click();
-  await b.waitForTimeout(500);
-  expect(patches, "tab B cannot drain while tab A holds the lock").toBe(0);
+  await holdsFor(b, 500, async () => expect(patches, "tab B cannot drain while tab A holds the lock").toBe(0));
 
   // Tab A lets go of the lock and drains at once (a focus drains).
   // The release is async, so wait until the lock is free before the focus,
@@ -293,8 +311,7 @@ test("tN card, tab B not draining: a refused save discarded in tab A frees tab B
   // Tab B: the card shows the server's note, leaves no draft behind, and its
   // Save works again for new text.
   await expect(noteTextarea(b, tn.id)).toHaveValue(server);
-  await b.waitForTimeout(1000);
-  expect(await readDraftPatch(b, key), "no stray draft for the row").toBeNull();
+  await holdsFor(b, 1500, async () => expect(await readDraftPatch(b, key), "no stray draft for the row").toBeNull());
   const again = `CROSS TAB NOTE AGAIN ${Date.now()}`;
   await noteTextarea(b, tn.id).fill(again);
   await expect(save, "Save should be enabled for new text").toBeEnabled();

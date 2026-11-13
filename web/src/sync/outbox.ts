@@ -22,7 +22,7 @@ import { backoffMs } from "./backoff";
 import { isSortOrderOnlyPatch, wouldAutoHeal } from "./rowConflict";
 import { deletesOnFatal, healSettlesAsSaved, rearmOnKeepMine, resultFor409 } from "./conflict409.ts";
 import { isLaneFrozen, laneFreezeReason } from "./laneFreeze";
-import { ROW_DROP_CHANNEL_BASE, openRowDropChannel, type RowDrop } from "./rowDropChannel.ts";
+import { ROW_DROP_CHANNEL_BASE, hasQueuedTwin, openRowDropChannel, type RowDrop } from "./rowDropChannel.ts";
 import {
   MAX_ATTEMPTS_SENTINEL,
   eligibleForVersionThread,
@@ -776,8 +776,13 @@ export function onRemoteRowDrop(fn: RemoteDropListener): () => void {
   return () => remoteDropListeners.delete(fn);
 }
 
-/** The parts of a dropped op an editor matches its pending save against. */
-export type DroppedOp = Pick<OutboxOp, "id" | "target" | "action" | "patch">;
+/**
+ * The parts of a dropped op an editor matches its pending save against.
+ * `twinQueued` (another tab's drop only): an op with the same row and patch is
+ * still queued, so an editor matching by content must not take this one for
+ * its own (hasQueuedTwin).
+ */
+export type DroppedOp = Pick<OutboxOp, "id" | "target" | "action" | "patch"> & { twinQueued?: boolean };
 // An op dropped in this tab (onOutboxDrop) or a row op dropped in another
 // (onRemoteRowDrop). For an editor that tracks its own pending save: a save
 // discarded from another tab ends it as a local Discard does (#637 review).
@@ -791,7 +796,16 @@ export function onOpDropped(fn: (op: DroppedOp) => void): () => void {
 }
 
 // Named per workspace, as the outbox database is (review item 3).
-const rowDropChannel = openRowDropChannel(workspaceDbName(ROW_DROP_CHANNEL_BASE), (drop) => {
+const rowDropChannel = openRowDropChannel(workspaceDbName(ROW_DROP_CHANNEL_BASE), async (received) => {
+  // Read once for every listener: is this tab's own save of the same text
+  // still queued (round 2 review)? Saves this tab has not committed yet count.
+  let queued: OutboxOp[] | null;
+  try {
+    queued = await outbox.listWithUncommitted();
+  } catch {
+    queued = null;
+  }
+  const drop: RowDrop = { ...received, twinQueued: hasQueuedTwin(received, queued) };
   for (const l of remoteDropListeners) {
     try {
       l(drop);

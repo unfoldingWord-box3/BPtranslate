@@ -22,6 +22,7 @@
 // Node script (rowRebuild.test.mjs).
 
 import type { OutboxOp, RowTarget } from "./outbox.ts";
+import { isPendingRowSave } from "./draftSaveState.ts";
 
 export const ROW_DROP_CHANNEL_BASE = "be-row-drop";
 
@@ -32,6 +33,23 @@ export interface RowDrop {
   action: OutboxOp["action"];
   patch: OutboxOp["patch"];
   conflictCurrent?: unknown;
+  /** Set by the receiving tab (never sent): hasQueuedTwin found a twin still queued. */
+  twinQueued?: boolean;
+}
+
+// Whether another op with the dropped op's row and exact patch is still in the
+// outbox (any status). Tabs A and B can each queue the same text for one row;
+// when A discards its op, B's editor, which knows its own save only by row and
+// patch, would take A's op for its own while its own op is still queued. An
+// editor that matches by content leaves its save alone when this is true; one
+// that knows its op id matches by id. An unreadable outbox (null) counts as no
+// twin, the behaviour before the check.
+export function hasQueuedTwin(
+  drop: Pick<RowDrop, "id" | "target" | "action" | "patch">,
+  queued: OutboxOp[] | null,
+): boolean {
+  if (!queued || drop.action !== "patch") return false;
+  return queued.some((o) => o.id !== drop.id && isPendingRowSave(drop.patch, o, drop.target));
 }
 
 interface ChannelLike {
