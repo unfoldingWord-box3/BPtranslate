@@ -1621,3 +1621,119 @@ test("#912 item 8: a same-night retry after an admin change writes a set that be
   f.approveMore();
   assert.equal((await f.run(NIGHT2 + 60)).reason, "already_ran", "still one run a night");
 });
+
+// ── review leftovers (#923) ─────────────────────────────────────────────────
+
+// Wrap the workspace DB so a statement whose SQL contains `match` misbehaves
+// once: "after" runs `hook` right after the read returns (a write committing
+// between two reads), "throw" makes the read fail (a D1 error).
+function hookDb(f, match, mode, hook = () => {}) {
+  const real = f.env.DB;
+  let armed = true;
+  const wrap = (stmt, sql) => ({
+    ...stmt,
+    bind: (...a) => wrap(stmt.bind(...a), sql),
+    async first() {
+      if (armed && sql.includes(match)) {
+        if (mode === "throw") throw new Error("D1_ERROR: simulated");
+        const r = await stmt.first();
+        armed = false;
+        hook();
+        return r;
+      }
+      return stmt.first();
+    },
+    async all() {
+      if (armed && sql.includes(match) && mode === "throw") throw new Error("D1_ERROR: simulated");
+      return stmt.all();
+    },
+  });
+  f.env.DB = { ...real, prepare: (sql) => wrap(real.prepare(sql), sql) };
+  return () => (f.env.DB = real);
+}
+
+test("#923 item 1: an approval committed after the watermark was read does not make the night run on it", async () => {
+  const f = await fresh();
+  assert.equal((await f.run(NIGHT1)).status, "ok");
+  // Night 2: nothing new when the watermark is read; a hand approval commits right after.
+  const restore = hookDb(f, "SELECT MAX(e.id) AS w", "after", () => approveIn(f, 3, "late1", "قال الكاتب", "كتب الكاتب"));
+  assert.equal((await f.run(NIGHT2)).reason, "no_new_approvals", "the late approval is the next night's");
+  restore();
+  assert.equal((await f.run(NIGHT3)).status, "ok");
+  assert.match(f.calls[1].user, SAID, "night 3 mines the late approval");
+  assert.equal((await f.run(NIGHT4)).reason, "no_new_approvals", "and it is not compared again");
+  assert.equal(f.calls.length, 2);
+});
+
+test("#923 item 1: an approval committed after the watermark read cannot push a newest chapter out of the window", async () => {
+  const f = await fresh();
+  assert.equal((await f.run(NIGHT1)).status, "ok");
+  // Between nights: a new approval in MRK 2, then one in MRK 3 (the newest two at the watermark).
+  approveIn(f, 2, "n201", "قال الكاتب", "كتب الكاتب");
+  approveIn(f, 3, "n301", "ذهب الرجل", "مضى الرجل");
+  // Night 2: right after the watermark read, an approval lands in a third chapter.
+  const restore = hookDb(f, "SELECT MAX(e.id) AS w", "after", () => approveIn(f, 4, "late4"));
+  assert.equal((await f.run(NIGHT2)).status, "ok", "the night runs on the approvals it read");
+  restore();
+  assert.match(f.calls[1].user, /Chapters: MRK 3, MRK 2\./, "the newest two at the watermark, not MRK 4");
+  assert.match(f.calls[1].user, SAID, "MRK 2's new approval is mined");
+  assert.match(f.calls[1].user, WENT, "MRK 3's new approval is mined");
+});
+
+test("#923 item 1: mining counts only approvals at or below the night's watermark as new", async () => {
+  const f = await fresh();
+  const w = maxApproval(f);
+  approveIn(f, 3, "late1", "قال الكاتب", "كتب الكاتب");
+  approveIn(f, 3, "late2", "ذهب الرجل", "مضى الرجل");
+  const mined = await mineChanges(f.env.DB, [MRK(3)], { after: w, upTo: w, cells: 1 });
+  assert.equal(mined.truncated, true);
+  assert.equal(mined.stoppedAt, null, "approvals above the watermark are not new tonight: no resume point among them");
+});
+
+for (const [what, match] of [
+  ["the newest chapters", "GROUP BY t.book, t.chapter ORDER BY last_id DESC"],
+  ["the new-approval check", "SELECT 1 AS x"],
+]) {
+  test(`#923 item 2: a D1 error reading ${what} leaves a failed run for the night`, async () => {
+    const f = await fresh();
+    const restore = hookDb(f, match, "throw");
+    await assert.rejects(f.run(NIGHT1), /simulated/);
+    restore();
+    const last = (await readLessonsState(f.env)).lastRun;
+    assert.equal(last?.night, "2026-11-12", "the admin page reads the failed night");
+    assert.equal(last?.status, "failed");
+    const rows = f.runs();
+    assert.equal(rows.length, 1, "the admin page shows the night");
+    assert.equal(rows[0].night, "2026-11-12");
+    assert.equal(rows[0].status, "failed");
+    assert.equal(rows[0].failure_reason, "internal_error");
+    assert.ok(rows[0].finished_at != null);
+    assert.equal(f.calls.length, 0);
+  });
+}
+
+test("#923 item 3: a night after the newest approval was un-approved never stores a lower watermark", async () => {
+  const f = await fresh();
+  const a = approveIn(f, 4, "c401", "قال الكاتب", "كتب الكاتب");
+  approveIn(f, 5, "c501");
+  approveIn(f, 6, "c601");
+  const c = approveIn(f, 6, "c602");
+  // A finished run through c, with MRK 4 left owed below it; MRK 6 and MRK 5
+  // are the newest chapters, so MRK 4 runs through the owed path.
+  f.sqlite
+    .prepare(
+      `INSERT INTO lesson_runs (night, started_at, finished_at, status, approvals_through, chapters_json, truncated, marks_json)
+       VALUES ('2026-11-11', 1, 1, 'no_changes', ?, '[]', 0, ?)`,
+    )
+    .run(c, JSON.stringify([{ book: "MRK", chapter: 4, through: a - 1 }]));
+  // The newest approval goes back to draft: tonight's watermark drops below c.
+  f.sqlite.prepare(`UPDATE tn_rows SET translation_state = 'draft' WHERE id = 'c602'`).run();
+  assert.equal((await f.run(NIGHT1)).status, "ok");
+  assert.match(f.calls[0].user, /Chapters: MRK 6, MRK 5, MRK 4\./, "the newest chapters plus the owed one");
+  assert.match(f.calls[0].user, SAID, "MRK 4's owed approval is mined");
+  const row = f.runs().at(-1);
+  assert.equal(row.approvals_through, c, "never below the last stored watermark");
+  for (const m of JSON.parse(row.marks_json ?? "[]")) assert.notEqual(m.through, row.approvals_through);
+  assert.equal((await f.run(NIGHT2)).reason, "no_new_approvals");
+  assert.equal(f.calls.length, 1);
+});
