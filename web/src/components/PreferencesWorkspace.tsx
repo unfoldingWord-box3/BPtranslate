@@ -63,6 +63,7 @@ import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 import { UserManagementSection } from "./UserManagementSection";
 import { AiServiceSection } from "./AiServiceSection";
 import { HouseStyleRulesSection } from "./HouseStyleRulesSection";
+import { LessonsSection } from "./LessonsSection";
 import { UiLanguageControl } from "./TopBar";
 import { LocalizationSection } from "./LocalizationSection";
 import { TerminologySection } from "./TerminologySection";
@@ -117,16 +118,17 @@ export type Section =
   | "localization"
   | "users"
   | "aiService"
-  | "houseStyle";
+  | "houseStyle"
+  | "lessons";
 // Memory sections shown in the rail when a translation project + memory are
-// available. "setup", "localization", "users", "aiService" and "houseStyle" are
+// available. "setup", "localization", "users", "aiService", "houseStyle" and "lessons" are
 // admin-only and gated separately (they must show regardless of project type /
 // memory), so they aren't listed.
 export const SECTIONS: Section[] = ["brief", "instructions", "commonIssues", "terminology", "examples"];
 // Every routable section (memory + the admin-only setup wizard, localization
-// editor, user management, AI service config and house-style rules) — used for
+// editor, user management, AI service config, house-style rules and lessons) — used for
 // hash-route validation in App.tsx.
-export const ALL_SECTIONS: Section[] = [...SECTIONS, "setup", "localization", "users", "aiService", "houseStyle"];
+export const ALL_SECTIONS: Section[] = [...SECTIONS, "setup", "localization", "users", "aiService", "houseStyle", "lessons"];
 
 // Memory is now one long scrollable page; the rail items and deep links jump to
 // a section by scrolling its wrapper (id `pref-sec-<key>`) into view rather than
@@ -322,6 +324,25 @@ export function PreferencesWorkspace({ onNavigate, onBack, section, role }: Prop
               </Typography>
             </Box>
           )}
+          {role === "admin" && (
+            <Box
+              onClick={() => onNavigate("lessons")}
+              sx={{
+                px: 1.5,
+                py: 0.9,
+                cursor: "pointer",
+                borderInlineStart: "3px solid",
+                borderColor: section === "lessons" ? "primary.main" : "transparent",
+                bgcolor:
+                  section === "lessons" ? (theme) => alpha(theme.palette.primary.main, 0.08) : "transparent",
+                "&:hover": { bgcolor: "action.hover" },
+              }}
+            >
+              <Typography variant="body2" sx={{ fontWeight: section === "lessons" ? 700 : 400 }}>
+                {t("preferences.section.lessons")}
+              </Typography>
+            </Box>
+          )}
         </Box>
       </Box>
 
@@ -348,6 +369,8 @@ export function PreferencesWorkspace({ onNavigate, onBack, section, role }: Prop
             <AiServiceSection />
           ) : section === "houseStyle" && role === "admin" ? (
             <HouseStyleRulesSection />
+          ) : section === "lessons" && role === "admin" ? (
+            <LessonsSection />
           ) : cfg === null ? null : !isTranslation ? (
             <Alert severity="info" variant="outlined">
               {t("preferences.glOnly")}

@@ -14,6 +14,7 @@ import {
   type ContextFile,
   type ContextPackStats,
 } from "./contextExportLib.ts";
+import { loadLessonsForRender, renderLessonsSection, type Lesson } from "./lessonsRender.ts";
 
 export type { ContextFile, ContextPackStats };
 export { contentFileCount, hasMinimumContent, hasSemanticContent, totalBytes };
@@ -94,10 +95,15 @@ export type TemplateForRender = {
 // so an older overlapping run can't publish a pack that misses a newer save.
 // Validated tN/tQ example rows queue no export and are not re-checked: they
 // reach the pack on the next export, as before.
+//
+// `lessons` (#817) is the current lesson set when the workspace's switch is on,
+// else empty. The nightly lessons job writes it just before it requests the
+// daily export, and switching lessons on or off queues an export.
 export type QueuedContextInputs = {
   prefs: TranslationPrefsForRender;
   terms: TermImport[];
   templates: TemplateForRender[];
+  lessons: Lesson[];
 };
 
 export type ContextPackInputs = QueuedContextInputs & {
@@ -107,6 +113,7 @@ export type ContextPackInputs = QueuedContextInputs & {
 
 type InputsDb = {
   prepare(sql: string): {
+    bind(...args: unknown[]): { all<T>(): Promise<{ results?: T[] }> };
     first<T>(): Promise<T | null>;
     all<T>(): Promise<{ results?: T[] }>;
   };
@@ -142,7 +149,11 @@ export async function loadQueuedContextInputs(db: InputsDb): Promise<QueuedConte
       ORDER BY support_ref, sheet_order, template_id`,
   ).all<TemplateForRender>();
 
-  return { prefs, terms: termRs.results ?? [], templates: templateRs.results ?? [] };
+  // Missing lesson tables (an unmigrated workspace) read as no lessons, so they
+  // can never fail an export.
+  const lessons = await loadLessonsForRender(db);
+
+  return { prefs, terms: termRs.results ?? [], templates: templateRs.results ?? [], lessons };
 }
 
 export async function loadContextPackInputs(db: InputsDb): Promise<ContextPackInputs> {
@@ -157,7 +168,7 @@ export async function loadContextPackInputs(db: InputsDb): Promise<ContextPackIn
 // Terms can tie on their ORDER BY keys, so compare them as a sorted set.
 export function sameQueuedContextInputs(a: QueuedContextInputs, b: QueuedContextInputs): boolean {
   const key = (x: QueuedContextInputs) =>
-    JSON.stringify([x.prefs, x.templates, x.terms.map((t) => JSON.stringify(t)).sort()]);
+    JSON.stringify([x.prefs, x.templates, x.terms.map((t) => JSON.stringify(t)).sort(), x.lessons ?? []]);
   return key(a) === key(b);
 }
 
@@ -229,14 +240,22 @@ export function renderBriefMd(
  * heading rather than as a new top-level file — per CONTEXT-REPO-CONTRACT §5
  * readers ignore files they don't know, so a `common-issues.md` would be
  * written and never read. Split it out when the bot grows a reader (§7).
+ *
+ * Lessons from recent editor corrections (#817) ride along the same way, as a
+ * third section, when the workspace has them switched on and has a set.
  */
-export function renderInstructionsMd(prefs: TranslationPrefsForRender): string | null {
+export function renderInstructionsMd(
+  prefs: TranslationPrefsForRender,
+  lessons: readonly Lesson[] = [],
+): string | null {
   const instructions = prefs.instructions_md?.trim();
   const commonIssues = prefs.common_issues_md?.trim();
-  if (!instructions && !commonIssues) return null;
+  const lessonsSection = renderLessonsSection(lessons);
+  if (!instructions && !commonIssues && !lessonsSection) return null;
   const parts: string[] = [];
   if (instructions) parts.push(instructions);
   if (commonIssues) parts.push(`## Common issues\n\n${commonIssues}`);
+  if (lessonsSection) parts.push(lessonsSection);
   const content = parts.join("\n\n");
   return content.endsWith("\n") ? content : `${content}\n`;
 }
@@ -462,6 +481,8 @@ export function renderContextPack(input: {
   tqRows: readonly ValidatedTqRow[];
   sources: EnSourceMaps;
   templates: readonly TemplateForRender[];
+  /** Current lessons (#817); empty when switched off. */
+  lessons?: readonly Lesson[];
   // Resources with no upstream source (blank in Setup) — their rows are skipped
   // rather than tripping missing_en_source. See fetchEnSourceMaps / buildValidatedExamples.
   skipped?: readonly string[];
@@ -492,7 +513,8 @@ export function renderContextPack(input: {
     ),
   });
 
-  const instructionsContent = renderInstructionsMd(input.prefs);
+  const lessons = input.lessons ?? [];
+  const instructionsContent = renderInstructionsMd(input.prefs, lessons);
   if (instructionsContent) {
     files.push({ path: "instructions.md", content: instructionsContent });
   }
@@ -521,6 +543,9 @@ export function renderContextPack(input: {
   // counts measure the D1 pool the file is selected from (every validated row),
   // not the bounded file. The byte check uses guardBytes, which leaves the
   // examples file out: its size moves day to day as the recent chapters change.
+  // It leaves the lessons section of instructions.md out too (#817): the set
+  // is rewritten every night and an admin can switch it off, and either can
+  // shrink a small pack by more than the 10% the guard refuses.
   const stats: ContextPackStats = {
     terms: input.terms.length,
     examplesTn: examples.lines.filter((l) => l.resource === "tn").length,
@@ -528,10 +553,18 @@ export function renderContextPack(input: {
     templates: templatesRowCount,
     contentFiles: contentFileCount(files),
     totalBytes: totalBytes(files),
-    guardBytes: totalBytes(files.filter((f) => f.path !== EXAMPLES_PATH)),
+    guardBytes: totalBytes(files.filter((f) => f.path !== EXAMPLES_PATH)) - lessonsBytes(input.prefs, lessons),
   };
 
   return { ok: true, files, stats };
+}
+
+// The bytes the lessons section adds to instructions.md (0 without lessons).
+function lessonsBytes(prefs: TranslationPrefsForRender, lessons: readonly Lesson[]): number {
+  if (lessons.length === 0) return 0;
+  const enc = new TextEncoder();
+  const size = (s: string | null) => (s == null ? 0 : enc.encode(s).byteLength);
+  return size(renderInstructionsMd(prefs, lessons)) - size(renderInstructionsMd(prefs));
 }
 
 /** Owner for the context repo and contextRef — mirrors article export. */

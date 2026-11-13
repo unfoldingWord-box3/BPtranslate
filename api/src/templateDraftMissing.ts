@@ -415,9 +415,9 @@ export function parseTemplateOutput(text: string, unitIds: readonly string[]): M
 // Key + provider
 // ---------------------------------------------------------------------------
 
-type Resolved = { availability: Availability; apiKey: string | null };
+export type Resolved = { availability: Availability; apiKey: string | null };
 
-async function resolveProvider(env: Env, decrypt: boolean): Promise<Resolved> {
+export async function resolveProvider(env: Env, decrypt: boolean): Promise<Resolved> {
   const cfg = await getProjectConfig(env);
   if (!isTranslationConfig(cfg)) {
     return { availability: { available: false, reason: "not_translation_project", provider: null }, apiKey: null };

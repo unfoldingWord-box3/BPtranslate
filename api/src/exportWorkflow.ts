@@ -647,7 +647,7 @@ export class ExportWorkflow extends WorkflowEntrypoint<Env, ExportParams> {
     const maxAttempts = 3;
     let lastReason: string | null = null;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      const { prefs, terms, tnRows, tqRows, templates } = inputs;
+      const { prefs, terms, tnRows, tqRows, templates, lessons } = inputs;
       const rendered = renderContextPack({
         cfg,
         prefs,
@@ -656,6 +656,7 @@ export class ExportWorkflow extends WorkflowEntrypoint<Env, ExportParams> {
         tqRows,
         sources: sourceFetch.sources,
         templates,
+        lessons,
         skipped: sourceFetch.skipped,
       });
       if (!rendered.ok) {

@@ -28,6 +28,7 @@ import {
 import { getLatestSuccessfulContextExport } from "./contextExportResults.ts";
 import { queueContextExport } from "./contextExportQueue.ts";
 import { compileRule, ruleFromRow, type HouseStyleRuleRow } from "./houseStyle.ts";
+import { lessonsRoutes } from "./lessons.ts";
 
 export const translationMemory = new Hono<{
   Bindings: Env;
@@ -1066,3 +1067,7 @@ translationMemory.patch("/house-style-rules/:id", requireAdmin, async (c) => {
     throw err;
   }
 });
+
+// Nightly lessons from editor corrections (issue #817): GET the switch, the
+// current set and the last run; PUT { enabled }. See api/src/lessons.ts.
+translationMemory.route("/lessons", lessonsRoutes());

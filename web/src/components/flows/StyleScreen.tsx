@@ -52,6 +52,7 @@ import { MarkdownView } from "../MarkdownView";
 import { PrefsHistoryButton } from "../PrefsHistoryDialog";
 import { TerminologySection } from "../TerminologySection";
 import { HouseStyleRulesSection } from "../HouseStyleRulesSection";
+import { LessonsSection } from "../LessonsSection";
 import { bookName } from "../../lib/bookNames";
 import { formatNumber } from "../../lib/formatDate";
 
@@ -64,6 +65,7 @@ type SectionKey =
   | "terminology"
   | "examples"
   | "houseStyle"
+  | "lessons"
   | "qa"
   | "templates";
 
@@ -74,6 +76,7 @@ const MEMORY_SECTION_LABELS: Array<{ key: SectionKey; labelKey: string }> = [
   { key: "terminology", labelKey: "moreTools.style.sectionTerminology" },
   { key: "examples", labelKey: "moreTools.style.sectionExamples" },
   { key: "houseStyle", labelKey: "moreTools.style.sectionHouseStyle" },
+  { key: "lessons", labelKey: "moreTools.style.sectionLessons" },
 ];
 
 const ALWAYS_SECTION_LABELS: Array<{ key: SectionKey; labelKey: string }> = [
@@ -740,6 +743,10 @@ export default function StyleScreen({ role, me }: StyleScreenProps) {
                   intro={t("moreTools.style.houseStyleIntro")}
                 >
                   <HouseStyleRulesSection heading={false} />
+                </Panel>
+                {/* #817: admin-only like the house-style panel above. */}
+                <Panel id="lessons" title={t("moreTools.style.sectionLessons")} intro={t("moreTools.style.lessonsIntro")}>
+                  <LessonsSection heading={false} />
                 </Panel>
               </>
             )}

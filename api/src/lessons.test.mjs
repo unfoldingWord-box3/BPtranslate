@@ -1,0 +1,916 @@
+// Issue #817 part 1: nightly lessons from editor corrections.
+//
+// Run from api/:
+//   node --experimental-strip-types --no-warnings --test src/lessons.test.mjs
+//
+// The REAL job against the REAL migration schema (node:sqlite). The model call
+// is a fake Transport; nothing here touches the network.
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { DatabaseSync } from "node:sqlite";
+import { readdirSync, readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import {
+  runNightlyLessons,
+  loadLessonsForRender,
+  renderLessonsSection,
+  readLessonsState,
+  setLessonsEnabled,
+  mergeLessons,
+  parseLessonsOutput,
+  isShaddaVowelOnly,
+  MAX_LESSONS,
+  LESSONS_HEADING,
+  capText,
+  buildLessonsPrompt,
+  mineChanges,
+  nightlyLessonsTick,
+  loadCurrentLessons,
+  PROMPT_CHAR_CAP,
+  RUN_STALE_SECONDS,
+} from "./lessons.ts";
+import { runContextExportExclusive, startQueuedContextExport } from "./contextExportQueue.ts";
+import { Hono } from "hono";
+import { encryptApiKey } from "./aiKeyCrypto.ts";
+import { translationMemory } from "./translationMemory.ts";
+import { loadContextPackInputs, loadQueuedContextInputs, renderContextPack, renderInstructionsMd } from "./contextExport.ts";
+import { contextShrinkRefused } from "./contextExportLib.ts";
+import { clearProjectConfigCache } from "./projectConfig.ts";
+import { BEGIN_OUTPUT, END_OUTPUT } from "./translate/llm.ts";
+
+const WRAPPING_KEY = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64");
+const NIGHT1 = Date.UTC(2026, 10, 12, 4, 15) / 1000;
+const NIGHT2 = NIGHT1 + 86400;
+
+function makeDb(sqlite) {
+  const mk = (sql, args) => ({
+    bind: (...a) => mk(sql, a),
+    all() {
+      return { results: sqlite.prepare(sql).all(...args), success: true };
+    },
+    first() {
+      const r = sqlite.prepare(sql).all(...args);
+      return r.length ? r[0] : null;
+    },
+    run() {
+      const r = sqlite.prepare(sql).run(...args);
+      return { success: true, meta: { changes: Number(r.changes), last_row_id: Number(r.lastInsertRowid) } };
+    },
+  });
+  return {
+    prepare: (sql) => mk(sql, []),
+    async batch(stmts) {
+      sqlite.exec("BEGIN");
+      try {
+        const out = stmts.map((s) => s.run());
+        sqlite.exec("COMMIT");
+        return out;
+      } catch (e) {
+        sqlite.exec("ROLLBACK");
+        throw e;
+      }
+    },
+  };
+}
+
+// Draft/final pairs: يمكنك → فيمكنك in 20 notes across MRK 1 (7), MRK 2 (7) and
+// MRK 3 (6), approved chapter by chapter, so the 2-chapter window is MRK 3 + MRK 2
+// = 13 notes. Plus, inside the window: 4 notes whose only change is a vowel on a
+// shadda (a preference, never a lesson), 2 bulk-approved notes with a different
+// change (never read), and 1 approved note with no AI draft (not compared).
+async function fresh({ provider = "claude", model = "claude-sonnet-5", enabled = true } = {}) {
+  const sqlite = new DatabaseSync(":memory:");
+  const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations");
+  for (const f of readdirSync(dir).filter((f) => f.endsWith(".sql")).sort()) {
+    sqlite.exec(readFileSync(join(dir, f), "utf8"));
+  }
+  sqlite.prepare(`INSERT INTO users (id, dcs_user_id, dcs_username) VALUES (9, 909, 'admin')`).run();
+  sqlite.prepare(`INSERT INTO project_config (id, preset, overrides_json, updated_at) VALUES (1, 'ar-bsoj', NULL, unixepoch())`).run();
+  sqlite
+    .prepare(`INSERT INTO translation_prefs (id, instructions_md, common_issues_md) VALUES (1, 'Write plainly.', '- «قال» → «يقول»')`)
+    .run();
+  sqlite
+    .prepare(`INSERT INTO terminology (concept_id, source_term, target_term, status) VALUES ('c1', 'grace', 'نعمة', 'preferred')`)
+    .run();
+
+  const tn = sqlite.prepare(
+    `INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, support_reference, quote, note, sort_order, version, translation_state, updated_at, admin_bulk_state)
+     VALUES (?, 'MRK', ?, 1, ?, 'rc://*/ta/man/translate/figs-metaphor', 'q', ?, 10, 2, 'validated', 1000, ?)`,
+  );
+  const aiLog = sqlite.prepare(
+    `INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action, source, payload_json)
+     VALUES ('tn', ?, 'MRK', NULL, 1, 2, 'update', 'ai_pipeline', ?)`,
+  );
+  const approve = sqlite.prepare(
+    `INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action) VALUES ('tn', ?, 'MRK', 9, 2, 2, 'validate')`,
+  );
+  let n = 0;
+  const note = (chapter, draft, final, bulk = null) => {
+    const id = `r${(n++).toString(36).padStart(3, "0")}`;
+    tn.run(id, chapter, `${chapter}:1`, final, bulk);
+    if (draft != null) aiLog.run(id, JSON.stringify({ id, note: draft }));
+    approve.run(id);
+  };
+  for (const [chapter, count] of [[1, 7], [2, 7], [3, 6]]) {
+    for (let i = 0; i < count; i++) note(chapter, `يمكنك أن تترجم هذا ${chapter}-${i}`, `فيمكنك أن تترجم هذا ${chapter}-${i}`);
+    if (chapter >= 2) {
+      note(chapter, `قال إنّ الرب ${chapter}`, `قال إنَّ الرب ${chapter}`);
+      note(chapter, `قال أنَّ الرب ${chapter}`, `قال أنّ الرب ${chapter}`);
+      note(chapter, `كلمة خطأ ${chapter}`, `كلمة صواب ${chapter}`, "approved");
+    }
+  }
+  note(3, null, "ملاحظة بلا مسودة");
+
+  const { ciphertextB64, ivB64 } = await encryptApiKey(WRAPPING_KEY, "sk-ant-api03-notarealkey-000000wxyz");
+  sqlite
+    .prepare(
+      `INSERT INTO ai_provider_config (id, provider, model, key_ciphertext, key_iv, key_hint, version, updated_at)
+       VALUES (1, ?, ?, ?, ?, 'wxyz', 1, unixepoch())`,
+    )
+    .run(provider, model, ciphertextB64, ivB64);
+
+  const slug = `t${Math.random().toString(36).slice(2)}`;
+  clearProjectConfigCache(slug);
+  const env = { DB: makeDb(sqlite), AI_KEY_WRAPPING_KEY: WRAPPING_KEY, WORKSPACE_SLUG: slug };
+  if (enabled) await setLessonsEnabled(env.DB, true, 9);
+
+  const calls = [];
+  let reply = null;
+  // A fake model that does what the prompt asks: one lesson for the most
+  // frequent change it was shown, keeping current lessons by not mentioning them.
+  const transport = async (req) => {
+    calls.push(req);
+    if (reply) return reply(req);
+    const m = /^- (\d+)× «([^»]*)» → «([^»]*)»/m.exec(req.user);
+    const lessons = m
+      ? [{ id: null, lesson: `Start the clause with «${m[3]}», not «${m[2]}».`, before: m[2], after: m[3], evidence: Number(m[1]) }]
+      : [];
+    return {
+      text: `${BEGIN_OUTPUT}\n${JSON.stringify({ lessons, reversed: [] })}\n${END_OUTPUT}`,
+      usage: { inputTokens: 4000, outputTokens: 300 },
+      stopReason: "end_turn",
+    };
+  };
+  const runs = () => sqlite.prepare(`SELECT * FROM lesson_runs ORDER BY id`).all();
+  const approveMore = () => note(3, "يمكنك أن تكتب", "فيمكنك أن تكتب");
+  return {
+    sqlite,
+    env,
+    calls,
+    runs,
+    approveMore,
+    setReply: (r) => (reply = r),
+    run: (now = NIGHT1) => runNightlyLessons(env, { transport, now }),
+    runWith: (now, extra) => runNightlyLessons(env, { transport, now, ...extra }),
+    tick: (now = NIGHT1) => nightlyLessonsTick(env, { transport, now }),
+  };
+}
+
+test("fixture: يمكنك → فيمكنك 20× across 3 chapters becomes a lesson, and instructions.md carries it", async () => {
+  const f = await fresh();
+  const out = await f.run();
+  assert.equal(out.ran, true);
+  assert.equal(out.status, "ok");
+  assert.equal(f.calls.length, 1, "one AI call");
+
+  // What the model was shown: the 2 most recent chapters, the change with its count there.
+  const { system, user } = f.calls[0];
+  assert.match(user, /Chapters: MRK 3, MRK 2\./);
+  assert.match(user, /^- 13× «يمكنك» → «فيمكنك»/m, "13 of the 20 notes fall in the 2-chapter window");
+  assert.doesNotMatch(user, /خطأ|صواب/, "bulk-approved notes are not read");
+  assert.doesNotMatch(user, /إنّ|أنّ|إنَّ|أنَّ/, "shadda-vowel-only changes are left out");
+  assert.match(user, /- grace → «نعمة»/, "terms are in the input");
+  assert.match(user, /Write plainly\./, "instructions are in the input");
+  assert.match(user, /«قال» → «يقول»/, "common issues are in the input");
+  assert.match(user, /\(none yet\)/, "no current lessons yet");
+  assert.match(system, /shadda vowels are a preference, not an error/);
+  assert.match(system, new RegExp(`At most ${MAX_LESSONS} lessons`));
+
+  // Stored, priced, and rendered.
+  const [run] = f.runs();
+  assert.equal(run.status, "ok");
+  assert.equal(run.calls, 1);
+  assert.equal(run.input_tokens, 4000);
+  assert.equal(run.output_tokens, 300);
+  assert.ok(Math.abs(run.cost_usd - (4000 * 2 + 300 * 10) / 1e6) < 1e-9, "cost from the price catalog");
+  assert.deepEqual(JSON.parse(run.chapters_json), [{ book: "MRK", chapter: 3 }, { book: "MRK", chapter: 2 }]);
+  const lessons = await loadLessonsForRender(f.env.DB);
+  assert.equal(lessons.length, 1);
+  assert.equal(lessons[0].before, "يمكنك");
+  assert.equal(lessons[0].after, "فيمكنك");
+  assert.equal(lessons[0].evidence, 13);
+  const section = renderLessonsSection(lessons);
+  assert.ok(section.startsWith(LESSONS_HEADING));
+  assert.match(section, /Example: «يمكنك» → «فيمكنك» \(seen in 13 notes\)/);
+  // The export's own loader and renderer put it in instructions.md as the third section.
+  const inputs = await loadContextPackInputs(f.env.DB);
+  const md = renderInstructionsMd(inputs.prefs, inputs.lessons);
+  assert.equal(
+    md,
+    `Write plainly.\n\n## Common issues\n\n- «قال» → «يقول»\n\n${LESSONS_HEADING}\n\n` +
+      "Written automatically each night from what editors changed in recent AI drafts before approving them.\n\n" +
+      "- Start the clause with «فيمكنك», not «يمكنك». Example: «يمكنك» → «فيمكنك» (seen in 13 notes)\n",
+  );
+});
+
+test("switch off (the default): no AI call, no run row, nothing rendered", async () => {
+  const f = await fresh({ enabled: false });
+  assert.deepEqual(await f.run(), { ran: false, reason: "off" });
+  assert.equal(f.calls.length, 0);
+  assert.equal(f.runs().length, 0);
+  assert.equal(f.sqlite.prepare(`SELECT COUNT(*) AS n FROM lesson_settings`).get().n, 0, "no settings row = off");
+  const state = await readLessonsState(f.env);
+  assert.equal(state.enabled, false);
+
+  // Switched off after a set exists: the set stays stored but is not rendered.
+  await setLessonsEnabled(f.env.DB, true, 9);
+  await f.run();
+  await setLessonsEnabled(f.env.DB, false, 9);
+  assert.deepEqual(await loadLessonsForRender(f.env.DB), []);
+  assert.equal((await readLessonsState(f.env)).lessons.length, 1);
+});
+
+test("a provider without an in-Worker adapter: no call, no run row, and the state says why", async () => {
+  const f = await fresh({ provider: "openai", model: "gpt-5.5" });
+  const out = await f.run();
+  assert.deepEqual(out, { ran: false, reason: "provider_not_supported" });
+  assert.equal(f.calls.length, 0);
+  assert.equal(f.runs().length, 0);
+  const state = await readLessonsState(f.env);
+  assert.equal(state.availability.available, false);
+  assert.equal(state.availability.reason, "provider_not_supported");
+});
+
+test("one call a night, and only when there are new approvals", async () => {
+  const f = await fresh();
+  await f.run();
+  assert.equal((await f.run()).reason, "no_new_approvals", "same night, nothing new");
+  f.approveMore();
+  assert.equal((await f.run()).reason, "already_ran", "same night, new approval: still one run");
+  assert.equal(f.calls.length, 1);
+  assert.equal((await f.run(NIGHT2)).status, "ok", "next night picks up the new approval");
+  assert.equal(f.calls.length, 2);
+  assert.equal((await f.run(NIGHT2 + 86400)).reason, "no_new_approvals");
+  assert.equal(f.calls.length, 2);
+});
+
+test("current lessons are in the next prompt, and stay when the model does not mention them", async () => {
+  const f = await fresh();
+  await f.run();
+  f.approveMore();
+  f.setReply(() => ({
+    text: `${BEGIN_OUTPUT}\n{"lessons": [], "reversed": []}\n${END_OUTPUT}`,
+    usage: { inputTokens: 10, outputTokens: 5 },
+    stopReason: "end_turn",
+  }));
+  const out = await f.run(NIGHT2);
+  assert.equal(out.status, "ok");
+  assert.match(f.calls[1].user, /^L1\. Start the clause with «فيمكنك»/m);
+  const lessons = await loadLessonsForRender(f.env.DB);
+  assert.equal(lessons.length, 1, "a working lesson is not dropped for going quiet");
+  assert.equal(lessons[0].firstSeenAt, NIGHT1);
+  // Each night's set is its own snapshot.
+  assert.equal(f.sqlite.prepare(`SELECT COUNT(DISTINCT run_id) AS n FROM lessons`).get().n, 2);
+});
+
+test("an unreadable reply keeps the previous set and still records the cost", async () => {
+  const f = await fresh();
+  await f.run();
+  f.approveMore();
+  f.setReply(() => ({ text: "I could not do that.", usage: { inputTokens: 100, outputTokens: 20 }, stopReason: "end_turn" }));
+  const out = await f.run(NIGHT2);
+  assert.equal(out.status, "failed");
+  assert.equal(out.failureReason, "unreadable_output");
+  const last = f.runs().at(-1);
+  assert.equal(last.status, "failed");
+  assert.equal(last.calls, 1);
+  assert.ok(last.cost_usd > 0);
+  assert.equal((await loadLessonsForRender(f.env.DB)).length, 1);
+});
+
+test("a failed AI call is recorded and keeps the previous set", async () => {
+  const f = await fresh();
+  await f.run();
+  f.approveMore();
+  f.setReply(() => {
+    throw Object.assign(new Error("invalid x-api-key"), { status: 401 });
+  });
+  const out = await f.run(NIGHT2);
+  assert.equal(out.status, "failed");
+  assert.equal(out.failureReason, "invalid_key");
+  assert.equal(f.runs().at(-1).cost_usd, null, "nothing billed, so no price");
+  assert.equal((await loadLessonsForRender(f.env.DB)).length, 1);
+});
+
+// ── merge rules (pure) ──────────────────────────────────────────────────────
+
+const L = (lesson, before = "", after = "", evidence = 5, firstSeenAt = 1) => ({ lesson, before, after, evidence, firstSeenAt });
+const ctx = { terms: [{ target: "نعمة", replacement: null, status: "preferred" }], templates: ["يمكن أن تترجم هذا بصيغة أخرى"], instructionsMd: "", commonIssuesMd: "" };
+
+test("merge: reversed lessons go, unmentioned ones stay, duplicates of terms/templates are dropped", () => {
+  const current = [L("keep me", "أ", "ب"), L("reverse me", "ج", "د"), L("quiet", "ه", "و")];
+  const parsed = {
+    lessons: [
+      { id: "L1", lesson: "keep me, reworded", before: "أ", after: "ب", evidence: 9 },
+      { id: "L2", lesson: "should not return", before: "ج", after: "د", evidence: 3 },
+      { id: null, lesson: "use the term", before: "فضل", after: "نعمة", evidence: 4 },
+      { id: null, lesson: "template words", before: "x", after: "بصيغة أخرى", evidence: 4 },
+      { id: null, lesson: "## Heading\nsneaks in", before: "س", after: "ش", evidence: 2 },
+      { id: null, lesson: "shadda", before: "إنّ", after: "إنَّ", evidence: 7 },
+    ],
+    reversed: ["L2"],
+  };
+  const out = mergeLessons(current, parsed, ctx, 99);
+  assert.deepEqual(
+    out.map((l) => l.lesson),
+    ["keep me, reworded", "Heading sneaks in", "quiet"],
+  );
+  assert.equal(out[0].evidence, 9);
+  assert.equal(out[0].firstSeenAt, 1, "a kept lesson keeps its first-seen date");
+  assert.equal(out[1].firstSeenAt, 99);
+});
+
+test("merge: never more than the cap, and new lessons give way to current ones", () => {
+  const current = Array.from({ length: MAX_LESSONS }, (_, i) => L(`old ${i}`));
+  const parsed = { lessons: [{ id: null, lesson: "new one", before: "", after: "", evidence: 50 }], reversed: [] };
+  const out = mergeLessons(current, parsed, ctx, 2);
+  assert.equal(out.length, MAX_LESSONS);
+  assert.ok(!out.some((l) => l.lesson === "new one"));
+  const long = mergeLessons([], { lessons: [{ id: null, lesson: "x".repeat(1000), before: "", after: "", evidence: 1 }], reversed: [] }, ctx, 2);
+  assert.ok(long[0].lesson.length <= 301);
+});
+
+test("parse: needs the agreed JSON object", () => {
+  assert.equal(parseLessonsOutput("nothing here"), null);
+  assert.equal(parseLessonsOutput(`${BEGIN_OUTPUT}\n{"foo": 1}\n${END_OUTPUT}`), null);
+  const p = parseLessonsOutput(`${BEGIN_OUTPUT}\n{"lessons": [{"id": "L1", "lesson": " a\\n b ", "evidence": "4"}], "reversed": ["L3"]}\n${END_OUTPUT}`);
+  assert.deepEqual(p, { lessons: [{ id: "L1", lesson: "a b", before: "", after: "", evidence: 4 }], reversed: ["L3"] });
+});
+
+test("shadda vowel on either side of the shadda is a preference", () => {
+  assert.equal(isShaddaVowelOnly("أنّ", "أنَّ"), true);
+  assert.equal(isShaddaVowelOnly("أنّ", "أنّ"), false, "no change at all");
+  assert.equal(isShaddaVowelOnly("مفيدا", "مفيدًا"), false, "tanween with no shadda is a real change");
+  assert.equal(isShaddaVowelOnly("يمكنك", "فيمكنك"), false);
+});
+
+// ── context pack ────────────────────────────────────────────────────────────
+
+const cfg = { languageCode: "ar", languageName: "Arabic", languageTitle: "العربية", direction: "rtl", exportOrg: "BSOJ", org: "BSOJ" };
+const prefs = { audience: null, purpose: null, register: "default", script_notes: null, instructions_md: "Be brief.", common_issues_md: null };
+const pack = (lessons) =>
+  renderContextPack({
+    cfg,
+    prefs,
+    terms: [],
+    tnRows: [],
+    tqRows: [],
+    sources: { tn: new Map(), tq: new Map() },
+    templates: [],
+    lessons,
+    exportedAt: new Date("2026-11-12T04:15:00Z"),
+  });
+
+test("context pack: lessons render only when present, and never count toward the shrink guard", () => {
+  const off = pack([]);
+  const on = pack(Array.from({ length: 25 }, (_, i) => L(`Lesson number ${i} with some words in it.`, "قبل", "بعد", 12)));
+  const instr = (r) => r.files.find((f) => f.path === "instructions.md")?.content;
+  assert.equal(instr(off), "Be brief.\n");
+  assert.ok(instr(on).includes(LESSONS_HEADING));
+  assert.equal(on.stats.guardBytes, off.stats.guardBytes, "the lessons section is left out of guardBytes");
+  assert.ok(on.stats.totalBytes > off.stats.totalBytes);
+  assert.equal(contextShrinkRefused(off.stats, on.stats), null, "switching lessons off never trips the shrink guard");
+  // Lessons alone still make an instructions.md.
+  const only = renderInstructionsMd({ ...prefs, instructions_md: null }, [L("x")]);
+  assert.ok(only.startsWith(LESSONS_HEADING));
+});
+
+test("context pack loader: a database without the lesson tables loads no lessons", async () => {
+  const sqlite = new DatabaseSync(":memory:");
+  const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations");
+  for (const f of readdirSync(dir).filter((f) => f.endsWith(".sql") && f < "0085").sort()) {
+    sqlite.exec(readFileSync(join(dir, f), "utf8"));
+  }
+  const inputs = await loadContextPackInputs(makeDb(sqlite));
+  assert.deepEqual(inputs.lessons, []);
+  const state = await runNightlyLessons({ DB: makeDb(sqlite), WORKSPACE_SLUG: "x" });
+  assert.deepEqual(state, { ran: false, reason: "off" });
+});
+
+// ── routes ──────────────────────────────────────────────────────────────────
+
+function appFor(env, role) {
+  const app = new Hono();
+  app.use("*", async (c, next) => {
+    c.set("userId", 9);
+    c.set("role", role);
+    await next();
+  });
+  app.route("/api/translation-memory", translationMemory);
+  return (path, init) => app.request(path, init, env);
+}
+
+test("routes: admin reads the Off default, switches on and off; editors cannot", async () => {
+  const f = await fresh({ enabled: false });
+  const admin = appFor(f.env, "admin");
+  let res = await admin("/api/translation-memory/lessons", { method: "GET" });
+  assert.equal(res.status, 200);
+  let body = await res.json();
+  assert.equal(body.enabled, false);
+  assert.equal(body.notMigrated, false);
+  assert.equal(body.availability.available, true);
+  assert.equal(body.availability.provider, "claude");
+  assert.deepEqual(body.lessons, []);
+  assert.equal(body.lastRun, null);
+  assert.equal(body.maxLessons, MAX_LESSONS);
+
+  const put = (enabled, who = admin) =>
+    who("/api/translation-memory/lessons", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled }) });
+  res = await put(true);
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).enabled, true);
+  await f.run();
+  body = await (await admin("/api/translation-memory/lessons", { method: "GET" })).json();
+  assert.equal(body.lessons.length, 1);
+  assert.equal(body.lessons[0].evidence, 13);
+  assert.equal(body.lastRun.status, "ok");
+  assert.ok(body.lastRun.costUsd > 0);
+  assert.equal(body.setAt != null, true);
+
+  res = await put(false);
+  assert.equal((await res.json()).enabled, false);
+  assert.equal((await put("yes")).status, 400);
+
+  const editor = appFor(f.env, "editor");
+  assert.equal((await editor("/api/translation-memory/lessons", { method: "GET" })).status, 403);
+  assert.equal((await put(true, editor)).status, 403);
+});
+
+// ── review round (#817) ─────────────────────────────────────────────────────
+
+test("a failed run does not advance the watermark: the next night mines the same approvals again", async () => {
+  const f = await fresh();
+  f.setReply(() => ({ text: "garbage", usage: { inputTokens: 100, outputTokens: 20 }, stopReason: "end_turn" }));
+  assert.equal((await f.run()).status, "failed");
+  f.setReply(null);
+  const out = await f.run(NIGHT2);
+  assert.equal(out.status, "ok", "no new approval, but the failed night's corrections are retried");
+  assert.equal(f.calls.length, 2);
+  assert.equal((await f.run(NIGHT2 + 86400)).reason, "no_new_approvals", "a successful run does advance it");
+});
+
+test("a run killed mid-way (row left 'running') is marked failed by the next night's run", async () => {
+  const f = await fresh();
+  f.sqlite
+    .prepare(`INSERT INTO lesson_runs (night, started_at, approvals_through, status) VALUES ('2026-11-01', 1, 999999, 'running')`)
+    .run();
+  const out = await f.run();
+  assert.equal(out.status, "ok", "the dead run's watermark does not block tonight");
+  const dead = f.sqlite.prepare(`SELECT status, failure_reason, finished_at FROM lesson_runs WHERE night = '2026-11-01'`).get();
+  assert.equal(dead.status, "failed");
+  assert.equal(dead.failure_reason, "interrupted");
+  assert.ok(dead.finished_at > 0);
+});
+
+test("the outcome says whether the stored set changed", async () => {
+  const f = await fresh();
+  assert.equal((await f.run()).changed, true);
+  f.approveMore();
+  const same = f.calls.length;
+  f.setReply(() => ({
+    text: `${BEGIN_OUTPUT}\n{"lessons": [], "reversed": []}\n${END_OUTPUT}`,
+    usage: { inputTokens: 10, outputTokens: 5 },
+    stopReason: "end_turn",
+  }));
+  const out = await f.run(NIGHT2);
+  assert.equal(f.calls.length, same + 1);
+  assert.equal(out.status, "ok");
+  assert.equal(out.changed, false, "same lessons kept: nothing new to export");
+});
+
+test("evidence is clamped to the notes compared in the run", async () => {
+  const f = await fresh();
+  f.setReply(() => ({
+    text: `${BEGIN_OUTPUT}\n{"lessons": [{"id": null, "lesson": "Big claim.", "before": "a", "after": "b", "evidence": 1e300}], "reversed": []}\n${END_OUTPUT}`,
+    usage: { inputTokens: 10, outputTokens: 5 },
+    stopReason: "end_turn",
+  }));
+  await f.run();
+  const [l] = await loadLessonsForRender(f.env.DB);
+  // Notes compared in MRK 2–3: 7 + 6 يمكنك notes and 4 shadda notes; the
+  // bulk-approved and no-draft notes are not compared.
+  assert.equal(l.evidence, 17);
+  assert.doesNotMatch(renderLessonsSection([l]), /e\+/);
+});
+
+test("PUT on is refused (409) when lessons cannot run; off is always allowed; page and night job agree", async () => {
+  const f = await fresh({ provider: "openai", model: "gpt-5.5", enabled: false });
+  const admin = appFor(f.env, "admin");
+  const put = (enabled) =>
+    admin("/api/translation-memory/lessons", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled }) });
+  let res = await put(true);
+  assert.equal(res.status, 409);
+  assert.deepEqual(await res.json(), { error: "lessons_unavailable", reason: "provider_not_supported" });
+  assert.equal(f.sqlite.prepare(`SELECT COUNT(*) AS n FROM lesson_settings WHERE enabled = 1`).get().n, 0);
+  assert.equal((await put(false)).status, 200);
+
+  // A key that no longer decrypts (wrapping key rotated): the page says so, PUT refuses, the job does not call.
+  const g = await fresh({ enabled: false });
+  g.env.AI_KEY_WRAPPING_KEY = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64");
+  const admin2 = appFor(g.env, "admin");
+  const state = await (await admin2("/api/translation-memory/lessons", { method: "GET" })).json();
+  assert.equal(state.availability.available, false);
+  assert.equal(state.availability.reason, "ai_provider_key_decrypt_failed");
+  res = await admin2("/api/translation-memory/lessons", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: true }) });
+  assert.equal(res.status, 409);
+  await setLessonsEnabled(g.env.DB, true, 9);
+  assert.deepEqual(await g.run(), { ran: false, reason: "ai_provider_key_decrypt_failed" });
+  assert.equal(g.calls.length, 0);
+});
+
+test("shadda: only a vowel present on one side and absent on the other is a preference", () => {
+  assert.equal(isShaddaVowelOnly("إنَّ", "إنّ"), true, "vowel dropped");
+  assert.equal(isShaddaVowelOnly("ربّ", "ربُّ"), true, "vowel added");
+  assert.equal(isShaddaVowelOnly("الربُّ", "الربَّ"), false, "damma → fatha on the shadda is a grammar fix");
+  assert.equal(isShaddaVowelOnly("عدوٌّ", "عدوًّ"), false, "tanween swap on the shadda is a real change");
+  assert.equal(isShaddaVowelOnly("أنَّ قال", "أنّ يقول"), false, "another word changed too");
+});
+
+test("capText counts code points and never splits a letter from its marks", () => {
+  assert.equal(capText("abc", 5), "abc");
+  assert.equal(capText("abcdef", 3), "abc…");
+  const marked = "بَّ".repeat(10); // 3 code points each: letter + two marks
+  assert.equal(capText(marked, 4), "بَّ…");
+  assert.equal(capText(marked, 6), "بَّبَّ…");
+  assert.equal(capText("😀".repeat(5), 2), "😀😀…", "no lone surrogate");
+});
+
+test("a killed run is closed even on a night with nothing new to mine", async () => {
+  const f = await fresh();
+  await f.run();
+  f.sqlite.prepare(`INSERT INTO lesson_runs (night, started_at, approvals_through, status) VALUES ('2026-11-12b', 1, 0, 'running')`).run();
+  assert.equal((await f.run(NIGHT2)).reason, "no_new_approvals");
+  assert.equal(f.sqlite.prepare(`SELECT status FROM lesson_runs WHERE night = '2026-11-12b'`).get().status, "failed");
+});
+
+// ── review round 2 (#817) ───────────────────────────────────────────────────
+
+// Long rewrites (no shared word) cost the diff n×m cells each. Enough of them
+// used to spend the whole run's shared cell budget, after which every later
+// note counted as compared but yielded no changes.
+function addRewrites(f, chapter, count) {
+  const tn = f.sqlite.prepare(
+    `INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, support_reference, quote, note, sort_order, version, translation_state, updated_at)
+     VALUES (?, 'MRK', ?, 1, ?, 'x', 'q', ?, 10, 2, 'validated', 1000)`,
+  );
+  const ai = f.sqlite.prepare(
+    `INSERT INTO edit_log (kind, row_key, book, prev_version, new_version, action, source, payload_json)
+     VALUES ('tn', ?, 'MRK', 1, 2, 'update', 'ai_pipeline', ?)`,
+  );
+  const draft = Array.from({ length: 400 }, (_, i) => `d${i}`).join(" ");
+  const final = Array.from({ length: 400 }, (_, i) => `f${i}`).join(" ");
+  f.sqlite.exec("BEGIN");
+  for (let i = 0; i < count; i++) {
+    const id = `b${i.toString(36).padStart(4, "0")}`;
+    tn.run(id, chapter, `${chapter}:1`, final);
+    ai.run(id, JSON.stringify({ id, note: draft }));
+  }
+  f.sqlite.exec("COMMIT");
+}
+
+test("every note gets its own diff budget: long rewrites early in the window do not hide later corrections", async () => {
+  const f = await fresh();
+  addRewrites(f, 3, 1900); // 1900 × 160,000 cells > the old shared 300,000,000
+  await f.run();
+  assert.match(f.calls[0].user, /^- 13× «يمكنك» → «فيمكنك»/m);
+});
+
+test("two books with the same chapter number are mined apart", async () => {
+  const f = await fresh();
+  // TIT 3 approved last: the window becomes TIT 3 + MRK 3, never MRK 3 twice.
+  f.sqlite
+    .prepare(
+      `INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, support_reference, quote, note, sort_order, version, translation_state, updated_at)
+       VALUES ('t001', 'TIT', 3, 1, '3:1', 'x', 'q', 'كتب الرسول', 10, 2, 'validated', 1000)`,
+    )
+    .run();
+  f.sqlite
+    .prepare(
+      `INSERT INTO edit_log (kind, row_key, book, prev_version, new_version, action, source, payload_json)
+       VALUES ('tn', 't001', 'TIT', 1, 2, 'update', 'ai_pipeline', '{"note": "قال الرسول"}')`,
+    )
+    .run();
+  f.sqlite.prepare(`INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action) VALUES ('tn', 't001', 'TIT', 9, 2, 2, 'validate')`).run();
+  await f.run();
+  const { user } = f.calls[0];
+  assert.match(user, /Chapters: TIT 3, MRK 3\./);
+  assert.match(user, /^- 6× «يمكنك» → «فيمكنك»/m, "MRK 3 only: TIT 3 has no يمكنك notes");
+  assert.match(user, /^- 1× «قال» → «كتب»/m);
+});
+
+test("a truncated reply is one billed call: no lower-effort retry, previous set kept", async () => {
+  const f = await fresh();
+  await f.run();
+  f.approveMore();
+  f.setReply(() => ({ text: `${BEGIN_OUTPUT}\n{"lessons": [`, usage: { inputTokens: 100, outputTokens: 32000 }, stopReason: "max_tokens" }));
+  const out = await f.run(NIGHT2);
+  assert.equal(f.calls.length, 2, "one call tonight, no retry");
+  assert.equal(out.status, "failed");
+  assert.equal(out.failureReason, "output_too_long");
+  assert.equal(f.runs().at(-1).calls, 1);
+  assert.ok(f.runs().at(-1).cost_usd > 0);
+  assert.equal((await loadLessonsForRender(f.env.DB)).length, 1);
+});
+
+// ── review round 3 (#817) ───────────────────────────────────────────────────
+
+// The window's drafted, hand-approved notes, by approval (edit_log id), oldest first.
+function windowApprovals(f) {
+  return f.sqlite
+    .prepare(
+      `SELECT MAX(e.id) AS id FROM edit_log e JOIN tn_rows t ON t.id = e.row_key AND t.book = e.book
+        WHERE e.action = 'validate' AND t.chapter IN (2, 3) AND t.admin_bulk_state IS NULL
+          AND EXISTS (SELECT 1 FROM edit_log d WHERE d.row_key = t.id AND d.source = 'ai_pipeline')
+        GROUP BY t.id ORDER BY id`,
+    )
+    .all()
+    .map((r) => r.id);
+}
+
+test("the mining budget stops a run without skipping approvals: the next night resumes where it stopped", async () => {
+  const f = await fresh();
+  const approvals = windowApprovals(f);
+  const newest = f.sqlite.prepare(`SELECT MAX(id) AS w FROM edit_log WHERE action = 'validate'`).get().w;
+  // A budget of one cell: each night diffs exactly one note (the one that crosses the line finishes).
+  const out1 = await f.runWith(NIGHT1, { cells: 1 });
+  assert.equal(out1.status, "ok");
+  assert.equal(out1.truncated, true);
+  assert.match(f.calls[0].user, /compared with their AI draft: 1;/);
+  assert.equal(f.runs().at(-1).approvals_through, approvals[1] - 1, "the watermark stops below the first approval left");
+
+  const out2 = await f.runWith(NIGHT2, { cells: 1 });
+  assert.equal(out2.ran, true, "no new approval, but the stopped run's rest is still due");
+  assert.equal(f.runs().at(-1).approvals_through, approvals[2] - 1, "the next night diffs the next approval");
+
+  const out3 = await f.run(NIGHT2 + 86400);
+  assert.equal(out3.truncated, false);
+  assert.equal(f.runs().at(-1).approvals_through, newest, "a run that diffs everything takes the full watermark");
+  assert.equal((await f.run(NIGHT2 + 2 * 86400)).reason, "no_new_approvals");
+});
+
+test("the run-wide budget bounds the diff work of many long rewrites", async () => {
+  const f = await fresh();
+  addRewrites(f, 3, 400); // 400 × 160,000 cells = 64M > MINING_CELL_BUDGET
+  const mined = await mineChanges(f.env.DB, [{ book: "MRK", chapter: 3 }]);
+  assert.equal(mined.truncated, true);
+  assert.equal(mined.stoppedAt, null, "every new approval was diffed before the rewrites (which have none)");
+  assert.ok(mined.compared < 400, `compared ${mined.compared}`);
+  assert.equal(mined.groups[0].before, "يمكنك", "approved corrections come first");
+});
+
+test("every prompt string is capped, and the whole prompt stays under PROMPT_CHAR_CAP with true counts", () => {
+  const huge = "x".repeat(10_000);
+  const { system, user } = buildLessonsPrompt({
+    languageName: huge,
+    languageCode: huge,
+    current: [{ lesson: huge, before: huge, after: huge, evidence: 3, firstSeenAt: 1 }],
+    instructionsMd: huge,
+    commonIssuesMd: huge,
+    terms: Array.from({ length: 300 }, (_, i) => ({ source: `${huge}${i}`, target: huge, status: i % 2 ? "forbidden" : huge, replacement: huge })),
+    chapters: [{ book: huge, chapter: 1 }],
+    compared: 60,
+    changed: 60,
+    groups: Array.from({ length: 70 }, (_, i) => ({ before: huge, after: `${huge}${i}`, count: 70 - i, draftExcerpt: huge, finalExcerpt: huge })),
+  });
+  assert.ok(system.length < 5_000, `system ${system.length}`);
+  assert.ok(user.length <= PROMPT_CHAR_CAP, `user ${user.length}`);
+  const lines = user.split("\n");
+  // Only the two capped preference texts may be long single lines.
+  assert.equal(lines.filter((l) => l.length > 1_000).length, 2);
+  const changeLines = lines.filter((l) => /^- \d+× /.test(l));
+  assert.equal(changeLines.length, 60, "changes go in before terms (60 = MAX_PROMPT_CHANGES)");
+  assert.match(user, /\(10 rarer changes not shown\)/);
+  const termLines = lines.filter((l) => /^- x{100}/.test(l));
+  assert.ok(termLines.length > 0 && termLines.length < 300);
+  assert.match(user, new RegExp(`\\(${300 - termLines.length} more terms not shown\\)`));
+});
+
+test("a long term or token in the database never reaches the provider uncapped", async () => {
+  const f = await fresh();
+  const long = "ب".repeat(10_000);
+  f.sqlite.prepare(`INSERT INTO terminology (concept_id, source_term, target_term, status) VALUES ('c2', ?, ?, 'preferred')`).run(long, long);
+  f.approveMore();
+  f.sqlite.prepare(`UPDATE tn_rows SET note = ? WHERE id = (SELECT MAX(id) FROM tn_rows WHERE chapter = 3 AND id LIKE 'r%')`).run(`فيمكنك ${long}`);
+  await f.run();
+  assert.ok(f.calls[0].user.length <= PROMPT_CHAR_CAP);
+  assert.ok(!f.calls[0].user.includes("ب".repeat(500)));
+});
+
+test("a changed set stored while tonight's export holds the lease reaches that export's follow-up", async () => {
+  const f = await fresh();
+  const created = [];
+  f.env.DCS_SERVICE_TOKEN = "service-token";
+  f.env.EXPORT_WORKFLOW = { create: async (o) => (created.push(o), { id: o.id }) };
+  const key = f.env.WORKSPACE_SLUG;
+  let inputsRead;
+  await runContextExportExclusive({
+    db: f.env.DB,
+    key,
+    instance: "context-nightly",
+    markPending: true,
+    shrinkOverride: false,
+    run: async () => {
+      // The running export read its inputs before tonight's lessons were written.
+      inputsRead = await loadQueuedContextInputs(f.env.DB);
+      await f.tick();
+      assert.equal(created.length, 0, "the lease is held: no second export starts");
+      return { status: "ok", failureReason: null };
+    },
+    startFollowUp: () => startQueuedContextExport(f.env),
+  });
+  assert.deepEqual(inputsRead.lessons, []);
+  assert.equal(created.length, 1, "exactly one follow-up");
+  assert.equal(created[0].params.queued, true);
+  const followUp = await loadQueuedContextInputs(f.env.DB);
+  assert.equal(followUp.lessons.length, 1);
+  assert.match(renderInstructionsMd(followUp.prefs, followUp.lessons), new RegExp(LESSONS_HEADING));
+
+  // An unchanged night requests nothing.
+  f.sqlite.prepare(`UPDATE context_export_lock SET pending = 0`).run();
+  await f.tick(NIGHT2);
+  assert.equal(created.length, 1);
+  assert.equal(f.sqlite.prepare(`SELECT pending FROM context_export_lock`).get().pending, 0);
+});
+
+test("PUT answers only after the context export is marked pending", async () => {
+  const f = await fresh({ enabled: false });
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const gated = (st) => ({
+    bind: (...a) => gated(st.bind(...a)),
+    first: async () => (await gate, st.first()),
+    run: async () => (await gate, st.run()),
+    all: async () => (await gate, st.all()),
+  });
+  const db = f.env.DB;
+  const created = [];
+  const env = {
+    ...f.env,
+    DB: { ...db, prepare: (sql) => (/context_export_lock/.test(sql) ? gated(db.prepare(sql)) : db.prepare(sql)) },
+    DCS_SERVICE_TOKEN: "service-token",
+    EXPORT_WORKFLOW: { create: async (o) => (created.push(o), { id: o.id }) },
+  };
+  const app = new Hono();
+  app.use("*", async (c, next) => {
+    c.set("userId", 9);
+    c.set("role", "admin");
+    await next();
+  });
+  app.route("/api/translation-memory", translationMemory);
+  const ctx = { waitUntil() {}, passThroughOnException() {} };
+  let answered = false;
+  const res = app
+    .request(
+      "/api/translation-memory/lessons",
+      { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: true }) },
+      env,
+      ctx,
+    )
+    .then((r) => ((answered = true), r));
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(answered, false, "no answer while the export is not yet marked pending");
+  release();
+  assert.equal((await res).status, 200);
+  assert.equal(f.sqlite.prepare(`SELECT pending FROM context_export_lock`).get().pending, 1);
+  assert.equal(created.length, 1);
+});
+
+test("a run killed earlier tonight is retried tonight once stale; a run that ended is not", async () => {
+  const f = await fresh();
+  f.sqlite
+    .prepare(`INSERT INTO lesson_runs (night, started_at, approvals_through, status) VALUES ('2026-11-12', ?, 0, 'running')`)
+    .run(NIGHT1 - 600);
+  assert.equal((await f.run()).reason, "already_ran", "ten minutes old: it may still be running");
+  assert.equal(f.calls.length, 0);
+  const out = await f.run(NIGHT1 - 600 + RUN_STALE_SECONDS);
+  assert.equal(out.status, "ok", "stale: closed as interrupted and taken over the same night");
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.runs().length, 1);
+  assert.equal(f.runs()[0].status, "ok");
+
+  const g = await fresh();
+  g.setReply(() => ({ text: "garbage", usage: { inputTokens: 100, outputTokens: 20 }, stopReason: "end_turn" }));
+  assert.equal((await g.run()).status, "failed");
+  g.setReply(null);
+  assert.equal((await g.run(NIGHT1 + RUN_STALE_SECONDS + 60)).reason, "already_ran", "one call a night for a failing provider");
+  assert.equal(g.calls.length, 1);
+});
+
+test("a new evidence count alone is not a changed set (no pack export), but it is stored", async () => {
+  const f = await fresh();
+  assert.equal((await f.run()).changed, true);
+  const [l] = (await loadCurrentLessons(f.env.DB)).lessons;
+  f.approveMore();
+  f.setReply(() => ({
+    text: `${BEGIN_OUTPUT}\n${JSON.stringify({ lessons: [{ id: "L1", lesson: l.lesson, before: l.before, after: l.after, evidence: l.evidence - 2 }], reversed: [] })}\n${END_OUTPUT}`,
+    usage: { inputTokens: 10, outputTokens: 5 },
+    stopReason: "end_turn",
+  }));
+  const out = await f.run(NIGHT2);
+  assert.equal(out.status, "ok");
+  assert.equal(out.changed, false);
+  assert.equal((await loadCurrentLessons(f.env.DB)).lessons[0].evidence, l.evidence - 2);
+});
+
+// ── review round 4 (#817) ───────────────────────────────────────────────────
+
+// One hand-approved AI-drafted note in MRK `chapter`, approved now. Returns the approval's edit_log id.
+function approveIn(f, chapter, id, draft = "يمكنك أن تكتب", final = "فيمكنك أن تكتب") {
+  f.sqlite
+    .prepare(
+      `INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, support_reference, quote, note, sort_order, version, translation_state, updated_at)
+       VALUES (?, 'MRK', ?, 1, ?, 'x', 'q', ?, 10, 2, 'validated', 1000)`,
+    )
+    .run(id, chapter, `${chapter}:1`, final);
+  f.sqlite
+    .prepare(
+      `INSERT INTO edit_log (kind, row_key, book, prev_version, new_version, action, source, payload_json)
+       VALUES ('tn', ?, 'MRK', 1, 2, 'update', 'ai_pipeline', ?)`,
+    )
+    .run(id, JSON.stringify({ id, note: draft }));
+  const r = f.sqlite
+    .prepare(`INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action) VALUES ('tn', ?, 'MRK', 9, 2, 2, 'validate')`)
+    .run(id);
+  return Number(r.lastInsertRowid);
+}
+
+test("a run stopped by the budget is finished the next night even when editors moved to another chapter", async () => {
+  const f = await fresh();
+  const approvals = windowApprovals(f); // MRK 2 + MRK 3, oldest first
+  await f.runWith(NIGHT1, { cells: 1 });
+  assert.equal(f.runs().at(-1).approvals_through, approvals[1] - 1);
+  // Before night 2, editors approve in MRK 4: the newest window is now MRK 4 + MRK 3, without MRK 2.
+  const c4 = approveIn(f, 4, "c401");
+  const out2 = await f.run(NIGHT2);
+  assert.equal(out2.status, "ok");
+  assert.match(f.calls[1].user, /Chapters: MRK 3, MRK 2\./, "night 2 finishes the stopped run's chapters");
+  // Every drafted note of MRK 2–3 is compared (13 يمكنك + 4 shadda notes).
+  assert.match(f.calls[1].user, /compared with their AI draft: 17;/);
+  assert.ok(f.runs().at(-1).approvals_through < c4, "MRK 4's approval was not mined, so the watermark stays below it");
+  const out3 = await f.run(NIGHT2 + 86400);
+  assert.equal(out3.status, "ok", "night 3 mines the newest window");
+  assert.match(f.calls[2].user, /Chapters: MRK 4, MRK 3\./);
+  assert.equal(f.runs().at(-1).approvals_through, c4);
+  assert.equal((await f.run(NIGHT2 + 2 * 86400)).reason, "no_new_approvals");
+});
+
+test("a finished resume whose chapters are still the newest takes the full watermark", async () => {
+  const f = await fresh();
+  await f.runWith(NIGHT1, { cells: 1 });
+  assert.equal((await f.run(NIGHT2)).status, "ok");
+  assert.equal((await f.run(NIGHT2 + 86400)).reason, "no_new_approvals", "no extra night");
+});
+
+test("a killed run is closed as interrupted even after lessons are switched off", async () => {
+  const f = await fresh();
+  f.sqlite.prepare(`INSERT INTO lesson_runs (night, started_at, approvals_through, status) VALUES ('2026-11-11', 1, 0, 'running')`).run();
+  await setLessonsEnabled(f.env.DB, false, 9);
+  assert.deepEqual(await f.run(), { ran: false, reason: "off" });
+  const row = f.sqlite.prepare(`SELECT status, failure_reason FROM lesson_runs WHERE night = '2026-11-11'`).get();
+  assert.equal(row.status, "failed");
+  assert.equal(row.failure_reason, "interrupted");
+});
+
+for (const evidence of [null, "", 40]) {
+  test(`evidence ${JSON.stringify(evidence)} on a kept lesson, on a night that compares one note, keeps its count`, async () => {
+    const f = await fresh();
+    await f.run();
+    const [l] = (await loadCurrentLessons(f.env.DB)).lessons;
+    assert.equal(l.evidence, 13);
+    approveIn(f, 3, "e301");
+    f.setReply(() => ({
+      text: `${BEGIN_OUTPUT}\n${JSON.stringify({ lessons: [{ id: "L1", lesson: l.lesson, before: l.before, after: l.after, evidence }], reversed: [] })}\n${END_OUTPUT}`,
+      usage: { inputTokens: 10, outputTokens: 5 },
+      stopReason: "end_turn",
+    }));
+    const out = await f.runWith(NIGHT2, { cells: 1 });
+    assert.equal(out.status, "ok");
+    assert.match(f.calls[1].user, /compared with their AI draft: 1;/);
+    assert.equal((await loadCurrentLessons(f.env.DB)).lessons[0].evidence, 13);
+  });
+}
+
+test("a call that throws before any usage comes back still counts as a call", async () => {
+  const f = await fresh();
+  f.setReply(() => {
+    throw new Error("network down");
+  });
+  const out = await f.run();
+  assert.equal(out.status, "failed");
+  const row = f.runs().at(-1);
+  assert.equal(row.calls, 1, "the page must not say no call was made");
+  assert.equal(row.cost_usd, null);
+});

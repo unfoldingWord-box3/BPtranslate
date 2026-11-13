@@ -39,6 +39,7 @@ import { readPackageRefs } from "./packageRefs";
 import { readSourceNotes } from "./sourceNotes";
 import { blockViewerWrites } from "./viewerGuard";
 import { requestDailyContextExport, sweepContextExportQueue } from "./contextExportQueue";
+import { nightlyLessonsTick } from "./lessons";
 import { listWorkspaces, resolveWorkspaceFresh, workspaceEnv, parseWorkspaceCookie, requireWorkspaceMatch, primeWorkspaces } from "./workspaces";
 
 export interface Env {
@@ -643,7 +644,8 @@ export default {
     // With WORKSPACES unset this is exactly one iteration against DB, same
     // as before workspaces existed.
     await primeWorkspaces(env);
-    for (const ws of listWorkspaces(env)) {
+    const workspaces = listWorkspaces(env);
+    for (const ws of workspaces) {
       try {
         await runScheduledTick(controller, workspaceEnv(env, ws), ctx);
       } catch (e) {
@@ -652,6 +654,23 @@ export default {
           error: e instanceof Error ? e.message : String(e),
         });
       }
+    }
+    // Lessons (#817) only after every workspace's export has been requested,
+    // and all workspaces at once: one AI call can take up to 2 minutes, so
+    // running them one after another could push later workspaces past the
+    // scheduled invocation's wall-clock limit. Each is isolated.
+    if (controller.cron === CONTEXT_CRON || controller.cron === EXPORT_CRON) {
+      const results = await Promise.allSettled(
+        workspaces.map(async (ws) => nightlyLessonsTick(workspaceEnv(env, ws))),
+      );
+      results.forEach((r, i) => {
+        if (r.status === "rejected") {
+          console.error("nightly lessons failed for workspace", {
+            slug: workspaces[i].slug,
+            error: r.reason instanceof Error ? r.reason.message : String(r.reason),
+          });
+        }
+      });
     }
   },
 } satisfies ExportedHandler<Env>;

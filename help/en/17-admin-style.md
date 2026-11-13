@@ -3,7 +3,7 @@ id: admin-style
 title: Teaching the AI your style (admin)
 routes: [style]
 roles: [admin]
-keywords: [style, house style, rules, closing period, brief, audience, register, instructions, common issues, terminology, glossary, term, examples, few-shot, context pack, qa rules, ai, prompt, export, history, restore, undo, who changed, chat]
+keywords: [style, house style, rules, lessons, learning, corrections, closing period, brief, audience, register, instructions, common issues, terminology, glossary, term, examples, few-shot, context pack, qa rules, ai, prompt, export, history, restore, undo, who changed, chat]
 screenshots:
   - admin-style-1 #/admin/style
 ---
@@ -36,6 +36,21 @@ Use the list on the left to jump to a section. After you change a section, press
 - If a draft still contains the English phrase "If it would be helpful in your language", the app notes this in the draft's record for later review. It does not rewrite the phrase, and nothing on screen shows this yet.
 
 You cannot add or edit rules on this page. New rules are added by the development team, or by approving a card in the suggestion inbox.
+
+## Lessons: what the AI learns from editor corrections
+**Lessons** is a short list the AI is given with every new draft. Each night, the app reads what editors changed in the AI drafts they approved and writes the list from those changes. Each lesson says what to do, with one example (**AI wrote** and **Editor wrote**) and the number of notes it was seen in.
+
+Lessons are **Off** for every project until an admin turns them on. While they are off, the page says so: the AI is NOT learning from editor corrections, and new drafts get only the sections above. Turn lessons on when your editors have approved enough notes, for example after a few weeks of work.
+
+- On a night with new approvals, the app compares the AI draft with the approved note for the notes that count as examples (see **Examples** above), in the 2 most recently approved chapters. If there are more notes than it can compare in one night, the next night finishes the same chapters first, even if editors have moved on to other chapters, and the newest chapters come after that.
+- The app makes one call to your AI service on each night it runs. Your project's AI account pays for it. The page shows the last run, what happened, and about what it cost. A night with no new approvals makes no call, unless the night before failed or did not finish its chapters: then the app tries again. If a run is cut off part-way, a later run the same night can start it again, which can cost a second call.
+- Lessons need Claude or Gemini in **AI service**. With another provider the page says **Not available with your AI provider**, and lessons cannot be turned on.
+- A lesson stays until editors start changing its words back. A lesson that works makes its correction rarer, and that does not remove it.
+- A new lesson that only repeats a term, a template, the instructions or the common issues is left out. At most 25 lessons are kept.
+- In Arabic, writing or leaving out the vowel on a shadda (أنَّ or أنّ) is a choice, not an error, so it never becomes a lesson.
+- When a night changes the wording or examples of the lessons, the app exports the context pack again, and the AI gets the new lessons from then on. When you turn lessons off, the next export leaves them out. The list is kept.
+
+You cannot edit or remove lessons on this page yet.
 
 ## See who changed the preferences, and undo a change
 Every save of **Brief**, **Instructions** and **Common issues** is kept, whether it was made here or by the chat assistant. Press **History** above the Brief section to see the list, newest first.

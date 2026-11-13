@@ -3,7 +3,7 @@ id: preferences
 title: Preferences (classic settings page)
 routes: [preferences]
 roles: [editor, admin]
-keywords: [preferences, settings, memory, brief, instructions, terminology, examples, setup, localization, users, ai service, house style, change scripture source, replace source, lane, history, restore, undo]
+keywords: [preferences, settings, memory, brief, instructions, terminology, examples, setup, localization, users, ai service, house style, lessons, change scripture source, replace source, lane, history, restore, undo]
 screenshots:
   - preferences-1 #/preferences/setup top
 ---
@@ -22,8 +22,9 @@ Open it from the account menu in the top bar, with **Preferences & Memory**. Use
 | **Users** | [Team & roles](#help:admin-team) |
 | **AI service** | [AI studio](#help:admin-ai) |
 | **House style** (fixes made to AI drafts) | [Style](#help:admin-style) |
+| **Lessons** (what the AI learns from editor corrections) | [Style](#help:admin-style) |
 
-The five Style sections need a translation project and an account that is not read-only. Otherwise the page says you need editor or admin access, or that the panel is for translation projects only.
+The five Style sections in the first row (Brief, Instructions, Common issues, Terminology and Examples) need a translation project and an account that is not read-only. Otherwise the page says you need editor or admin access, or that the panel is for translation projects only. House style and Lessons show only to admins.
 
 ## Change the scripture source
 This job exists only here and in the Books lane panel. Use it when the project already has text and you want a lane to read from a different Door43 repository. The setup wizard cannot do it.

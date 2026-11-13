@@ -97,6 +97,14 @@ export const ADMIN_SURFACES: AdminSurfaceEntry[] = [
       "#815. Both sides mount the shared HouseStyleRulesSection (components/HouseStyleRulesSection.tsx); admin-only, like GET/PATCH /api/translation-memory/house-style-rules. Rules arrive by migration; there is no add/edit form.",
   },
   {
+    id: "lessons",
+    label: "Lessons from editor corrections (nightly AI-written lessons in instructions.md; on/off switch, read-only list, last run and cost)",
+    classic: { section: "lessons", file: PREFS },
+    desk: { page: "style", file: STYLE, anchor: "<LessonsSection" },
+    notes:
+      "#817 part 1. Both sides mount the shared LessonsSection (components/LessonsSection.tsx); admin-only, like GET/PUT /api/translation-memory/lessons. Off by default for every workspace. Per-lesson delete / pin / promote and restoring an older night's set are part 2 (still open on #817).",
+  },
+  {
     id: "setupWizard",
     label: "Setup wizard (org / sources / lanes)",
     classic: { section: "setup", file: PREFS },

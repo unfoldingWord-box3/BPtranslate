@@ -333,7 +333,8 @@
       "localization": "Localization",
       "users": "Users",
       "aiService": "AI service",
-      "houseStyle": "House style"
+      "houseStyle": "House style",
+      "lessons": "Lessons"
     },
     "aiService": {
       "title": "AI service",
@@ -615,6 +616,46 @@
       },
       "saved": "Lane config saved."
     }
+  },
+  "lessons": {
+    "title": "Lessons from editor corrections",
+    "intro": "Each night the app can read what editors changed in the AI drafts they approved and write a short list of lessons. The AI is given these lessons with every new draft.",
+    "switchOn": "On",
+    "switchOff": "Off",
+    "toggleAria": "Learn from editor corrections",
+    "statusOff": "Off. The AI is NOT learning from editor corrections. New drafts get only your brief, instructions, terms, templates and examples. Turn this on when your editors have approved enough notes, for example after a few weeks of work.",
+    "statusOn": "On. On a night with new approvals, the app reads the corrections in the 2 most recently approved chapters and updates the lessons below. AI drafts made after the next context pack export are given them. A night that failed or ran out of time is finished the next night.",
+    "unavailableProvider": "Not available with your AI provider ({{provider}}). Lessons need Claude or Gemini. The AI is NOT learning from editor corrections.",
+    "unavailableNoKey": "Cannot run: the AI service is not set up, or its key cannot be used. Check AI service. The AI is NOT learning from editor corrections.",
+    "unavailableNotTranslation": "Lessons are for translation projects only. The AI is NOT learning from editor corrections.",
+    "cost": "On each night it runs, the app makes one call to your AI service: a night with new approvals, or the night after a run that failed or ran out of time. Your project's AI account pays for it.",
+    "run": {
+      "never": "Last run: not run yet.",
+      "summary": "Last run: {{when}}, {{status}}. {{cost}}",
+      "ok": "lessons updated",
+      "noChanges": "no corrections to learn from",
+      "failed": "failed ({{reason}}); the previous lessons were kept",
+      "running": "running",
+      "noCall": "No AI call was made.",
+      "cost": "Cost: about US${{cost}}.",
+      "costUnknown": "Cost: unknown for this model."
+    },
+    "listTitle": "Current lessons: {{n}} (at most {{max}})",
+    "empty": "No lessons yet. The first lessons are written on the first night after this is on and editors have approved notes.",
+    "meta": "Seen in {{n}} notes · since {{date}}",
+    "before": "AI wrote",
+    "after": "Editor wrote",
+    "storedNotUsed": "These lessons are kept, but the AI is not given them while this is off.",
+    "unavailableStillUsed": "No new lessons can be written: {{why}} The {{n}} lessons already saved are still given to the AI. Turn this off to stop giving them.",
+    "why": {
+      "provider": "your AI provider ({{provider}}) cannot write lessons; they need Claude or Gemini.",
+      "noKey": "the AI service is not set up, or its key cannot be used.",
+      "notTranslation": "lessons are for translation projects only."
+    },
+    "readOnly": "Lessons cannot be edited or removed here yet.",
+    "loadFailed": "Could not load the lessons. Reload the page to try again.",
+    "saveFailed": "Could not change the setting. Try again.",
+    "notMigrated": "Lessons are not available yet: the server database needs an update (migration 0085)."
   },
   "houseStyle": {
     "title": "House style",
@@ -2318,6 +2359,8 @@
       "sectionExamples": "Examples",
       "sectionHouseStyle": "House style",
       "houseStyleIntro": "Fixes made automatically to AI translation drafts when they are imported, so editors do not have to make the same correction on every note. They apply to notes and to questions and their answers.",
+      "sectionLessons": "Lessons",
+      "lessonsIntro": "Each night the app can read what editors changed in the AI drafts they approved and write a short list of lessons. The AI is given these lessons with every new draft.",
       "sectionQaRules": "QA rules",
       "sectionTemplates": "Templates",
       "sourceProjectOnly": "Translation preferences (brief, instructions, terminology, examples) apply to translation projects only — this workspace is a source project.",
