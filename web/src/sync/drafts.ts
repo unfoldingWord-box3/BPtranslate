@@ -200,8 +200,10 @@ async function tell(to: Set<Subscriber>) {
 // without a reload. Editors do not opt in: they copy a stored draft into a box
 // only when the box opens (#903) and otherwise trust the box's own text, so
 // another tab's typing would only mark this tab's box dirty without showing
-// that text. A received message only re-reads, never
-// announces, so tabs cannot ping-pong. Named per workspace, as the database is.
+// that text. (The prefs editors opt in only to write their own draft again
+// when another tab deleted it while they still show the typing, #913; they
+// never copy another tab's text into a box.) A received message only re-reads,
+// never announces, so tabs cannot ping-pong. Named per workspace, as the database is.
 // tell() never rejects (orderedReads logs a failed read), so `void` is safe.
 const changedChannel = openDraftsChangedChannel(workspaceDbName(DRAFTS_CHANGED_CHANNEL_BASE), () => {
   void tell(remoteSubscribers);
@@ -325,7 +327,8 @@ export function templateKey(templateId: string): string {
 
 export const drafts = {
   // `remote: true` also calls `fn` after another tab of this workspace changed
-  // the store (#896). Only the "N unsaved" count opts in; see changedChannel.
+  // the store (#896). The "N unsaved" count opts in, and the prefs editors to
+  // notice their own draft deleted (#913); see changedChannel.
   subscribe(fn: Subscriber, opts?: { remote?: boolean }): () => void {
     subscribers.add(fn);
     if (opts?.remote) remoteSubscribers.add(fn);

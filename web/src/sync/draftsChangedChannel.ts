@@ -5,8 +5,9 @@
 // after a change made in that same tab. When tab A saved or discarded a draft,
 // tab B kept the old count until a reload. Now drafts.ts posts a "changed"
 // message after each committed write or delete, and every other tab re-reads
-// the store for its subscribers that opted in (only the count; editors keep
-// hearing their own tab's changes only). A received message never posts
+// the store for its subscribers that opted in (the count, and the prefs
+// editors, which only check that their own draft is still stored, #913; other
+// editors keep hearing their own tab's changes only). A received message never posts
 // another one, so tabs cannot ping-pong.
 //
 // The channel is named per workspace (drafts.ts passes workspaceDbName's
