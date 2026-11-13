@@ -897,3 +897,54 @@ test("913 B4: the drafts store's set-if-absent leaves an existing record", async
   });
   expect(out).toEqual({ first: true, second: false, text: "first" });
 });
+
+// Review round 3, C1: tab A saves Brief while tab B is still loading, and B's
+// prefs GET (read before A's save) lands after A's broadcast. B keeps the
+// newer row: a later save of a box nobody typed in lands first time, and
+// A's saved text stays.
+test("913 C1: a stale first load does not replace another tab's newer saved row", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const stamp = Date.now();
+  await putPrefs(setup!.context.request, setup!.csrf, {
+    audience: `c1 audience ${stamp}`,
+    common_issues_md: `c1 common ${stamp}`,
+  });
+  const { context } = await adminContext(browser, "a");
+  const pageA = await context.newPage();
+  await openStyle(pageA, `c1 common ${stamp}`);
+  await briefBox(pageA).click();
+  await pageA.keyboard.press("End");
+  await pageA.keyboard.type(" A");
+
+  // B reads the row now, but gets it only after A's save.
+  const pageB = await context.newPage();
+  pageB.on("dialog", (d) => void d.accept());
+  await pageB.setViewportSize({ width: 1280, height: 900 });
+  let release = () => {};
+  const gate = new Promise<void>((r) => (release = r));
+  await pageB.route(`**${PREFS}`, async (route) => {
+    if (route.request().method() !== "GET") return route.continue();
+    const res = await route.fetch();
+    await gate;
+    await route.fulfill({ response: res });
+  });
+  const asked = pageB.waitForRequest((r) => r.url().includes(PREFS) && r.method() === "GET");
+  await pageB.goto(`${BASE}/#/admin/style`);
+  await asked;
+  await pageB.waitForTimeout(500);
+
+  await pageA.bringToFront();
+  expect(await clickSave(pageA, "brief")).toBe(200);
+  await pageA.waitForTimeout(500);
+  release();
+
+  await pageB.bringToFront();
+  await expect(commonBox(pageB)).toHaveValue(`c1 common ${stamp}`, { timeout: 20_000 });
+  await expect(briefBox(pageB)).toHaveValue(`c1 audience ${stamp} A`);
+  await scriptNotesBox(pageB).click();
+  await pageB.keyboard.press("End");
+  await pageB.keyboard.type(" C1");
+  expect(await clickSave(pageB, "brief")).toBe(200);
+  const p = await getPrefs(setup!.context.request);
+  expect(p.audience).toBe(`c1 audience ${stamp} A`);
+});

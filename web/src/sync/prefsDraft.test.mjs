@@ -3,6 +3,8 @@ import {
   afterPrefsConflict,
   afterPrefsSave,
   afterPrefsSavedElsewhere,
+  newestPrefs,
+  prefsDiscardMatches,
   hydratePrefsDraft,
   prefsDraftClearable,
   prefsDraftDroppable,
@@ -186,6 +188,32 @@ assert.deepStrictEqual(afterPrefsSavedElsewhere({ text: brief0, base: brief0, ba
   base: briefServer,
   baseVersion: 8,
 });
+
+// Round 3 C3: a save message not newer than what this editor holds is ignored.
+assert.strictEqual(afterPrefsSavedElsewhere({ text: typed, base: start, baseVersion: 5 }, typed, 5), null);
+assert.strictEqual(afterPrefsSavedElsewhere({ text: typed, base: start, baseVersion: 6 }, typed, 5), null);
+
+// ── prefsDiscardMatches (round 3, C2) ──────────────────────────────────────
+// Another tab discarded a draft whose text was `discarded`. This editor shows
+// that typing when every box it typed in holds the discarded value; boxes it
+// did not type in (Brief's `notes`, or a box showing a newer server value)
+// do not count. Nothing typed here: nothing to throw away.
+assert.ok(prefsDiscardMatches(briefTyped, brief0, { ...briefTyped, notes: "older notes" }));
+assert.ok(prefsDiscardMatches(briefTyped, brief0, briefTyped));
+assert.ok(!prefsDiscardMatches(briefTyped, brief0, { ...briefTyped, audience: "other typing" }));
+assert.ok(!prefsDiscardMatches(brief0, brief0, briefTyped));
+
+// ── newestPrefs (round 3, C1) ──────────────────────────────────────────────
+// The page's prefs row never moves to an older version: a late GET, or a save
+// response overtaken by another tab's newer save, is ignored.
+const v5 = { version: 5, audience: "five" };
+const v6 = { version: 6, audience: "six" };
+assert.strictEqual(newestPrefs(null, v5), v5);
+assert.strictEqual(newestPrefs(v5, v6), v6);
+assert.strictEqual(newestPrefs(v6, v5), v6);
+// Same version: the row in hand is taken (a refetch of the same row).
+const v6b = { version: 6, audience: "six again" };
+assert.strictEqual(newestPrefs(v6, v6b), v6b);
 
 // ── prefsDraftDroppable (#913 item 5) ──────────────────────────────────────
 // Drafts are per workspace, not per user. A user who cannot save drops only a
