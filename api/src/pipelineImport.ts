@@ -38,7 +38,7 @@ import { rawUrlOriginError } from "./rawUrlPin.ts";
 import { sameDcsName } from "./repoUrl.ts";
 import { HUMAN_TOUCH_ACTIONS, HUMAN_TOUCH_SOURCES } from "./pipelineDedupSql.ts";
 import { houseStyleForProposal, loadEnabledHouseStyleRules, type HouseStyleRule } from "./houseStyle.ts";
-import { readBookSourceNotes, type SourceNotes } from "./sourceNotes.ts";
+import { readBookSourceNotes, readPinnedSourceNotes, type SourceNotes } from "./sourceNotes.ts";
 import { isTranslationConfig } from "./workflowLayouts.ts";
 
 interface OutputEntry {
@@ -259,6 +259,22 @@ async function translateSelection(env: Env, jobId: string): Promise<TranslateSel
   const verseEnd = typeof o.verseEnd === "number" ? o.verseEnd : null;
   if (!rowIds && verseStart == null) return null;
   return { rowIds, verseStart, verseEnd };
+}
+
+// #794: the English a translate job translated from, "org/repo@ref", as
+// buildTranslateOptions stored it in options_json (the project's source on
+// master, or a caller's pinned ref). null when the job has none.
+async function translateSourceRef(env: Env, jobId: string): Promise<string | null> {
+  const r = await env.DB.prepare(`SELECT options_json FROM pipeline_jobs WHERE job_id = ?1`)
+    .bind(jobId)
+    .first<{ options_json: string | null }>();
+  try {
+    const o: unknown = r?.options_json ? JSON.parse(r.options_json) : null;
+    const ref = o && typeof o === "object" ? (o as { sourceRef?: unknown }).sourceRef : null;
+    return typeof ref === "string" && ref.trim() ? ref.trim() : null;
+  } catch {
+    return null;
+  }
 }
 
 async function parseOutputEntry(
@@ -699,13 +715,23 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
     // #794: a whole-chapter run (no rowIds, no verse range) keeps approved rows.
     const keepApproved = selection === null;
     // #794: the English source notes, read once per job for every chapter with
-    // a note proposal (one Door43 read per source repo, cached per isolate).
-    // A project that writes its notes in English has no English source, so
-    // there is nothing to compare against and nothing is read.
-    const english =
-      tnProposals.length > 0 && isTranslationConfig(job.cfg)
-        ? await readBookSourceNotes(env, job.book, [...new Set(tnProposals.map((p) => p.chapter))])
-        : new Map<number, SourceNotes>();
+    // a note proposal (cached per isolate). The English is the file the job
+    // translated from: its options_json.sourceRef ("org/repo@ref", set at start,
+    // possibly pinned to a commit), one read for the whole job. A job without
+    // one (queued before sourceRef was stored) falls back to the project's
+    // per-chapter source on master. A project that writes its notes in English
+    // has no English source, so nothing is read.
+    const english = new Map<number, SourceNotes>();
+    if (tnProposals.length > 0 && isTranslationConfig(job.cfg)) {
+      const chapters = [...new Set(tnProposals.map((p) => p.chapter))];
+      const sourceRef = await translateSourceRef(env, job.jobId);
+      if (sourceRef) {
+        const notes = await readPinnedSourceNotes(env, sourceRef, job.book);
+        for (const ch of chapters) english.set(ch, notes);
+      } else {
+        for (const [ch, notes] of await readBookSourceNotes(env, job.book, chapters)) english.set(ch, notes);
+      }
+    }
     // #815: this workspace's enabled house-style rules, read once per job (not
     // per row) and applied to every drafted note / question below.
     const houseRules =
@@ -1325,7 +1351,19 @@ async function applyTranslateTnRow(
       )
       .bind(p.id, userId, target.id, job.book, newVersion, now),
   ]);
-  return (res[0]?.meta?.changes ?? 0) > 0 ? "drafted" : "no_match";
+  if ((res[0]?.meta?.changes ?? 0) > 0) return "drafted";
+  // #794: the write changed nothing. If the state guard was on and the note is
+  // approved now, an Approve landed after the read above: report it as kept.
+  return guard.keepApproved && (await approvedNow(env, "tn_rows", target.id, job.book)) ? "approved" : "no_match";
+}
+
+// #794: is this row approved right now? Read only after a guarded write changed
+// nothing, so a whole-chapter apply pays it only on a lost race.
+async function approvedNow(env: Env, table: "tn_rows" | "tq_rows", id: string, book: string): Promise<boolean> {
+  const r = await env.DB.prepare(`SELECT translation_state FROM ${table} WHERE id = ?1 AND book = ?2 AND deleted_at IS NULL`)
+    .bind(id, book)
+    .first<{ translation_state: string | null }>();
+  return r?.translation_state === "validated";
 }
 
 // Translate-pipeline apply for translationQuestions (multilingual; PIPELINE-SPEC
@@ -1428,7 +1466,9 @@ async function applyTranslateTqRow(
       )
       .bind(p.id, userId, target.id, job.book, newVersion, now),
   ]);
-  return (res[0]?.meta?.changes ?? 0) > 0 ? "drafted" : "no_match";
+  if ((res[0]?.meta?.changes ?? 0) > 0) return "drafted";
+  // #794: see applyTranslateTnRow.
+  return guard.keepApproved && (await approvedNow(env, "tq_rows", target.id, job.book)) ? "approved" : "no_match";
 }
 
 // Translate-pipeline apply for tw/ta markdown articles (multilingual). The
