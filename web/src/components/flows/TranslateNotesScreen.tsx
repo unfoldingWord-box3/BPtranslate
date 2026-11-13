@@ -199,7 +199,7 @@ import {
   withPendingReverts,
   type PendingRowSave,
 } from "../../sync/draftSaveState";
-import { onOutboxDrop, onOutboxResult, outbox, type OutboxOp } from "../../sync/outbox";
+import { onOpDropped, onOutboxResult, outbox, type DroppedOp, type OutboxOp } from "../../sync/outbox";
 import { pipelineStore, getSessionKey, type PipelineJob } from "../../sync/pipelineStore";
 import { jobLocksChapterNotes, jobLocksNote, lockJobReleased } from "../../lib/chapterLock";
 import { redoOutcome } from "../../lib/applySkipped";
@@ -874,7 +874,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
   // (also after a keep-mine, where saveDraft no longer moves it), and the
   // persist effect re-runs against it, so a kept revert stays a draft.
   useEffect(() => {
-    const end = (op: OutboxOp, ok: boolean) => {
+    const end = (op: DroppedOp, ok: boolean) => {
       endedOpsRef.current.add(op.id);
       const sent = sentRef.current;
       if (!sent || !isEditorsPendingSave(sent, op, { rowKind: "tn", id: sent.id, book })) return;
@@ -891,7 +891,8 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
     const offResult = onOutboxResult((op, result) => {
       if (rowSaveEnded(result)) end(op, result.kind === "ok");
     });
-    const offDrop = onOutboxDrop((op) => end(op, false));
+    // A discard in this tab or another (#637 review item 1).
+    const offDrop = onOpDropped((op) => end(op, false));
     return () => {
       offResult();
       offDrop();
@@ -1552,7 +1553,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
         applyLocalRowPatch("tn", target.id, baseline as Partial<TnRow & TqRow>);
       }
     });
-    offDrop = onOutboxDrop((op) => {
+    offDrop = onOpDropped((op) => {
       if (op.id !== opId) return;
       offResult();
       offDrop();

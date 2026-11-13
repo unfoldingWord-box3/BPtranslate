@@ -123,7 +123,7 @@ import {
   withPendingReverts,
   type PendingRowSave,
 } from "../../sync/draftSaveState";
-import { onOutboxDrop, onOutboxResult, outbox, type OutboxOp } from "../../sync/outbox";
+import { onOpDropped, onOutboxResult, outbox, type DroppedOp, type OutboxOp } from "../../sync/outbox";
 import { api, ApiError, isChapterLockedBody, type ChapterLockedBody, type TqRow } from "../../sync/api";
 import { SCRIPTURE_FONT_STACK } from "../../theme";
 
@@ -847,7 +847,7 @@ export default function TranslateQuestionsScreen({
   // (also after a keep-mine, where saveDraft no longer moves it), and the
   // persist effect re-runs against it, so a kept revert stays a draft.
   useEffect(() => {
-    const end = (op: OutboxOp, ok: boolean) => {
+    const end = (op: DroppedOp, ok: boolean) => {
       endedOpsRef.current.add(op.id);
       const sent = sentRef.current;
       if (!sent || !isEditorsPendingSave(sent, op, { rowKind: "tq", id: sent.id, book })) return;
@@ -868,7 +868,8 @@ export default function TranslateQuestionsScreen({
     const offResult = onOutboxResult((op, result) => {
       if (rowSaveEnded(result)) end(op, result.kind === "ok");
     });
-    const offDrop = onOutboxDrop((op) => end(op, false));
+    // A discard in this tab or another (#637 review item 1).
+    const offDrop = onOpDropped((op) => end(op, false));
     return () => {
       offResult();
       offDrop();
