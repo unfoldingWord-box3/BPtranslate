@@ -20,7 +20,13 @@
 //             edit_log 'validate' entries of validated tN rows with no
 //             admin_bulk_state stamp (#833), and only once per UTC day
 //             (lesson_runs.night is UNIQUE). A run left 'running' from an
-//             earlier night is closed as failed ('interrupted').
+//             earlier night, or from tonight for longer than RUN_STALE_SECONDS,
+//             is closed as failed ('interrupted'); tonight's interrupted run
+//             is the one run a later invocation the same night may take over.
+//   budget    mining stops once MINING_CELL_BUDGET diff cells are spent. New
+//             approvals are diffed first, oldest first; a run that stops among
+//             them records its watermark just below the first one left, so
+//             the next night resumes there instead of skipping it.
 //   provider  the workspace's own key, only for providers with an in-Worker
 //             adapter (Claude, Gemini: hasInternalAdapter). Anything else is
 //             "not available": no call, no run row.
@@ -49,7 +55,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { Env } from "./index";
 import { currentUserId, requireAdmin } from "./auth.ts";
-import { queueContextExport } from "./contextExportQueue.ts";
+import { queueContextExport, requestDailyContextExport } from "./contextExportQueue.ts";
 import { getProjectConfig } from "./projectConfig.ts";
 import { nfc } from "./contextExportLib.ts";
 import { SCORECARD_ROWS_SQL } from "./draftScorecard.ts";
@@ -101,6 +107,28 @@ export const LESSON_CHAR_CAP = 300;
 export const EXAMPLE_CHAR_CAP = 120;
 /** One small call; a call that has not returned by now is hung. */
 export const CALL_TIMEOUT_MS = 120_000;
+/**
+ * LCS cells one night's mining may fill, for the whole run (each note is also
+ * capped at DIFF_SEGMENT_CAP tokens a side, 160,000 cells). The tick runs every
+ * workspace in one scheduled invocation, so this is far below the inbox's
+ * 300M-per-request budget: about 300 fully rewritten maximum-length notes, or
+ * tens of thousands of ordinary ones.
+ */
+export const MINING_CELL_BUDGET = 50_000_000;
+/**
+ * A run still 'running' this long after it started was killed: a scheduled
+ * invocation cannot run longer than 15 minutes.
+ */
+export const RUN_STALE_SECONDS = 30 * 60;
+/** Each term field in the prompt is cut to this. */
+export const TERM_CHAR_CAP = 100;
+/** Each side of an example excerpt in the prompt is cut to this. */
+export const EXCERPT_CHAR_CAP = 240;
+/**
+ * The whole user prompt stays under this many characters. Change lines are
+ * admitted before term lines; whatever does not fit is counted as not shown.
+ */
+export const PROMPT_CHAR_CAP = 80_000;
 
 // ---------------------------------------------------------------------------
 // Data shapes
@@ -145,8 +173,14 @@ export type LessonJobOutcome =
       status: Exclude<RunStatus, "running">;
       failureReason: string | null;
       lessons: number;
-      /** True when the stored set differs from the one before: the context pack needs an export. */
+      /**
+       * True when the stored lessons' wording or examples differ from the set
+       * before: the context pack needs an export. A new evidence count alone
+       * does not count (the pack shows it from the next export on).
+       */
       changed: boolean;
+      /** The mining budget ran out (MINING_CELL_BUDGET); the next night resumes. */
+      truncated: boolean;
     };
 
 type Db = Env["DB"];
@@ -215,52 +249,105 @@ export function isShaddaVowelOnly(before: string, after: string): boolean {
   return differs;
 }
 
-/** Group the corrections of the given chapters. */
+export type MineResult = {
+  groups: ChangeGroup[];
+  compared: number;
+  changed: number;
+  /** The run's cell budget ran out before every note in the window was diffed. */
+  truncated: boolean;
+  /**
+   * The approval (edit_log id) of the first NEW approval left undiffed when the
+   * budget ran out, or null when every new approval was diffed. The run then
+   * records its watermark just below it, so the next night starts there.
+   */
+  stoppedAt: number | null;
+};
+
+// One diff of the largest pair noteChanges accepts (DIFF_SEGMENT_CAP tokens a side).
+const NOTE_CELLS = DIFF_SEGMENT_CAP * DIFF_SEGMENT_CAP;
+
+/**
+ * Group the corrections of the given chapters.
+ *
+ * Work is bounded twice. Each note gets its own budget, enough for the largest
+ * diff noteChanges accepts, so one long rewrite never starves the notes after
+ * it (a note too long to diff is skipped and not counted as compared). And the
+ * whole run stops once `cells` are spent (MINING_CELL_BUDGET), so thousands of
+ * long rewrites cannot exceed the scheduled Worker's CPU limit. The note that
+ * crosses the line finishes, so every run diffs at least one note.
+ *
+ * The order makes a stopped run lose nothing: notes approved after `after`
+ * (the last finished run's watermark) come first, oldest approval first, then
+ * the rest of the window, newest approval first. When the budget runs out
+ * among the new approvals, `stoppedAt` names the first one left, and the next
+ * night resumes from it.
+ */
 export async function mineChanges(
   db: Db,
   chapters: readonly ChapterRef[],
-): Promise<{ groups: ChangeGroup[]; compared: number; changed: number }> {
+  opts: { after?: number | null; cells?: number } = {},
+): Promise<MineResult> {
+  const after = opts.after ?? null;
+  const runCells = opts.cells ?? MINING_CELL_BUDGET;
+  type Row = { id: string; final_note: string | null; draft_note: unknown; approval_id: number | null };
+  const rows: Row[] = [];
+  for (const ch of chapters) {
+    const rs = await db
+      .prepare(
+        `SELECT s.id AS id, s.final_note AS final_note, s.draft_note AS draft_note,
+                (SELECT MAX(a.id) FROM edit_log a
+                  WHERE a.kind = 'tn' AND a.action = 'validate' AND a.row_key = s.id AND a.book = ?1) AS approval_id
+           FROM (${SCORECARD_ROWS_SQL}) s WHERE s.chapter = ?2`,
+      )
+      .bind(ch.book, ch.chapter)
+      .all<Row>();
+    rows.push(...(rs.results ?? []));
+  }
+  const isNew = (r: Row) => r.approval_id != null && (after == null || r.approval_id > after);
+  const fresh = rows.filter(isNew).sort((a, b) => a.approval_id! - b.approval_id!);
+  // Array.sort is stable: rows without a hand approval keep their window order, last.
+  const rest = rows.filter((r) => !isNew(r)).sort((a, b) => (b.approval_id ?? -1) - (a.approval_id ?? -1));
+
   const byKey = new Map<string, ChangeGroup>();
   let compared = 0;
   let changed = 0;
-  for (const ch of chapters) {
-    const rs = await db
-      .prepare(`SELECT * FROM (${SCORECARD_ROWS_SQL}) WHERE chapter = ?2`)
-      .bind(ch.book, ch.chapter)
-      .all<{ id: string; final_note: string | null; draft_note: unknown }>();
-    for (const r of rs.results ?? []) {
-      if (typeof r.draft_note !== "string" || r.final_note == null) continue;
-      // Each note gets its own budget, enough for the largest diff noteChanges
-      // accepts (DIFF_SEGMENT_CAP tokens a side). A budget shared across the
-      // window ran out on long rewrites and silently skipped every later note,
-      // whose corrections the watermark then moved past. A note too long to
-      // diff is not counted as compared.
-      const changes = noteChanges(r.draft_note, r.final_note, { cells: DIFF_SEGMENT_CAP * DIFF_SEGMENT_CAP });
-      if (!changes) continue;
-      compared++;
-      if (changes.length === 0) continue;
-      const seen = new Set<string>();
-      for (const c of changes) {
-        if (seen.has(c.key) || isShaddaVowelOnly(c.before, c.after)) continue;
-        seen.add(c.key);
-        const g = byKey.get(c.key);
-        if (g) g.count++;
-        else
-          byKey.set(c.key, {
-            before: c.before,
-            after: c.after,
-            count: 1,
-            draftExcerpt: c.draftExcerpt,
-            finalExcerpt: c.finalExcerpt,
-          });
-      }
-      if (seen.size > 0) changed++;
+  let spent = 0;
+  let truncated = false;
+  let stoppedAt: number | null = null;
+  for (const r of [...fresh, ...rest]) {
+    if (typeof r.draft_note !== "string" || r.final_note == null) continue;
+    if (spent >= runCells) {
+      truncated = true;
+      if (isNew(r)) stoppedAt = r.approval_id;
+      break;
     }
+    const budget = { cells: NOTE_CELLS };
+    const changes = noteChanges(r.draft_note, r.final_note, budget);
+    spent += NOTE_CELLS - budget.cells;
+    if (!changes) continue;
+    compared++;
+    if (changes.length === 0) continue;
+    const seen = new Set<string>();
+    for (const c of changes) {
+      if (seen.has(c.key) || isShaddaVowelOnly(c.before, c.after)) continue;
+      seen.add(c.key);
+      const g = byKey.get(c.key);
+      if (g) g.count++;
+      else
+        byKey.set(c.key, {
+          before: c.before,
+          after: c.after,
+          count: 1,
+          draftExcerpt: c.draftExcerpt,
+          finalExcerpt: c.finalExcerpt,
+        });
+    }
+    if (seen.size > 0) changed++;
   }
   const groups = [...byKey.values()].sort(
     (a, b) => b.count - a.count || (a.before < b.before ? -1 : a.before > b.before ? 1 : a.after < b.after ? -1 : 1),
   );
-  return { groups, compared, changed };
+  return { groups, compared, changed, truncated, stoppedAt };
 }
 
 // ---------------------------------------------------------------------------
@@ -300,7 +387,7 @@ export function buildLessonsPrompt(input: {
   groups: readonly ChangeGroup[];
 }): { system: string; user: string } {
   const system = [
-    `You keep a short list of lessons for an AI that drafts Bible translation notes in ${input.languageName} (${input.languageCode}).`,
+    `You keep a short list of lessons for an AI that drafts Bible translation notes in ${field(input.languageName, 80)} (${field(input.languageCode, 20)}).`,
     "Editors correct each AI draft before approving it. You are shown what they changed in the most recently approved chapters, with how many notes each change was made in, and the lessons the AI is given today.",
     "",
     "Rules:",
@@ -317,46 +404,77 @@ export function buildLessonsPrompt(input: {
     '"id" is the current lesson\'s id (L1, L2, …) for a lesson you keep, or null for a new one. "reversed" lists the ids of current lessons that editors are now reversing. A current lesson you do not list in either place is kept as it is.',
   ].join("\n");
 
-  const parts: string[] = [];
-  parts.push("# Current lessons", "");
-  if (input.current.length === 0) parts.push("(none yet)");
-  else input.current.forEach((l, i) => parts.push(`L${i + 1}. ${lessonLine(l).slice(2)}`));
+  // Every interpolated string is flattened to one line and capped: only item
+  // counts were capped before, and one 10,000-character term or token would
+  // carry straight into the provider's input.
+  const head: string[] = [];
+  head.push("# Current lessons", "");
+  if (input.current.length === 0) head.push("(none yet)");
+  else input.current.forEach((l, i) => head.push(`L${i + 1}. ${field(lessonLine(l).slice(2), LESSON_LINE_CAP)}`));
 
-  parts.push("", "# Instructions the drafting AI already gets", "");
-  parts.push(input.instructionsMd?.trim() ? cap(input.instructionsMd.trim(), PREFS_CHAR_CAP) : "(none)");
-  parts.push("", "## Common issues", "");
-  parts.push(input.commonIssuesMd?.trim() ? cap(input.commonIssuesMd.trim(), PREFS_CHAR_CAP) : "(none)");
+  head.push("", "# Instructions the drafting AI already gets", "");
+  head.push(input.instructionsMd?.trim() ? cap(input.instructionsMd.trim(), PREFS_CHAR_CAP) : "(none)");
+  head.push("", "## Common issues", "");
+  head.push(input.commonIssuesMd?.trim() ? cap(input.commonIssuesMd.trim(), PREFS_CHAR_CAP) : "(none)");
 
-  parts.push("", "# Terms (source → target)", "");
-  const shown = input.terms.slice(0, MAX_PROMPT_TERMS);
-  if (shown.length === 0) parts.push("(none)");
-  for (const t of shown) {
-    parts.push(
-      t.status === "forbidden"
-        ? `- ${t.source}: never «${t.target ?? ""}»${t.replacement ? `, use «${t.replacement}»` : ""}`
-        : `- ${t.source} → «${t.target ?? ""}»${t.status && t.status !== "preferred" ? ` (${t.status})` : ""}`,
+  const termLines = input.terms.slice(0, MAX_PROMPT_TERMS).map((t) => {
+    const source = field(t.source, TERM_CHAR_CAP);
+    const target = field(t.target ?? "", TERM_CHAR_CAP);
+    const replacement = field(t.replacement ?? "", TERM_CHAR_CAP);
+    const status = field(t.status, 20);
+    return t.status === "forbidden"
+      ? `- ${source}: never «${target}»${replacement ? `, use «${replacement}»` : ""}`
+      : `- ${source} → «${target}»${status && status !== "preferred" ? ` (${status})` : ""}`;
+  });
+  const changeLines = input.groups
+    .slice(0, MAX_PROMPT_CHANGES)
+    .map(
+      (g) =>
+        `- ${g.count}× «${field(g.before, EXAMPLE_CHAR_CAP)}» → «${field(g.after, EXAMPLE_CHAR_CAP) || "∅"}»   e.g. «${field(g.draftExcerpt, EXCERPT_CHAR_CAP)}» ⇒ «${field(g.finalExcerpt, EXCERPT_CHAR_CAP)}»`,
     );
-  }
-  if (input.terms.length > shown.length) parts.push(`(${input.terms.length - shown.length} more terms not shown)`);
 
-  const where = input.chapters.map((c) => `${c.book} ${c.chapter}`).join(", ");
-  parts.push(
+  const where = input.chapters.map((c) => `${field(c.book, 10)} ${c.chapter}`).join(", ");
+  const changesHead = [
     "",
     "# What editors changed",
     "",
     `Chapters: ${where}. Approved notes compared with their AI draft: ${input.compared}; notes the editor changed: ${input.changed}.`,
     "Each line: the number of notes with that change, the AI's words → the editor's words (∅ = deleted), then one example in context.",
     "",
-  );
-  const groups = input.groups.slice(0, MAX_PROMPT_CHANGES);
-  for (const g of groups) {
-    parts.push(`- ${g.count}× «${g.before}» → «${g.after || "∅"}»   e.g. «${g.draftExcerpt}» ⇒ «${g.finalExcerpt}»`);
-  }
-  if (input.groups.length > groups.length) {
-    parts.push(`(${input.groups.length - groups.length} rarer changes not shown)`);
+  ];
+
+  // Whole lines within PROMPT_CHAR_CAP: changes before terms, since the
+  // changes are what tonight's run is about. The "not shown" lines (and the
+  // terms heading) are reserved for up front, so their counts stay true.
+  const RESERVED = 200;
+  let room =
+    PROMPT_CHAR_CAP - RESERVED - [...head, "", "# Terms (source → target)", "", ...changesHead].join("\n").length;
+  const admit = (lines: string[]) => {
+    const out: string[] = [];
+    for (const line of lines) {
+      if (line.length + 1 > room) break;
+      room -= line.length + 1;
+      out.push(line);
+    }
+    return out;
+  };
+  const changesShown = admit(changeLines);
+  const termsShown = admit(termLines);
+
+  const parts = [...head, "", "# Terms (source → target)", ""];
+  if (input.terms.length === 0) parts.push("(none)");
+  parts.push(...termsShown);
+  if (input.terms.length > termsShown.length) parts.push(`(${input.terms.length - termsShown.length} more terms not shown)`);
+  parts.push(...changesHead, ...changesShown);
+  if (input.groups.length > changesShown.length) {
+    parts.push(`(${input.groups.length - changesShown.length} rarer changes not shown)`);
   }
   return { system, user: parts.join("\n") };
 }
+
+// A stored lesson line: its lesson and both example sides are already capped
+// when the set is written; this bounds it again for the prompt.
+const LESSON_LINE_CAP = LESSON_CHAR_CAP + 2 * EXAMPLE_CHAR_CAP + 60;
 
 // ---------------------------------------------------------------------------
 // Output
@@ -366,6 +484,8 @@ export type ParsedLesson = { id: string | null; lesson: string; before: string; 
 export type ParsedOutput = { lessons: ParsedLesson[]; reversed: string[] };
 
 const oneLine = (s: unknown) => (typeof s === "string" ? s.replace(/\s+/g, " ").trim() : "");
+/** One prompt field: flattened to one line, then capped. */
+const field = (s: unknown, n: number) => cap(oneLine(s), n);
 
 /** null when the reply holds no readable JSON object of the agreed shape. */
 export function parseLessonsOutput(text: string): ParsedOutput | null {
@@ -487,7 +607,7 @@ export function mergeLessons(
 // The nightly job
 // ---------------------------------------------------------------------------
 
-export type LessonDeps = { transport?: Transport; now?: number };
+export type LessonDeps = { transport?: Transport; now?: number; /** Mining budget (tests). */ cells?: number };
 
 /**
  * Run tonight's lessons for this workspace (env is already workspace-resolved).
@@ -502,15 +622,17 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
 
   let last: number | null;
   try {
-    // A run from an earlier night still 'running' was killed (isolate evicted,
-    // timeout): close it as failed so the page says so, every night the
-    // switch is on, whether or not tonight runs.
+    // A run still 'running' from an earlier night, or from tonight but
+    // started longer ago than any invocation can last, was killed (isolate
+    // evicted, timeout): close it as failed so the page says so, every night
+    // the switch is on, whether or not tonight runs. Tonight's killed run can
+    // then be retried tonight (the claim below).
     await db
       .prepare(
         `UPDATE lesson_runs SET status = 'failed', failure_reason = 'interrupted', finished_at = ?2
-          WHERE status = 'running' AND night <> ?1`,
+          WHERE status = 'running' AND (night <> ?1 OR started_at <= ?3)`,
       )
-      .bind(night, now)
+      .bind(night, now, now - RUN_STALE_SECONDS)
       .run();
     // Only runs that finished their mining move the watermark: a failed or
     // killed run's corrections are mined again on a later night. Spend stays
@@ -535,11 +657,22 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
   }
   const { provider, model } = availability;
 
-  // One run per UTC day: the claim is the run row itself.
+  // One run per UTC day: the claim is the run row itself. The one exception is
+  // tonight's run that was killed (closed as 'interrupted' above): its row is
+  // taken over, since a killed run never recorded a finish. A run that ended
+  // ('ok', 'no_changes', or 'failed' for any other reason) is not retried
+  // tonight, so a failing provider is called at most once a night.
   const claim = await db
     .prepare(
       `INSERT INTO lesson_runs (night, started_at, approvals_through, provider, model)
-       VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(night) DO NOTHING RETURNING id`,
+       VALUES (?1, ?2, ?3, ?4, ?5)
+       ON CONFLICT(night) DO UPDATE SET
+         started_at = excluded.started_at, approvals_through = excluded.approvals_through,
+         provider = excluded.provider, model = excluded.model, status = 'running',
+         failure_reason = NULL, finished_at = NULL, chapters_json = '[]', changes = 0,
+         calls = 0, input_tokens = 0, output_tokens = 0, cost_usd = NULL
+       WHERE lesson_runs.status = 'failed' AND lesson_runs.failure_reason = 'interrupted'
+       RETURNING id`,
     )
     .bind(night, now, watermark, provider, model)
     .first<{ id: number }>();
@@ -559,22 +692,28 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
   };
   let chapters: ChapterRef[] = [];
   let changes = 0;
+  // The watermark this run covers: the claimed one, or, when the mining
+  // budget ran out among new approvals, just below the first one left undiffed.
+  let through = watermark;
+  let truncated = false;
   const finish = (status: Exclude<RunStatus, "running">, reason: string | null) =>
     db
       .prepare(
         `UPDATE lesson_runs SET finished_at = ?2, status = ?3, failure_reason = ?4, chapters_json = ?5, changes = ?6,
-                calls = ?7, input_tokens = ?8, output_tokens = ?9, cost_usd = ?10
+                calls = ?7, input_tokens = ?8, output_tokens = ?9, cost_usd = ?10, approvals_through = ?11
           WHERE id = ?1`,
       )
-      .bind(runId, Math.floor(Date.now() / 1000), status, reason, JSON.stringify(chapters), changes, calls, inputTokens, outputTokens, cost);
+      .bind(runId, Math.floor(Date.now() / 1000), status, reason, JSON.stringify(chapters), changes, calls, inputTokens, outputTokens, cost, through);
 
   try {
     chapters = await recentApprovedChapters(db);
-    const mined = await mineChanges(db, chapters);
+    const mined = await mineChanges(db, chapters, { after: last, cells: deps.cells });
     changes = mined.groups.length;
+    truncated = mined.truncated;
+    if (mined.stoppedAt != null) through = mined.stoppedAt - 1;
     if (mined.groups.length === 0) {
       await finish("no_changes", null).run();
-      return { ran: true, runId, status: "no_changes", failureReason: null, lessons: 0, changed: false };
+      return { ran: true, runId, status: "no_changes", failureReason: null, lessons: 0, changed: false, truncated };
     }
 
     const cfg = await getProjectConfig(env);
@@ -626,13 +765,13 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
       // The code only: provider error bodies can echo the prompt.
       console.error(`lessons: AI call failed (${provider}, ${code})`);
       await finish("failed", code).run();
-      return { ran: true, runId, status: "failed", failureReason: code, lessons: current.lessons.length, changed: false };
+      return { ran: true, runId, status: "failed", failureReason: code, lessons: current.lessons.length, changed: false, truncated };
     }
 
     const parsed = parseLessonsOutput(text);
     if (!parsed) {
       await finish("failed", "unreadable_output").run();
-      return { ran: true, runId, status: "failed", failureReason: "unreadable_output", lessons: current.lessons.length, changed: false };
+      return { ran: true, runId, status: "failed", failureReason: "unreadable_output", lessons: current.lessons.length, changed: false, truncated };
     }
     const next = mergeLessons(
       current.lessons,
@@ -654,8 +793,9 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
       ...next.map((l, i) => insert.bind(runId, i + 1, l.lesson, l.before, l.after, l.evidence, l.firstSeenAt)),
       finish("ok", null),
     ]);
-    const key = (ls: readonly Lesson[]) => JSON.stringify(ls.map((l) => [l.lesson, l.before, l.after, l.evidence]));
-    return { ran: true, runId, status: "ok", failureReason: null, lessons: next.length, changed: key(next) !== key(current.lessons) };
+    // Content only: a re-estimated evidence count is not worth a pack export.
+    const key = (ls: readonly Lesson[]) => JSON.stringify(ls.map((l) => [l.lesson, l.before, l.after]));
+    return { ran: true, runId, status: "ok", failureReason: null, lessons: next.length, changed: key(next) !== key(current.lessons), truncated };
   } catch (e) {
     // Leave a finished row behind (the cost so far included), then let the caller log it.
     try {
@@ -664,6 +804,25 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
       // The row stays 'running'; the next night is a new day anyway.
     }
     throw e;
+  }
+}
+
+/**
+ * The scheduled tick for one workspace (index.ts runs it for every workspace
+ * after their daily exports were requested). A run that stores a changed set
+ * then requests a context export through the same pending flag every save
+ * uses (contextExportQueue.ts): the flag is set AFTER the set is committed, so
+ * an export already running, which read its inputs before, sees it set when
+ * it ends and starts one follow-up, which renders the new set. Isolated: a
+ * lessons failure is logged and never reaches the export or another workspace.
+ */
+export async function nightlyLessonsTick(env: Env, deps: LessonDeps = {}): Promise<void> {
+  try {
+    const out = await runNightlyLessons(env, deps);
+    console.log("nightly lessons", { workspace: env.WORKSPACE_SLUG ?? "default", ...out });
+    if (out.ran && out.changed) await requestDailyContextExport(env);
+  } catch (e) {
+    console.error("nightly lessons failed", e instanceof Error ? e.message : String(e));
   }
 }
 
@@ -792,7 +951,10 @@ export function lessonsRoutes() {
       if (tableMissing(e)) return c.json({ error: "not_migrated" }, 503);
       throw e;
     }
-    queueContextExport(c);
+    // Awaited, not left to waitUntil alone: the answer goes back only after the
+    // export is marked pending (or started), so the page never reports a
+    // switch whose pack update was not yet requested.
+    await queueContextExport(c);
     return c.json(await readLessonsState(c.env));
   });
 

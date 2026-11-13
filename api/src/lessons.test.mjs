@@ -25,11 +25,18 @@ import {
   MAX_LESSONS,
   LESSONS_HEADING,
   capText,
+  buildLessonsPrompt,
+  mineChanges,
+  nightlyLessonsTick,
+  loadCurrentLessons,
+  PROMPT_CHAR_CAP,
+  RUN_STALE_SECONDS,
 } from "./lessons.ts";
+import { runContextExportExclusive, startQueuedContextExport } from "./contextExportQueue.ts";
 import { Hono } from "hono";
 import { encryptApiKey } from "./aiKeyCrypto.ts";
 import { translationMemory } from "./translationMemory.ts";
-import { loadContextPackInputs, renderContextPack, renderInstructionsMd } from "./contextExport.ts";
+import { loadContextPackInputs, loadQueuedContextInputs, renderContextPack, renderInstructionsMd } from "./contextExport.ts";
 import { contextShrinkRefused } from "./contextExportLib.ts";
 import { clearProjectConfigCache } from "./projectConfig.ts";
 import { BEGIN_OUTPUT, END_OUTPUT } from "./translate/llm.ts";
@@ -157,6 +164,8 @@ async function fresh({ provider = "claude", model = "claude-sonnet-5", enabled =
     approveMore,
     setReply: (r) => (reply = r),
     run: (now = NIGHT1) => runNightlyLessons(env, { transport, now }),
+    runWith: (now, extra) => runNightlyLessons(env, { transport, now, ...extra }),
+    tick: (now = NIGHT1) => nightlyLessonsTick(env, { transport, now }),
   };
 }
 
@@ -614,4 +623,204 @@ test("a truncated reply is one billed call: no lower-effort retry, previous set 
   assert.equal(f.runs().at(-1).calls, 1);
   assert.ok(f.runs().at(-1).cost_usd > 0);
   assert.equal((await loadLessonsForRender(f.env.DB)).length, 1);
+});
+
+// ── review round 3 (#817) ───────────────────────────────────────────────────
+
+// The window's drafted, hand-approved notes, by approval (edit_log id), oldest first.
+function windowApprovals(f) {
+  return f.sqlite
+    .prepare(
+      `SELECT MAX(e.id) AS id FROM edit_log e JOIN tn_rows t ON t.id = e.row_key AND t.book = e.book
+        WHERE e.action = 'validate' AND t.chapter IN (2, 3) AND t.admin_bulk_state IS NULL
+          AND EXISTS (SELECT 1 FROM edit_log d WHERE d.row_key = t.id AND d.source = 'ai_pipeline')
+        GROUP BY t.id ORDER BY id`,
+    )
+    .all()
+    .map((r) => r.id);
+}
+
+test("the mining budget stops a run without skipping approvals: the next night resumes where it stopped", async () => {
+  const f = await fresh();
+  const approvals = windowApprovals(f);
+  const newest = f.sqlite.prepare(`SELECT MAX(id) AS w FROM edit_log WHERE action = 'validate'`).get().w;
+  // A budget of one cell: each night diffs exactly one note (the one that crosses the line finishes).
+  const out1 = await f.runWith(NIGHT1, { cells: 1 });
+  assert.equal(out1.status, "ok");
+  assert.equal(out1.truncated, true);
+  assert.match(f.calls[0].user, /compared with their AI draft: 1;/);
+  assert.equal(f.runs().at(-1).approvals_through, approvals[1] - 1, "the watermark stops below the first approval left");
+
+  const out2 = await f.runWith(NIGHT2, { cells: 1 });
+  assert.equal(out2.ran, true, "no new approval, but the stopped run's rest is still due");
+  assert.equal(f.runs().at(-1).approvals_through, approvals[2] - 1, "the next night diffs the next approval");
+
+  const out3 = await f.run(NIGHT2 + 86400);
+  assert.equal(out3.truncated, false);
+  assert.equal(f.runs().at(-1).approvals_through, newest, "a run that diffs everything takes the full watermark");
+  assert.equal((await f.run(NIGHT2 + 2 * 86400)).reason, "no_new_approvals");
+});
+
+test("the run-wide budget bounds the diff work of many long rewrites", async () => {
+  const f = await fresh();
+  addRewrites(f, 3, 400); // 400 × 160,000 cells = 64M > MINING_CELL_BUDGET
+  const mined = await mineChanges(f.env.DB, [{ book: "MRK", chapter: 3 }]);
+  assert.equal(mined.truncated, true);
+  assert.equal(mined.stoppedAt, null, "every new approval was diffed before the rewrites (which have none)");
+  assert.ok(mined.compared < 400, `compared ${mined.compared}`);
+  assert.equal(mined.groups[0].before, "يمكنك", "approved corrections come first");
+});
+
+test("every prompt string is capped, and the whole prompt stays under PROMPT_CHAR_CAP with true counts", () => {
+  const huge = "x".repeat(10_000);
+  const { system, user } = buildLessonsPrompt({
+    languageName: huge,
+    languageCode: huge,
+    current: [{ lesson: huge, before: huge, after: huge, evidence: 3, firstSeenAt: 1 }],
+    instructionsMd: huge,
+    commonIssuesMd: huge,
+    terms: Array.from({ length: 300 }, (_, i) => ({ source: `${huge}${i}`, target: huge, status: i % 2 ? "forbidden" : huge, replacement: huge })),
+    chapters: [{ book: huge, chapter: 1 }],
+    compared: 60,
+    changed: 60,
+    groups: Array.from({ length: 70 }, (_, i) => ({ before: huge, after: `${huge}${i}`, count: 70 - i, draftExcerpt: huge, finalExcerpt: huge })),
+  });
+  assert.ok(system.length < 5_000, `system ${system.length}`);
+  assert.ok(user.length <= PROMPT_CHAR_CAP, `user ${user.length}`);
+  const lines = user.split("\n");
+  // Only the two capped preference texts may be long single lines.
+  assert.equal(lines.filter((l) => l.length > 1_000).length, 2);
+  const changeLines = lines.filter((l) => /^- \d+× /.test(l));
+  assert.equal(changeLines.length, 60, "changes go in before terms (60 = MAX_PROMPT_CHANGES)");
+  assert.match(user, /\(10 rarer changes not shown\)/);
+  const termLines = lines.filter((l) => /^- x{100}/.test(l));
+  assert.ok(termLines.length > 0 && termLines.length < 300);
+  assert.match(user, new RegExp(`\\(${300 - termLines.length} more terms not shown\\)`));
+});
+
+test("a long term or token in the database never reaches the provider uncapped", async () => {
+  const f = await fresh();
+  const long = "ب".repeat(10_000);
+  f.sqlite.prepare(`INSERT INTO terminology (concept_id, source_term, target_term, status) VALUES ('c2', ?, ?, 'preferred')`).run(long, long);
+  f.approveMore();
+  f.sqlite.prepare(`UPDATE tn_rows SET note = ? WHERE id = (SELECT MAX(id) FROM tn_rows WHERE chapter = 3 AND id LIKE 'r%')`).run(`فيمكنك ${long}`);
+  await f.run();
+  assert.ok(f.calls[0].user.length <= PROMPT_CHAR_CAP);
+  assert.ok(!f.calls[0].user.includes("ب".repeat(500)));
+});
+
+test("a changed set stored while tonight's export holds the lease reaches that export's follow-up", async () => {
+  const f = await fresh();
+  const created = [];
+  f.env.DCS_SERVICE_TOKEN = "service-token";
+  f.env.EXPORT_WORKFLOW = { create: async (o) => (created.push(o), { id: o.id }) };
+  const key = f.env.WORKSPACE_SLUG;
+  let inputsRead;
+  await runContextExportExclusive({
+    db: f.env.DB,
+    key,
+    instance: "context-nightly",
+    markPending: true,
+    shrinkOverride: false,
+    run: async () => {
+      // The running export read its inputs before tonight's lessons were written.
+      inputsRead = await loadQueuedContextInputs(f.env.DB);
+      await f.tick();
+      assert.equal(created.length, 0, "the lease is held: no second export starts");
+      return { status: "ok", failureReason: null };
+    },
+    startFollowUp: () => startQueuedContextExport(f.env),
+  });
+  assert.deepEqual(inputsRead.lessons, []);
+  assert.equal(created.length, 1, "exactly one follow-up");
+  assert.equal(created[0].params.queued, true);
+  const followUp = await loadQueuedContextInputs(f.env.DB);
+  assert.equal(followUp.lessons.length, 1);
+  assert.match(renderInstructionsMd(followUp.prefs, followUp.lessons), new RegExp(LESSONS_HEADING));
+
+  // An unchanged night requests nothing.
+  f.sqlite.prepare(`UPDATE context_export_lock SET pending = 0`).run();
+  await f.tick(NIGHT2);
+  assert.equal(created.length, 1);
+  assert.equal(f.sqlite.prepare(`SELECT pending FROM context_export_lock`).get().pending, 0);
+});
+
+test("PUT answers only after the context export is marked pending", async () => {
+  const f = await fresh({ enabled: false });
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const gated = (st) => ({
+    bind: (...a) => gated(st.bind(...a)),
+    first: async () => (await gate, st.first()),
+    run: async () => (await gate, st.run()),
+    all: async () => (await gate, st.all()),
+  });
+  const db = f.env.DB;
+  const created = [];
+  const env = {
+    ...f.env,
+    DB: { ...db, prepare: (sql) => (/context_export_lock/.test(sql) ? gated(db.prepare(sql)) : db.prepare(sql)) },
+    DCS_SERVICE_TOKEN: "service-token",
+    EXPORT_WORKFLOW: { create: async (o) => (created.push(o), { id: o.id }) },
+  };
+  const app = new Hono();
+  app.use("*", async (c, next) => {
+    c.set("userId", 9);
+    c.set("role", "admin");
+    await next();
+  });
+  app.route("/api/translation-memory", translationMemory);
+  const ctx = { waitUntil() {}, passThroughOnException() {} };
+  let answered = false;
+  const res = app
+    .request(
+      "/api/translation-memory/lessons",
+      { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: true }) },
+      env,
+      ctx,
+    )
+    .then((r) => ((answered = true), r));
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(answered, false, "no answer while the export is not yet marked pending");
+  release();
+  assert.equal((await res).status, 200);
+  assert.equal(f.sqlite.prepare(`SELECT pending FROM context_export_lock`).get().pending, 1);
+  assert.equal(created.length, 1);
+});
+
+test("a run killed earlier tonight is retried tonight once stale; a run that ended is not", async () => {
+  const f = await fresh();
+  f.sqlite
+    .prepare(`INSERT INTO lesson_runs (night, started_at, approvals_through, status) VALUES ('2026-11-12', ?, 0, 'running')`)
+    .run(NIGHT1 - 600);
+  assert.equal((await f.run()).reason, "already_ran", "ten minutes old: it may still be running");
+  assert.equal(f.calls.length, 0);
+  const out = await f.run(NIGHT1 - 600 + RUN_STALE_SECONDS);
+  assert.equal(out.status, "ok", "stale: closed as interrupted and taken over the same night");
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.runs().length, 1);
+  assert.equal(f.runs()[0].status, "ok");
+
+  const g = await fresh();
+  g.setReply(() => ({ text: "garbage", usage: { inputTokens: 100, outputTokens: 20 }, stopReason: "end_turn" }));
+  assert.equal((await g.run()).status, "failed");
+  g.setReply(null);
+  assert.equal((await g.run(NIGHT1 + RUN_STALE_SECONDS + 60)).reason, "already_ran", "one call a night for a failing provider");
+  assert.equal(g.calls.length, 1);
+});
+
+test("a new evidence count alone is not a changed set (no pack export), but it is stored", async () => {
+  const f = await fresh();
+  assert.equal((await f.run()).changed, true);
+  const [l] = (await loadCurrentLessons(f.env.DB)).lessons;
+  f.approveMore();
+  f.setReply(() => ({
+    text: `${BEGIN_OUTPUT}\n${JSON.stringify({ lessons: [{ id: "L1", lesson: l.lesson, before: l.before, after: l.after, evidence: l.evidence - 2 }], reversed: [] })}\n${END_OUTPUT}`,
+    usage: { inputTokens: 10, outputTokens: 5 },
+    stopReason: "end_turn",
+  }));
+  const out = await f.run(NIGHT2);
+  assert.equal(out.status, "ok");
+  assert.equal(out.changed, false);
+  assert.equal((await loadCurrentLessons(f.env.DB)).lessons[0].evidence, l.evidence - 2);
 });

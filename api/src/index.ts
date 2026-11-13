@@ -39,7 +39,7 @@ import { readPackageRefs } from "./packageRefs";
 import { readSourceNotes } from "./sourceNotes";
 import { blockViewerWrites } from "./viewerGuard";
 import { requestDailyContextExport, sweepContextExportQueue } from "./contextExportQueue";
-import { runNightlyLessons } from "./lessons";
+import { nightlyLessonsTick } from "./lessons";
 import { listWorkspaces, resolveWorkspaceFresh, workspaceEnv, parseWorkspaceCookie, requireWorkspaceMatch, primeWorkspaces } from "./workspaces";
 
 export interface Env {
@@ -382,25 +382,6 @@ app.notFound((c) => {
   return c.json({ error: "not_found", path: c.req.path }, 404);
 });
 
-// Nightly lessons from editor corrections (#817). Runs AFTER every
-// workspace's nightly tick has requested its export (see scheduled() below),
-// so a slow AI call (up to 2 minutes) never delays or starves an export. When
-// a run stores a changed set, it queues a context export for that workspace,
-// the same mark-pending-and-start-if-free a save does, so the new lessons still
-// reach tonight's pack. The job does nothing while the workspace's switch is
-// off (the default) and only calls the AI when there are new hand approvals.
-// Isolated: a lessons failure is logged and never reaches the export or the
-// next workspace.
-async function runNightlyLessonsTick(env: Env) {
-  try {
-    const out = await runNightlyLessons(env);
-    console.log("nightly lessons", { workspace: env.WORKSPACE_SLUG ?? "default", ...out });
-    if (out.ran && out.changed) await requestDailyContextExport(env);
-  } catch (e) {
-    console.error("nightly lessons failed", e instanceof Error ? e.message : String(e));
-  }
-}
-
 // Runs the existing per-cron body once, against a single (already
 // workspace-resolved) env. Split out of the exported `scheduled()` so that
 // handler can loop it once per workspace — see the loop below for why.
@@ -680,7 +661,7 @@ export default {
     // scheduled invocation's wall-clock limit. Each is isolated.
     if (controller.cron === CONTEXT_CRON || controller.cron === EXPORT_CRON) {
       const results = await Promise.allSettled(
-        workspaces.map(async (ws) => runNightlyLessonsTick(workspaceEnv(env, ws))),
+        workspaces.map(async (ws) => nightlyLessonsTick(workspaceEnv(env, ws))),
       );
       results.forEach((r, i) => {
         if (r.status === "rejected") {
