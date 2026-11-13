@@ -20,7 +20,7 @@ import {
   rebuiltRow,
   rowRebuildAction,
 } from "./outboxTargeting.ts";
-import { openRowDropChannel } from "./rowDropChannel.ts";
+import { hasQueuedTwin, openRowDropChannel } from "./rowDropChannel.ts";
 import { isEditorsPendingSave } from "./draftSaveState.ts";
 import { holdOnDrop, holdOnSave, EMPTY_HOLD } from "./refusedSaveHold.ts";
 
@@ -315,4 +315,37 @@ test("cross-tab: verse ops and malformed messages are ignored; no BroadcastChann
   });
   throws.announce(op("op-1", { response: "ABC" }));
   throws.close();
+});
+
+// Round 2 review: tabs A and B each queue a save of the same text to the same
+// row (ops X and Y). A discards X. An editor in B that knows its save only by
+// content must not take X for its own Y while Y is still queued: it would end
+// its type-back protection, Save gate and refused-text hold for a save that
+// can still land or be refused. The receiving tab checks the shared outbox
+// for a twin of the dropped op and passes `twinQueued` on.
+test("cross-tab: a dropped op's twin still queued is found; the dropped op itself, other rows and deletes are not", () => {
+  const drop = { id: "op-x", target, action: "patch", patch: { note: "SAME" } };
+  const y = op("op-y", { note: "SAME" });
+  assert.equal(hasQueuedTwin(drop, [y]), true);
+  assert.equal(hasQueuedTwin(drop, [op("op-x", { note: "SAME" })]), false, "the dropped op itself is no twin");
+  assert.equal(hasQueuedTwin(drop, [{ ...y, target: otherRow }]), false);
+  assert.equal(hasQueuedTwin(drop, [op("op-z", { note: "OTHER" })]), false);
+  assert.equal(hasQueuedTwin(drop, [{ ...y, action: "delete" }]), false);
+  assert.equal(hasQueuedTwin(drop, null), false, "an unreadable outbox keeps today's behaviour");
+  assert.equal(hasQueuedTwin({ ...drop, action: "delete" }, [y]), false);
+});
+
+test("cross-tab: with a twin queued, a content-matched editor keeps its save; an id-matched one still matches by id", () => {
+  const drop = { id: "op-x", target, action: "patch", patch: { note: "SAME" }, twinQueued: true };
+  // Content-matched (no op id): the drop is not this editor's save.
+  assert.equal(isEditorsPendingSave({ patch: { note: "SAME" } }, drop, target), false);
+  // Id-matched: the id decides, twin or not.
+  assert.equal(isEditorsPendingSave({ opId: "op-x", patch: { note: "SAME" } }, drop, target), true);
+  assert.equal(isEditorsPendingSave({ opId: "op-y", patch: { note: "SAME" } }, drop, target), false);
+  // Without a twin the content match stands, as for a local drop.
+  assert.equal(isEditorsPendingSave({ patch: { note: "SAME" } }, { ...drop, twinQueued: false }, target), true);
+  // The refused-save hold keeps its hold and its watch.
+  const held = { sent: [{ patch: { note: "SAME" }, version: 2 }], held: [{ patch: { note: "SAME" }, version: 2, fields: { note: "SAME" } }] };
+  assert.deepEqual(holdOnDrop(held, drop, target), { state: held, released: null });
+  assert.deepEqual(holdOnDrop(held, { ...drop, twinQueued: false }, target).released, { note: "SAME" });
 });
