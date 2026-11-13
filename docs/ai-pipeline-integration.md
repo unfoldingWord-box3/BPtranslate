@@ -11,9 +11,16 @@ Use this doc for background and partner-contract context, not as a current
 **Update (2026-11, #470):** the editor no longer offers the bot's three original
 pipelines ("Generate ULT + UST", "Write translation notes", "Write translation
 questions"). The only AI pipeline the editor starts is `translate` (tN and tQ for
-a chapter, plus tW/tA articles), which runs on the organization's own AI key. The
-server still knows the old `generate` / `notes` / `tqs` types so job history can
-show past runs, and `/api/pipelines/start` refuses them (#551).
+a chapter, plus tW/tA articles), which runs on the organization's own AI key.
+
+**Update (2026-11, #726):** the server code for `generate` / `notes` / `tqs` is
+gone. `/api/pipelines/start` accepts only `translate` (any other type gets a
+400), a queued old job fails at dispatch as `pipeline_type_retired`, and a
+still-running one is failed on its done poll without importing its output. The
+`followUpOptions` / `followUpChain` start fields and the chain they drove are
+gone too. Old rows keep their `pipeline_type`, so the job history still names
+past runs. The sections below on those three types describe the contract as it
+was.
 
 ---
 
