@@ -136,6 +136,8 @@ function db() {
 }
 
 const subscribers = new Set<Subscriber>();
+// The subscribers that also hear changes other tabs made (#896).
+const remoteSubscribers = new Set<Subscriber>();
 
 // Called with the key of each draft the user discarded (drafts.discard).
 const discardListeners = new Set<(key: string) => void>();
@@ -175,27 +177,28 @@ async function listAll(): Promise<DraftRecord[]> {
   return all;
 }
 
-// Tell this tab's subscribers the store changed.
-async function notifyLocal() {
-  if (subscribers.size === 0) return;
+async function tell(to: Set<Subscriber>) {
+  if (to.size === 0) return;
   const all = await listAll();
-  for (const s of subscribers) s(all);
+  for (const s of to) s(all);
 }
 
-// The store is shared by every tab of the workspace, so a change made here
-// also reaches the other tabs' subscribers (#896): their "N unsaved" chip
-// re-counts without a reload. A received message only re-reads (notifyLocal),
-// never announces, so tabs cannot ping-pong. Named per workspace, as the
-// database is.
+// The store is shared by every tab of the workspace, so a change made here is
+// announced to the other tabs (#896), which re-read it for their subscribers
+// that opted in (subscribe's `remote`): the "N unsaved" count re-counts
+// without a reload. Editors do not opt in: one copies a draft's text into its
+// box the first time it sees that draft, so another tab's typing would land
+// there as a stale snapshot. A received message only re-reads, never
+// announces, so tabs cannot ping-pong. Named per workspace, as the database is.
 const changedChannel = openDraftsChangedChannel(workspaceDbName(DRAFTS_CHANGED_CHANNEL_BASE), () => {
-  void notifyLocal();
+  void tell(remoteSubscribers);
 });
 
 // After a committed change in this tab. Every caller awaits the write's
 // transaction first, so another tab that re-reads on the message sees it.
 async function notify() {
   changedChannel.announce();
-  await notifyLocal();
+  await tell(subscribers);
 }
 
 // Delete a row draft only if `settled` accepts it. Read + conditional delete
@@ -308,10 +311,16 @@ export function templateKey(templateId: string): string {
 }
 
 export const drafts = {
-  subscribe(fn: Subscriber): () => void {
+  // `remote: true` also calls `fn` after another tab of this workspace changed
+  // the store (#896). Only the "N unsaved" count opts in; see changedChannel.
+  subscribe(fn: Subscriber, opts?: { remote?: boolean }): () => void {
     subscribers.add(fn);
+    if (opts?.remote) remoteSubscribers.add(fn);
     void listAll().then(fn);
-    return () => subscribers.delete(fn);
+    return () => {
+      subscribers.delete(fn);
+      remoteSubscribers.delete(fn);
+    };
   },
 
   async set(
