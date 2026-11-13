@@ -154,8 +154,27 @@ export function afterPrefsSavedElsewhere<F extends PrefsFields>(
   saved: F,
   savedVersion: number,
 ): PrefsDraftState<F> | null {
+  // Not newer than what this editor holds: an old or repeated message (C3).
+  if (savedVersion <= state.baseVersion) return null;
   if (!typedKeys(state.text, state.base).every((k) => state.text[k] === saved[k])) return null;
   return { text: saved, base: saved, baseVersion: savedVersion };
+}
+
+// Whether another tab's discard of a draft whose text was `discarded` threw
+// away the typing this editor shows: some box is typed here, and every typed
+// box holds the discarded value. Boxes not typed here (Brief's `notes`, or a
+// box showing a newer server value) do not count (round 3, C2).
+export function prefsDiscardMatches(text: PrefsFields, base: PrefsFields, discarded: PrefsFields): boolean {
+  const typed = typedKeys(text, base);
+  return typed.length > 0 && typed.every((k) => text[k] === discarded[k]);
+}
+
+// The prefs row a page should hold after seeing `next`: never an older version
+// than the one it has, so a late first load, or a save response overtaken by
+// another tab's newer save, cannot pair an old row with a newer editor
+// version (round 3, C1). The same version replaces it (a refetch).
+export function newestPrefs<P extends { version: number }>(cur: P | null, next: P): P {
+  return cur && next.version < cur.version ? cur : next;
 }
 
 // Whether a stored prefs draft may be deleted by this tab: only when it holds

@@ -492,21 +492,33 @@ export const drafts = {
     // Marked dirty synchronously, as set() does: this tab is showing the typing.
     const generation = nextGeneration();
     const prevGeneration = latestGenerationByKey.get(key);
+    const prevPending = pendingKeys.has(key);
     pendingKeys.add(key);
     latestGenerationByKey.set(key, generation);
-    const tx = (await db()).transaction(STORE, "readwrite");
-    const existing = await tx.store.get(key);
-    if (!existing) {
-      const rec: DraftRecord = { key, payload, expectedVersion, updatedAt: Date.now(), generation, meta };
-      await tx.store.put(rec);
-    }
-    await tx.done;
-    if (existing) {
-      // Nothing written: the generation this tab last wrote is still its latest.
-      if (latestGenerationByKey.get(key) === generation) {
-        if (prevGeneration === undefined) latestGenerationByKey.delete(key);
-        else latestGenerationByKey.set(key, prevGeneration);
+    // Nothing written: the generation this tab last wrote is still its latest.
+    const restoreGeneration = () => {
+      if (latestGenerationByKey.get(key) !== generation) return;
+      if (prevGeneration === undefined) latestGenerationByKey.delete(key);
+      else latestGenerationByKey.set(key, prevGeneration);
+    };
+    let existing: unknown;
+    try {
+      const tx = (await db()).transaction(STORE, "readwrite");
+      existing = await tx.store.get(key);
+      if (!existing) {
+        const rec: DraftRecord = { key, payload, expectedVersion, updatedAt: Date.now(), generation, meta };
+        await tx.store.put(rec);
       }
+      await tx.done;
+    } catch (e) {
+      // Failed: put the marks back as they were (round 3, C4).
+      restoreGeneration();
+      if (!prevPending && latestGenerationByKey.get(key) === prevGeneration) pendingKeys.delete(key);
+      console.warn("draft write-back failed", key, e);
+      return false;
+    }
+    if (existing) {
+      restoreGeneration();
       return false;
     }
     void notify();
@@ -702,9 +714,14 @@ export const drafts = {
   // Delete a draft only if `settled` accepts the stored record, read and
   // deleted in one transaction. The prefs editors fence their clears with it
   // (prefsDraftClearable, #909): another tab's newer text under the same key
-  // is kept.
-  clearIf(key: string, settled: (rec: DraftRecord) => boolean): Promise<boolean> {
-    return clearRowIf(key, settled);
+  // is kept. When nothing was deleted here, this tab's subscribers re-read
+  // anyway: another tab may have deleted the record first (a save of the same
+  // text there), and this tab's unload guard hears only this tab's changes
+  // (#913 review B2).
+  async clearIf(key: string, settled: (rec: DraftRecord) => boolean): Promise<boolean> {
+    const cleared = await clearRowIf(key, settled);
+    if (!cleared) void tell(subscribers);
+    return cleared;
   },
 
   async list(): Promise<DraftRecord[]> {

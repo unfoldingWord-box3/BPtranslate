@@ -7,6 +7,7 @@ import {
   afterPrefsSave,
   afterPrefsSavedElsewhere,
   hydratePrefsDraft,
+  prefsDiscardMatches,
   prefsDraftClearable,
   prefsDraftDroppable,
   prefsDraftKey,
@@ -199,7 +200,7 @@ export function usePrefsDraft<F extends PrefsFields>(
           }
           // Only the text thrown away is reset; other typing here stays, and
           // the write-back above stores it once the record is gone (B3).
-          if (!sameFields(s.text, m.text)) return;
+          if (!prefsDiscardMatches(s.text, s.base, m.text)) return;
           discarded();
           // This tab no longer holds unsaved typing (B2). If this tab's own
           // write-back got in first, the discarded text is stored again:
@@ -211,6 +212,9 @@ export function usePrefsDraft<F extends PrefsFields>(
         // Saved: when every box typed here holds the saved text, this editor
         // is clean on the saved row (the page's prefs state takes that row
         // too, useTranslationPrefs).
+        // Not newer than the row this page holds: an old message (C3).
+        const p = prefsRef.current;
+        if (p && m.row.version < p.version) return;
         const next = s && afterPrefsSavedElsewhere(s, pick(m.row as unknown as TranslationPrefs), m.row.version);
         // commit() drops this tab's unsaved mark (B2).
         if (next) commit(next);
