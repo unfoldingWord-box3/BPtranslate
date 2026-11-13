@@ -635,3 +635,39 @@ test("913 item 5: a user who cannot save does not delete another user's prefs dr
   await page.waitForTimeout(1000);
   expect(await prefsDrafts(page)).toEqual(adminDraft);
 });
+
+// Item 6: Discard from the unsaved menu while the page is still loading the
+// prefs row. The draft was already read, so it used to come back once the row
+// arrived; now the box shows the server's text and nothing is stored.
+test("913 item 6: a discard before the editor finished loading is not restored", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const stamp = Date.now();
+  const original = `913-6 common ${stamp}`;
+  await putPrefs(setup!.context.request, setup!.csrf, { common_issues_md: original });
+  const { context } = await adminContext(browser, "a");
+  const page = await context.newPage();
+  await openStyle(page, original);
+  await commonBox(page).click();
+  await page.keyboard.press("End");
+  await page.keyboard.type(" THROWN-AWAY");
+  await expect.poll(() => prefsDrafts(page)).toHaveProperty("prefs:common_issues_md");
+
+  // Hold the prefs row on the reload until the discard is done.
+  let release = () => {};
+  const gate = new Promise<void>((r) => (release = r));
+  await page.route(`**${PREFS}`, async (route) => {
+    if (route.request().method() === "GET") await gate;
+    await route.continue();
+  });
+  await page.reload();
+  await page.getByText("1 unsaved").first().click({ timeout: 20_000 });
+  await page.getByRole("presentation").getByText("1 unsaved").click();
+  await page.getByRole("button", { name: "Discard this edit" }).click();
+  await expect.poll(() => prefsDrafts(page)).toEqual({});
+  release();
+
+  await expect(commonBox(page)).toHaveValue(original, { timeout: 20_000 });
+  await page.waitForTimeout(500);
+  await expect(page.getByText(/\d+ unsaved/)).toHaveCount(0);
+  expect(await prefsDrafts(page)).toEqual({});
+});
