@@ -62,16 +62,24 @@ test("round 4 item 1: any write of the row sent at the copy's version lands on t
   // The server took it at the version the card's text was typed against, so
   // nothing else landed in between: a quote build, find/replace or reorder
   // the translator made, landing on the copy their unsaved text was typed on.
-  assert.equal(isWriteFromOrigin({ action: "patch", target, expectedVersion: 3 }, row, 3), true);
-  assert.equal(isWriteFromOrigin({ action: "patch", target, draftRef, expectedVersion: 3 }, row, 3), true);
+  assert.equal(isWriteFromOrigin({ action: "patch", target, expectedVersion: 3 }, row, 3, 4), true);
+  assert.equal(isWriteFromOrigin({ action: "patch", target, draftRef, expectedVersion: 3 }, row, 3, 4), true);
+});
+
+test("round 4 item 1: a result whose row is more than one version past the copy does not move it", () => {
+  // An edit settled as saved from its 409 (#886 item 1) is announced as a 200
+  // with the server's current row, which can carry another person's later
+  // write; the op still shows the version it first went out at.
+  assert.equal(isWriteFromOrigin({ action: "patch", target, expectedVersion: 3 }, row, 3, 5), false);
+  assert.equal(isWriteFromOrigin({ action: "patch", target, expectedVersion: 3 }, row, 3, undefined), false);
 });
 
 test("round 4 item 1: a write sent at a newer version than the copy does not move it (review A1)", () => {
   // A reorder sent at the row's current version, which already carries
   // another person's note: the restored draft's Save must still go out old.
-  assert.equal(isWriteFromOrigin({ action: "patch", target, expectedVersion: 4 }, row, 3), false);
-  assert.equal(isWriteFromOrigin({ action: "delete", target, expectedVersion: 3 }, row, 3), false);
-  assert.equal(isWriteFromOrigin({ action: "patch", target: { ...target, id: "n-2" }, expectedVersion: 3 }, row, 3), false);
-  assert.equal(isWriteFromOrigin({ action: "patch", target: { ...target, rowKind: "tq" }, expectedVersion: 3 }, row, 3), false);
-  assert.equal(isWriteFromOrigin({ action: "patch", target }, row, 3), false);
+  assert.equal(isWriteFromOrigin({ action: "patch", target, expectedVersion: 4 }, row, 3, 5), false);
+  assert.equal(isWriteFromOrigin({ action: "delete", target, expectedVersion: 3 }, row, 3, 4), false);
+  assert.equal(isWriteFromOrigin({ action: "patch", target: { ...target, id: "n-2" }, expectedVersion: 3 }, row, 3, 4), false);
+  assert.equal(isWriteFromOrigin({ action: "patch", target: { ...target, rowKind: "tq" }, expectedVersion: 3 }, row, 3, 4), false);
+  assert.equal(isWriteFromOrigin({ action: "patch", target }, row, 3, 4), false);
 });

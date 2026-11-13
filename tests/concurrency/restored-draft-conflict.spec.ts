@@ -728,6 +728,20 @@ test("tN card: while a restored draft's Save waits in conflict, the row moving o
   expect(enabled, "Save stays shut while the first Save waits in conflict").toBe(false);
   expect(sent, "only one Save went out").toHaveLength(1);
 
+  // A reload remounts the card with the draft restored while the Save still
+  // waits in conflict: the button must stay shut there too.
+  await page.reload();
+  await page.locator("[data-note-id]").first().waitFor({ timeout: 10_000 });
+  await expect(noteTextarea(page, tn.id)).toHaveValue(typed);
+  await expect(page.getByText(/^1 conflict$/).first()).toBeVisible({ timeout: 10_000 });
+  await page.waitForTimeout(1000);
+  const enabledAfterReload = (await save.count()) > 0 && (await save.isEnabled());
+  if (enabledAfterReload) await save.click();
+  await page.waitForTimeout(1500);
+  console.log("[#754 double, reload]", JSON.stringify({ saveEnabledAfterReload: enabledAfterReload, sent }));
+  expect(enabledAfterReload, "Save stays shut after a reload while the Save waits in conflict").toBe(false);
+  expect(sent, "only one Save went out").toHaveLength(1);
+
   await probe.dispose();
   await context.close();
 });
