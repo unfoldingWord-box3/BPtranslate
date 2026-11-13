@@ -90,8 +90,6 @@ async function saveBrief(page: Page) {
   else expect(first).toBe(200);
 }
 
-test.describe.configure({ mode: "serial" });
-
 let setup: { context: BrowserContext; csrf: string } | null = null;
 test.beforeAll(async ({ browser }) => {
   const context = await browser.newContext({ baseURL: BASE });
@@ -137,17 +135,53 @@ test("(a) typing in Brief and Common issues survives a history restore, shown as
   const restored = page.waitForResponse((r) => r.url().includes(PREFS) && r.request().method() === "PUT");
   await page.getByRole("dialog").getByRole("button", { name: "Restore" }).last().click();
   expect((await restored).status()).toBe(200);
-  await page.keyboard.press("Escape");
+  await page.getByRole("dialog").getByRole("button", { name: "Close" }).last().click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
 
   await expect(commonBox(page)).toHaveValue(`909a common v2 ${stamp} TYPED-COMMON`, { timeout: 10_000 });
   await expect(briefBox(page)).toHaveValue(`909a audience ${stamp} TYPED-BRIEF`);
   await expect(page.getByText("2 unsaved").first()).toBeVisible();
-  if (SHOTS) await page.screenshot({ path: `${SHOTS}/style-page-drafts-after-restore.png`, fullPage: false });
+  if (SHOTS) {
+    await page.locator("#style-sec-brief").scrollIntoViewIfNeeded();
+    await page.screenshot({ path: `${SHOTS}/style-page-drafts-after-restore-brief.png` });
+    await page.locator("#style-sec-commonIssues").scrollIntoViewIfNeeded();
+    await page.screenshot({ path: `${SHOTS}/style-page-drafts-after-restore-common.png` });
+  }
 
   // And a reload brings the typing back too.
   await page.reload();
   await expect(commonBox(page)).toHaveValue(`909a common v2 ${stamp} TYPED-COMMON`, { timeout: 20_000 });
   await expect(briefBox(page)).toHaveValue(`909a audience ${stamp} TYPED-BRIEF`);
+});
+
+// The classic Preferences page has its own editors on the same drafts.
+test("(a, classic Preferences) typing in Common issues survives a history restore", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const stamp = Date.now();
+  const { request } = setup!.context;
+  const v1 = await putPrefs(request, setup!.csrf, { common_issues_md: `909c common v1 ${stamp}` });
+  await putPrefs(request, setup!.csrf, { common_issues_md: `909c common v2 ${stamp}` });
+
+  const { context } = await adminContext(browser, "c");
+  const page = await context.newPage();
+  page.on("dialog", (d) => void d.accept());
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto(`${BASE}/#/preferences/commonIssues`);
+  const box = page.locator('#pref-sec-commonIssues textarea:not([aria-hidden="true"])').first();
+  await expect(box).toHaveValue(`909c common v2 ${stamp}`, { timeout: 20_000 });
+  await box.click();
+  await page.keyboard.press("End");
+  await page.keyboard.type(" TYPED-CLASSIC");
+
+  await page.getByRole("button", { name: "History" }).click();
+  await page.getByRole("button", { name: `Restore version ${v1.version}` }).click();
+  const restored = page.waitForResponse((r) => r.url().includes(PREFS) && r.request().method() === "PUT");
+  await page.getByRole("dialog").getByRole("button", { name: "Restore" }).last().click();
+  expect((await restored).status()).toBe(200);
+  await page.getByRole("dialog").getByRole("button", { name: "Close" }).last().click();
+
+  // (The classic Preferences page has no "N unsaved" chip to check.)
+  await expect(box).toHaveValue(`909c common v2 ${stamp} TYPED-CLASSIC`, { timeout: 10_000 });
 });
 
 for (const typed of [false, true]) {
