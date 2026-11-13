@@ -624,11 +624,11 @@
     "switchOff": "Off",
     "toggleAria": "Learn from editor corrections",
     "statusOff": "Off. The AI is NOT learning from editor corrections. New drafts get only your brief, instructions, terms, templates and examples. Turn this on when your editors have approved enough notes, for example after a few weeks of work.",
-    "statusOn": "On. Each night that has new approvals, the app reads the corrections in the 2 most recently approved chapters and updates the lessons below. AI drafts made after the next context pack export are given them.",
+    "statusOn": "On. On a night with new approvals, the app reads the corrections in the 2 most recently approved chapters and updates the lessons below. AI drafts made after the next context pack export are given them. A night that failed or ran out of time is finished the next night.",
     "unavailableProvider": "Not available with your AI provider ({{provider}}). Lessons need Claude or Gemini. The AI is NOT learning from editor corrections.",
     "unavailableNoKey": "Cannot run: the AI service is not set up, or its key cannot be used. Check AI service. The AI is NOT learning from editor corrections.",
     "unavailableNotTranslation": "Lessons are for translation projects only. The AI is NOT learning from editor corrections.",
-    "cost": "Each night that has new approvals, the app makes one call to your AI service. Your project's AI account pays for it.",
+    "cost": "On each night it runs, the app makes one call to your AI service: a night with new approvals, or the night after a run that failed or ran out of time. Your project's AI account pays for it.",
     "run": {
       "never": "Last run: not run yet.",
       "summary": "Last run: {{when}}, {{status}}. {{cost}}",

@@ -42,8 +42,8 @@ You cannot add or edit rules on this page. New rules are added by the developmen
 
 Lessons are **Off** for every project until an admin turns them on. While they are off, the page says so: the AI is NOT learning from editor corrections, and new drafts get only the sections above. Turn lessons on when your editors have approved enough notes, for example after a few weeks of work.
 
-- Each night that has new approvals, the app compares the AI draft with the approved note for the notes that count as examples (see **Examples** above), in the 2 most recently approved chapters.
-- The app then makes one call to your AI service. Your project's AI account pays for it. The page shows the last run, what happened, and about what it cost. A night with no new approvals makes no call, unless the previous run failed or had more changed notes than it could compare in one night: then the app goes back to those notes the next night.
+- On a night with new approvals, the app compares the AI draft with the approved note for the notes that count as examples (see **Examples** above), in the 2 most recently approved chapters. If there are more notes than it can compare in one night, the next night finishes the same chapters first, even if editors have moved on to other chapters, and the newest chapters come after that.
+- The app makes one call to your AI service on each night it runs. Your project's AI account pays for it. The page shows the last run, what happened, and about what it cost. A night with no new approvals makes no call, unless the night before failed or did not finish its chapters: then the app tries again. If a run is cut off part-way, a later run the same night can start it again, which can cost a second call.
 - Lessons need Claude or Gemini in **AI service**. With another provider the page says **Not available with your AI provider**, and lessons cannot be turned on.
 - A lesson stays until editors start changing its words back. A lesson that works makes its correction rarer, and that does not remove it.
 - A new lesson that only repeats a term, a template, the instructions or the common issues is left out. At most 25 lessons are kept.

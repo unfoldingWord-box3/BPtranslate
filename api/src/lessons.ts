@@ -25,8 +25,14 @@
 //             is the one run a later invocation the same night may take over.
 //   budget    mining stops once MINING_CELL_BUDGET diff cells are spent. New
 //             approvals are diffed first, oldest first; a run that stops among
-//             them records its watermark just below the first one left, so
-//             the next night resumes there instead of skipping it.
+//             them records its watermark just below the first one left and is
+//             marked truncated (migration 0086). The next run then mines that
+//             run's chapters again, not the newest ones, so nothing it left is
+//             skipped when editors moved to another chapter in between; if
+//             the newest chapters differ, the finished resume keeps the
+//             watermark, and the night after mines the newest chapters. A
+//             budget that runs out only on older notes of the window (every
+//             new approval compared) is not a stop.
 //   provider  the workspace's own key, only for providers with an in-Worker
 //             adapter (Claude, Gemini: hasInternalAdapter). Anything else is
 //             "not available": no call, no run row.
@@ -506,7 +512,9 @@ export function parseLessonsOutput(text: string): ParsedOutput | null {
   for (const item of o.lessons) {
     if (!item || typeof item !== "object") continue;
     const it = item as Record<string, unknown>;
-    const ev = Number(it.evidence);
+    // Only a real number counts: null, "" or a word is "no count given".
+    const raw = it.evidence;
+    const ev = typeof raw === "number" ? raw : typeof raw === "string" && raw.trim() !== "" ? Number(raw) : NaN;
     lessons.push({
       id: typeof it.id === "string" && it.id.trim() ? it.id.trim() : null,
       lesson: oneLine(it.lesson),
@@ -580,7 +588,13 @@ export function mergeLessons(
       lesson: text,
       before,
       after,
-      evidence: clampEvidence(p.evidence ?? prev?.evidence ?? 0, ctx.maxEvidence),
+      // A kept lesson without a count keeps its own. Tonight's compared notes
+      // cap the count, but never below what a kept lesson already had: a
+      // small night (or one that ran out of time) does not erase its evidence.
+      evidence: clampEvidence(
+        p.evidence ?? prev?.evidence ?? 0,
+        prev ? Math.max(ctx.maxEvidence ?? Number.MAX_SAFE_INTEGER, prev.evidence) : ctx.maxEvidence,
+      ),
       firstSeenAt: prev?.firstSeenAt ?? now,
       fresh: !prev,
     });
@@ -607,6 +621,26 @@ export function mergeLessons(
 // The nightly job
 // ---------------------------------------------------------------------------
 
+/** A run's stored chapters (chapters_json); unreadable reads as none. */
+function parseChapters(json: string): ChapterRef[] {
+  try {
+    const v = JSON.parse(json) as unknown;
+    if (Array.isArray(v)) {
+      return v.filter(
+        (c): c is ChapterRef => !!c && typeof c.book === "string" && typeof c.chapter === "number",
+      );
+    }
+  } catch {
+    // Unreadable: no chapters.
+  }
+  return [];
+}
+
+const sameChapters = (a: readonly ChapterRef[], b: readonly ChapterRef[]) => {
+  const key = (cs: readonly ChapterRef[]) => cs.map((c) => `${c.book} ${c.chapter}`).sort().join("|");
+  return key(a) === key(b);
+};
+
 export type LessonDeps = { transport?: Transport; now?: number; /** Mining budget (tests). */ cells?: number };
 
 /**
@@ -617,16 +651,14 @@ export type LessonDeps = { transport?: Transport; now?: number; /** Mining budge
 export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promise<LessonJobOutcome> {
   const db = env.DB;
   const now = deps.now ?? Math.floor(Date.now() / 1000);
-  if (!(await lessonsEnabledRead(db))) return { ran: false, reason: "off" };
   const night = new Date(now * 1000).toISOString().slice(0, 10);
 
-  let last: number | null;
+  // A run still 'running' from an earlier night, or from tonight but started
+  // longer ago than any invocation can last, was killed (isolate evicted,
+  // timeout): close it as failed so the page says so, every night, whether
+  // the switch is on or not and whether or not tonight runs. Tonight's killed
+  // run can then be retried tonight (the claim below).
   try {
-    // A run still 'running' from an earlier night, or from tonight but
-    // started longer ago than any invocation can last, was killed (isolate
-    // evicted, timeout): close it as failed so the page says so, every night
-    // the switch is on, whether or not tonight runs. Tonight's killed run can
-    // then be retried tonight (the claim below).
     await db
       .prepare(
         `UPDATE lesson_runs SET status = 'failed', failure_reason = 'interrupted', finished_at = ?2
@@ -634,6 +666,16 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
       )
       .bind(night, now, now - RUN_STALE_SECONDS)
       .run();
+  } catch (e) {
+    // No lesson tables: an unmigrated workspace, which reads as off.
+    if (tableMissing(e)) return { ran: false, reason: "off" };
+    throw e;
+  }
+  if (!(await lessonsEnabledRead(db))) return { ran: false, reason: "off" };
+
+  let last: number | null;
+  let prev: { chapters_json: string; truncated: number } | null;
+  try {
     // Only runs that finished their mining move the watermark: a failed or
     // killed run's corrections are mined again on a later night. Spend stays
     // at one call a night through the night claim below.
@@ -643,6 +685,9 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
           .prepare(`SELECT MAX(approvals_through) AS w FROM lesson_runs WHERE status IN ('ok', 'no_changes')`)
           .first<{ w: number | null }>()
       )?.w ?? null;
+    prev = await db
+      .prepare(`SELECT chapters_json, truncated FROM lesson_runs WHERE status IN ('ok', 'no_changes') ORDER BY id DESC LIMIT 1`)
+      .first<{ chapters_json: string; truncated: number }>();
   } catch (e) {
     if (tableMissing(e)) return { ran: false, reason: "not_migrated" };
     throw e;
@@ -670,7 +715,7 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
          started_at = excluded.started_at, approvals_through = excluded.approvals_through,
          provider = excluded.provider, model = excluded.model, status = 'running',
          failure_reason = NULL, finished_at = NULL, chapters_json = '[]', changes = 0,
-         calls = 0, input_tokens = 0, output_tokens = 0, cost_usd = NULL
+         calls = 0, input_tokens = 0, output_tokens = 0, cost_usd = NULL, truncated = 0
        WHERE lesson_runs.status = 'failed' AND lesson_runs.failure_reason = 'interrupted'
        RETURNING id`,
     )
@@ -690,27 +735,48 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
     const c = estimateCost(provider, model, u);
     if (c != null) cost = (cost ?? 0) + c;
   };
+  // A call was started: it counts on the run row even when it throws before
+  // any usage comes back (a timeout can still be billed).
+  let attempted = false;
   let chapters: ChapterRef[] = [];
   let changes = 0;
   // The watermark this run covers: the claimed one, or, when the mining
   // budget ran out among new approvals, just below the first one left undiffed.
   let through = watermark;
   let truncated = false;
+  // Stopped among new approvals: the next run finishes these chapters first.
+  let stopped = false;
   const finish = (status: Exclude<RunStatus, "running">, reason: string | null) =>
     db
       .prepare(
         `UPDATE lesson_runs SET finished_at = ?2, status = ?3, failure_reason = ?4, chapters_json = ?5, changes = ?6,
-                calls = ?7, input_tokens = ?8, output_tokens = ?9, cost_usd = ?10, approvals_through = ?11
+                calls = ?7, input_tokens = ?8, output_tokens = ?9, cost_usd = ?10, approvals_through = ?11, truncated = ?12
           WHERE id = ?1`,
       )
-      .bind(runId, Math.floor(Date.now() / 1000), status, reason, JSON.stringify(chapters), changes, calls, inputTokens, outputTokens, cost, through);
+      .bind(
+        runId, Math.floor(Date.now() / 1000), status, reason, JSON.stringify(chapters), changes,
+        Math.max(calls, attempted ? 1 : 0), inputTokens, outputTokens, cost, through, stopped ? 1 : 0,
+      );
 
   try {
-    chapters = await recentApprovedChapters(db);
+    // Resume: when the last finished run stopped among new approvals, this
+    // run mines that run's chapters, not the newest ones, so the approvals it
+    // left are compared even when editors moved to another chapter since.
+    const newest = await recentApprovedChapters(db);
+    const resume = prev?.truncated ? parseChapters(prev.chapters_json) : [];
+    chapters = resume.length > 0 ? resume : newest;
     const mined = await mineChanges(db, chapters, { after: last, cells: deps.cells });
     changes = mined.groups.length;
     truncated = mined.truncated;
-    if (mined.stoppedAt != null) through = mined.stoppedAt - 1;
+    if (mined.stoppedAt != null) {
+      through = mined.stoppedAt - 1;
+      stopped = true;
+    } else if (resume.length > 0 && !sameChapters(resume, newest)) {
+      // The resumed chapters are done, but the newest chapters were not
+      // mined tonight: keep the watermark where it was, so the next night
+      // runs on the newest chapters.
+      through = last ?? through;
+    }
     if (mined.groups.length === 0) {
       await finish("no_changes", null).run();
       return { ran: true, runId, status: "no_changes", failureReason: null, lessons: 0, changed: false, truncated };
@@ -752,6 +818,7 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
 
     const transport = deps.transport ?? transportFor(provider);
     let text: string;
+    attempted = true;
     try {
       const outcome = await callProvider(transport, {
         provider, model, system, user, thinking: "low", apiKey, timeoutMs: CALL_TIMEOUT_MS,

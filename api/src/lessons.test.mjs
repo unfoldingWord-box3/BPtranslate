@@ -824,3 +824,93 @@ test("a new evidence count alone is not a changed set (no pack export), but it i
   assert.equal(out.changed, false);
   assert.equal((await loadCurrentLessons(f.env.DB)).lessons[0].evidence, l.evidence - 2);
 });
+
+// ── review round 4 (#817) ───────────────────────────────────────────────────
+
+// One hand-approved AI-drafted note in MRK `chapter`, approved now. Returns the approval's edit_log id.
+function approveIn(f, chapter, id, draft = "يمكنك أن تكتب", final = "فيمكنك أن تكتب") {
+  f.sqlite
+    .prepare(
+      `INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, support_reference, quote, note, sort_order, version, translation_state, updated_at)
+       VALUES (?, 'MRK', ?, 1, ?, 'x', 'q', ?, 10, 2, 'validated', 1000)`,
+    )
+    .run(id, chapter, `${chapter}:1`, final);
+  f.sqlite
+    .prepare(
+      `INSERT INTO edit_log (kind, row_key, book, prev_version, new_version, action, source, payload_json)
+       VALUES ('tn', ?, 'MRK', 1, 2, 'update', 'ai_pipeline', ?)`,
+    )
+    .run(id, JSON.stringify({ id, note: draft }));
+  const r = f.sqlite
+    .prepare(`INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action) VALUES ('tn', ?, 'MRK', 9, 2, 2, 'validate')`)
+    .run(id);
+  return Number(r.lastInsertRowid);
+}
+
+test("a run stopped by the budget is finished the next night even when editors moved to another chapter", async () => {
+  const f = await fresh();
+  const approvals = windowApprovals(f); // MRK 2 + MRK 3, oldest first
+  await f.runWith(NIGHT1, { cells: 1 });
+  assert.equal(f.runs().at(-1).approvals_through, approvals[1] - 1);
+  // Before night 2, editors approve in MRK 4: the newest window is now MRK 4 + MRK 3, without MRK 2.
+  const c4 = approveIn(f, 4, "c401");
+  const out2 = await f.run(NIGHT2);
+  assert.equal(out2.status, "ok");
+  assert.match(f.calls[1].user, /Chapters: MRK 3, MRK 2\./, "night 2 finishes the stopped run's chapters");
+  // Every drafted note of MRK 2–3 is compared (13 يمكنك + 4 shadda notes).
+  assert.match(f.calls[1].user, /compared with their AI draft: 17;/);
+  assert.ok(f.runs().at(-1).approvals_through < c4, "MRK 4's approval was not mined, so the watermark stays below it");
+  const out3 = await f.run(NIGHT2 + 86400);
+  assert.equal(out3.status, "ok", "night 3 mines the newest window");
+  assert.match(f.calls[2].user, /Chapters: MRK 4, MRK 3\./);
+  assert.equal(f.runs().at(-1).approvals_through, c4);
+  assert.equal((await f.run(NIGHT2 + 2 * 86400)).reason, "no_new_approvals");
+});
+
+test("a finished resume whose chapters are still the newest takes the full watermark", async () => {
+  const f = await fresh();
+  await f.runWith(NIGHT1, { cells: 1 });
+  assert.equal((await f.run(NIGHT2)).status, "ok");
+  assert.equal((await f.run(NIGHT2 + 86400)).reason, "no_new_approvals", "no extra night");
+});
+
+test("a killed run is closed as interrupted even after lessons are switched off", async () => {
+  const f = await fresh();
+  f.sqlite.prepare(`INSERT INTO lesson_runs (night, started_at, approvals_through, status) VALUES ('2026-11-11', 1, 0, 'running')`).run();
+  await setLessonsEnabled(f.env.DB, false, 9);
+  assert.deepEqual(await f.run(), { ran: false, reason: "off" });
+  const row = f.sqlite.prepare(`SELECT status, failure_reason FROM lesson_runs WHERE night = '2026-11-11'`).get();
+  assert.equal(row.status, "failed");
+  assert.equal(row.failure_reason, "interrupted");
+});
+
+for (const evidence of [null, "", 40]) {
+  test(`evidence ${JSON.stringify(evidence)} on a kept lesson, on a night that compares one note, keeps its count`, async () => {
+    const f = await fresh();
+    await f.run();
+    const [l] = (await loadCurrentLessons(f.env.DB)).lessons;
+    assert.equal(l.evidence, 13);
+    approveIn(f, 3, "e301");
+    f.setReply(() => ({
+      text: `${BEGIN_OUTPUT}\n${JSON.stringify({ lessons: [{ id: "L1", lesson: l.lesson, before: l.before, after: l.after, evidence }], reversed: [] })}\n${END_OUTPUT}`,
+      usage: { inputTokens: 10, outputTokens: 5 },
+      stopReason: "end_turn",
+    }));
+    const out = await f.runWith(NIGHT2, { cells: 1 });
+    assert.equal(out.status, "ok");
+    assert.match(f.calls[1].user, /compared with their AI draft: 1;/);
+    assert.equal((await loadCurrentLessons(f.env.DB)).lessons[0].evidence, 13);
+  });
+}
+
+test("a call that throws before any usage comes back still counts as a call", async () => {
+  const f = await fresh();
+  f.setReply(() => {
+    throw new Error("network down");
+  });
+  const out = await f.run();
+  assert.equal(out.status, "failed");
+  const row = f.runs().at(-1);
+  assert.equal(row.calls, 1, "the page must not say no call was made");
+  assert.equal(row.cost_usd, null);
+});
