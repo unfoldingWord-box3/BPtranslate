@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test, request as apiRequest, type BrowserContext, type Page } from "@playwright/test";
+import { ZEC_CHAPTERS } from "./chapters";
 import { fetchChapter, gotoVerse, mintToken, newUserContext } from "./helpers";
 
 // Issue #896. The drafts store (IndexedDB) is shared by every tab of a
@@ -13,12 +14,13 @@ import { fetchChapter, gotoVerse, mintToken, newUserContext } from "./helpers";
 //
 // Both pages live in ONE browser context: tabs share IndexedDB and
 // BroadcastChannel only within a context. In the first test tab B stays on
-// another verse; the second puts both tabs on one verse. Nothing is saved, so the server fixture is
-// untouched; ZEC 2 is used because no other spec opens it.
+// another verse; the second puts both tabs on one verse. Nothing is saved, so
+// the server fixture is untouched. The chapter is this spec's own entry in
+// chapters.ts (crossTabDrafts).
 
 const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
 const SHOTS = process.env.BE_SHOT_DIR;
-const CHAPTER = 2;
+const CHAPTER = ZEC_CHAPTERS.crossTabDrafts.chapter;
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const EN = JSON.parse(readFileSync(resolve(repoRoot, "web/src/i18n/locales/en.json"), "utf8")) as {
