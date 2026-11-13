@@ -1476,5 +1476,6 @@ test("#912 item 8: a same-night retry after an admin change writes a set that be
   assert.ok(cur.lessons.some((l) => l.lesson === "A new one."));
   assert.equal(cur.lessons.find((l) => l.lesson === THREE[0].lesson).pinned, true, "built on the admin's change");
   assert.equal(f.sqlite.prepare(`SELECT COUNT(*) AS n FROM lesson_runs WHERE night = '2026-11-13'`).get().n, 1);
-  assert.equal((await f.run(NIGHT2 + 60)).reason, "already_ran");
+  f.approveMore();
+  assert.equal((await f.run(NIGHT2 + 60)).reason, "already_ran", "still one run a night");
 });
