@@ -839,7 +839,10 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
       .bind(night, now, watermark, provider, model),
   ]);
   if (!claim?.meta?.changes) return { ran: false, reason: "already_ran" };
-  const runId = Number(claim.meta.last_row_id);
+  // Tonight's row is ours now: night is UNIQUE, and only an interrupted row is ever replaced.
+  const own = await db.prepare(`SELECT id FROM lesson_runs WHERE night = ?1`).bind(night).first<{ id: number }>();
+  if (!own) return { ran: false, reason: "already_ran" };
+  const runId = own.id;
 
   let calls = 0;
   let inputTokens = 0;
@@ -889,19 +892,21 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
     const mined = await mineChanges(db, chapters, { after: last, cells: deps.cells });
     changes = mined.groups.length;
     truncated = mined.truncated;
-    // On a resume, the newest chapters it did not mine may hold approvals
-    // newer than the watermark (editors moved on between nights): the
-    // watermark stops just below the first of them, so the next night mines
-    // them as new and nothing tonight compared is new again below it (#912).
-    const left =
-      resume.length > 0
-        ? await firstApprovalIn(db, newest.filter((c) => !resume.some((r) => r.book === c.book && r.chapter === c.chapter)), last, watermark)
-        : null;
     if (mined.stoppedAt != null) {
       through = mined.stoppedAt - 1;
       stopped = true;
+    } else if (resume.length > 0) {
+      // A finished resume: the newest chapters it did not mine may hold
+      // approvals newer than the watermark (editors moved on between nights).
+      // The watermark stops just below the first of them, so the next night,
+      // which mines the newest chapters, takes them as new, and the resumed
+      // approvals below it are not new again (#912). (A resume that stops
+      // again keeps stoppedAt - 1: holding it lower would resume from the
+      // same note every night and never advance.)
+      const others = newest.filter((c) => !resume.some((r) => r.book === c.book && r.chapter === c.chapter));
+      const left = await firstApprovalIn(db, others, last, watermark);
+      if (left != null) through = left - 1;
     }
-    if (left != null) through = Math.min(through, left - 1);
     if (mined.groups.length === 0) {
       await finish("no_changes", null).run();
       return { ran: true, runId, status: "no_changes", failureReason: null, lessons: 0, changed: false, truncated };

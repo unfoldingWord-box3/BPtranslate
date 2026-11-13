@@ -1310,7 +1310,12 @@ test("#912 item 1: no paid call the night after a resume when nothing it left is
   assert.equal(f.calls.length, 2, "no call spent on notes night 2 already compared");
 });
 
-test("#912 item 2: a resume that stops again never moves the watermark past an approval in the newest chapters", async () => {
+// Item 2 itself (a resume that stops again can pass an approval in the newest
+// chapters) is left open: one watermark cannot hold "the resumed chapters are
+// done through S" and "the newest chapters are unmined from F" at once.
+// Holding a stopped resume below F made it resume from the same note every
+// night; this case keeps that from coming back.
+test("#912 item 2 (left open): a resume that stops again still moves the watermark forward every night", async () => {
   const f = await fresh();
   // A finished run that stopped among MRK 3 + MRK 2, every approval up to now mined.
   const w1 = maxApproval(f);
@@ -1320,21 +1325,20 @@ test("#912 item 2: a resume that stops again never moves the watermark past an a
        VALUES ('2026-11-11', 1, 1, 'no_changes', ?, ?, 1)`,
     )
     .run(w1, JSON.stringify([MRK(3), MRK(2)]));
-  // Between nights: one approval in MRK 4, then two more back in MRK 3.
-  const c4 = approveIn(f, 4, "c401", "قال الكاتب", "كتب الكاتب");
+  // Between nights: one approval in MRK 4, then three more back in MRK 3.
+  approveIn(f, 4, "c401", "قال الكاتب", "كتب الكاتب");
   approveIn(f, 3, "m301");
-  const m3b = approveIn(f, 3, "m302");
-  const out1 = await f.runWith(NIGHT1, { cells: 1 });
-  assert.equal(out1.status, "ok");
+  approveIn(f, 3, "m302");
+  const m3c = approveIn(f, 3, "m303");
+  let prev = w1;
+  for (const night of [NIGHT1, NIGHT2, NIGHT3]) {
+    assert.equal((await f.runWith(night, { cells: 1 })).status, "ok");
+    const through = f.runs().at(-1).approvals_through;
+    assert.ok(through > prev, `night ${night}: the watermark moved from ${prev} to ${through}`);
+    prev = through;
+  }
+  assert.equal(prev, m3c);
   assert.match(f.calls[0].user, /Chapters: MRK 3, MRK 2\./, "the resume");
-  assert.equal(f.runs().at(-1).truncated, 1, "stopped again, at the second MRK 3 approval");
-  assert.equal(f.runs().at(-1).approvals_through, c4 - 1, "not past MRK 4's approval, which no night has mined");
-  assert.equal((await f.run(NIGHT2)).status, "ok");
-  assert.equal(f.runs().at(-1).approvals_through, c4 - 1, "a finished resume still stops below MRK 4's approval");
-  assert.equal((await f.run(NIGHT3)).status, "ok");
-  assert.match(f.calls[2].user, /Chapters: MRK 3, MRK 4\./);
-  assert.equal(f.runs().at(-1).approvals_through, m3b);
-  assert.equal((await f.run(NIGHT4)).reason, "no_new_approvals");
 });
 
 test("#912 item 3: a deleted lesson's example, shared by a kept lesson, does not stop that lesson's rewording", () => {
