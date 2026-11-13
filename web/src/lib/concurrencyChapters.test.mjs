@@ -160,6 +160,12 @@ test("the checks catch what they are for", () => {
     `data: { book: "ZEC", chapter: 13, verse: 1, ref_raw: "13:1" },`,
     "`UPDATE tn_rows SET x = 1 WHERE book = 'ZEC' AND chapter = 13;`",
     "ref_raw: `${13}:${verse}`,",
+    // A number right after a book constant: the helpers take (…, book, chapter, …).
+    `await fetchChapter(ctx, token, BOOK, 13);`,
+    `await gotoVerse(page, BOOK, 13, 1);`,
+    `await waitForServerNote(ctx, token, BOOK, 13, id, (n) => n === x);`,
+    `await fetchChapter(probe, auth.token, RTL_FIXTURE.book, 13);`,
+    `await gotoVerse(page, book, 13, 1);`,
   ]) {
     assert.match(fileProblems(one, "x.spec.ts", literal).join("\n"), /writes a ZEC chapter as a number/, literal);
   }
@@ -171,6 +177,18 @@ test("the checks catch what they are for", () => {
   );
   assert.match(fileProblems(one, "a.spec.ts", `const all = ZEC_CHAPTERS;`).join("\n"), /other than as/);
   assert.deepEqual(fileProblems(one, "a.spec.ts", `import {\n  ZEC_CHAPTERS,\n} from "./chapters";`), []);
+  assert.deepEqual(fileProblems(one, "a.spec.ts", `await gotoVerse(page, BOOK, CHAPTER, 1);`), []);
+  // An alias hides every later use from the entry check.
+  assert.match(
+    fileProblems(one, "a.spec.ts", `import { ZEC_CHAPTERS as Z } from "./chapters";`).join("\n"),
+    /imports ZEC_CHAPTERS under another name/,
+  );
+  assert.match(
+    fileProblems(one, "a.spec.ts", `import {\n  ZEC_CHAPTERS as Z,\n} from "./chapters";`).join("\n"),
+    /imports ZEC_CHAPTERS under another name/,
+  );
+  // A bare `ZEC_CHAPTERS,` line is allowed only inside an import.
+  assert.match(fileProblems(one, "a.spec.ts", `const all = [\n  ZEC_CHAPTERS,\n];`).join("\n"), /other than as/);
 
   // A new spec that hides its chapter behind its own constant still has to be listed.
   const hidden = `const BOOK = "ZEC";\nconst CH = 7 * 2;\nawait fetchChapter(p, t, BOOK, CH);`;
