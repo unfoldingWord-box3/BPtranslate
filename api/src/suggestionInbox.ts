@@ -62,8 +62,9 @@
 //             or more); already a Common issues line: one line of that text is
 //             exactly the line the page copies ("- «before» → «after»", either
 //             arrow, ∅ for a deletion), or holds before and after (both with a
-//             word) as whole words; already a lesson: stubbed until lessons
-//             exist (#817), see coveredByLesson.
+//             word) as whole words; already a lesson (#908): a lesson the
+//             drafting AI is given now (switch on) has exactly this before and
+//             after as its example, see coveredByLesson.
 //   home      house_style ONLY for the three shapes candidateRule allows (the
 //             closing period after a final "]"; deleting a tag fully enclosed
 //             in () or []; one whole word whose only change is its combining
@@ -113,6 +114,7 @@ import type { Env } from "./index";
 import { currentUserId, requireAdmin } from "./auth.ts";
 import { BOOK_NUMBERS } from "./dcsSources.ts";
 import { SCORECARD_ROWS_SQL } from "./draftScorecard.ts";
+import { loadLessonsForRender } from "./lessonsRender.ts";
 import {
   boldRanges,
   compileRule,
@@ -242,6 +244,8 @@ export interface InboxContext {
   templates: string[];
   commonIssues: string;
   rejected: Set<string>;
+  /** The examples of the lessons the drafting AI is given now (#817/#908); none when lessons are off. */
+  lessons?: { before: string; after: string }[];
 }
 
 export interface InboxExcluded {
@@ -748,11 +752,16 @@ export function draftLine(draft: string, start: number, end: number): string {
   return draft.slice(from, to).trim();
 }
 
-// TODO(#817): lessons do not exist yet. When they do, return true when a
-// lesson already teaches this change (e.g. its before/after or an example of
-// it), and load the lessons into InboxContext.
-function coveredByLesson(_s: { before: string; after: string }): boolean {
-  return false;
+// A lesson the drafting AI is given already teaches this change: its example
+// is exactly this before -> after (compared like every cover: NFC, collapsed
+// spaces, case-folded). Only the current set while lessons are switched on,
+// since a lesson the AI is not given covers nothing. A lesson's wording is
+// free text, so it is not matched.
+export function coveredByLesson(s: { before: string; after: string }, lessons: { before: string; after: string }[]): boolean {
+  const before = norm(s.before);
+  const after = norm(s.after);
+  if (before === "" && after === "") return false;
+  return lessons.some((l) => norm(l.before) === before && norm(l.after) === after);
 }
 
 // A live term already gives the approved words: a term that is not deprecated or
@@ -885,7 +894,7 @@ export function buildInbox(
       excluded.commonIssues++;
       continue;
     }
-    if (coveredByLesson(s)) {
+    if (coveredByLesson(s, ctx.lessons ?? [])) {
       excluded.lesson++;
       continue;
     }
@@ -979,7 +988,7 @@ export async function computeInbox(
   book: string,
   exampleNotes?: Map<string, ExampleNote[]>,
 ): Promise<SuggestionInboxResponse> {
-  const [rowRes, rules, terms, templates, prefs, rejected] = await Promise.all([
+  const [rowRes, rules, terms, templates, prefs, rejected, lessons] = await Promise.all([
     db.prepare(SCORECARD_ROWS_SQL).bind(book).all<{
       id: string;
       chapter: number;
@@ -1010,6 +1019,8 @@ export async function computeInbox(
       "translation_prefs",
     ),
     allOrEmpty<{ key: string }>(db, `SELECT key FROM suggestion_rejections`, "suggestion_rejections"),
+    // Missing lesson tables read as none.
+    loadLessonsForRender(db),
   ]);
   const rows: InboxRow[] = (rowRes.results ?? []).map((r) => ({
     id: r.id,
@@ -1025,6 +1036,7 @@ export async function computeInbox(
     templates: templates.rows.map((t) => t.target_md),
     commonIssues: prefs.rows[0]?.common_issues_md ?? "",
     rejected: new Set(rejected.rows.map((r) => r.key)),
+    lessons: lessons.map((l) => ({ before: l.before, after: l.after })),
   };
   return { book, ...buildInbox(rows, ctx, undefined, exampleNotes), notMigrated: rejected.missing };
 }
