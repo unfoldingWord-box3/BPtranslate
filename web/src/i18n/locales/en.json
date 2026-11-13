@@ -660,6 +660,7 @@
       "promote": "Move to Common issues"
     },
     "editHelp": "Pin a lesson to keep it, word for word, every night. Delete removes it; a night brings it back only if editors make the same correction again in notes approved later. Move to Common issues adds it to the end of Common issues and removes it from this list. Every change is saved as a new version of the list, so you can restore an earlier one below.",
+    "promoteBlocked": "Common issues above has unsaved changes. Save them, or undo them, before you move a lesson there.",
     "promoted": "The lesson was added to the end of Common issues.",
     "error": {
       "stale": "The lessons changed since this page loaded (a night's run or another admin). The list is up to date now. Try again.",

@@ -312,6 +312,7 @@ function MarkdownPrefPanel({
   placeholder,
   maxChars,
   prefsState,
+  onDirtyChange,
 }: {
   id: SectionKey;
   field: "instructions_md" | "common_issues_md";
@@ -320,6 +321,8 @@ function MarkdownPrefPanel({
   placeholder: string;
   maxChars: number;
   prefsState: PrefsState;
+  /** Told whether the text differs from the saved text (the Lessons panel needs it, #908). */
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const { t } = useTranslation();
   const { prefs, error, apply, refetch } = prefsState;
@@ -335,6 +338,11 @@ function MarkdownPrefPanel({
   if (value === null && prefs) setValue(prefs[field] ?? "");
 
   const overLimit = (value ?? "").length > maxChars;
+  const dirty = value !== null && !!prefs && value !== (prefs[field] ?? "");
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
 
   const onSave = async () => {
     if (!prefs || value === null) return;
@@ -590,6 +598,10 @@ export default function StyleScreen({ role, me }: StyleScreenProps) {
   // Bumped by a restore from the preferences history (#788) to remount the
   // seed-once prefs editors.
   const [prefsGen, setPrefsGen] = useState(0);
+  // Common issues alone remounts after a lesson is moved there (#908), and the
+  // Lessons panel refuses that move while Common issues has unsaved text.
+  const [commonIssuesGen, setCommonIssuesGen] = useState(0);
+  const [commonIssuesDirty, setCommonIssuesDirty] = useState(false);
 
   const sectionLabels: Array<{ key: SectionKey; labelKey: string }> = [
     ...(memoryAvailable ? MEMORY_SECTION_LABELS : []),
@@ -717,9 +729,10 @@ export default function StyleScreen({ role, me }: StyleScreenProps) {
                   prefsState={prefsState}
                 />
                 <MarkdownPrefPanel
-                  key={`commonIssues-${prefsGen}`}
+                  key={`commonIssues-${prefsGen}-${commonIssuesGen}`}
                   id="commonIssues"
                   field="common_issues_md"
+                  onDirtyChange={setCommonIssuesDirty}
                   title={t("moreTools.style.sectionCommonIssues")}
                   sub={t("moreTools.style.commonIssuesSub")}
                   placeholder={t("moreTools.style.commonIssuesPlaceholder")}
@@ -746,11 +759,15 @@ export default function StyleScreen({ role, me }: StyleScreenProps) {
                 </Panel>
                 {/* #817: admin-only like the house-style panel above. */}
                 <Panel id="lessons" title={t("moreTools.style.sectionLessons")} intro={t("moreTools.style.lessonsIntro")}>
+                  {/* A promote changes only Common issues: only that editor
+                      remounts (to show the new line), and only while it holds
+                      no unsaved text, so no typing on this page is lost (#908). */}
                   <LessonsSection
                     heading={false}
+                    promoteBlocked={commonIssuesDirty}
                     onPrefsChanged={(p) => {
                       prefsState.apply(p);
-                      setPrefsGen((g) => g + 1);
+                      setCommonIssuesGen((g) => g + 1);
                     }}
                   />
                 </Panel>

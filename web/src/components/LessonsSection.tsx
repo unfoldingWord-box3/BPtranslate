@@ -43,10 +43,12 @@ function Sample({ text }: { text: string }) {
 function LessonCard({
   lesson,
   busy,
+  promoteBlocked,
   onAction,
 }: {
   lesson: Lesson;
   busy: boolean;
+  promoteBlocked: boolean;
   onAction: (action: LessonEditAction) => void;
 }) {
   const { t } = useTranslation();
@@ -77,7 +79,7 @@ function LessonCard({
         <Button size="small" variant="outlined" disabled={busy} onClick={() => onAction(lesson.pinned ? "unpin" : "pin")}>
           {lesson.pinned ? t("lessons.actions.unpin") : t("lessons.actions.pin")}
         </Button>
-        <Button size="small" variant="outlined" disabled={busy} onClick={() => onAction("promote")}>
+        <Button size="small" variant="outlined" disabled={busy || promoteBlocked} onClick={() => onAction("promote")}>
           {t("lessons.actions.promote")}
         </Button>
         <Button size="small" color="error" disabled={busy} onClick={() => onAction("delete")}>
@@ -146,9 +148,16 @@ function runSummary(run: LessonRun, t: (k: string, o?: Record<string, unknown>) 
 export function LessonsSection({
   heading = true,
   onPrefsChanged,
+  promoteBlocked = false,
 }: {
   heading?: boolean;
   onPrefsChanged?: (prefs: TranslationPrefs) => void;
+  /**
+   * The host shows a Common issues editor holding unsaved text: "Move to
+   * Common issues" waits until it is saved or undone, so the move cannot
+   * replace that text (#908).
+   */
+  promoteBlocked?: boolean;
 }) {
   const { t } = useTranslation();
   const [state, setState] = useState<LessonsState | null>(null);
@@ -316,8 +325,19 @@ export function LessonsSection({
               </Typography>
             ) : (
               <Stack spacing={1}>
+                {promoteBlocked && (
+                  <Alert severity="info" variant="outlined" data-testid="lessons-promote-blocked">
+                    {t("lessons.promoteBlocked")}
+                  </Alert>
+                )}
                 {state.lessons.map((l, i) => (
-                  <LessonCard key={`${state.setId}-${i}`} lesson={l} busy={busy} onAction={(a) => edit(i + 1, a)} />
+                  <LessonCard
+                    key={`${state.setId}-${i}`}
+                    lesson={l}
+                    busy={busy}
+                    promoteBlocked={promoteBlocked}
+                    onAction={(a) => edit(i + 1, a)}
+                  />
                 ))}
               </Stack>
             )}
