@@ -1174,7 +1174,7 @@ type PrefsState = ReturnType<typeof useTranslationPrefs>;
 // ── Brief ──────────────────────────────────────────────────────────────────
 function BriefSection({ prefsState, canSave }: { prefsState: PrefsState; canSave: boolean }) {
   const { t } = useTranslation();
-  const { prefs, loading, apply, refetch } = prefsState;
+  const { prefs, loading, apply, applyConflict, refetch } = prefsState;
   // Unsaved typing lives in the drafts store, shared with the desk Style
   // page's Brief (#909): a remount (history restore) or reload restores it. A
   // sibling section's save (the server partial-merges) does not touch it, and
@@ -1214,8 +1214,8 @@ function BriefSection({ prefsState, canSave }: { prefsState: PrefsState; canSave
         // ever sends Brief's own fields.
         const current = await prefsConflictRow(e.body, () => api.getTranslationPrefs().then((r) => r.prefs));
         if (current) {
-          apply(current);
-          prefsDraft.conflicted(current);
+          applyConflict(current, plan.version);
+          prefsDraft.conflicted(current, plan.version);
         } else refetch();
         save.setMsg(t("preferences.conflictKeptEdits"));
       } else if (e instanceof ApiError && e.status === 403) {
@@ -1311,7 +1311,7 @@ function MarkdownPrefSection({
   canSave: boolean;
 }) {
   const { t } = useTranslation();
-  const { prefs, error, apply, refetch } = prefsState;
+  const { prefs, error, apply, applyConflict, refetch } = prefsState;
   // Unsaved typing lives in the drafts store, shared with the desk Style
   // page's editor for the same field (#909), so a remount or reload restores
   // it and a sibling section's save cannot reset it. null = not yet read
@@ -1346,8 +1346,8 @@ function MarkdownPrefSection({
         // next save re-sends it against that row's version.
         const current = await prefsConflictRow(e.body, () => api.getTranslationPrefs().then((r) => r.prefs));
         if (current) {
-          apply(current);
-          prefsDraft.conflicted(current);
+          applyConflict(current, plan.version);
+          prefsDraft.conflicted(current, plan.version);
         } else refetch();
         save.setMsg(t("preferences.conflictKeptEdits"));
       } else if (e instanceof ApiError && e.status === 403) {

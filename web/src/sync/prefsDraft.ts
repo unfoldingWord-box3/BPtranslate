@@ -177,6 +177,21 @@ export function newestPrefs<P extends { version: number }>(cur: P | null, next: 
   return cur && next.version < cur.version ? cur : next;
 }
 
+// The prefs row a page should hold after a 409 answered a Save sent with
+// If-Match `sent`. The server's version only goes up, except when an admin
+// restores the database or resets the row: a `current` row older than the
+// version sent shows that happened, and it is taken even though it is older
+// than the row held, or every Save would conflict until a reload (#922 item
+// 2). Only while the row held is still from before the restore: once the page
+// holds a later row (a 409 of another Save in flight brought one), a late 409
+// with an older row is not taken (#922 review). Otherwise newestPrefs as
+// everywhere else, so a late 409 overtaken by another tab's newer save cannot
+// move the page back (C1).
+export function prefsAfterConflict<P extends { version: number }>(held: P | null, current: P, sent: number): P {
+  const beforeRestore = held == null || held.version >= sent;
+  return current.version < sent && beforeRestore ? current : newestPrefs(held, current);
+}
+
 // Whether a stored prefs draft may be deleted by this tab: only when it holds
 // one of `texts` (what this tab last wrote, or what it is settling to). The
 // store is shared by every tab of the workspace, so another tab's newer typing

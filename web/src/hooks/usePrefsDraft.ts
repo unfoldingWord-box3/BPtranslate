@@ -8,6 +8,7 @@ import {
   afterPrefsSavedElsewhere,
   hydratePrefsDraft,
   newestPrefs,
+  prefsAfterConflict,
   prefsDiscardMatches,
   prefsDraftClearable,
   prefsDraftDroppable,
@@ -81,14 +82,20 @@ export function usePrefsDraft<F extends PrefsFields>(
   }, [key]);
 
   // Store typed state as this editor's draft, stamped with who typed it.
-  // `ifAbsent`: only when no record is stored (the write-back below, B4).
+  // `ifAbsent`: only when no record is stored (the write-back below, B4), and
+  // only while the box still shows that typing: another tab's discard handled
+  // after the write-back started has reset it (#922 item 1).
   const write = useCallback(
     (s: PrefsDraftState<F>, ifAbsent = false) => {
       lastWritten.current = s.text;
       const owner = currentUserId();
       const payload = { text: s.text, base: s.base, ...(owner != null ? { owner } : {}) };
       const meta = { kind: "prefs" as const, section };
-      if (ifAbsent) void drafts.setIfAbsent(key, payload, s.baseVersion, meta);
+      const still = () => {
+        const cur = stateRef.current;
+        return !!cur && sameFields(cur.text, s.text) && typedKeys(cur.text, cur.base).length > 0;
+      };
+      if (ifAbsent) void drafts.setIfAbsent(key, payload, s.baseVersion, meta, still);
       else void drafts.set(key, payload, s.baseVersion, meta);
     },
     [key, section],
@@ -257,10 +264,12 @@ export function usePrefsDraft<F extends PrefsFields>(
       const latest = newestPrefs(prefsRef.current, row);
       commit(afterPrefsSave(s.text, textAtSave.current ?? s.text, pick(latest), latest.version));
     },
-    conflicted: (current: TranslationPrefs) => {
+    // `sent`: the If-Match of the Save that got the 409. A late 409 body
+    // older than the row this page holds is not taken, unless the version
+    // went down (an admin database restore, #922 item 2; prefsAfterConflict).
+    conflicted: (current: TranslationPrefs, sent: number) => {
       const s = stateRef.current;
-      // The same for a late 409 body older than the row this page holds.
-      const latest = newestPrefs(prefsRef.current, current);
+      const latest = prefsAfterConflict(prefsRef.current, current, sent);
       if (s) commit(afterPrefsConflict(s.text, s.base, pick(latest), latest.version));
     },
   };

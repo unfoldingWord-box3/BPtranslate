@@ -33,6 +33,7 @@ import { legacyDbNames, workspaceDbName } from "./workspace";
 import { adoptFromLegacyDbs, type LegacySource } from "./legacyAdoption";
 import { DRAFTS_CHANGED_CHANNEL_BASE, openDraftsChangedChannel, orderedReads } from "./draftsChangedChannel.ts";
 import { openPrefsDraftChannel, PREFS_DRAFT_CHANNEL_BASE, type PrefsDraftMessage } from "./prefsDraftChannel.ts";
+import { isDraftEditorShown } from "./draftEditors";
 
 // Base name; the actual per-workspace DB name is derived via workspaceDbName()
 // so drafts written in one Door43 org never surface in another (issue #228).
@@ -208,7 +209,37 @@ async function tell(to: Set<Subscriber>) {
 // tell() never rejects (orderedReads logs a failed read), so `void` is safe.
 const changedChannel = openDraftsChangedChannel(workspaceDbName(DRAFTS_CHANGED_CHANNEL_BASE), () => {
   void tell(remoteSubscribers);
+  void releaseGonePrefsMarks();
 });
+
+// Another tab changed the store. A prefs draft typed here whose editor is no
+// longer on screen (the page was left) keeps this tab's "unsaved here" mark
+// until the record goes; once another tab's save or discard deleted it, the
+// mark goes too, or the unload guard would ask about typing nobody holds
+// (#922 item 3). An open prefs editor drops or re-writes its own mark
+// (usePrefsDraft), and other kinds of editor do not all say when they are
+// open, so only prefs keys with no editor showing are released. A key written
+// here again while the store was being read keeps its mark.
+async function releaseGonePrefsMarks() {
+  const keys = [...pendingKeys].filter((k) => k.startsWith("prefs:") && !isDraftEditorShown(k));
+  if (keys.length === 0) return;
+  const generations = new Map(keys.map((k) => [k, latestGenerationByKey.get(k)]));
+  let stored: Set<string>;
+  try {
+    stored = new Set((await listAll()).map((r) => r.key));
+  } catch {
+    return;
+  }
+  let released = false;
+  for (const k of keys) {
+    if (stored.has(k) || isDraftEditorShown(k) || latestGenerationByKey.get(k) !== generations.get(k)) continue;
+    pendingKeys.delete(k);
+    latestGenerationByKey.delete(k);
+    released = true;
+  }
+  // The unload guard's own copy of the store hears only this tab's changes.
+  if (released) void tell(subscribers);
+}
 
 // A prefs draft discarded or saved in another tab, by key (#913 review A1/A2,
 // prefsDraftChannel.ts). The prefs editors listen; discard() and the editors'
@@ -487,7 +518,16 @@ export const drafts = {
   // one transaction, so it never replaces a record another tab wrote in the
   // meantime (#913 review B4: a prefs editor writing back its draft after
   // another tab deleted it). Resolves whether it wrote.
-  async setIfAbsent(key: string, payload: DraftPayload, expectedVersion: number, meta: DraftMeta): Promise<boolean> {
+  // `still`, when given, is asked inside that transaction: false skips the
+  // write. A prefs editor whose box another tab's discard reset after this
+  // write-back started must not store the thrown-away text (#922 item 1).
+  async setIfAbsent(
+    key: string,
+    payload: DraftPayload,
+    expectedVersion: number,
+    meta: DraftMeta,
+    still?: () => boolean,
+  ): Promise<boolean> {
     if (isReadOnly()) return false;
     // Marked dirty synchronously, as set() does: this tab is showing the typing.
     const generation = nextGeneration();
@@ -501,20 +541,30 @@ export const drafts = {
       if (prevGeneration === undefined) latestGenerationByKey.delete(key);
       else latestGenerationByKey.set(key, prevGeneration);
     };
+    // Nothing written and nothing stored: put the marks back as they were.
+    const restoreMarks = () => {
+      restoreGeneration();
+      if (!prevPending && latestGenerationByKey.get(key) === prevGeneration) pendingKeys.delete(key);
+    };
     let existing: unknown;
+    let skipped = false;
     try {
       const tx = (await db()).transaction(STORE, "readwrite");
       existing = await tx.store.get(key);
-      if (!existing) {
+      if (!existing && still && !still()) skipped = true;
+      else if (!existing) {
         const rec: DraftRecord = { key, payload, expectedVersion, updatedAt: Date.now(), generation, meta };
         await tx.store.put(rec);
       }
       await tx.done;
     } catch (e) {
-      // Failed: put the marks back as they were (round 3, C4).
-      restoreGeneration();
-      if (!prevPending && latestGenerationByKey.get(key) === prevGeneration) pendingKeys.delete(key);
+      // Failed (round 3, C4).
+      restoreMarks();
       console.warn("draft write-back failed", key, e);
+      return false;
+    }
+    if (skipped) {
+      restoreMarks();
       return false;
     }
     if (existing) {

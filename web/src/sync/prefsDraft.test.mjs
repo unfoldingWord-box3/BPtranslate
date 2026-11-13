@@ -4,6 +4,7 @@ import {
   afterPrefsSave,
   afterPrefsSavedElsewhere,
   newestPrefs,
+  prefsAfterConflict,
   prefsDiscardMatches,
   hydratePrefsDraft,
   prefsDraftClearable,
@@ -214,6 +215,24 @@ assert.strictEqual(newestPrefs(v6, v5), v6);
 // Same version: the row in hand is taken (a refetch of the same row).
 const v6b = { version: 6, audience: "six again" };
 assert.strictEqual(newestPrefs(v6, v6b), v6b);
+
+// ── prefsAfterConflict (#922 item 2) ───────────────────────────────────────
+// An admin database restore lowered the version: a Save sent at 1005 gets a
+// 409 with the row at 5. The page takes it, or every Save conflicts.
+const v1005 = { version: 1005, audience: "before restore" };
+assert.strictEqual(prefsAfterConflict(v1005, v5, 1005), v5);
+// A late 409 (sent at 5, server then at 6) arriving after the page took
+// another tab's v7 keeps v7: an older row would let a sibling editor's next
+// Save send v7 with stale boxes and revert that tab's save (C1).
+const v7 = { version: 7, audience: "seven" };
+assert.strictEqual(prefsAfterConflict(v7, v6, 5), v7);
+// Two Saves sent at 1005 across the restore: the first 409 brought v6 (another
+// tab saved after the restore), the late one brings v5. The page already holds
+// a row from after the restore, so v6 is kept.
+assert.strictEqual(prefsAfterConflict(v6, v5, 1005), v6);
+// An ordinary 409 with a newer row takes it.
+assert.strictEqual(prefsAfterConflict(v5, v6, 5), v6);
+assert.strictEqual(prefsAfterConflict(null, v6, 5), v6);
 
 // ── prefsDraftDroppable (#913 item 5) ──────────────────────────────────────
 // Drafts are per workspace, not per user. A user who cannot save drops only a

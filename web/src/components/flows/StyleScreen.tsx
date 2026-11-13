@@ -186,7 +186,7 @@ function Panel({
 // server merges them), same 409/403 handling.
 function BriefPanel({ prefsState }: { prefsState: PrefsState }) {
   const { t } = useTranslation();
-  const { prefs, loading, apply, refetch } = prefsState;
+  const { prefs, loading, apply, applyConflict, refetch } = prefsState;
   // Unsaved typing lives in the drafts store (#909): restored after a remount
   // (history restore) or a reload, and a save is refused with 409 when the
   // Brief fields changed on the server since the typing started.
@@ -218,8 +218,8 @@ function BriefPanel({ prefsState }: { prefsState: PrefsState }) {
         // the next save carries the right If-Match; typed text is kept.
         const current = await prefsConflictRow(e.body, () => api.getTranslationPrefs().then((r) => r.prefs));
         if (current) {
-          apply(current);
-          prefsDraft.conflicted(current);
+          applyConflict(current, plan.version);
+          prefsDraft.conflicted(current, plan.version);
         } else refetch();
         save.setMsg(t("moreTools.style.saveConflict"));
       } else if (e instanceof ApiError && e.status === 403) {
@@ -332,7 +332,7 @@ function MarkdownPrefPanel({
   onDirtyChange?: (dirty: boolean) => void;
 }) {
   const { t } = useTranslation();
-  const { prefs, error, apply, refetch } = prefsState;
+  const { prefs, error, apply, applyConflict, refetch } = prefsState;
   // Unsaved typing lives in the drafts store (#909), so a remount (history
   // restore, a lesson moved into Common issues) or a reload restores it. null
   // = not yet read (loading gate below): never "" over saved content, or a
@@ -370,8 +370,8 @@ function MarkdownPrefPanel({
       if (e instanceof ApiError && e.status === 409) {
         const current = await prefsConflictRow(e.body, () => api.getTranslationPrefs().then((r) => r.prefs));
         if (current) {
-          apply(current);
-          prefsDraft.conflicted(current);
+          applyConflict(current, plan.version);
+          prefsDraft.conflicted(current, plan.version);
         } else refetch();
         save.setMsg(t("moreTools.style.saveConflict"));
       } else if (e instanceof ApiError && e.status === 403) {

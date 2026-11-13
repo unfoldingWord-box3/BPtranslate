@@ -1009,3 +1009,149 @@ test("913 D1: a late save response does not move the editor back to an older row
   expect(p.purpose).toBe(`d1 purpose ${stamp} B`);
   expect(p.audience).toBe(`d1 audience ${stamp} A`);
 });
+
+// ── Issue #922: leftovers from the #913 review ──────────────────────────────
+
+// Item 1: a write-back that has started (another tab's "drafts changed"
+// message got here before its discard message) checks, inside its
+// transaction, that this tab still shows the typing. A discard handled in the
+// meantime has reset the box, so the thrown-away text is not stored again.
+test("922 item 1: set-if-absent skips the write when the editor no longer shows the typing", async ({ browser }) => {
+  test.setTimeout(60_000);
+  const { context } = await adminContext(browser, "a");
+  const page = await context.newPage();
+  await openStyle(page, (await getPrefs(setup!.context.request)).common_issues_md ?? "");
+  const out = await page.evaluate(async () => {
+    const url = "/src/sync/drafts.ts";
+    const m = await import(/* @vite-ignore */ url);
+    const key = "prefs:922-item1-probe";
+    const meta = { kind: "prefs", section: "common_issues_md" };
+    await m.drafts.clear(key);
+    const wrote = await m.drafts.setIfAbsent(key, { text: { v: "discarded" }, base: { v: "" } }, 1, meta, () => false);
+    const rec = await m.drafts.get(key);
+    const pending = m.hasUnsavedDrafts();
+    await m.drafts.clear(key);
+    return { wrote, stored: !!rec, pending };
+  });
+  expect(out).toEqual({ wrote: false, stored: false, pending: false });
+});
+
+// Item 2: an admin database restore can lower the prefs version below the one
+// this page holds. The 409's row is the server's truth: the page takes it, so
+// the next Save lands instead of conflicting until a reload.
+test("922 item 2: after the settings version goes down, the second Save lands", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const stamp = Date.now();
+  const original = `922-2 common ${stamp}`;
+  await putPrefs(setup!.context.request, setup!.csrf, { common_issues_md: original });
+  const { context } = await adminContext(browser, "a");
+  const page = await context.newPage();
+  // The page loads the row at a version 1000 higher than the server's, as if
+  // the database was restored to an older copy after the page loaded.
+  await page.route(`**${PREFS}`, async (route) => {
+    if (route.request().method() !== "GET") return route.continue();
+    const res = await route.fetch();
+    const body = (await res.json()) as { prefs: Prefs };
+    body.prefs.version += 1000;
+    await route.fulfill({ response: res, json: body });
+  });
+  await openStyle(page, original);
+  await commonBox(page).click();
+  await page.keyboard.press("End");
+  await page.keyboard.type(" DOWN");
+  expect(await clickSave(page, "commonIssues")).toBe(409);
+  expect(await clickSave(page, "commonIssues")).toBe(200);
+  expect((await getPrefs(setup!.context.request)).common_issues_md).toBe(`${original} DOWN`);
+});
+
+// Item 3: tab B typed on the Style page and moved to another page, so no
+// editor there holds the typing. Tab A then saves or discards that draft. B
+// keeps nothing unsaved, so closing it does not ask.
+for (const how of ["save", "discard"] as const) {
+  test(`922 item 3: after B left the Style page, a ${how} in A leaves B without a leave-page prompt`, async ({
+    browser,
+  }) => {
+    test.setTimeout(90_000);
+    const stamp = Date.now();
+    const original = `922-3${how} common ${stamp}`;
+    await putPrefs(setup!.context.request, setup!.csrf, { common_issues_md: original });
+    const { context } = await adminContext(browser, "a");
+    const pageB = await context.newPage();
+    await openStyle(pageB, original);
+    await commonBox(pageB).click();
+    await pageB.keyboard.press("End");
+    await pageB.keyboard.type(" B-TYPED");
+    await expect.poll(() => prefsDrafts(pageB)).toHaveProperty("prefs:common_issues_md");
+    await pageB.goto(`${BASE}/#/admin/curate`);
+    await expect(commonBox(pageB)).toHaveCount(0);
+    await pageB.waitForTimeout(500);
+
+    const pageA = await context.newPage();
+    await openStyle(pageA, `${original} B-TYPED`);
+    if (how === "save") {
+      expect(await clickSave(pageA, "commonIssues")).toBe(200);
+    } else {
+      await pageA.getByText("1 unsaved").first().click();
+      await pageA.getByRole("presentation").getByText("1 unsaved").click();
+      await pageA.getByRole("button", { name: "Discard this edit" }).click();
+      await expect(commonBox(pageA)).toHaveValue(original);
+    }
+    await expect.poll(() => prefsDrafts(pageA)).toEqual({});
+    await pageB.waitForTimeout(1000);
+    expect(await closePrompts(pageB)).toBe(false);
+  });
+}
+
+// Item 4: when classic Preferences cannot read the drafts store, "Move to
+// Common issues" is refused with a message that says the check failed, not
+// that Common issues has unsaved changes.
+test("922 item 4: a failed drafts read refuses the move with its own message", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const { context } = await adminContext(browser, "a");
+  const page = await context.newPage();
+  page.on("dialog", (d) => void d.accept());
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const now = Math.floor(Date.now() / 1000);
+  await page.route("**/api/translation-memory/lessons", (route) =>
+    route.request().method() === "GET"
+      ? route.fulfill({
+          json: {
+            enabled: true,
+            notMigrated: false,
+            availability: { available: true, provider: "gemini", model: "m" },
+            lessons: [{ lesson: "922 lesson", before: "a", after: "b", evidence: 2, firstSeenAt: now, pinned: false }],
+            setId: 1,
+            setAt: now,
+            lastRun: null,
+            sets: [{ id: 1, at: now, kind: "night", action: null, count: 1 }],
+            maxLessons: 20,
+          },
+        })
+      : route.continue(),
+  );
+  let edits = 0;
+  await page.route("**/api/translation-memory/lessons/edit", (route) => {
+    edits++;
+    return route.abort();
+  });
+  // Once switched on, every IndexedDB read by key fails, as an unreadable
+  // drafts store would.
+  await page.addInitScript(() => {
+    const w = window as unknown as { __failIdbGet?: boolean };
+    const get = IDBObjectStore.prototype.get;
+    IDBObjectStore.prototype.get = function (this: IDBObjectStore, ...args: Parameters<IDBObjectStore["get"]>) {
+      if (w.__failIdbGet) throw new DOMException("922 item 4: store unreadable", "UnknownError");
+      return get.apply(this, args);
+    };
+  });
+  await page.goto(`${BASE}/#/preferences/lessons`);
+  const move = page.getByRole("button", { name: "Move to Common issues" });
+  await expect(move).toBeEnabled({ timeout: 20_000 });
+  await page.evaluate(() => {
+    (window as unknown as { __failIdbGet?: boolean }).__failIdbGet = true;
+  });
+  await move.click();
+  await expect(page.getByText(/Could not check Common issues for unsaved changes/)).toBeVisible();
+  await expect(page.getByText(/Common issues has unsaved changes/)).toHaveCount(0);
+  expect(edits).toBe(0);
+});
