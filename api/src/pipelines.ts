@@ -766,9 +766,12 @@ async function pollPipelineJob(
   // apply_skipped_json, echoed here so the polling tab sees it at completion.
   let applySkipped: ApplySkipped | null = null;
   // #726: a job of a retired type that was still running when its type was
-  // retired is failed on its done poll, at once (no import-retry hold), and
+  // retired is failed on the poll that sees it end upstream (done with or
+  // without output, failed, or cancelled), at once (no import-retry hold), and
   // its output is never fetched or applied.
-  const retired = shouldImport && job.pipeline_type !== "translate";
+  const retired =
+    job.pipeline_type !== "translate" &&
+    (data.state === "done" || data.state === "failed" || data.state === "cancelled");
   if (retired) {
     importFailed = true;
     importErrMessage = retiredTypeMessage(job.pipeline_type);
