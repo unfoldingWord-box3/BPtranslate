@@ -48,7 +48,7 @@ Good to know:
 1. Open **Draft scorecard** in the admin menu.
 2. Choose the **Book**. The table shows one row per chapter, and **Whole book** at the bottom.
 3. Read the columns:
-   - **Approved notes**: approved translation notes in the chapter. Notes approved with **Approve all notes** or by a review-state change are left out, because nobody read them one by one.
+   - **Approved notes**: approved translation notes in the chapter. AI drafts nobody changed that were approved with **Approve all notes**, and notes approved by a review-state change, are left out, because nobody read them one by one. Approvals made with Approve all before this change are still counted.
    - **No draft logged**: notes with no AI draft on record. Edit history older than 180 days can be cleared.
    - **Draft was English**: the AI draft was the English note, not translated. These notes are left out of the columns to the right. A note that is the same as the English for a good reason, such as one that holds only links, is counted here too.
    - **Compared**: the notes the other columns are about.

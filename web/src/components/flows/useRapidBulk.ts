@@ -14,7 +14,7 @@
 //   checked range counts as read. The approval becomes an AI example and clears
 //   any admin_bulk_state stamp (api/src/rows.ts, HAND_APPROVAL_CLAUSE), the same
 //   as approving the note on its own. Only the Approve-all buttons (review queue,
-//   classic editor) send `bulk: true` and stamp. The open note with an unsaved
+//   classic editor) send `bulk: true`, which stamps AI drafts nobody changed. The open note with an unsaved
 //   edit goes through the screen's handleApprove (save, then approve), which is
 //   a hand approval like Ctrl+Enter.
 // - Approve has no Undo: un-approving sets 'edited', not the state the note

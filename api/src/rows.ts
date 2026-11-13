@@ -1150,7 +1150,8 @@ function coerceBitValue(raw: 0 | 1 | boolean): 0 | 1 {
 // source: edit_log.source for the audit entry (editSource).
 // bulkStamp: what an approval does to admin_bulk_state (bulkStampClause).
 // "clear" for a person approving one row, "stamp" for an Approve-all loop
-// (`bulk: true`), "keep" when no person is on record. Absent = "keep".
+// (`bulk: true`; stamps only an unchanged AI draft, see BULK_APPROVAL_CLAUSE),
+// "keep" when no person is on record. Absent = "keep".
 // An un-approve never touches the stamp.
 interface StateWriteOpts {
   expected: number | null;
@@ -1198,20 +1199,24 @@ function statePins(opts: StateWriteOpts, first: number, trash: boolean): { sql: 
 // lets the reimport overwrite a 'validated' row.
 //
 // Approve-all in the review queue and the classic editor is itself a bulk
-// approver (issue #833, option B): it loops rows through this route with
-// `bulk: true`, and nobody read those rows one at a time, so the approval
-// STAMPS the row the way the admin sweep does (reviewState.ts decision 3): the
-// stamp holds the state the approval displaced, and an existing stamp keeps its
-// first value. A row that is already 'validated' is left as it is, so a stale
-// Approve-all list cannot turn a hand-approved example back into a bulk one.
+// approver (issue #833, option B: "if it seems pretty clear they've been seen,
+// go with it"). It loops rows through this route with `bulk: true`. An AI draft
+// nobody changed (state 'ai_draft' before the approval) was never clearly seen,
+// so the approval STAMPS it the way the admin sweep does (reviewState.ts
+// decision 3): the stamp holds the state the approval displaced ('ai_draft'),
+// and an existing stamp keeps its first value. An 'edited' row was changed by a
+// person, so it counts like a single approval and gets no new stamp; an
+// existing import/sweep stamp is left as it is, not cleared. A row that is
+// already 'validated' is left as it is too, so a stale Approve-all list cannot
+// turn a hand-approved example back into a bulk one.
 // Rapid check's checked-range Approve is a hand approval: each note sits on
 // screen beside its English source, and it sends no `bulk` flag. An approval
 // with no signed-in user keeps any stamp (no person is on record as having read
 // the row).
 const HAND_APPROVAL_CLAUSE = ", admin_bulk_state = NULL";
 const BULK_APPROVAL_CLAUSE =
-  ", admin_bulk_state = CASE WHEN translation_state = 'validated' THEN admin_bulk_state" +
-  " ELSE COALESCE(admin_bulk_state, translation_state, 'none') END";
+  ", admin_bulk_state = CASE WHEN translation_state = 'ai_draft'" +
+  " THEN COALESCE(admin_bulk_state, translation_state) ELSE admin_bulk_state END";
 
 // The admin_bulk_state SET clause for an approval. SQLite evaluates every SET
 // right-hand side against the row's ORIGINAL values, so translation_state here
@@ -1521,8 +1526,8 @@ async function stateWriteMiss(c: Context<{ Bindings: Env; Variables: { userId?: 
 // The validate body: TnBitBody plus the state (and updated_at) the reviewer
 // saw. Validate-only, so /preserve and /hint keep their exact shape.
 // bulk: sent by the web's Approve-all loops. Approve-all is itself a bulk
-// approver, so it stamps admin_bulk_state (#833) or keeps an existing stamp
-// (#414); see BULK_APPROVAL_CLAUSE.
+// approver, so it stamps admin_bulk_state on an AI draft nobody changed (#833)
+// and keeps any existing stamp (#414); see BULK_APPROVAL_CLAUSE.
 const ValidateBody = TnBitBody.extend({
   expected_state: z.enum(TRANSLATION_STATES).optional(),
   expected_updated_at: z.number().int().nonnegative().optional(),

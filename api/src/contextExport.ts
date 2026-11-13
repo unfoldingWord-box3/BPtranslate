@@ -58,7 +58,8 @@ export type ValidatedTqRow = {
  *   * the admin bulk review-state sweep (reviewState.ts, issue #296),
  *   * the Aquifer importer's heuristic approve (aquiferImport.ts, issue #393), and
  *   * the web's Approve-all buttons, which send `bulk: true` to
- *     POST /api/rows/{tn,tq}/:id/validate (rows.ts BULK_APPROVAL_CLAUSE, #833).
+ *     POST /api/rows/{tn,tq}/:id/validate and stamp the AI drafts nobody
+ *     changed (rows.ts BULK_APPROVAL_CLAUSE, #833).
  * All stamp `admin_bulk_state` (migration 0071), and `admin_bulk_state IS NULL`
  * here is what keeps them out of the training set. A row approved one-at-a-time
  * through the same route without `bulk` (including Rapid check's checked-range

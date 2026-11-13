@@ -418,7 +418,7 @@ export function buildScorecard(
 
 // The latest ai_pipeline audit row per validated, live tN row of the book.
 // Hand approvals only: a bulk approval (admin_bulk_state set by the admin
-// sweep, the Aquifer import or Approve-all, #833) was never read one at a time,
+// sweep, the Aquifer import, or Approve-all on an unchanged AI draft, #833) was never read one at a time,
 // so it says nothing about how good the draft was. Same rule as
 // VALIDATED_TN_EXAMPLES_SQL (contextExport.ts). The suggestion inbox reads
 // these rows too.
