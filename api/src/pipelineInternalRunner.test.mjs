@@ -35,7 +35,9 @@ import { clearProjectConfigCache } from "./projectConfig.ts";
 import { clearSourceNotesCache } from "./sourceNotes.ts";
 import { isEnglishEcho } from "./pipelineImport.ts";
 import { outKey } from "./translate/storage.ts";
-import { memoryBlobStore } from "./translate/fixtures.mjs";
+import { fixture, memoryBlobStore } from "./translate/fixtures.mjs";
+import * as steps from "./translate/workflowSteps.ts";
+import { BEGIN_OUTPUT, END_OUTPUT } from "./translate/llm.ts";
 
 const WRAPPING_KEY = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64");
 const API_KEY = "sk-ant-api03-PLAINTEXT-MUST-NEVER-LEAVE-DISPATCH";
@@ -1687,5 +1689,213 @@ test("POST /start stamps the job with the edit_log watermark", async () => {
   const rows = sqlite.prepare(`SELECT edit_log_watermark FROM pipeline_jobs`).all();
   assert.equal(rows.length, 1);
   assert.equal(rows[0].edit_log_watermark, 3);
+});
+
+// ---------------------------------------------------------------------------
+// Whole-chapter runs leave approved rows out of the AI request (#895)
+// ---------------------------------------------------------------------------
+//
+// #794 keeps approved notes and questions at apply time, but the rows were still
+// sent to the AI first, so the org paid for drafts the apply then discarded. A
+// whole-chapter internal run now leaves them out of the request at dispatch
+// (guard-and-source); the apply still lists them as kept, so the banner does not
+// go silent. A narrowed run (rowIds or a verse range) still sends them.
+//
+// These drive the real chain: dispatchNext → the Workflow's step bodies with a
+// capturing provider transport → pollAllNonTerminal's import and apply.
+
+const EN_TN = fixture("tn_OBA.tsv");
+const EN_TQ = fixture("tq_OBA.tsv");
+
+// DCS raw fake keyed by org/repo/path, so the target repo can 404 while the
+// English source serves.
+function dcsRawFetch(files) {
+  return async (url) => {
+    const m = /^https:\/\/git\.door43\.org\/([^/]+)\/([^/]+)\/raw\/(?:branch|commit)\/[^/]+\/(.+)$/.exec(String(url));
+    const body = m ? files[`${m[1]}/${m[2]}/${decodeURIComponent(m[3])}`] : null;
+    if (body != null) return { status: 200, ok: true, headers: null, text: async () => body, json: async () => JSON.parse(body) };
+    return { status: 404, ok: false, headers: null, text: async () => "" };
+  };
+}
+
+// Runs the Workflow's steps in order, as TranslateWorkflow.run does. The
+// transport records the row IDs of the SOURCE CONTENT block of every prompt
+// (not note text: an approved note can legitimately appear in the context pack
+// as an example) and answers with each row's translatable text prefixed.
+async function runInternalSteps(env, params, files) {
+  const sent = [];
+  let calls = 0;
+  const deps = {
+    db: env.DB,
+    blobs: env.blobs,
+    workspaceSlug: env.WORKSPACE_SLUG,
+    wrappingKey: WRAPPING_KEY,
+    startedAt: "2026-11-12T10:00:00.000Z",
+    fetchImpl: dcsRawFetch(files),
+    now: () => new Date("2026-11-12T10:05:00.000Z"),
+    transport: async (req) => {
+      calls++;
+      const block = /-----BEGIN SOURCE CONTENT-----\n([\s\S]*?)\n-----END SOURCE CONTENT-----/.exec(req.user);
+      assert.ok(block, "the prompt inlines the source TSV");
+      const lines = block[1].split("\n").filter(Boolean);
+      const header = lines[0].split("\t");
+      const out = [lines[0]];
+      for (const line of lines.slice(1)) {
+        const cells = line.split("\t");
+        sent.push(cells[header.indexOf("ID")]);
+        for (const col of ["Note", "Question", "Response"]) {
+          const i = header.indexOf(col);
+          if (i >= 0 && cells[i]) cells[i] = `ترجمة ${cells[i]}`;
+        }
+        out.push(cells.join("\t"));
+      }
+      return { text: `${BEGIN_OUTPUT}\n${out.join("\n")}\n${END_OUTPUT}\n`, usage: { inputTokens: 10, outputTokens: 10 }, stopReason: "end_turn" };
+    },
+  };
+  const src = await steps.guardAndSourceStep(deps, params);
+  const ctx = await steps.contextStep(deps, params, src.batchCount);
+  const results = [];
+  for (let i = 0; i < src.batchCount; i++) {
+    const translated = await steps.batchTranslateStep(deps, params, i, src.batchCount);
+    results.push(await steps.batchPersistStep(deps, params, translated));
+  }
+  await steps.mergeReportStep(deps, params, src, ctx, results);
+  return { sent, calls, src };
+}
+
+async function dispatchInternal(sqlite, options) {
+  seedQueuedTranslateJob(sqlite, { options });
+  await seedByoKey(sqlite);
+  const env = freshEnv(sqlite, { PIPELINE_MODE: "internal" });
+  await withNoFetch(async () => dispatchNext(env));
+  assert.equal(env.created.length, 1, "the job went to the internal runner");
+  return { env, params: env.created[0].params };
+}
+
+function seedOneTnRow(sqlite, id, verse, state) {
+  sqlite
+    .prepare(
+      `INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, note, translation_state, version, updated_at)
+       VALUES (?, 'OBA', 1, ?, ?, ?, ?, 3, 50)`,
+    )
+    .run(id, verse, `1:${verse}`, state === "validated" ? "ملاحظة عربية معتمدة" : "Old note", state);
+}
+
+function seedOneTqRow(sqlite, id, verse, state) {
+  sqlite
+    .prepare(
+      `INSERT INTO tq_rows (id, book, chapter, verse, ref_raw, question, response, translation_state, version, updated_at)
+       VALUES (?, 'OBA', 1, ?, ?, ?, ?, ?, 3, 50)`,
+    )
+    .run(id, verse, `1:${verse}`, state === "validated" ? "سؤال معتمد" : "Old question", state === "validated" ? "جواب معتمد" : "Old response", state);
+}
+
+const fixtureIds = (tsv) => tsv.split("\n").slice(1).filter(Boolean).map((l) => l.split("\t")[1]);
+
+test("internal run (#895): a whole-chapter tn job leaves the approved note out of the AI request, and still reports it as kept", async () => {
+  const sqlite = freshSqlite();
+  seedOneTnRow(sqlite, "jdr1", 1, "validated");
+  seedOneTnRow(sqlite, "xm1w", 1, null);
+  const { env, params } = await dispatchInternal(sqlite, TRANSLATE_OPTIONS);
+
+  const { sent, src } = await runInternalSteps(env, params, { "unfoldingWord/en_tn/tn_OBA.tsv": EN_TN });
+  assert.ok(!sent.includes("jdr1"), "the approved note is not in any request to the AI");
+  assert.ok(sent.includes("xm1w"), "the unapproved note is sent");
+  assert.equal(sent.length, fixtureIds(EN_TN).length - 1, "every other row of the chapter is sent");
+  assert.equal(src.approvedLeftOut, 1);
+
+  await withNoFetch(async () => pollAllNonTerminal(env));
+  assert.equal(jobRow(sqlite).state, "done");
+  assert.equal(tnRow(sqlite, "xm1w").translation_state, "ai_draft", "the unapproved note was drafted");
+  assert.deepEqual(
+    tnRow(sqlite, "jdr1"),
+    { note: "ملاحظة عربية معتمدة", translation_state: "validated", version: 3 },
+    "the approved note keeps its note, state and version",
+  );
+  const staged = sqlite.prepare(`SELECT payload_json FROM pending_imports WHERE job_id = 'job-1'`).all().map((r) => JSON.parse(r.payload_json).id);
+  assert.ok(!staged.includes("jdr1"), "no proposal was staged for the left-out note");
+
+  const report = JSON.parse(jobRow(sqlite).apply_skipped_json);
+  assert.equal(report.tnApproved, 1);
+  assert.deepEqual(report.tnApprovedIds, ["jdr1"]);
+  const alerts = sqlite.prepare(`SELECT message, link_url FROM system_alerts WHERE source = 'translate_tn_kept_approved:job-1'`).all();
+  assert.equal(alerts.length, 1, "the kept-because-approved banner still fires");
+  assert.match(alerts[0].message, /OBA 1:1/);
+});
+
+test("internal run (#895): a row-scoped tn job still sends the approved note it names", async () => {
+  const sqlite = freshSqlite();
+  seedOneTnRow(sqlite, "jdr1", 1, "validated");
+  const { env, params } = await dispatchInternal(sqlite, { ...TRANSLATE_OPTIONS, rowIds: ["jdr1", "xm1w"] });
+
+  const { sent, src } = await runInternalSteps(env, params, {
+    "unfoldingWord/en_tn/tn_OBA.tsv": EN_TN,
+    "BSOJ/ar_tn/tn_OBA.tsv": EN_TN, // by-id needs an existing target book
+  });
+  assert.deepEqual(sent, ["xm1w", "jdr1"], "both named rows are sent, the approved one included, in source order");
+  assert.equal(src.approvedLeftOut, 0);
+});
+
+test("internal run (#895): a verse-range tn job still sends approved notes in the range", async () => {
+  const sqlite = freshSqlite();
+  seedOneTnRow(sqlite, "jdr1", 1, "validated");
+  const { env, params } = await dispatchInternal(sqlite, { ...TRANSLATE_OPTIONS, verseStart: 1, verseEnd: 1 });
+
+  const { sent } = await runInternalSteps(env, params, {
+    "unfoldingWord/en_tn/tn_OBA.tsv": EN_TN,
+    "BSOJ/ar_tn/tn_OBA.tsv": EN_TN,
+  });
+  assert.ok(sent.includes("jdr1"), "a narrowed run redrafts approved rows, as before");
+});
+
+test("internal run (#895): a whole-chapter tq job leaves the approved question out of the AI request, and still reports it as kept", async () => {
+  const sqlite = freshSqlite();
+  seedOneTqRow(sqlite, "jbuh", 1, "validated");
+  seedOneTqRow(sqlite, "en3z", 3, null);
+  const { env, params } = await dispatchInternal(sqlite, { ...TRANSLATE_OPTIONS, resourceType: "tq" });
+
+  const { sent } = await runInternalSteps(env, params, { "unfoldingWord/en_tq/tq_OBA.tsv": EN_TQ });
+  assert.ok(!sent.includes("jbuh"), "the approved question is not in any request to the AI");
+  assert.ok(sent.includes("en3z"));
+  assert.equal(sent.length, fixtureIds(EN_TQ).length - 1);
+
+  await withNoFetch(async () => pollAllNonTerminal(env));
+  assert.equal(jobRow(sqlite).state, "done");
+  assert.equal(tqRow(sqlite, "en3z").translation_state, "ai_draft");
+  assert.deepEqual(
+    tqRow(sqlite, "jbuh"),
+    { question: "سؤال معتمد", response: "جواب معتمد", translation_state: "validated", version: 3 },
+  );
+  const report = JSON.parse(jobRow(sqlite).apply_skipped_json);
+  assert.equal(report.tqApproved, 1);
+  assert.deepEqual(report.tqApprovedIds, ["jbuh"]);
+  assert.equal(report.tnApproved, undefined, "a tq job lists no notes");
+  const alerts = sqlite.prepare(`SELECT message FROM system_alerts WHERE source = 'translate_tq_kept_approved:job-1'`).all();
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0].message, /OBA 1:1/);
+});
+
+test("internal run (#895): a whole-chapter job on a fully approved chapter calls the AI zero times, finishes done, and lists every row as kept", async () => {
+  const sqlite = freshSqlite();
+  const ids = fixtureIds(EN_TQ);
+  for (const line of EN_TQ.split("\n").slice(1).filter(Boolean)) {
+    const [ref, id] = line.split("\t");
+    seedOneTqRow(sqlite, id, Number(ref.split(":")[1]), "validated");
+  }
+  const { env, params } = await dispatchInternal(sqlite, { ...TRANSLATE_OPTIONS, resourceType: "tq" });
+
+  const { sent, calls, src } = await runInternalSteps(env, params, { "unfoldingWord/en_tq/tq_OBA.tsv": EN_TQ });
+  assert.equal(calls, 0, "nothing was bought");
+  assert.deepEqual(sent, []);
+  assert.equal(src.batchCount, 0);
+  assert.equal(src.approvedLeftOut, ids.length);
+
+  await withNoFetch(async () => pollAllNonTerminal(env));
+  assert.equal(jobRow(sqlite).state, "done", "the run completes rather than failing for want of rows");
+  const report = JSON.parse(jobRow(sqlite).apply_skipped_json);
+  assert.equal(report.tqApproved, ids.length);
+  assert.deepEqual([...report.tqApprovedIds].sort(), [...ids].sort());
+  const versions = sqlite.prepare(`SELECT DISTINCT version, translation_state FROM tq_rows`).all();
+  assert.deepEqual(versions.map((r) => ({ ...r })), [{ version: 3, translation_state: "validated" }], "no question was written");
 });
 
