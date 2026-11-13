@@ -1245,6 +1245,44 @@ export interface HouseStyleRule {
   updatedBy: string | null;
 }
 
+// Nightly lessons from editor corrections (issue #817, api/src/lessons.ts).
+export interface Lesson {
+  lesson: string;
+  before: string;
+  after: string;
+  evidence: number;
+  firstSeenAt: number;
+}
+
+export interface LessonRun {
+  id: number;
+  night: string;
+  startedAt: number;
+  finishedAt: number | null;
+  status: "running" | "ok" | "no_changes" | "failed";
+  failureReason: string | null;
+  chapters: Array<{ book: string; chapter: number }>;
+  changes: number;
+  provider: string | null;
+  model: string | null;
+  calls: number;
+  inputTokens: number;
+  outputTokens: number;
+  /** null = no price known, or no call made. */
+  costUsd: number | null;
+}
+
+export interface LessonsState {
+  enabled: boolean;
+  notMigrated: boolean;
+  /** Whether a night's run could call the AI (only Claude and Gemini can). */
+  availability: { available: true; provider: string; model: string } | { available: false; reason: string; provider: string | null };
+  lessons: Lesson[];
+  setAt: number | null;
+  lastRun: LessonRun | null;
+  maxLessons: number;
+}
+
 export interface TranslationPrefs {
   id: number;
   audience: string | null;
@@ -2493,6 +2531,15 @@ export const api = {
   setHouseStyleRuleEnabled: (id: string, enabled: boolean) =>
     request<{ rule: HouseStyleRule }>(`/api/translation-memory/house-style-rules/${encodeURIComponent(id)}`, {
       method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    }),
+
+  // Nightly lessons from editor corrections (issue #817). Admin-only.
+  getLessons: () => request<LessonsState>(`/api/translation-memory/lessons`),
+  setLessonsEnabled: (enabled: boolean) =>
+    request<LessonsState>(`/api/translation-memory/lessons`, {
+      method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ enabled }),
     }),
