@@ -194,6 +194,11 @@ export function LessonsSection({ heading = true }: { heading?: boolean }) {
                 {t("lessons.storedNotUsed")}
               </Typography>
             )}
+            {state.lessons.length > 0 && state.enabled && unavailable && (
+              <Typography variant="caption" color="text.secondary" component="p" sx={{ mt: 1 }}>
+                {t("lessons.storedStillUsed")}
+              </Typography>
+            )}
             <Typography variant="caption" color="text.secondary" component="p" sx={{ mt: 1 }}>
               {t("lessons.readOnly")}
             </Typography>

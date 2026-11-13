@@ -646,6 +646,7 @@
     "before": "AI wrote",
     "after": "Editor wrote",
     "storedNotUsed": "These lessons are kept, but the AI is not given them while this is off.",
+    "storedStillUsed": "The AI is still given these lessons, but no new ones are written. Turn this off to stop giving them.",
     "readOnly": "Lessons cannot be edited or removed here yet.",
     "loadFailed": "Could not load the lessons. Reload the page to try again.",
     "saveFailed": "Could not change the setting. Try again.",
