@@ -1321,6 +1321,10 @@ function ActiveLine({
   // Hoisted above the draft subscription so the hydration path can update
   // it in lockstep with the DOM write.
   const lastSetRef = useRef<string | null>(null);
+  // The box's textContent right after this component last wrote it (render,
+  // Undo, draft restore). Typing changes the box but not this, so "box text
+  // differs from this" means the user has typed since (#903).
+  const writtenTextRef = useRef<string | null>(null);
   // Synchronous mirror of "this cell has unsaved typing." `hasDraft` is React
   // state set asynchronously from the draft-store subscription, so between a
   // keystroke and that state catching up there's a window where `hasDraft` is
@@ -1351,22 +1355,27 @@ function ActiveLine({
       // async draft write so the reset effect is protected in the meantime.
       dirtyRef.current = !!rec;
       // Restore a draft that already existed when this verse's box opened,
-      // on the first (mount-snapshot) callback only, as DocColumn and
-      // BookView do. A draft first seen later is one the user is typing right
-      // now, and the store notifies asynchronously, so its text can be a
-      // keystroke or two behind the box: copying it in dropped those
-      // characters and moved the caret to the start (#903).
+      // on the first callback only, as DocColumn and BookView do, and only
+      // while the box still shows the text this component put there. A
+      // draft seen after the user starts typing is their own typing, and the
+      // store notifies asynchronously, so its text can be a keystroke or two
+      // behind the box: copying it in dropped those characters and moved the
+      // caret to the start (#903). The text check also covers a first
+      // callback that lands after typing began (a slow first read, or a
+      // newer read delivered first).
       if (!firstCallback) return;
       firstCallback = false;
       if (
         rec &&
         typeof (rec.payload as { plainText?: unknown }).plainText === "string" &&
-        elRef.current
+        elRef.current &&
+        elRef.current.textContent === writtenTextRef.current
       ) {
         const plain = (rec.payload as { plainText: string }).plainText;
         if (elRef.current.textContent !== plain) {
           elRef.current.textContent = plain;
           lastSetRef.current = plain;
+          writtenTextRef.current = plain;
         }
       }
     });
@@ -1515,6 +1524,7 @@ function ActiveLine({
       elRef.current.innerHTML = html;
     }
     lastSetRef.current = next;
+    writtenTextRef.current = elRef.current.textContent;
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `hasDraft` is read only as a guard. Listing it would resync the DOM when a draft clears, which can reset the caret; the resync is meant to follow content and highlight changes only (see above).
   }, [html, domBaseline]);
 
@@ -1604,6 +1614,7 @@ function ActiveLine({
                   elRef.current.innerHTML = html ?? "";
                   if (!html) elRef.current.textContent = editableText;
                   lastSetRef.current = html ?? editableText;
+                  writtenTextRef.current = elRef.current.textContent;
                 }
               }}
               sx={{ p: 0.5, color: "warning.main" }}

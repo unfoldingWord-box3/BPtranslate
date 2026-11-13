@@ -188,9 +188,10 @@ async function tell(to: Set<Subscriber>) {
 // The store is shared by every tab of the workspace, so a change made here is
 // announced to the other tabs (#896), which re-read it for their subscribers
 // that opted in (subscribe's `remote`): the "N unsaved" count re-counts
-// without a reload. Editors do not opt in: one copies a draft's text into its
-// box the first time it sees that draft, so another tab's typing would land
-// there as a stale snapshot. A received message only re-reads, never
+// without a reload. Editors do not opt in: they copy a stored draft into a box
+// only when the box opens (#903) and otherwise trust the box's own text, so
+// another tab's typing would only mark this tab's box dirty without showing
+// that text. A received message only re-reads, never
 // announces, so tabs cannot ping-pong. Named per workspace, as the database is.
 // tell() never rejects (orderedReads logs a failed read), so `void` is safe.
 const changedChannel = openDraftsChangedChannel(workspaceDbName(DRAFTS_CHANGED_CHANNEL_BASE), () => {
