@@ -18,7 +18,7 @@ import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import EditNoteIcon from "@mui/icons-material/EditNote";
 import { onOutboxResult, outbox, isOpPending, type OutboxOp, type OpTarget } from "../sync/outbox";
 import { drafts, type DraftRecord, type DraftMeta } from "../sync/drafts";
-import { draftFlowHash, formatDraftMeta } from "../lib/draftLocation";
+import { draftFlowHash, formatDraftMeta, PREFS_CLASSIC_SECTION } from "../lib/draftLocation";
 
 // If we believe we're online but haven't seen a successful save in this
 // long while pending ops exist, treat it as effectively offline —
@@ -450,15 +450,17 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
 
   const navigateToDraft = (m: DraftMeta) => {
     // On the flows screens every draft routes to its flows editor
-    // (draftFlowHash), so the jump stays in the new UI. In classic, article
-    // and template drafts have no scripture reference to navigate to, so they
-    // route to the classic article / template editors by id.
+    // (draftFlowHash), so the jump stays in the new UI. In classic, article,
+    // template and preferences drafts have no scripture reference to navigate
+    // to, so they route to the classic article / template / preferences editors.
     if (flowRouting) {
       location.assign(draftFlowHash(m));
     } else if (m.kind === "article") {
       location.assign(`#/articles/${m.resource}/${encodeURIComponent(m.articleId)}`);
     } else if (m.kind === "template") {
       location.assign(`#/templates/${encodeURIComponent(m.templateId)}`);
+    } else if (m.kind === "prefs") {
+      location.assign(`#/preferences/${PREFS_CLASSIC_SECTION[m.section]}`);
     } else {
       onNavigate?.(m.book, m.chapter, m.verse);
     }

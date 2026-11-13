@@ -37,7 +37,6 @@ import {
   REGISTERS,
   type LanePublicState,
   type Register,
-  type TranslationPrefs,
   type ProjectConfig,
   type Role,
   type LaneReplacementJobResponse,
@@ -54,6 +53,8 @@ import {
   useContextExportStatus,
 } from "../hooks/useTranslationMemory";
 import { currentPrefsFromConflict } from "../sync/prefsConflict";
+import { briefFields, commonIssuesFields, instructionsFields } from "../sync/prefsDraft";
+import { usePrefsDraft } from "../hooks/usePrefsDraft";
 import { bookName } from "../lib/bookNames";
 import { MarkdownView } from "./MarkdownView";
 import { PrefsHistoryButton } from "./PrefsHistoryDialog";
@@ -1144,43 +1145,46 @@ type PrefsState = ReturnType<typeof useTranslationPrefs>;
 function BriefSection({ prefsState }: { prefsState: PrefsState }) {
   const { t } = useTranslation();
   const { prefs, loading, apply, refetch } = prefsState;
-  const [draft, setDraft] = useState<TranslationPrefs | null>(() => prefs);
+  // Unsaved typing lives in the drafts store, shared with the desk Style
+  // page's Brief (#909): a remount (history restore) or reload restores it. A
+  // sibling section's save (the server partial-merges) does not touch it, and
+  // a save is refused with 409 when Brief's own fields changed on the server
+  // since the typing started (prefsDraft.ts).
+  const prefsDraft = usePrefsDraft("brief", prefs, briefFields);
+  const draft = prefsDraft.text;
+  const setDraft = prefsDraft.change;
   const save = useSaveState();
 
-  // Seed once: a sibling section's save PUTs only its own fields (the server
-  // partial-merges), so it can't change anything Brief owns. If this re-seeded
-  // on every `prefs` change, a sibling's save (which also updates `prefs` via
-  // apply()) would silently overwrite whatever the user is still typing here.
-  // Seeded during render once prefs arrive, when they weren't loaded at mount.
-  if (draft === null && prefs) setDraft(prefs);
-
   const onSave = async () => {
-    if (!draft || !prefs) return;
+    const version = prefsDraft.versionToSend();
+    if (!draft || version === null) return;
     save.setSaving(true);
     try {
-      const res = await api.putTranslationPrefs(prefs.version, {
+      const res = await api.putTranslationPrefs(version, {
         audience: draft.audience,
         purpose: draft.purpose,
-        register: draft.register,
+        register: draft.register as Register,
         script_notes: draft.script_notes,
         notes: draft.notes,
         // brief section doesn't own instructions/assisted — omit so the server
         // merges the existing values.
       });
       apply(res.prefs);
+      prefsDraft.saved(res.prefs);
       save.setMsg(t("preferences.saved"));
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
         // Someone else saved first (another section, or another admin).
         // Adopt the server's fresh row directly from the 409 body so the
         // next save has the right If-Match; fall back to a refetch only if
-        // the body didn't carry one. Our draft is left untouched — seed-once
-        // means this can't clobber unsaved typing, and a re-save only ever
-        // sends Brief's own fields, so it overwrites at most the concurrent
-        // change to THOSE fields.
+        // the body didn't carry one. Typed text is kept and rebased on that
+        // row (prefsDraft.conflicted), so a re-save sends it; a re-save only
+        // ever sends Brief's own fields.
         const current = currentPrefsFromConflict(e.body);
-        if (current) apply(current);
-        else refetch();
+        if (current) {
+          apply(current);
+          prefsDraft.conflicted(current);
+        } else refetch();
         save.setMsg(t("preferences.conflictKeptEdits"));
       } else if (e instanceof ApiError && e.status === 403) {
         save.setMsg(t("preferences.saveForbidden"));
@@ -1273,38 +1277,38 @@ function MarkdownPrefSection({
 }) {
   const { t } = useTranslation();
   const { prefs, error, apply, refetch } = prefsState;
-  // null = not yet seeded from `prefs` (loading gate below); seeded once so a
-  // sibling section's save (which also updates `prefs` via apply()) can't
-  // reset text the user is mid-typing here.
-  const [value, setValue] = useState<string | null>(() => (prefs ? (prefs[field] ?? "") : null));
+  // Unsaved typing lives in the drafts store, shared with the desk Style
+  // page's editor for the same field (#909), so a remount or reload restores
+  // it and a sibling section's save cannot reset it. null = not yet read
+  // (loading gate below): never "" over saved content, or a Save from that
+  // state would silently null the field on the server.
+  const prefsDraft = usePrefsDraft(field, prefs, field === "instructions_md" ? instructionsFields : commonIssuesFields);
+  const value = prefsDraft.text ? (prefsDraft.text[field] ?? "") : null;
+  const setValue = (v: string) => prefsDraft.change({ [field]: v });
   const [preview, setPreview] = useState(false);
   const save = useSaveState();
-
-  // Seed ONLY once prefs actually loaded (during render when they weren't
-  // loaded at mount). Without the `prefs` gate this would coalesce the initial
-  // null prefs into "" on mount — the editor would render empty instead of the
-  // saved content, and a Save from that state would silently null the field
-  // on the server.
-  if (value === null && prefs) setValue(prefs[field] ?? "");
 
   const overLimit = (value ?? "").length > maxChars;
 
   const onSave = async () => {
-    if (!prefs || value === null) return;
+    const version = prefsDraft.versionToSend();
+    if (value === null || version === null) return;
     save.setSaving(true);
     try {
-      const res = await api.putTranslationPrefs(prefs.version, { [field]: value || null });
+      const res = await api.putTranslationPrefs(version, { [field]: value || null });
       apply(res.prefs);
+      prefsDraft.saved(res.prefs);
       save.setMsg(t("preferences.saved"));
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
         // See BriefSection's onSave: adopt the server's fresh row from the
-        // conflict body rather than refetching, so this section's unsaved
-        // text (kept as-is; seed-once means it was never at risk) survives
-        // and the next save re-sends it against the right version.
+        // conflict body rather than refetching; typed text is kept and the
+        // next save re-sends it against that row's version.
         const current = currentPrefsFromConflict(e.body);
-        if (current) apply(current);
-        else refetch();
+        if (current) {
+          apply(current);
+          prefsDraft.conflicted(current);
+        } else refetch();
         save.setMsg(t("preferences.conflictKeptEdits"));
       } else if (e instanceof ApiError && e.status === 403) {
         save.setMsg(t("preferences.saveForbidden"));

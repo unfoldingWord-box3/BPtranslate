@@ -39,9 +39,11 @@ import {
   REGISTERS,
   type ContextExportStatus,
   type Register,
-  type TranslationPrefs,
 } from "../../sync/api";
 import { currentPrefsFromConflict } from "../../sync/prefsConflict";
+import { briefFields, commonIssuesFields, instructionsFields } from "../../sync/prefsDraft";
+import { usePrefsDraft } from "../../hooks/usePrefsDraft";
+import { useUnsavedGuard } from "../../hooks/useUnsavedGuard";
 import { setProjectMode, useProjectConfig, isTranslationProject } from "../../hooks/useProjectConfig";
 import {
   useContextExportStatus,
@@ -178,42 +180,45 @@ function Panel({
 }
 
 // ── Brief ───────────────────────────────────────────────────────────────────
-// Faithful re-presentation of BriefSection (PreferencesWorkspace.tsx:1376-1488):
-// same fields, same seed-once draft, same PUT field set (audience / purpose /
+// Faithful re-presentation of BriefSection (PreferencesWorkspace.tsx):
+// same fields, same drafts-store draft (#909), same PUT field set (audience / purpose /
 // register / script_notes / notes — instructions/assisted omitted so the
 // server merges them), same 409/403 handling.
 function BriefPanel({ prefsState }: { prefsState: PrefsState }) {
   const { t } = useTranslation();
   const { prefs, loading, apply, refetch } = prefsState;
-  const [draft, setDraft] = useState<TranslationPrefs | null>(() => prefs);
+  // Unsaved typing lives in the drafts store (#909): restored after a remount
+  // (history restore) or a reload, and a save is refused with 409 when the
+  // Brief fields changed on the server since the typing started.
+  const prefsDraft = usePrefsDraft("brief", prefs, briefFields);
+  const draft = prefsDraft.text;
+  const setDraft = prefsDraft.change;
   const save = useSaveState();
 
-  // Seed once — a sibling section's save PUTs only its own fields, so it can't
-  // change anything Brief owns; re-seeding on every prefs change would clobber
-  // in-progress typing (see PreferencesWorkspace.tsx BriefSection). Seeded
-  // during render once prefs arrive, when they weren't loaded at mount.
-  if (draft === null && prefs) setDraft(prefs);
-
   const onSave = async () => {
-    if (!draft || !prefs) return;
+    const version = prefsDraft.versionToSend();
+    if (!draft || version === null) return;
     save.setSaving(true);
     try {
-      const res = await api.putTranslationPrefs(prefs.version, {
+      const res = await api.putTranslationPrefs(version, {
         audience: draft.audience,
         purpose: draft.purpose,
-        register: draft.register,
+        register: draft.register as Register,
         script_notes: draft.script_notes,
         notes: draft.notes,
       });
       apply(res.prefs);
+      prefsDraft.saved(res.prefs);
       save.setMsg(t("moreTools.style.saved"));
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
         // Someone else saved first. Adopt the fresh row from the 409 body so
-        // the next save carries the right If-Match; the local draft is kept.
+        // the next save carries the right If-Match; typed text is kept.
         const current = currentPrefsFromConflict(e.body);
-        if (current) apply(current);
-        else refetch();
+        if (current) {
+          apply(current);
+          prefsDraft.conflicted(current);
+        } else refetch();
         save.setMsg(t("moreTools.style.saveConflict"));
       } else if (e instanceof ApiError && e.status === 403) {
         save.setMsg(t("moreTools.style.saveAdminOnly"));
@@ -326,36 +331,41 @@ function MarkdownPrefPanel({
 }) {
   const { t } = useTranslation();
   const { prefs, error, apply, refetch } = prefsState;
-  // null = not yet seeded (loading gate below). Seed ONLY once prefs actually
-  // loaded — coalescing null prefs into "" would render empty over saved
-  // content, and a Save from that state would null the field on the server
-  // (see PreferencesWorkspace.tsx:1517-1523).
-  const [value, setValue] = useState<string | null>(() => (prefs ? (prefs[field] ?? "") : null));
+  // Unsaved typing lives in the drafts store (#909), so a remount (history
+  // restore, a lesson moved into Common issues) or a reload restores it. null
+  // = not yet read (loading gate below): never "" over saved content, or a
+  // Save from that state would null the field on the server.
+  const prefsDraft = usePrefsDraft(field, prefs, field === "instructions_md" ? instructionsFields : commonIssuesFields);
+  const value = prefsDraft.text ? (prefsDraft.text[field] ?? "") : null;
+  const setValue = (v: string) => prefsDraft.change({ [field]: v });
   const [preview, setPreview] = useState(false);
   const save = useSaveState();
 
-  // Seeded during render once prefs arrive, when they weren't loaded at mount.
-  if (value === null && prefs) setValue(prefs[field] ?? "");
-
   const overLimit = (value ?? "").length > maxChars;
-  const dirty = value !== null && !!prefs && value !== (prefs[field] ?? "");
+  // Typed and not saved. Not "differs from the server": a change made
+  // elsewhere would turn that on with nothing typed here.
+  const dirty = prefsDraft.dirty;
   useEffect(() => {
     onDirtyChange?.(dirty);
   }, [dirty, onDirtyChange]);
   useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
 
   const onSave = async () => {
-    if (!prefs || value === null) return;
+    const version = prefsDraft.versionToSend();
+    if (value === null || version === null) return;
     save.setSaving(true);
     try {
-      const res = await api.putTranslationPrefs(prefs.version, { [field]: value || null });
+      const res = await api.putTranslationPrefs(version, { [field]: value || null });
       apply(res.prefs);
+      prefsDraft.saved(res.prefs);
       save.setMsg(t("moreTools.style.saved"));
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
         const current = currentPrefsFromConflict(e.body);
-        if (current) apply(current);
-        else refetch();
+        if (current) {
+          apply(current);
+          prefsDraft.conflicted(current);
+        } else refetch();
         save.setMsg(t("moreTools.style.saveConflict"));
       } else if (e instanceof ApiError && e.status === 403) {
         save.setMsg(t("moreTools.style.saveAdminOnly"));
@@ -595,8 +605,12 @@ export default function StyleScreen({ role, me }: StyleScreenProps) {
   const exportStatusState = useContextExportStatus(role !== "viewer" || memoryAvailable);
 
   const [current, setCurrent] = useState<SectionKey>("qa");
+  // The prefs editors keep unsaved typing in the drafts store (#909); warn
+  // before a reload or tab close like the other draft-keeping screens.
+  useUnsavedGuard(false);
   // Bumped by a restore from the preferences history (#788) to remount the
-  // seed-once prefs editors.
+  // prefs editors: one with nothing typed shows the restored text, one with
+  // typing gets its draft back (#909).
   const [prefsGen, setPrefsGen] = useState(0);
   // Common issues alone remounts after a lesson is moved there (#908), and the
   // Lessons panel refuses that move while Common issues has unsaved text.

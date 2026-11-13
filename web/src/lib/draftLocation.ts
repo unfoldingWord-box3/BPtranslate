@@ -1,4 +1,18 @@
 import type { DraftMeta } from "../sync/drafts";
+import type { PrefsDraftSection } from "../sync/prefsDraft";
+
+const PREFS_SECTION_NAMES: Record<PrefsDraftSection, string> = {
+  brief: "Brief",
+  instructions_md: "Instructions",
+  common_issues_md: "Common issues",
+};
+
+// The classic Preferences section that holds a translation-preferences draft.
+export const PREFS_CLASSIC_SECTION: Record<PrefsDraftSection, string> = {
+  brief: "brief",
+  instructions_md: "instructions",
+  common_issues_md: "commonIssues",
+};
 
 // Where an unsaved draft lives on the flows screens. Shared by the flows "N
 // unsaved" jump menu (SyncStatusBar) and the flows unsaved-drafts toast
@@ -17,6 +31,8 @@ export function formatDraftMeta(m: DraftMeta): string {
   // translator recognises them by, so lead with it and keep the id for
   // disambiguation (several templates can share a support_ref).
   if (m.kind === "template") return `${m.supportRef} · ${m.templateId}`;
+  // Translation preferences (#909) have no reference: name the editor.
+  if (m.kind === "prefs") return `Style · ${PREFS_SECTION_NAMES[m.section]}`;
   return `${m.rowKind.toUpperCase()} ${m.book} ${m.chapter}:${m.verse}`;
 }
 
@@ -28,6 +44,7 @@ export function formatDraftMeta(m: DraftMeta): string {
 export function draftFlowHash(m: DraftMeta): string {
   if (m.kind === "article") return `#/articles/${m.resource}/${encodeURIComponent(m.articleId)}`;
   if (m.kind === "template") return `#/admin/curate/${encodeURIComponent(m.templateId)}`;
+  if (m.kind === "prefs") return "#/admin/style";
   // 3-segment #/scripture/B/C/V: App.tsx's `ts` route accepts the optional
   // verse segment and TranslateScriptureScreen seeds its cursor from it on
   // mount, so this lands the translator on the exact drafted verse, not just

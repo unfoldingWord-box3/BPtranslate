@@ -15,7 +15,7 @@ screenshots:
 The bar at the top shows the state of the context pack, for example **Context pack ready**, with counts of terms and examples. **Export now** builds a new pack. The switch **Project mode** shows whether the project is in translation or authoring mode. The sections below apply to translation projects only. In other projects the page says so.
 
 ## Fill in the sections
-Use the list on the left to jump to a section. After you change a section, press **Save**.
+Use the list on the left to jump to a section. After you change a section, press **Save**. Until you do, the text you typed in **Brief**, **Instructions** or **Common issues** is kept in this browser, even if you reload the page, and is counted as unsaved at the top of the page.
 
 - **Brief:** fill in **Audience**, **Purpose**, **Register** and **Script / direction notes**. Register is how formal the drafts should be: **Default (auto)**, **Formal** or **Informal**.
 - **Instructions:** free text (Markdown) added to every AI drafting and checking request. Use **Preview** to see how it looks.
@@ -71,7 +71,7 @@ Every save of **Brief**, **Instructions** and **Common issues** is kept, whether
 To put an earlier version back:
 1. Press **History**.
 2. Find the version you want and press **Restore**.
-3. Read the message and press **Restore** again. Text you have typed on the page but not saved is replaced.
+3. Read the message and press **Restore** again. Text you have typed on the page but not saved stays in its box, still unsaved. If the restore changed that section, your first **Save** there says someone else saved first: press **Save** again to keep your text.
 
 The restore is saved as a new version, so you can undo it the same way. The list starts from the day this history was turned on. Saves made before then are not listed. If the preferences were already saved before that day, the end of the list (once you have loaded all of it) offers the version **As it was before the earliest recorded change**.
 

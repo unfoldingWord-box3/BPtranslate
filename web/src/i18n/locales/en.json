@@ -739,7 +739,7 @@
     "loadFailed": "Could not load the history.",
     "restore": "Restore",
     "confirmTitle": "Restore version {{version}}?",
-    "confirmBody": "The brief, instructions and common issues go back to how they were at version {{version}}. This is saved as a new version. Any unsaved text in the editors on this page is replaced.",
+    "confirmBody": "The brief, instructions and common issues go back to how they were at version {{version}}. This is saved as a new version. Text you typed in the editors and have not saved stays in its box, still unsaved.",
     "restored": "Restored version {{version}}. It is saved as version {{newVersion}}.",
     "restoreStale": "Someone saved in the meantime. The list is refreshed: check it and try again.",
     "restoreGap": "This version can't be rebuilt: part of the history between it and now is missing.",

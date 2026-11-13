@@ -1,6 +1,6 @@
 // Local draft store for unsaved edits. Every editable field (ULT/UST verse,
 // TN/TQ/TWL row, note quote/body/support-ref, tW/tA article part, note
-// template) stashes its
+// template, translation preferences) stashes its
 // in-progress text here on every keystroke. The outbox is NOT touched until the
 // user clicks Save — drafts are deliberately separate from the write-ahead
 // queue so the only thing that produces a PATCH is an explicit user action.
@@ -28,6 +28,7 @@ import {
   rowDraftOnNoDiff,
   withCarriedRefusal,
 } from "./refusedRowDraft";
+import type { PrefsDraftSection } from "./prefsDraft";
 import { legacyDbNames, workspaceDbName } from "./workspace";
 import { adoptFromLegacyDbs, type LegacySource } from "./legacyAdoption";
 import { DRAFTS_CHANGED_CHANNEL_BASE, openDraftsChangedChannel, orderedReads } from "./draftsChangedChannel.ts";
@@ -117,6 +118,14 @@ export type DraftMeta =
       kind: "template";
       templateId: string;
       supportRef: string;
+    }
+  // Translation preferences (#909): the Brief, Instructions or Common issues
+  // editor of the Style / Preferences pages, keyed by prefsDraftKey. Book-
+  // agnostic like articles and templates; the payload is prefsDraft.ts's
+  // { text, base } and expectedVersion the prefs version it was typed against.
+  | {
+      kind: "prefs";
+      section: PrefsDraftSection;
     };
 
 type Subscriber = (drafts: DraftRecord[]) => void;
