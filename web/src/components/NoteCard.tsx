@@ -797,6 +797,28 @@ function NoteCardInner({
         const pending = pendingRevertSave(rec, ops, { rowKind: "tn", id: row.id, book: row.book }, endedOpsRef.current);
         if (pending) sentRef.current = pending;
       }
+      // A Save of this card's still waiting at an older copy (#754 round 4,
+      // item 2): a remount keeps the Save gate shut until it ends, as the
+      // mounted card did. Matched by op id from here on.
+      if (!pinnedSaveRef.current) {
+        const pinned = ops.find(
+          (o) =>
+            o.originPinned === true &&
+            o.draftRef !== undefined &&
+            o.action === "patch" &&
+            o.target.kind === "row" &&
+            o.target.rowKind === "tn" &&
+            o.target.id === row.id &&
+            o.target.book === row.book &&
+            o.status !== "failed" &&
+            !endedOpsRef.current.has(o.id),
+        );
+        if (pinned) {
+          pinnedSaveRef.current = { patch: pinned.patch as Record<string, unknown>, shown: {}, opId: pinned.id };
+          setPinnedSave(true);
+          setSavePendingVersion(pinned.expectedVersion);
+        }
+      }
       const payload = rec?.payload as
         | {
             patch?: Partial<TnRow>;
@@ -1252,12 +1274,12 @@ function NoteCardInner({
       // copy alone (review A1: a reorder after another person's save).
       const origin = originRef.current;
       const ids = { id: row.id, book: row.book };
+      const landed = result.kind === "ok" ? (result.updated as Partial<TnRow> | null | undefined) : undefined;
       if (
         result.kind === "ok" &&
         origin !== null &&
-        (isNoteCardSaveOf(op, ids) || isWriteFromOrigin(op, ids, origin.version))
+        (isNoteCardSaveOf(op, ids) || isWriteFromOrigin(op, ids, origin.version, landed?.version))
       ) {
-        const landed = result.updated as Partial<TnRow> | null | undefined;
         originRef.current =
           landed && typeof landed.version === "number"
             ? {

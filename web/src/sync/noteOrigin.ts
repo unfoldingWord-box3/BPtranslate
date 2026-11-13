@@ -61,9 +61,17 @@ export function isNoteCardSaveOf(op: ResultOp, row: { id: string; book: string }
 // top of it: a quote build the translator made from the card must not leave
 // the copy behind, or the next Save conflicts with the translator's own build.
 // The op's expectedVersion is the If-Match it last went out with (a healed or
-// resolved op is re-armed at the server's version first).
-export function isWriteFromOrigin(op: ResultOp, row: { id: string; book: string }, originVersion: number): boolean {
-  return isPatchOfRow(op, row) && op.expectedVersion === originVersion;
+// resolved op is re-armed at the server's version first), and the landed row
+// must be the next version: an edit settled as saved from its 409 is announced
+// as a 200 with the server's current row (#886 item 1), which can carry a
+// later write by someone else while the op still shows its first version.
+export function isWriteFromOrigin(
+  op: ResultOp,
+  row: { id: string; book: string },
+  originVersion: number,
+  landedVersion: number | undefined,
+): boolean {
+  return isPatchOfRow(op, row) && op.expectedVersion === originVersion && landedVersion === originVersion + 1;
 }
 
 // NoteCard keeps display text (real newlines) and D1 may hold a literal
