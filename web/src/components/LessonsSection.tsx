@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Alert, Box, Button, Chip, CircularProgress, FormControlLabel, Stack, Switch, Typography } from "@mui/material";
 import { useTranslation } from "react-i18next";
 import {
@@ -149,6 +149,7 @@ export function LessonsSection({
   heading = true,
   onPrefsChanged,
   promoteBlocked = false,
+  promoteBlockedNow,
 }: {
   heading?: boolean;
   onPrefsChanged?: (prefs: TranslationPrefs) => void;
@@ -158,8 +159,20 @@ export function LessonsSection({
    * replace that text (#908).
    */
   promoteBlocked?: boolean;
+  /**
+   * Asked right before a move is sent, for a host whose `promoteBlocked`
+   * follows an async source (classic Preferences reads the drafts store,
+   * #909): true refuses that one move and shows the same hint as a message;
+   * the button itself follows `promoteBlocked` only, so the next click asks
+   * again.
+   */
+  promoteBlockedNow?: () => Promise<boolean>;
 }) {
   const { t } = useTranslation();
+  // Set synchronously for the whole of a change, including the click-time
+  // check before it, so a second quick click cannot slip in before `busy`
+  // has rendered the buttons disabled.
+  const inFlight = useRef(false);
   const [state, setState] = useState<LessonsState | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -197,6 +210,7 @@ export function LessonsSection({
   // Pin / delete / promote / restore: each answers with the new state. A
   // refusal carries the server's current state, which replaces ours.
   const change = async (run: () => Promise<LessonsState & { prefs?: TranslationPrefs }>, done?: string) => {
+    inFlight.current = true;
     setBusy(true);
     setEditError(null);
     setNotice(null);
@@ -210,16 +224,34 @@ export function LessonsSection({
       const fresh = e instanceof ApiError && e.body && typeof e.body === "object" ? (e.body as { state?: LessonsState }).state : undefined;
       if (fresh) setState(fresh);
     } finally {
+      inFlight.current = false;
       setBusy(false);
     }
   };
-  const edit = (position: number, action: LessonEditAction) => {
-    if (state?.setId == null) return;
+  const edit = async (position: number, action: LessonEditAction) => {
+    if (state?.setId == null || inFlight.current) return;
     const setId = state.setId;
+    if (action === "promote" && promoteBlockedNow) {
+      inFlight.current = true;
+      setBusy(true);
+      let blocked = false;
+      try {
+        blocked = await promoteBlockedNow().catch(() => false);
+      } finally {
+        inFlight.current = false;
+        setBusy(false);
+      }
+      if (blocked) {
+        // This click only: the next one checks again (round 3, K1).
+        setNotice(null);
+        setEditError(t("lessons.promoteBlocked"));
+        return;
+      }
+    }
     void change(() => api.editLesson(setId, position, action), action === "promote" ? t("lessons.promoted") : undefined);
   };
   const restore = (setId: number) => {
-    if (state?.setId == null) return;
+    if (state?.setId == null || inFlight.current) return;
     const current = state.setId;
     void change(() => api.restoreLessonSet(setId, current), t("lessons.sets.restored"));
   };
@@ -336,7 +368,7 @@ export function LessonsSection({
                     lesson={l}
                     busy={busy}
                     promoteBlocked={promoteBlocked}
-                    onAction={(a) => edit(i + 1, a)}
+                    onAction={(a) => void edit(i + 1, a)}
                   />
                 ))}
               </Stack>
