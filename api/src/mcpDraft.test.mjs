@@ -650,6 +650,37 @@ test("bpt_draft preview: a note whose reference spans verses is in a range it ov
   assert.equal(r.data.approved_will_be_replaced, 2);
 });
 
+test("bpt_draft preview: a long selection lists the first 100 rows and says how many more; the token covers them all", async () => {
+  const { call, sqlite, jobs } = await fresh();
+  const tn = sqlite.prepare(`INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, note, sort_order, version, translation_state) VALUES (?, ?, 1, 3, '1:3', 'n', 30, 1, 'validated')`);
+  for (let i = 0; i < 110; i++) tn.run(`m${String(i).padStart(3, "0")}`, BOOK);
+  await withBot(async () => {
+    const p = await call("bpt_draft", DRAFT);
+    assert.equal(p.isError, false, JSON.stringify(p.data).slice(0, 500));
+    assert.equal(p.data.will_redraft, 113);
+    assert.equal(p.data.rows.length, 100);
+    assert.equal(p.data.more_rows_not_listed, 13);
+    assert.equal(p.data.approved_will_be_replaced, 113);
+    assert.equal(p.data.approved_ids.length, 100);
+    assert.equal(tokenBody(p.data.confirm_token).r.length, 113);
+    assert.ok(Buffer.byteLength(JSON.stringify(p.data)) < 16_000, "well under BT Servant's 32 KB result limit");
+    const r = await call("bpt_draft", { ...DRAFT, confirm_token: p.data.confirm_token });
+    assert.equal(r.data.status, "running", JSON.stringify(r.data));
+    assert.equal(jobs().length, 1);
+  });
+});
+
+test("chatConfirmMac signs each tool under its own prefix, and bpt_bulk_set_state's prefix is unchanged", async () => {
+  const env = { JWT_SIGNING_KEY: "test-signing-key" };
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(env.JWT_SIGNING_KEY), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const hmac = async (s) => Buffer.from(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(s))).toString("base64url");
+  const bulk = await chatConfirmMac(env, "body", "bpt_bulk_set_state");
+  const draft = await chatConfirmMac(env, "body", "bpt_draft");
+  assert.notEqual(bulk, draft);
+  assert.equal(bulk, await hmac("bpt_bulk_set_state:v1\nbody"), "tokens issued before #747 still verify");
+  assert.equal(draft, await hmac("bpt_draft:v1\nbody"));
+});
+
 test("bpt_draft: with no signing key the preview is refused and nothing starts", async () => {
   const { call, jobs } = await fresh({ signingKey: false });
   await withBot(async (calls) => {
