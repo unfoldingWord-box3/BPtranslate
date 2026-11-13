@@ -46,6 +46,7 @@ import { loadContextPackInputs, loadQueuedContextInputs, renderContextPack, rend
 import { contextShrinkRefused } from "./contextExportLib.ts";
 import { clearProjectConfigCache } from "./projectConfig.ts";
 import { BEGIN_OUTPUT, END_OUTPUT } from "./translate/llm.ts";
+import { prefsVersionToSend } from "../../web/src/sync/prefsDraft.ts";
 
 const WRAPPING_KEY = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64");
 const NIGHT1 = Date.UTC(2026, 10, 12, 4, 15) / 1000;
@@ -1274,4 +1275,211 @@ test("G4: restoring a set clears the tombstones of the lessons it brings back; C
   assert.equal(f.sqlite.prepare(`SELECT common_issues_md FROM translation_prefs WHERE id = 1`).get().common_issues_md, ci);
   // The night that follows may keep, reword or re-add them like any other lesson.
   assert.deepEqual(deletedStill({ lesson: THREE[0].lesson, before: THREE[0].before, after: THREE[0].after }, [], []), false);
+});
+
+// ── review leftovers (#912) ─────────────────────────────────────────────────
+
+const MRK = (chapter) => ({ book: "MRK", chapter });
+const maxApproval = (f) => f.sqlite.prepare(`SELECT MAX(id) AS w FROM edit_log WHERE action = 'validate'`).get().w;
+
+test("#912 item 1: a finished resume moves the watermark up to the newest chapters' first unmined approval", async () => {
+  const f = await fresh();
+  await f.runWith(NIGHT1, { cells: 1 }); // stops among MRK 3 + MRK 2
+  const c4 = approveIn(f, 4, "c401", "قال الكاتب", "كتب الكاتب");
+  assert.equal((await f.run(NIGHT2)).status, "ok");
+  assert.match(f.calls[1].user, /Chapters: MRK 3, MRK 2\./, "night 2 finishes the stopped run's chapters");
+  assert.equal(f.runs().at(-1).approvals_through, c4 - 1, "everything below MRK 4's approval was mined");
+  // Night 3, one-note budget: the note diffed first is MRK 4's new one, not a MRK 3 note night 2 already compared.
+  const out3 = await f.runWith(NIGHT3, { cells: 1 });
+  assert.equal(out3.status, "ok");
+  assert.match(f.calls[2].user, /Chapters: MRK 4, MRK 3\./);
+  assert.match(f.calls[2].user, /^- 1× «قال» → «كتب»/m);
+  assert.match(f.calls[2].user, /compared with their AI draft: 1;/);
+  assert.equal(f.runs().at(-1).truncated, 0, "only already-mined notes were left: not a stop");
+  assert.equal(f.runs().at(-1).approvals_through, c4);
+});
+
+test("#912 item 1: no paid call the night after a resume when nothing it left is still unmined", async () => {
+  const f = await fresh();
+  await f.runWith(NIGHT1, { cells: 1 });
+  approveIn(f, 4, "c401", "قال الكاتب", "كتب الكاتب");
+  assert.equal((await f.run(NIGHT2)).status, "ok");
+  // MRK 4's note goes back to draft: every approval left was mined by night 2.
+  f.sqlite.prepare(`UPDATE tn_rows SET translation_state = 'draft' WHERE id = 'c401'`).run();
+  assert.equal((await f.run(NIGHT3)).reason, "no_new_approvals");
+  assert.equal(f.calls.length, 2, "no call spent on notes night 2 already compared");
+});
+
+// Item 2 itself (a resume that stops again can pass an approval in the newest
+// chapters) is left open: one watermark cannot hold "the resumed chapters are
+// done through S" and "the newest chapters are unmined from F" at once.
+// Holding a stopped resume below F made it resume from the same note every
+// night; this case keeps that from coming back.
+test("#912 item 2 (left open): a resume that stops again still moves the watermark forward every night", async () => {
+  const f = await fresh();
+  // A finished run that stopped among MRK 3 + MRK 2, every approval up to now mined.
+  const w1 = maxApproval(f);
+  f.sqlite
+    .prepare(
+      `INSERT INTO lesson_runs (night, started_at, finished_at, status, approvals_through, chapters_json, truncated)
+       VALUES ('2026-11-11', 1, 1, 'no_changes', ?, ?, 1)`,
+    )
+    .run(w1, JSON.stringify([MRK(3), MRK(2)]));
+  // Between nights: one approval in MRK 4, then three more back in MRK 3.
+  approveIn(f, 4, "c401", "قال الكاتب", "كتب الكاتب");
+  approveIn(f, 3, "m301");
+  approveIn(f, 3, "m302");
+  const m3c = approveIn(f, 3, "m303");
+  let prev = w1;
+  for (const night of [NIGHT1, NIGHT2, NIGHT3]) {
+    assert.equal((await f.runWith(night, { cells: 1 })).status, "ok");
+    const through = f.runs().at(-1).approvals_through;
+    assert.ok(through > prev, `night ${night}: the watermark moved from ${prev} to ${through}`);
+    prev = through;
+  }
+  assert.equal(prev, m3c);
+  assert.match(f.calls[0].user, /Chapters: MRK 3, MRK 2\./, "the resume");
+});
+
+test("#912 item 3: a deleted lesson's example, shared by a kept lesson, does not stop that lesson's rewording", () => {
+  const current = [L("Keep B.", "x", "y")];
+  const deleted = [{ lesson: "Gone A.", before: "x", after: "y", approvalsThrough: 100 }];
+  const reword = (lesson) => ({ lessons: [{ id: "L1", lesson, before: "x", after: "y", evidence: 6 }], reversed: [] });
+  const out = mergeLessons(current, reword("Keep B, reworded."), { ...ctx, deleted, changes: [] }, 5);
+  assert.deepEqual(out.map((l) => l.lesson), ["Keep B, reworded."]);
+  // G2 still holds: the kept lesson cannot take the deleted lesson's wording.
+  assert.deepEqual(mergeLessons(current, reword("Gone A."), { ...ctx, deleted, changes: [] }, 5).map((l) => l.lesson), ["Keep B."]);
+  // A new lesson with the deleted example is still dropped.
+  const fresh1 = { lessons: [{ id: null, lesson: "Other.", before: "x", after: "y", evidence: 2 }], reversed: [] };
+  assert.deepEqual(mergeLessons([], fresh1, { ...ctx, deleted, changes: [] }, 5), []);
+});
+
+test("#912 item 3: restoring a set keeps the tombstone of a deleted lesson it does not hold, even on a shared example", async () => {
+  const f = await fresh();
+  const A = { id: null, lesson: "Start with «فيمكنك».", before: "يمكنك", after: "فيمكنك", evidence: 5 };
+  const B = { id: null, lesson: "Prefer «فيمكنك» at the start.", before: "يمكنك", after: "فيمكنك", evidence: 4 };
+  f.setReply(replyWith([A, B]));
+  assert.equal((await f.run()).status, "ok");
+  const s1 = (await loadCurrentLessons(f.env.DB)).runId;
+  assert.equal((await editLesson(f.env, { setId: s1, position: 1, action: "delete", userId: 9, now: NIGHT1 + 60 })).ok, true);
+  const s2 = (await loadCurrentLessons(f.env.DB)).runId; // [B]
+  assert.equal((await editLesson(f.env, { setId: s2, position: 1, action: "pin", userId: 9, now: NIGHT1 + 61 })).ok, true);
+  const s3 = (await loadCurrentLessons(f.env.DB)).runId;
+  assert.equal((await restoreLessonSet(f.env, { setId: s2, currentSetId: s3, userId: 9, now: NIGHT1 + 62 })).ok, true);
+  const tomb = f.sqlite.prepare(`SELECT lesson FROM lesson_deletions`).all();
+  assert.deepEqual(tomb.map((t) => t.lesson), [A.lesson], "A was not restored: its deletion stands");
+});
+
+function loadTombs(f) {
+  return f.sqlite
+    .prepare(`SELECT lesson, example_before AS before, example_after AS after, approvals_through AS approvalsThrough FROM lesson_deletions`)
+    .all();
+}
+
+test("#912 item 4: restore clears a tombstone that differs from the restored lesson only in case or spacing", async () => {
+  const f = await withThree();
+  const s1 = (await loadCurrentLessons(f.env.DB)).runId;
+  assert.equal((await editLesson(f.env, { setId: s1, position: 1, action: "pin", userId: 9, now: NIGHT1 + 60 })).ok, true);
+  const s2 = (await loadCurrentLessons(f.env.DB)).runId;
+  // The night compares NFC, one line, lowercase: this is THREE[2]'s deletion record.
+  f.sqlite
+    .prepare(`INSERT INTO lesson_deletions (lesson, example_before, example_after, approvals_through) VALUES (?, ?, ?, 1)`)
+    .run("use «لكي»   FOR purpose.", " أن", "لكي ");
+  assert.equal(deletedStill(THREE[2], loadTombs(f), []), true, "the night reads it as the same lesson");
+  assert.equal((await restoreLessonSet(f.env, { setId: s1, currentSetId: s2, userId: 9, now: NIGHT1 + 61 })).ok, true);
+  assert.equal(f.sqlite.prepare(`SELECT COUNT(*) AS n FROM lesson_deletions`).get().n, 0);
+});
+
+// A DB whose guarded write meets a nightly run that has ended by the time the
+// refusal is read (or, with `bumpPrefs`, a Common issues save made meanwhile).
+function racingEnv(f, { bumpPrefs = false } = {}) {
+  const db = f.env.DB;
+  return {
+    ...f.env,
+    DB: {
+      ...db,
+      async batch(stmts) {
+        if (bumpPrefs) f.sqlite.prepare(`UPDATE translation_prefs SET version = version + 1 WHERE id = 1`).run();
+        else f.sqlite.prepare(`INSERT INTO lesson_runs (night, started_at, status, approvals_through) VALUES ('race', ?, 'running', 1)`).run(NIGHT2);
+        try {
+          return await db.batch(stmts);
+        } finally {
+          if (!bumpPrefs) f.sqlite.prepare(`UPDATE lesson_runs SET status = 'no_changes', finished_at = ? WHERE night = 'race'`).run(NIGHT2);
+        }
+      },
+    },
+  };
+}
+
+test("#912 item 5: a change refused by a nightly run that ended meanwhile is not reported as a Common issues change", async () => {
+  const f = await withThree();
+  const s1 = (await loadCurrentLessons(f.env.DB)).runId;
+  const now = NIGHT2 + 10;
+  for (const action of ["delete", "pin", "promote"]) {
+    const out = await editLesson(racingEnv(f), { setId: s1, position: 1, action, userId: 9, now });
+    assert.deepEqual(out, { ok: false, status: 409, error: "run_in_progress" }, action);
+    f.sqlite.prepare(`DELETE FROM lesson_runs WHERE night = 'race'`).run();
+  }
+  const pinned = await editLesson(f.env, { setId: s1, position: 1, action: "pin", userId: 9, now });
+  assert.equal(pinned.ok, true);
+  const s2 = (await loadCurrentLessons(f.env.DB)).runId;
+  assert.deepEqual(await restoreLessonSet(racingEnv(f), { setId: s1, currentSetId: s2, userId: 9, now }), {
+    ok: false,
+    status: 409,
+    error: "run_in_progress",
+  });
+  // A promote whose Common issues moved meanwhile is prefs_changed.
+  const out = await editLesson(racingEnv(f, { bumpPrefs: true }), { setId: s2, position: 2, action: "promote", userId: 9, now });
+  assert.deepEqual(out, { ok: false, status: 409, error: "prefs_changed" });
+  assert.equal((await loadCurrentLessons(f.env.DB)).runId, s2, "nothing landed");
+});
+
+test("#912 item 7 (closed by #911): Common issues text typed before a promote the page never heard of gets a 409, not an overwrite", async () => {
+  const f = await withThree();
+  const before = f.sqlite.prepare(`SELECT version, common_issues_md FROM translation_prefs WHERE id = 1`).get();
+  const s1 = (await loadCurrentLessons(f.env.DB)).runId;
+  const promoted = await editLesson(f.env, { setId: s1, position: 1, action: "promote", userId: 9, now: NIGHT1 + 60 });
+  assert.equal(promoted.ok, true); // ...and the reply is lost on the way to the page.
+  const after = promoted.prefs;
+  const typed = { common_issues_md: `${before.common_issues_md}\n- typed meanwhile` };
+  const base = { common_issues_md: before.common_issues_md };
+  // The version the page sends (#911): the typed-against one, whether or not a
+  // later reply brought the new prefs row in.
+  const stale = prefsVersionToSend(base, before.version, typed, base, before.version);
+  const refreshed = prefsVersionToSend({ common_issues_md: after.common_issues_md }, after.version, typed, base, before.version);
+  assert.equal(stale, before.version);
+  assert.equal(refreshed, before.version, "after a refresh, the changed box still sends the version it was typed against");
+  const admin = appFor(f.env, "admin");
+  for (const version of [stale, refreshed]) {
+    const res = await admin("/api/translation-memory/prefs", {
+      method: "PUT",
+      headers: { "content-type": "application/json", "If-Match": String(version) },
+      body: JSON.stringify(typed),
+    });
+    assert.equal(res.status, 409);
+  }
+  assert.equal(f.sqlite.prepare(`SELECT common_issues_md FROM translation_prefs WHERE id = 1`).get().common_issues_md, after.common_issues_md);
+});
+
+test("#912 item 8: a same-night retry after an admin change writes a set that becomes current", async () => {
+  const f = await withThree();
+  f.approveMore();
+  // Tonight's run was killed long ago; while it sat stale, an admin pinned a lesson.
+  f.sqlite
+    .prepare(`INSERT INTO lesson_runs (night, started_at, status, approvals_through) VALUES ('2026-11-13', ?, 'running', 1)`)
+    .run(NIGHT2 - RUN_STALE_SECONDS - 60);
+  const s1 = (await loadCurrentLessons(f.env.DB)).runId;
+  assert.equal((await editLesson(f.env, { setId: s1, position: 1, action: "pin", userId: 9, now: NIGHT2 })).ok, true);
+  const edited = (await loadCurrentLessons(f.env.DB)).runId;
+  f.setReply(replyWith([{ id: null, lesson: "A new one.", before: "ب", after: "ج", evidence: 1 }]));
+  const out = await f.run(NIGHT2);
+  assert.equal(out.status, "ok");
+  assert.ok(out.runId > edited, "the retry is a newer set than the admin's change");
+  const cur = await loadCurrentLessons(f.env.DB);
+  assert.equal(cur.runId, out.runId);
+  assert.ok(cur.lessons.some((l) => l.lesson === "A new one."));
+  assert.equal(cur.lessons.find((l) => l.lesson === THREE[0].lesson).pinned, true, "built on the admin's change");
+  assert.equal(f.sqlite.prepare(`SELECT COUNT(*) AS n FROM lesson_runs WHERE night = '2026-11-13'`).get().n, 1);
+  f.approveMore();
+  assert.equal((await f.run(NIGHT2 + 60)).reason, "already_ran", "still one run a night");
 });

@@ -29,8 +29,9 @@
 //             marked truncated (migration 0086). The next run then mines that
 //             run's chapters again, not the newest ones, so nothing it left is
 //             skipped when editors moved to another chapter in between; if
-//             the newest chapters differ, the finished resume keeps the
-//             watermark, and the night after mines the newest chapters. A
+//             the newest chapters differ, the resume's watermark stops just
+//             below their first approval it did not mine (#912), and the
+//             night after mines the newest chapters. A
 //             budget that runs out only on older notes of the window (every
 //             new approval compared) is not a stop.
 //   provider  the workspace's own key, only for providers with an in-Worker
@@ -253,6 +254,19 @@ async function newApprovalIn(db: Db, chapters: readonly ChapterRef[], after: num
     if (r) return true;
   }
   return false;
+}
+
+/** The oldest hand approval in the chapters with after < id <= upTo, or null when there is none. */
+async function firstApprovalIn(db: Db, chapters: readonly ChapterRef[], after: number | null, upTo: number): Promise<number | null> {
+  let first: number | null = null;
+  for (const ch of chapters) {
+    const r = await db
+      .prepare(`SELECT MIN(e.id) AS id ${HAND_APPROVAL_JOIN} AND t.book = ?1 AND t.chapter = ?2 AND (?3 IS NULL OR e.id > ?3) AND e.id <= ?4`)
+      .bind(ch.book, ch.chapter, after, upTo)
+      .first<{ id: number | null }>();
+    if (r?.id != null && (first == null || r.id < first)) first = r.id;
+  }
+  return first;
 }
 
 const SHORT_VOWEL = /[ً-ِ]/u;
@@ -593,11 +607,16 @@ const normText = (s: string) => nfc(oneLine(s)).toLowerCase();
  * own example change, seen in a note approved after the delete. The window
  * re-reads older notes every night, so without the "approved after" test the
  * notes that produced the lesson would bring it straight back.
+ *
+ * `kept` is the current lesson `l` would replace: a match on wording or an
+ * example that lesson already has does not count, so a lesson that shares its
+ * example with a deleted one can still be reworded (#912).
  */
 export function deletedStill(
   l: { lesson: string; before: string; after: string },
   deleted: readonly DeletedLesson[],
   changes: readonly ChangeGroup[],
+  kept?: { lesson: string; before: string; after: string } | null,
 ): boolean {
   const text = normText(l.lesson);
   const b = normText(l.before);
@@ -605,8 +624,11 @@ export function deletedStill(
   return deleted.some((d) => {
     const db = normText(d.before);
     const da = normText(d.after);
+    const dl = normText(d.lesson);
     const hasExample = db !== "" || da !== "";
-    const same = normText(d.lesson) === text || (hasExample && db === b && da === a);
+    const keptWording = kept != null && normText(kept.lesson) === dl;
+    const keptExample = kept != null && normText(kept.before) === db && normText(kept.after) === da;
+    const same = (dl === text && !keptWording) || (hasExample && db === b && da === a && !keptExample);
     if (!same) return false;
     const anew =
       hasExample &&
@@ -661,7 +683,7 @@ export function mergeLessons(
     let after = cap(oneLine(p.after), EXAMPLE_CHAR_CAP);
     if (isShaddaVowelOnly(before, after)) continue;
     if (!prev && covered({ before, after }, ctx)) continue;
-    if (deletedStill({ lesson: text, before, after }, ctx.deleted ?? [], ctx.changes ?? [])) {
+    if (deletedStill({ lesson: text, before, after }, ctx.deleted ?? [], ctx.changes ?? [], prev)) {
       // A deleted lesson does not come back as a new one, nor as the new
       // wording or example of a kept one (#908 gate G2): a kept lesson keeps
       // its own wording and example.
@@ -729,11 +751,6 @@ function parseChapters(json: string): ChapterRef[] {
   }
   return [];
 }
-
-const sameChapters = (a: readonly ChapterRef[], b: readonly ChapterRef[]) => {
-  const key = (cs: readonly ChapterRef[]) => cs.map((c) => `${c.book} ${c.chapter}`).sort().join("|");
-  return key(a) === key(b);
-};
 
 export type LessonDeps = { transport?: Transport; now?: number; /** Mining budget (tests). */ cells?: number };
 
@@ -804,25 +821,28 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
 
   // One run per UTC day: the claim is the run row itself. The one exception is
   // tonight's run that was killed (closed as 'interrupted' above): its row is
-  // taken over, since a killed run never recorded a finish. A run that ended
-  // ('ok', 'no_changes', or 'failed' for any other reason) is not retried
-  // tonight, so a failing provider is called at most once a night.
-  const claim = await db
-    .prepare(
-      `INSERT INTO lesson_runs (night, started_at, approvals_through, provider, model)
-       VALUES (?1, ?2, ?3, ?4, ?5)
-       ON CONFLICT(night) DO UPDATE SET
-         started_at = excluded.started_at, approvals_through = excluded.approvals_through,
-         provider = excluded.provider, model = excluded.model, status = 'running',
-         failure_reason = NULL, finished_at = NULL, chapters_json = '[]', changes = 0,
-         calls = 0, input_tokens = 0, output_tokens = 0, cost_usd = NULL, truncated = 0
-       WHERE lesson_runs.status = 'failed' AND lesson_runs.failure_reason = 'interrupted'
-       RETURNING id`,
-    )
-    .bind(night, now, watermark, provider, model)
-    .first<{ id: number }>();
-  if (!claim) return { ran: false, reason: "already_ran" };
-  const runId = claim.id;
+  // replaced, since a killed run never recorded a finish (nor any lessons). A
+  // run that ended ('ok', 'no_changes', or 'failed' for any other reason) is
+  // not retried tonight, so a failing provider is called at most once a night.
+  // The replacement is a new row, not the old one updated: the newest set is
+  // the current one, and an admin change made while the killed run sat stale
+  // has a newer id than the killed row (#912).
+  const [, claim] = await db.batch([
+    db
+      .prepare(`DELETE FROM lesson_runs WHERE night = ?1 AND status = 'failed' AND failure_reason = 'interrupted'`)
+      .bind(night),
+    db
+      .prepare(
+        `INSERT INTO lesson_runs (night, started_at, approvals_through, provider, model)
+         VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(night) DO NOTHING`,
+      )
+      .bind(night, now, watermark, provider, model),
+  ]);
+  if (!claim?.meta?.changes) return { ran: false, reason: "already_ran" };
+  // Tonight's row is ours now: night is UNIQUE, and only an interrupted row is ever replaced.
+  const own = await db.prepare(`SELECT id FROM lesson_runs WHERE night = ?1`).bind(night).first<{ id: number }>();
+  if (!own) return { ran: false, reason: "already_ran" };
+  const runId = own.id;
 
   let calls = 0;
   let inputTokens = 0;
@@ -875,11 +895,17 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
     if (mined.stoppedAt != null) {
       through = mined.stoppedAt - 1;
       stopped = true;
-    } else if (resume.length > 0 && !sameChapters(resume, newest)) {
-      // The resumed chapters are done, but the newest chapters were not
-      // mined tonight: keep the watermark where it was, so the next night
-      // runs on the newest chapters.
-      through = last ?? through;
+    } else if (resume.length > 0) {
+      // A finished resume: the newest chapters it did not mine may hold
+      // approvals newer than the watermark (editors moved on between nights).
+      // The watermark stops just below the first of them, so the next night,
+      // which mines the newest chapters, takes them as new, and the resumed
+      // approvals below it are not new again (#912). (A resume that stops
+      // again keeps stoppedAt - 1: holding it lower would resume from the
+      // same note every night and never advance.)
+      const others = newest.filter((c) => !resume.some((r) => r.book === c.book && r.chapter === c.chapter));
+      const left = await firstApprovalIn(db, others, last, watermark);
+      if (left != null) through = left - 1;
     }
     if (mined.groups.length === 0) {
       await finish("no_changes", null).run();
@@ -1236,8 +1262,13 @@ async function writeSet(
   return (res.meta?.changes ?? 0) > 0;
 }
 
-/** Why a guarded write did not land, read after the fact. */
-async function refusal(env: Env, baseSetId: number, now: number): Promise<LessonEditResult> {
+/**
+ * Why a guarded write did not land, read after the fact. `prefsVersion` is the
+ * Common issues version the write was guarded on (undefined: not guarded).
+ * When no guard fails any more, the cause was a nightly run that has ended
+ * since: run_in_progress, so the page asks to try again (#912).
+ */
+async function refusal(env: Env, baseSetId: number, now: number, prefsVersion?: number | null): Promise<LessonEditResult> {
   const current = await loadCurrentLessons(env.DB);
   if (current.runId !== baseSetId) return { ok: false, status: 409, error: "stale_set" };
   const running = await env.DB
@@ -1245,7 +1276,11 @@ async function refusal(env: Env, baseSetId: number, now: number): Promise<Lesson
     .bind(now - RUN_STALE_SECONDS)
     .first();
   if (running) return { ok: false, status: 409, error: "run_in_progress" };
-  return { ok: false, status: 409, error: "prefs_changed" };
+  if (prefsVersion !== undefined) {
+    const prefs = await env.DB.prepare(`SELECT version FROM translation_prefs WHERE id = 1`).first<{ version: number }>();
+    if ((prefs?.version ?? null) !== prefsVersion) return { ok: false, status: 409, error: "prefs_changed" };
+  }
+  return { ok: false, status: 409, error: "run_in_progress" };
 }
 
 /**
@@ -1316,6 +1351,8 @@ export async function editLesson(
   const changed = nextText !== (prevText ?? "");
   const prevVersion = prefs ? prefs.version : 0;
   const payload = JSON.stringify({ changed: { common_issues_md: { prev: prevText, new: nextText } } });
+  // Only a promote that changes Common issues depends on its version.
+  const prefsVersion = changed ? (prefs ? prefs.version : null) : undefined;
   const ok = await writeSet(env, {
     baseSetId: args.setId,
     lessons: rest,
@@ -1323,8 +1360,7 @@ export async function editLesson(
     basedOn: args.setId,
     userId: args.userId,
     now,
-    // Only a promote that changes Common issues depends on its version.
-    prefsVersion: changed ? (prefs ? prefs.version : null) : undefined,
+    prefsVersion,
     extra: (token) =>
       !changed
         ? [tombstone(token)]
@@ -1348,7 +1384,7 @@ export async function editLesson(
             db.prepare(PREFS_HISTORY_SQL).bind(args.userId, prevVersion, prefs ? "update" : "create", args.source ?? null, payload),
           ],
   });
-  if (!ok) return refusal(env, args.setId, now);
+  if (!ok) return refusal(env, args.setId, now, prefsVersion);
   // Prefs only when Common issues changed: the page then remounts its editors.
   if (!changed) return { ok: true };
   return { ok: true, prefs: await db.prepare(`SELECT * FROM translation_prefs WHERE id = 1`).first<PrefsRow>() };
@@ -1370,18 +1406,21 @@ export async function restoreLessonSet(
     .first<{ id: number }>();
   if (!exists) return { ok: false, status: 404, error: "set_not_found" };
   const lessons = await loadLessonSet(db, args.setId);
-  // The restored lessons are live again: their deletion records go (same
-  // wording, or the same example), so a night treats them like any current
-  // lesson (#908 gate G4). A promoted lesson's line stays in Common issues.
+  // The restored lessons are live again: their deletion records go, so a
+  // night treats them like any current lesson (#908 gate G4). A record goes
+  // when a restored lesson has its wording, compared as the night compares
+  // (normText). An example alone is not enough: another deleted lesson can
+  // share it, and that one is not restored (#912). A promoted lesson's line
+  // stays in Common issues. A record added after this read comes with a new
+  // set, so the guarded write below is refused.
+  const restored = new Set(lessons.map((l) => normText(l.lesson)));
+  const tombs = await db.prepare(`SELECT id, lesson FROM lesson_deletions`).all<{ id: number; lesson: string }>();
+  const gone = (tombs.results ?? []).filter((d) => restored.has(normText(d.lesson))).map((d) => d.id);
   const untomb = (token: string) =>
-    lessons.map((l) =>
+    gone.map((id) =>
       db
-        .prepare(
-          `DELETE FROM lesson_deletions
-            WHERE (lesson = ?2 OR (?3 || ?4 <> '' AND example_before = ?3 AND example_after = ?4))
-              AND EXISTS (SELECT 1 FROM lesson_runs WHERE night = ?1)`,
-        )
-        .bind(token, l.lesson, l.before, l.after),
+        .prepare(`DELETE FROM lesson_deletions WHERE id = ?2 AND EXISTS (SELECT 1 FROM lesson_runs WHERE night = ?1)`)
+        .bind(token, id),
     );
   const ok = await writeSet(env, {
     baseSetId: args.currentSetId,
