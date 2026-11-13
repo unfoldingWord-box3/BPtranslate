@@ -130,8 +130,10 @@ export const ZEC_CHAPTERS = {
   },
   reenablesSave: {
     chapter: 12,
-    specs: ["refused-save-reenables-save.spec.ts"],
-    why: "A refused save then a real one on a tN row here.",
+    specs: ["refused-save-reenables-save.spec.ts", "restored-draft-conflict.spec.ts"],
+    why:
+      "A refused save then a real one on a tN row here. restored-draft-conflict only visits " +
+      "12:1 to unmount its own chapter, and never edits here.",
   },
   rapidLanes: {
     chapter: 13,
@@ -144,8 +146,11 @@ export const ZEC_CHAPTERS = {
   },
   rowsFastTyping: {
     chapter: 14,
-    specs: ["rows-fast-typing.spec.ts"],
-    why: "Types into ULT verse boxes 14:1-17 and leaves the drafts unsaved; never writes to the server.",
+    specs: ["rows-fast-typing.spec.ts", "restored-draft-conflict.spec.ts"],
+    why:
+      "rows-fast-typing types into ULT verse boxes 14:1-17 and leaves the drafts unsaved; it never " +
+      "writes to the server. restored-draft-conflict saves tN notes here (no free chapter is left: " +
+      "ZEC has 14), which rows-fast-typing never reads; its drafts live in its own browser context.",
   },
 } as const satisfies Record<string, ChapterClaim>;
 

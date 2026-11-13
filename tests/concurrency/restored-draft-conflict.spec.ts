@@ -1,5 +1,6 @@
 import { expect, test, request as apiRequest, type Page } from "@playwright/test";
 import { authedRequest, fetchChapter, gotoVerse, mintToken, newUserContext, noteTextarea, saveNote } from "./helpers";
+import { ZEC_CHAPTERS } from "./chapters";
 
 // Honor BE_BASE_URL so the suite runs on a relocated port (mirrors s8).
 const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
@@ -13,11 +14,11 @@ const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
 // conflict. Before the fix the card rebased to the current row and sent the
 // current version, and the server took it with a 200.
 //
-// ZEC 14 is used because no other spec opens it; globalSetup re-imports ZEC
-// each run. Not ZEC 13: notes-rapid-lanes.spec writes there, and globalSetup
-// marks its notes ai_draft, which the classic Editor mode shows read-only.
-const CHAPTER = 14;
-const AWAY_CHAPTER = 12;
+// The chapter is shared with rows-fast-typing, which never writes to the
+// server (see chapters.ts); globalSetup re-imports ZEC each run. Not an
+// ai_draft-seeded chapter: the classic Editor mode shows those notes read-only.
+const CHAPTER = ZEC_CHAPTERS.rowsFastTyping.chapter;
+const AWAY_CHAPTER = ZEC_CHAPTERS.reenablesSave.chapter;
 
 interface DraftRecord {
   expectedVersion?: number;
