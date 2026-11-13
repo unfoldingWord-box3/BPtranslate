@@ -30,7 +30,7 @@ import {
 } from "./refusedRowDraft";
 import { legacyDbNames, workspaceDbName } from "./workspace";
 import { adoptFromLegacyDbs, type LegacySource } from "./legacyAdoption";
-import { DRAFTS_CHANGED_CHANNEL_BASE, openDraftsChangedChannel } from "./draftsChangedChannel.ts";
+import { DRAFTS_CHANGED_CHANNEL_BASE, latestOnly, openDraftsChangedChannel } from "./draftsChangedChannel.ts";
 
 // Base name; the actual per-workspace DB name is derived via workspaceDbName()
 // so drafts written in one Door43 org never surface in another (issue #228).
@@ -190,8 +190,13 @@ async function tell(to: Set<Subscriber>) {
 // box the first time it sees that draft, so another tab's typing would land
 // there as a stale snapshot. A received message only re-reads, never
 // announces, so tabs cannot ping-pong. Named per workspace, as the database is.
+// latestOnly delivers only the newest of overlapping re-reads and logs a failed
+// one instead of leaving an unhandled rejection.
+const rereadForRemote = latestOnly(listAll, (all) => {
+  for (const s of remoteSubscribers) s(all);
+});
 const changedChannel = openDraftsChangedChannel(workspaceDbName(DRAFTS_CHANGED_CHANNEL_BASE), () => {
-  void tell(remoteSubscribers);
+  if (remoteSubscribers.size > 0) void rereadForRemote();
 });
 
 // After a committed change in this tab. Every caller awaits the write's

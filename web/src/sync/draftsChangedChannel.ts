@@ -24,6 +24,32 @@ export const DRAFTS_CHANGED_CHANNEL_BASE = "be-drafts-changed";
 
 const MESSAGE_TYPE = "drafts-changed";
 
+/**
+ * Wrap the re-read a received message starts. Messages can arrive faster than
+ * reads finish, and reads can resolve out of order, so only the newest read
+ * started is delivered; an older one landing later would show a stale count.
+ * A failed read is logged and dropped (the next message reads again), never
+ * left as an unhandled rejection.
+ */
+export function latestOnly<T>(
+  read: () => Promise<T>,
+  deliver: (value: T) => void,
+  onError: (e: unknown) => void = (e) => console.warn("drafts re-read after another tab's change failed", e),
+): () => Promise<void> {
+  let seq = 0;
+  return async () => {
+    const mine = ++seq;
+    let value: T;
+    try {
+      value = await read();
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    if (mine === seq) deliver(value);
+  };
+}
+
 interface ChannelLike {
   postMessage(message: unknown): void;
   onmessage: ((event: MessageEvent) => void) | null;
