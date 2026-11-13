@@ -39,6 +39,7 @@ import { readPackageRefs } from "./packageRefs";
 import { readSourceNotes } from "./sourceNotes";
 import { blockViewerWrites } from "./viewerGuard";
 import { requestDailyContextExport, sweepContextExportQueue } from "./contextExportQueue";
+import { runNightlyLessons } from "./lessons";
 import { listWorkspaces, resolveWorkspaceFresh, workspaceEnv, parseWorkspaceCookie, requireWorkspaceMatch, primeWorkspaces } from "./workspaces";
 
 export interface Env {
@@ -381,6 +382,20 @@ app.notFound((c) => {
   return c.json({ error: "not_found", path: c.req.path }, 404);
 });
 
+// Nightly lessons from editor corrections (#817), run just before a nightly
+// context export is requested so that export carries tonight's set. The job
+// itself does nothing while the workspace's switch is off (the default), and
+// only calls the AI when there are new hand approvals. Isolated: a lessons
+// failure must never stop the export.
+async function runLessonsBeforeExport(env: Env) {
+  try {
+    const out = await runNightlyLessons(env);
+    console.log("nightly lessons", { workspace: env.WORKSPACE_SLUG ?? "default", ...out });
+  } catch (e) {
+    console.error("nightly lessons failed", e instanceof Error ? e.message : String(e));
+  }
+}
+
 // Runs the existing per-cron body once, against a single (already
 // workspace-resolved) env. Split out of the exported `scheduled()` so that
 // handler can loop it once per workspace — see the loop below for why.
@@ -452,6 +467,7 @@ async function runScheduledTick(controller: ScheduledController, env: Env, _ctx:
       // cron (or a retried scheduled event) rejects on the duplicate id
       // instead of running two overlapping nightly exports for the same org;
       // the workspace slug keeps two orgs' same-day runs from colliding.
+      await runLessonsBeforeExport(env);
       const day = new Date(controller.scheduledTime).toISOString().slice(0, 10);
       const wsSlug = env.WORKSPACE_SLUG ?? "default";
       try {
@@ -525,6 +541,7 @@ async function runScheduledTick(controller: ScheduledController, env: Env, _ctx:
       return;
     }
     if (controller.cron === CONTEXT_CRON) {
+      await runLessonsBeforeExport(env);
       await requestDailyContextExport(env);
       return;
     }
