@@ -226,6 +226,10 @@ assert.strictEqual(prefsAfterConflict(v1005, v5, 1005), v5);
 // Save send v7 with stale boxes and revert that tab's save (C1).
 const v7 = { version: 7, audience: "seven" };
 assert.strictEqual(prefsAfterConflict(v7, v6, 5), v7);
+// Two Saves sent at 1005 across the restore: the first 409 brought v6 (another
+// tab saved after the restore), the late one brings v5. The page already holds
+// a row from after the restore, so v6 is kept.
+assert.strictEqual(prefsAfterConflict(v6, v5, 1005), v6);
 // An ordinary 409 with a newer row takes it.
 assert.strictEqual(prefsAfterConflict(v5, v6, 5), v6);
 assert.strictEqual(prefsAfterConflict(null, v6, 5), v6);

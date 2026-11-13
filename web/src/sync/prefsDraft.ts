@@ -182,10 +182,14 @@ export function newestPrefs<P extends { version: number }>(cur: P | null, next: 
 // restores the database or resets the row: a `current` row older than the
 // version sent shows that happened, and it is taken even though it is older
 // than the row held, or every Save would conflict until a reload (#922 item
-// 2). Otherwise newestPrefs as everywhere else, so a late 409 overtaken by
-// another tab's newer save cannot move the page back (C1).
+// 2). Only while the row held is still from before the restore: once the page
+// holds a later row (a 409 of another Save in flight brought one), a late 409
+// with an older row is not taken (#922 review). Otherwise newestPrefs as
+// everywhere else, so a late 409 overtaken by another tab's newer save cannot
+// move the page back (C1).
 export function prefsAfterConflict<P extends { version: number }>(held: P | null, current: P, sent: number): P {
-  return current.version < sent ? current : newestPrefs(held, current);
+  const beforeRestore = held == null || held.version >= sent;
+  return current.version < sent && beforeRestore ? current : newestPrefs(held, current);
 }
 
 // Whether a stored prefs draft may be deleted by this tab: only when it holds
