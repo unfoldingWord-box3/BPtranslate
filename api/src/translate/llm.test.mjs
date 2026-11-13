@@ -14,7 +14,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import * as llm from "./llm.ts";
 import * as core from "./core.ts";
 import { parseTnTsv, sliceChapterRows } from "./tsvCodec.ts";
-import { API_MODE_OVERRIDE, SKILL_BODIES } from "./prompts/index.ts";
+import { API_MODE_OVERRIDE, SECOND_PASS_REVIEW, SKILL_BODIES } from "./prompts/index.ts";
 import { fixture } from "./fixtures.mjs";
 
 const HEADER = "Reference\tID\tTags\tSupportReference\tQuote\tOccurrence\tNote";
@@ -86,7 +86,7 @@ test("buildTranslatePrompt uses the frontmatter-stripped skill body and appends 
   assert.ok(system.includes("## API mode override (supersedes the Input/Output mechanics above)"));
   assert.ok(system.includes("There are no tools"));
   assert.ok(system.includes(llm.BEGIN_OUTPUT) && system.includes(llm.END_OUTPUT));
-  assert.equal(system, `${SKILL_BODIES["translate-tn"]}\n\n${API_MODE_OVERRIDE}\n`);
+  assert.equal(system, `${SKILL_BODIES["translate-tn"]}\n\n${SECOND_PASS_REVIEW}\n\n${API_MODE_OVERRIDE}\n`);
 });
 
 test("buildTranslatePrompt inlines the task JSON, the pack and the source rows", () => {

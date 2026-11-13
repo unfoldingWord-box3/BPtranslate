@@ -14,7 +14,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import {
-  API_MODE_OVERRIDE, BEGIN_OUTPUT, END_OUTPUT, SKILL_BODIES, skillBody, systemPromptFor, stripFrontmatter,
+  API_MODE_OVERRIDE, SECOND_PASS_REVIEW, BEGIN_OUTPUT, END_OUTPUT, SKILL_BODIES, skillBody, systemPromptFor, stripFrontmatter,
 } from "./prompts/index.ts";
 import { RESOURCE_TYPES } from "./resourceTypes.ts";
 
@@ -59,9 +59,9 @@ test("skillBody rejects unknown / missing skill names", () => {
   assert.throws(() => skillBody("constructor"), /unknown skill/);
 });
 
-test("systemPromptFor = body + blank line + API mode override + newline (bot translate-llm.js:156)", () => {
+test("systemPromptFor = body + second-pass review + API mode override + newline (bot translate-llm.js:156 + editor section)", () => {
   const system = systemPromptFor("translate-tn");
-  assert.equal(system, `${SKILL_BODIES["translate-tn"]}\n\n${API_MODE_OVERRIDE}\n`);
+  assert.equal(system, `${SKILL_BODIES["translate-tn"]}\n\n${SECOND_PASS_REVIEW}\n\n${API_MODE_OVERRIDE}\n`);
   assert.ok(system.includes("## API mode override (supersedes the Input/Output mechanics above)"));
   assert.ok(system.includes(`\n${BEGIN_OUTPUT}\n(the complete output file content)\n${END_OUTPUT}\n`));
   assert.equal(BEGIN_OUTPUT, "-----BEGIN OUTPUT-----");
@@ -97,4 +97,17 @@ test("checked-in bodies match the committed skills blobs at origin/main byte-for
     const stamped = /sha256\(body\) = ([0-9a-f]{64})/.exec(readFileSync(modFile, "utf8"))?.[1];
     assert.equal(stamped, createHash("sha256").update(body, "utf8").digest("hex"), `${skill} header sha256 matches body`);
   }
+});
+
+test("every translate skill gets the second-pass review, after the skill rules and before the API mode override", () => {
+  for (const skill of Object.keys(SKILL_BODIES)) {
+    const system = systemPromptFor(skill);
+    const review = system.indexOf("## Second pass: refine the wording before you emit");
+    assert.ok(review > system.indexOf(SKILL_BODIES[skill].slice(-40)), `${skill}: review follows the skill body`);
+    assert.ok(review < system.indexOf("## API mode override"), `${skill}: review precedes the API mode override`);
+  }
+  assert.match(SECOND_PASS_REVIEW, /Do not change the meaning/);
+  assert.match(SECOND_PASS_REVIEW, /clarification only when the meaning genuinely requires it/);
+  assert.match(SECOND_PASS_REVIEW, /never emit the\s+first draft/);
+  assert.ok(!SECOND_PASS_REVIEW.includes("\r"));
 });

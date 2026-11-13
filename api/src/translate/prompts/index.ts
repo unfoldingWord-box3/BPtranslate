@@ -46,6 +46,31 @@ ${END_OUTPUT}
   validation violations. Apply exactly those fixes and re-emit the complete
   corrected file between the same markers.`;
 
+// Appended to every skill body, ahead of API_MODE_OVERRIDE. Editor-owned (not
+// from bp-assistant-skills): requested by the Arabic team and applied to every
+// target language. It sits after the skill's own rules so it reads as a
+// refinement pass inside them, never as licence to break them.
+export const SECOND_PASS_REVIEW = `## Second pass: refine the wording before you emit
+
+After drafting each translated sentence, check it a second time before you emit
+it. In this pass, make the wording in the target language as natural, clear and
+well-structured as you can, while staying faithful to the source text:
+
+- Do not change the meaning. Do not add, drop, soften or strengthen anything the
+  source says.
+- Fix wording that reads as translated: stilted word order, calques of English
+  phrasing, awkward or run-on sentence structure, unclear references.
+- Add a clarification only when the meaning genuinely requires it for a reader
+  of the target language. Do not add explanation for its own sake.
+- This pass works inside every rule above. It never changes protected columns or structure,
+  \`rc://\` links, \`\\n\` conventions, the count of \`[bracketed]\` alternate
+  translations, bold words that must match the target Bible text, or preferred
+  terminology.
+- Do this review silently. Emit only the final, refined text; never emit the
+  first draft, a list of changes, or commentary.
+- In repair mode, skip this pass for rows that already passed validation: fix
+  only the listed violations, as the repair instructions say.`;
+
 export const SKILL_BODIES: Record<SkillName, string> = {
   "translate-tn": TRANSLATE_TN_SKILL_BODY,
   "translate-tq": TRANSLATE_TQ_SKILL_BODY,
@@ -62,11 +87,13 @@ export function skillBody(skill: string): string {
 }
 
 /**
- * The system prompt for one batch/article call — byte-identical to what the
- * bot's buildTranslatePrompt puts in `system` (translate-llm.js:156).
+ * The system prompt for one batch/article call: what the bot's
+ * buildTranslatePrompt puts in `system` (translate-llm.js:156), plus the
+ * editor-owned SECOND_PASS_REVIEW section between the skill body and the API
+ * mode override.
  */
 export function systemPromptFor(skill: string): string {
-  return `${skillBody(skill)}\n\n${API_MODE_OVERRIDE}\n`;
+  return `${skillBody(skill)}\n\n${SECOND_PASS_REVIEW}\n\n${API_MODE_OVERRIDE}\n`;
 }
 
 /**
