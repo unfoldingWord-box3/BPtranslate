@@ -1,4 +1,4 @@
-// Nightly lessons from editor corrections (issue #817, part 1).
+// Nightly lessons from editor corrections (issue #817; admin changes #908).
 //
 // Once a night, for a workspace whose admin switched this on, read what editors
 // changed in the AI translation-note drafts they approved, ask the workspace's
@@ -51,16 +51,22 @@
 //             correction disappear, which is not a reason to drop it); a NEW
 //             lesson whose example is already a term, a template or a line of
 //             the instructions / Common issues is dropped; lengths are capped
-//             and each lesson is flattened to one line.
+//             and each lesson is flattened to one line. An admin's changes
+//             (#908) bind it too: a pinned lesson is kept exactly as it is and
+//             never trimmed; a deleted lesson does not come back as a new one
+//             (same wording or example) unless a note approved after the
+//             delete shows its example change again.
+//   edits     delete / pin / unpin / promote / restore each write a new set
+//             (status 'edited'); see "Admin changes" below.
 //   failure   an unreadable reply or a failed call keeps the previous set; the
 //             run row still records what was billed.
 //
 // Imports carry .ts suffixes so the node strip-types test runner resolves them.
 
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { z } from "zod";
 import type { Env } from "./index";
-import { currentUserId, requireAdmin } from "./auth.ts";
+import { currentUserId, editSource, requireAdmin } from "./auth.ts";
 import { queueContextExport, requestDailyContextExport } from "./contextExportQueue.ts";
 import { getProjectConfig } from "./projectConfig.ts";
 import { nfc } from "./contextExportLib.ts";
@@ -85,13 +91,23 @@ import {
   type TransportUsage,
 } from "./translate/llm.ts";
 import { estimateCost } from "./translate/providerCatalog.ts";
-import { lessonLine, lessonsEnabled as lessonsEnabledRead, loadCurrentLessons, type Lesson } from "./lessonsRender.ts";
+import {
+  SET_STATUSES_SQL,
+  lessonLine,
+  lessonsEnabled as lessonsEnabledRead,
+  loadCurrentLessons,
+  loadLessonSet,
+  tableMissing,
+  type Lesson,
+} from "./lessonsRender.ts";
+import { PREFS_HISTORY_SQL } from "./prefsHistorySql.ts";
 
 export {
   LESSONS_HEADING,
   lessonLine,
   lessonsEnabled,
   loadCurrentLessons,
+  loadLessonSet,
   loadLessonsForRender,
   renderLessonsSection,
   type Lesson,
@@ -147,6 +163,8 @@ export type ChangeGroup = {
   count: number;
   draftExcerpt: string;
   finalExcerpt: string;
+  /** The newest hand approval (edit_log id) among the notes showing it; null when none had one. */
+  lastApproval: number | null;
 };
 
 export type ChapterRef = { book: string; chapter: number };
@@ -185,13 +203,16 @@ export type LessonJobOutcome =
        * does not count (the pack shows it from the next export on).
        */
       changed: boolean;
-      /** The mining budget ran out (MINING_CELL_BUDGET); the next night resumes. */
+      /**
+       * The mining budget ran out (MINING_CELL_BUDGET) before every note in
+       * the window was diffed. The next night resumes only when it stopped
+       * among NEW approvals (the run row's own truncated flag); a run that ran
+       * out only on older notes of the window is complete.
+       */
       truncated: boolean;
     };
 
 type Db = Env["DB"];
-
-const tableMissing = (e: unknown) => /no such table/i.test(e instanceof Error ? e.message : String(e));
 
 // ---------------------------------------------------------------------------
 // Mining
@@ -220,6 +241,18 @@ export async function recentApprovedChapters(db: Db, n = RECENT_CHAPTERS): Promi
     .bind(n)
     .all<{ book: string; chapter: number }>();
   return (rs.results ?? []).map((r) => ({ book: r.book, chapter: r.chapter }));
+}
+
+/** True when one of the chapters holds a hand approval newer than `after` (any, when null). */
+async function newApprovalIn(db: Db, chapters: readonly ChapterRef[], after: number | null): Promise<boolean> {
+  for (const ch of chapters) {
+    const r = await db
+      .prepare(`SELECT 1 AS x ${HAND_APPROVAL_JOIN} AND t.book = ?1 AND t.chapter = ?2 AND (?3 IS NULL OR e.id > ?3) LIMIT 1`)
+      .bind(ch.book, ch.chapter, after)
+      .first();
+    if (r) return true;
+  }
+  return false;
 }
 
 const SHORT_VOWEL = /[ً-ِ]/u;
@@ -338,14 +371,17 @@ export async function mineChanges(
       if (seen.has(c.key) || isShaddaVowelOnly(c.before, c.after)) continue;
       seen.add(c.key);
       const g = byKey.get(c.key);
-      if (g) g.count++;
-      else
+      if (g) {
+        g.count++;
+        if (r.approval_id != null && (g.lastApproval == null || r.approval_id > g.lastApproval)) g.lastApproval = r.approval_id;
+      } else
         byKey.set(c.key, {
           before: c.before,
           after: c.after,
           count: 1,
           draftExcerpt: c.draftExcerpt,
           finalExcerpt: c.finalExcerpt,
+          lastApproval: r.approval_id,
         });
     }
     if (seen.size > 0) changed++;
@@ -540,7 +576,46 @@ export type CoverContext = {
   commonIssuesMd: string;
   /** Notes compared in this run: no lesson can claim more evidence than that. */
   maxEvidence?: number;
+  /** Lessons an admin deleted (#908): a new lesson that repeats one is dropped... */
+  deleted?: readonly DeletedLesson[];
+  /** ...unless one of tonight's changes shows its example in a note approved after the delete. */
+  changes?: readonly ChangeGroup[];
 };
+
+/** A lesson_deletions row: what was deleted, and the newest approval at that moment. */
+export type DeletedLesson = { lesson: string; before: string; after: string; approvalsThrough: number };
+
+const normText = (s: string) => nfc(oneLine(s)).toLowerCase();
+
+/**
+ * True when a NEW lesson repeats a deleted one (same wording, or the same
+ * example) and no change mined tonight supports it anew: the deleted lesson's
+ * own example change, seen in a note approved after the delete. The window
+ * re-reads older notes every night, so without the "approved after" test the
+ * notes that produced the lesson would bring it straight back.
+ */
+export function deletedStill(
+  l: { lesson: string; before: string; after: string },
+  deleted: readonly DeletedLesson[],
+  changes: readonly ChangeGroup[],
+): boolean {
+  const text = normText(l.lesson);
+  const b = normText(l.before);
+  const a = normText(l.after);
+  return deleted.some((d) => {
+    const db = normText(d.before);
+    const da = normText(d.after);
+    const hasExample = db !== "" || da !== "";
+    const same = normText(d.lesson) === text || (hasExample && db === b && da === a);
+    if (!same) return false;
+    const anew =
+      hasExample &&
+      changes.some(
+        (g) => normText(g.before) === db && normText(g.after) === da && g.lastApproval != null && g.lastApproval > d.approvalsThrough,
+      );
+    return !anew;
+  });
+}
 
 function covered(l: { before: string; after: string }, ctx: CoverContext): boolean {
   if (!l.after) return false;
@@ -557,7 +632,11 @@ function clampEvidence(n: number, max = Number.MAX_SAFE_INTEGER): number {
   return Math.max(0, Math.min(Math.floor(n), Math.max(0, Math.floor(max))));
 }
 
-/** The new set: the model's list checked against the rules above. */
+/**
+ * The new set: the model's list checked against the rules above. A pinned
+ * lesson (#908) is carried exactly as the admin pinned it: the model cannot
+ * reword, reverse or drop it, and the trim never removes it.
+ */
 export function mergeLessons(
   current: readonly Lesson[],
   parsed: ParsedOutput,
@@ -567,19 +646,30 @@ export function mergeLessons(
   const byId = new Map<string, Lesson>(current.map((l, i) => [`L${i + 1}`, l]));
   const reversed = new Set(parsed.reversed.filter((id) => byId.has(id)));
   const used = new Set<string>();
-  const seenText = new Set<string>();
+  // Pinned wording is taken first, so no lesson of the model's can displace it.
+  const seenText = new Set<string>(current.filter((l) => l.pinned).map((l) => nfc(l.lesson).toLowerCase()));
   type Item = Lesson & { fresh: boolean };
   const out: Item[] = [];
   for (const p of parsed.lessons) {
     const prev = p.id && byId.has(p.id) ? byId.get(p.id)! : null;
-    // A reversed lesson does not come back under its own id, and one id is used once.
-    if (prev && (reversed.has(p.id!) || used.has(p.id!))) continue;
-    const text = cleanLessonText(p.lesson);
+    // A reversed lesson does not come back under its own id, and one id is used
+    // once. A pinned lesson is added below, as it is.
+    if (prev && (prev.pinned || reversed.has(p.id!) || used.has(p.id!))) continue;
+    let text = cleanLessonText(p.lesson);
     if (!text) continue;
-    const before = cap(oneLine(p.before), EXAMPLE_CHAR_CAP);
-    const after = cap(oneLine(p.after), EXAMPLE_CHAR_CAP);
+    let before = cap(oneLine(p.before), EXAMPLE_CHAR_CAP);
+    let after = cap(oneLine(p.after), EXAMPLE_CHAR_CAP);
     if (isShaddaVowelOnly(before, after)) continue;
     if (!prev && covered({ before, after }, ctx)) continue;
+    if (deletedStill({ lesson: text, before, after }, ctx.deleted ?? [], ctx.changes ?? [])) {
+      // A deleted lesson does not come back as a new one, nor as the new
+      // wording or example of a kept one (#908 gate G2): a kept lesson keeps
+      // its own wording and example.
+      if (!prev) continue;
+      text = prev.lesson;
+      before = prev.before;
+      after = prev.after;
+    }
     const key = nfc(text).toLowerCase();
     if (seenText.has(key)) continue;
     seenText.add(key);
@@ -596,23 +686,27 @@ export function mergeLessons(
         prev ? Math.max(ctx.maxEvidence ?? Number.MAX_SAFE_INTEGER, prev.evidence) : ctx.maxEvidence,
       ),
       firstSeenAt: prev?.firstSeenAt ?? now,
+      pinned: false,
       fresh: !prev,
     });
   }
-  // Current lessons the model neither kept nor named as reversed stay as they are.
+  // Current lessons the model neither kept nor named as reversed stay as they
+  // are, and so does every pinned lesson.
   current.forEach((l, i) => {
     const id = `L${i + 1}`;
-    if (used.has(id) || reversed.has(id)) return;
+    if (!l.pinned && (used.has(id) || reversed.has(id))) return;
     const key = nfc(l.lesson).toLowerCase();
-    if (seenText.has(key)) return;
+    if (!l.pinned && seenText.has(key)) return;
     seenText.add(key);
     out.push({ ...l, fresh: false });
   });
-  // Over the cap: new lessons go first, last ones first.
+  // Over the cap: new lessons go first, last ones first; pinned lessons never.
   while (out.length > MAX_LESSONS) {
     let k = -1;
     for (let i = out.length - 1; i >= 0; i--) if (out[i].fresh) { k = i; break; }
-    out.splice(k === -1 ? out.length - 1 : k, 1);
+    if (k === -1) for (let i = out.length - 1; i >= 0; i--) if (!out[i].pinned) { k = i; break; }
+    if (k === -1) break;
+    out.splice(k, 1);
   }
   return out.map(({ fresh: _fresh, ...l }) => l);
 }
@@ -675,6 +769,7 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
 
   let last: number | null;
   let prev: { chapters_json: string; truncated: number } | null;
+  let deleted: DeletedLesson[];
   try {
     // Only runs that finished their mining move the watermark: a failed or
     // killed run's corrections are mined again on a later night. Spend stays
@@ -688,7 +783,12 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
     prev = await db
       .prepare(`SELECT chapters_json, truncated FROM lesson_runs WHERE status IN ('ok', 'no_changes') ORDER BY id DESC LIMIT 1`)
       .first<{ chapters_json: string; truncated: number }>();
+    // Read here so a database without 0087 reads as not_migrated; read again
+    // after the claim below, since an admin change can land before it.
+    deleted = await loadDeletedLessons(db);
   } catch (e) {
+    // A missing table or column (a migration behind): not_migrated, never a
+    // generic failure every night (#908 leftover 6).
     if (tableMissing(e)) return { ran: false, reason: "not_migrated" };
     throw e;
   }
@@ -763,7 +863,11 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
     // run mines that run's chapters, not the newest ones, so the approvals it
     // left are compared even when editors moved to another chapter since.
     const newest = await recentApprovedChapters(db);
-    const resume = prev?.truncated ? parseChapters(prev.chapters_json) : [];
+    // A stored resume whose chapters no longer hold a hand approval newer than
+    // the watermark (its notes were un-approved since) is stale, however old:
+    // mine the newest chapters instead (#908 leftover 4).
+    const stored = prev?.truncated ? parseChapters(prev.chapters_json) : [];
+    const resume = stored.length > 0 && (await newApprovalIn(db, stored, last)) ? stored : [];
     chapters = resume.length > 0 ? resume : newest;
     const mined = await mineChanges(db, chapters, { after: last, cells: deps.cells });
     changes = mined.groups.length;
@@ -783,7 +887,9 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
     }
 
     const cfg = await getProjectConfig(env);
-    const [current, prefs, termRs, templateRs] = await Promise.all([
+    // Read after the claim: from here on no admin change can land (#908), so
+    // the set and the deletions are the ones this run's merge must respect.
+    const [current, prefs, termRs, templateRs, deletedNow] = await Promise.all([
       loadCurrentLessons(db),
       db
         .prepare(`SELECT instructions_md, common_issues_md FROM translation_prefs WHERE id = 1`)
@@ -801,7 +907,9 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
             WHERE deleted_at IS NULL AND target_md IS NOT NULL AND TRIM(target_md) <> ''`,
         )
         .all<{ target_md: string }>(),
+      loadDeletedLessons(db),
     ]);
+    deleted = deletedNow;
     const terms = termRs.results ?? [];
     const { system, user } = buildLessonsPrompt({
       languageName: cfg.languageName,
@@ -849,15 +957,17 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
         instructionsMd: prefs?.instructions_md ?? "",
         commonIssuesMd: prefs?.common_issues_md ?? "",
         maxEvidence: mined.compared,
+        deleted,
+        changes: mined.groups,
       },
       now,
     );
     const insert = db.prepare(
-      `INSERT INTO lessons (run_id, position, lesson, example_before, example_after, evidence, first_seen_at)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`,
+      `INSERT INTO lessons (run_id, position, lesson, example_before, example_after, evidence, first_seen_at, pinned)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`,
     );
     await db.batch([
-      ...next.map((l, i) => insert.bind(runId, i + 1, l.lesson, l.before, l.after, l.evidence, l.firstSeenAt)),
+      ...next.map((l, i) => insert.bind(runId, i + 1, l.lesson, l.before, l.after, l.evidence, l.firstSeenAt, l.pinned ? 1 : 0)),
       finish("ok", null),
     ]);
     // Content only: a re-estimated evidence count is not worth a pack export.
@@ -940,15 +1050,35 @@ function runFromRow(r: RunRow): LessonRun {
   };
 }
 
+/** One stored set, for the restore list. */
+export type LessonSetSummary = {
+  id: number;
+  /** When it was written (unix seconds). */
+  at: number | null;
+  /** 'night' = a nightly run wrote it; 'edit' = an admin change (#908). */
+  kind: "night" | "edit";
+  /** For an edit: delete | pin | unpin | promote | restore. */
+  action: string | null;
+  count: number;
+};
+
+/** Sets listed for restore, newest first. */
+export const SET_HISTORY_LIMIT = 20;
+
 export type LessonsState = {
   enabled: boolean;
   notMigrated: boolean;
   /** Whether a run could call the AI tonight (provider with an in-Worker adapter, key decrypts). */
   availability: Availability;
   lessons: Lesson[];
+  /** The current set's id: an admin change names it, so a set changed meanwhile is refused (409). */
+  setId: number | null;
   /** When the current set was written. */
   setAt: number | null;
+  /** The last nightly run (an admin change is not a run). */
   lastRun: LessonRun | null;
+  /** Recent sets, newest first (the first is the current one). */
+  sets: LessonSetSummary[];
   maxLessons: number;
 };
 
@@ -958,16 +1088,42 @@ export async function readLessonsState(env: Env): Promise<LessonsState> {
   let notMigrated = false;
   let enabled = false;
   let lastRun: LessonRun | null = null;
+  let sets: LessonSetSummary[] = [];
   try {
     enabled = (await db.prepare(`SELECT enabled FROM lesson_settings WHERE id = 1`).first<{ enabled: number }>())?.enabled === 1;
-    const r = await db.prepare(`SELECT * FROM lesson_runs ORDER BY id DESC LIMIT 1`).first<RunRow>();
+    const r = await db.prepare(`SELECT * FROM lesson_runs WHERE status <> 'edited' ORDER BY id DESC LIMIT 1`).first<RunRow>();
     lastRun = r ? runFromRow(r) : null;
+    const rs = await db
+      .prepare(
+        `SELECT r.id AS id, r.finished_at AS at, r.status AS status, r.action AS action,
+                (SELECT COUNT(*) FROM lessons l WHERE l.run_id = r.id) AS count
+           FROM lesson_runs r WHERE r.status IN ${SET_STATUSES_SQL} ORDER BY r.id DESC LIMIT ?1`,
+      )
+      .bind(SET_HISTORY_LIMIT)
+      .all<{ id: number; at: number | null; status: string; action: string | null; count: number }>();
+    sets = (rs.results ?? []).map((s) => ({
+      id: s.id,
+      at: s.at,
+      kind: s.status === "edited" ? "edit" : "night",
+      action: s.action,
+      count: s.count,
+    }));
   } catch (e) {
     if (!tableMissing(e)) throw e;
     notMigrated = true;
   }
-  const current = notMigrated ? { setAt: null, lessons: [] } : await loadCurrentLessons(db);
-  return { enabled, notMigrated, availability, lessons: current.lessons, setAt: current.setAt, lastRun, maxLessons: MAX_LESSONS };
+  const current = notMigrated ? { runId: null, setAt: null, lessons: [] } : await loadCurrentLessons(db);
+  return {
+    enabled,
+    notMigrated,
+    availability,
+    lessons: current.lessons,
+    setId: current.runId,
+    setAt: current.setAt,
+    lastRun,
+    sets,
+    maxLessons: MAX_LESSONS,
+  };
 }
 
 export async function setLessonsEnabled(db: Db, enabled: boolean, userId: number | null): Promise<void> {
@@ -980,16 +1136,284 @@ export async function setLessonsEnabled(db: Db, enabled: boolean, userId: number
     .run();
 }
 
+/** Every lesson an admin deleted (#908). */
+export async function loadDeletedLessons(db: Db): Promise<DeletedLesson[]> {
+  const rs = await db
+    .prepare(`SELECT lesson, example_before, example_after, approvals_through FROM lesson_deletions`)
+    .all<{ lesson: string; example_before: string; example_after: string; approvals_through: number }>();
+  return (rs.results ?? []).map((d) => ({
+    lesson: d.lesson,
+    before: d.example_before,
+    after: d.example_after,
+    approvalsThrough: d.approvals_through,
+  }));
+}
+
 // ---------------------------------------------------------------------------
-// Routes (mounted at /api/translation-memory/lessons). Admin-only both ways:
+// Admin changes (#908): delete, pin, unpin, promote to Common issues, restore.
+//
+// Each one writes a NEW set (a lesson_runs row with status 'edited' and its
+// lessons), never edits or deletes a stored one, so every earlier set stays
+// restorable. The write is one batch, guarded in SQL on three things, so it
+// lands whole or not at all:
+//   - the set the admin was looking at is still the current one (a night or
+//     another admin changed it meanwhile: 409 stale_set);
+//   - no nightly run is in progress (it read the current set and would write
+//     its own on top: 409 run_in_progress; a 'running' row older than
+//     RUN_STALE_SECONDS was killed and does not block);
+//   - for promote, Common issues is still at the version read (409 prefs_changed).
+// The set row and its lessons go in together, so no export can render a set
+// without its lessons.
+// ---------------------------------------------------------------------------
+
+export type LessonEditAction = "delete" | "pin" | "unpin" | "promote";
+
+/** Server cap on common_issues_md (translationMemory.ts PutPrefsBody). */
+export const COMMON_ISSUES_MAX_CHARS = 50000;
+
+/** The Common issues line a promoted lesson becomes: its lesson and example, no evidence count. */
+export function promotedLine(l: Lesson): string {
+  return lessonLine({ ...l, evidence: 0 });
+}
+
+/** Common issues with the line added at the end (unchanged when that exact line is already there). */
+export function appendCommonIssue(text: string | null, line: string): string {
+  const cur = text ?? "";
+  if (cur.split(/\r?\n/).some((l) => l.trim() === line.trim())) return cur;
+  const body = cur.replace(/\s+$/, "");
+  return body ? `${body}\n${line}` : line;
+}
+
+export type LessonEditResult =
+  | { ok: true; prefs?: Record<string, unknown> | null; /** Nothing changed: no new set, no export. */ noop?: boolean }
+  | { ok: false; status: 400 | 404 | 409 | 413; error: string };
+
+type PrefsRow = Record<string, unknown> & { version: number; common_issues_md: string | null };
+
+type Stmt = ReturnType<Db["prepare"]>;
+
+async function writeSet(
+  env: Env,
+  args: {
+    baseSetId: number;
+    lessons: readonly Lesson[];
+    action: LessonEditAction | "restore";
+    basedOn: number;
+    userId: number | null;
+    now: number;
+    /** Statements that run only when the set is written (each checks the token row). */
+    extra?: (token: string) => Stmt[];
+    /** Promote: Common issues must still be at this version (null = no prefs row). */
+    prefsVersion?: number | null;
+  },
+): Promise<boolean> {
+  const db = env.DB;
+  const token = `edit:${crypto.randomUUID()}`;
+  const checkPrefs = args.prefsVersion !== undefined;
+  const head = db
+    .prepare(
+      `INSERT INTO lesson_runs (night, started_at, finished_at, status, approvals_through, action, edited_by, based_on)
+       SELECT ?1, ?2, ?2, 'edited', 0, ?3, ?4, ?5
+        WHERE (SELECT id FROM lesson_runs WHERE status IN ${SET_STATUSES_SQL} ORDER BY id DESC LIMIT 1) = ?6
+          AND NOT EXISTS (SELECT 1 FROM lesson_runs WHERE status = 'running' AND started_at > ?7)
+          AND (?8 = 0 OR (SELECT version FROM translation_prefs WHERE id = 1) IS ?9)`,
+    )
+    .bind(
+      token, args.now, args.action, args.userId, args.basedOn, args.baseSetId,
+      args.now - RUN_STALE_SECONDS, checkPrefs ? 1 : 0, checkPrefs ? args.prefsVersion : null,
+    );
+  const insert = db.prepare(
+    `INSERT INTO lessons (run_id, position, lesson, example_before, example_after, evidence, first_seen_at, pinned)
+     SELECT id, ?2, ?3, ?4, ?5, ?6, ?7, ?8 FROM lesson_runs WHERE night = ?1`,
+  );
+  const [res] = await db.batch([
+    head,
+    ...args.lessons.map((l, i) =>
+      insert.bind(token, i + 1, l.lesson, l.before, l.after, l.evidence, l.firstSeenAt, l.pinned ? 1 : 0),
+    ),
+    ...(args.extra?.(token) ?? []),
+  ]);
+  return (res.meta?.changes ?? 0) > 0;
+}
+
+/** Why a guarded write did not land, read after the fact. */
+async function refusal(env: Env, baseSetId: number, now: number): Promise<LessonEditResult> {
+  const current = await loadCurrentLessons(env.DB);
+  if (current.runId !== baseSetId) return { ok: false, status: 409, error: "stale_set" };
+  const running = await env.DB
+    .prepare(`SELECT 1 AS x FROM lesson_runs WHERE status = 'running' AND started_at > ?1 LIMIT 1`)
+    .bind(now - RUN_STALE_SECONDS)
+    .first();
+  if (running) return { ok: false, status: 409, error: "run_in_progress" };
+  return { ok: false, status: 409, error: "prefs_changed" };
+}
+
+/**
+ * Delete, pin, unpin or promote the lesson at `position` (1-based) of set
+ * `setId`, which must be the current set.
+ *   delete   the lesson leaves the set and is remembered in lesson_deletions,
+ *            so a night does not bring it back unless newer approvals show its
+ *            example change again (deletedStill).
+ *   pin      every nightly merge keeps it exactly as it is; it is never trimmed.
+ *   promote  "- lesson Example: «before» → «after»" is added to the end of
+ *            Common issues (a prefs save with its own version and history
+ *            entry), and the lesson leaves the set, remembered like a delete.
+ */
+export async function editLesson(
+  env: Env,
+  args: { setId: number; position: number; action: LessonEditAction; userId: number | null; source?: string | null; now?: number },
+): Promise<LessonEditResult> {
+  const db = env.DB;
+  const now = args.now ?? Math.floor(Date.now() / 1000);
+  const current = await loadCurrentLessons(db);
+  if (current.runId !== args.setId) return { ok: false, status: 409, error: "stale_set" };
+  const i = args.position - 1;
+  const target = current.lessons[i];
+  if (!target) return { ok: false, status: 404, error: "lesson_not_found" };
+
+  if (args.action === "pin" || args.action === "unpin") {
+    const pinned = args.action === "pin";
+    if (target.pinned === pinned) return { ok: true, noop: true };
+    const lessons = current.lessons.map((l, k) => (k === i ? { ...l, pinned } : l));
+    const ok = await writeSet(env, { baseSetId: args.setId, lessons, action: args.action, basedOn: args.setId, userId: args.userId, now });
+    return ok ? { ok: true } : refusal(env, args.setId, now);
+  }
+
+  const rest = current.lessons.filter((_, k) => k !== i);
+  // Delete and promote both take the lesson out of the set, and both remember
+  // it, so a night does not write it back from the same old notes. (Common
+  // issues alone would not stop that: its cover needs a word on both sides of
+  // the example, and deletions and punctuation fixes have none.)
+  // The newest approval is read inside the same batch, so an approval that
+  // commits while the change is in flight never counts as "after the delete".
+  const tombstone = (token: string) =>
+    db
+      .prepare(
+        `INSERT INTO lesson_deletions (lesson, example_before, example_after, deleted_at, deleted_by, approvals_through)
+         SELECT ?2, ?3, ?4, ?5, ?6, COALESCE((SELECT MAX(e.id) ${HAND_APPROVAL_JOIN}), 0)
+          WHERE EXISTS (SELECT 1 FROM lesson_runs WHERE night = ?1)`,
+      )
+      .bind(token, target.lesson, target.before, target.after, now, args.userId);
+
+  if (args.action === "delete") {
+    const ok = await writeSet(env, {
+      baseSetId: args.setId,
+      lessons: rest,
+      action: "delete",
+      basedOn: args.setId,
+      userId: args.userId,
+      now,
+      extra: (token) => [tombstone(token)],
+    });
+    return ok ? { ok: true } : refusal(env, args.setId, now);
+  }
+
+  // promote
+  const prefs = await db.prepare(`SELECT * FROM translation_prefs WHERE id = 1`).first<PrefsRow>();
+  const prevText = prefs?.common_issues_md ?? null;
+  const nextText = appendCommonIssue(prevText, promotedLine(target));
+  if (nextText.length > COMMON_ISSUES_MAX_CHARS) return { ok: false, status: 413, error: "common_issues_full" };
+  const changed = nextText !== (prevText ?? "");
+  const prevVersion = prefs ? prefs.version : 0;
+  const payload = JSON.stringify({ changed: { common_issues_md: { prev: prevText, new: nextText } } });
+  const ok = await writeSet(env, {
+    baseSetId: args.setId,
+    lessons: rest,
+    action: "promote",
+    basedOn: args.setId,
+    userId: args.userId,
+    now,
+    // Only a promote that changes Common issues depends on its version.
+    prefsVersion: changed ? (prefs ? prefs.version : null) : undefined,
+    extra: (token) =>
+      !changed
+        ? [tombstone(token)]
+        : [
+            tombstone(token),
+            prefs
+              ? db
+                  .prepare(
+                    `UPDATE translation_prefs SET common_issues_md = ?2, version = version + 1, updated_at = ?3, updated_by = ?4
+                      WHERE id = 1 AND EXISTS (SELECT 1 FROM lesson_runs WHERE night = ?1)`,
+                  )
+                  .bind(token, nextText, now, args.userId)
+              : db
+                  .prepare(
+                    `INSERT INTO translation_prefs (id, common_issues_md, version, updated_at, updated_by)
+                     SELECT 1, ?2, 1, ?3, ?4 WHERE EXISTS (SELECT 1 FROM lesson_runs WHERE night = ?1)`,
+                  )
+                  .bind(token, nextText, now, args.userId),
+            // The same entry PUT /prefs writes (so prefs history can restore
+            // around it), gated on the write just above landing.
+            db.prepare(PREFS_HISTORY_SQL).bind(args.userId, prevVersion, prefs ? "update" : "create", args.source ?? null, payload),
+          ],
+  });
+  if (!ok) return refusal(env, args.setId, now);
+  // Prefs only when Common issues changed: the page then remounts its editors.
+  if (!changed) return { ok: true };
+  return { ok: true, prefs: await db.prepare(`SELECT * FROM translation_prefs WHERE id = 1`).first<PrefsRow>() };
+}
+
+/** Make an earlier set current again, as a new set (history is never rewritten). */
+export async function restoreLessonSet(
+  env: Env,
+  args: { setId: number; currentSetId: number; userId: number | null; now?: number },
+): Promise<LessonEditResult> {
+  const db = env.DB;
+  const now = args.now ?? Math.floor(Date.now() / 1000);
+  const current = await loadCurrentLessons(db);
+  if (current.runId !== args.currentSetId) return { ok: false, status: 409, error: "stale_set" };
+  if (args.setId === args.currentSetId) return { ok: false, status: 400, error: "already_current" };
+  const exists = await db
+    .prepare(`SELECT id FROM lesson_runs WHERE id = ?1 AND status IN ${SET_STATUSES_SQL}`)
+    .bind(args.setId)
+    .first<{ id: number }>();
+  if (!exists) return { ok: false, status: 404, error: "set_not_found" };
+  const lessons = await loadLessonSet(db, args.setId);
+  // The restored lessons are live again: their deletion records go (same
+  // wording, or the same example), so a night treats them like any current
+  // lesson (#908 gate G4). A promoted lesson's line stays in Common issues.
+  const untomb = (token: string) =>
+    lessons.map((l) =>
+      db
+        .prepare(
+          `DELETE FROM lesson_deletions
+            WHERE (lesson = ?2 OR (?3 || ?4 <> '' AND example_before = ?3 AND example_after = ?4))
+              AND EXISTS (SELECT 1 FROM lesson_runs WHERE night = ?1)`,
+        )
+        .bind(token, l.lesson, l.before, l.after),
+    );
+  const ok = await writeSet(env, {
+    baseSetId: args.currentSetId,
+    lessons,
+    action: "restore",
+    basedOn: args.setId,
+    userId: args.userId,
+    now,
+    extra: untomb,
+  });
+  return ok ? { ok: true } : refusal(env, args.currentSetId, now);
+}
+
+// ---------------------------------------------------------------------------
+// Routes (mounted at /api/translation-memory/lessons), all admin-only:
 // switching on spends the workspace's own AI account every night that has new
-// approvals. Either change queues a context export, so the lessons section
-// appears in (or leaves) instructions.md without waiting for the night.
+// approvals, and a change to the set changes what every draft is told. Every
+// change queues a context export (awaited), so instructions.md follows
+// without waiting for the night.
 // ---------------------------------------------------------------------------
 
 type RouteEnv = { Bindings: Env; Variables: { userId?: number } };
 
 const PutBody = z.object({ enabled: z.boolean() }).strict();
+const EditBody = z
+  .object({
+    setId: z.number().int().positive(),
+    position: z.number().int().positive(),
+    action: z.enum(["delete", "pin", "unpin", "promote"]),
+  })
+  .strict();
+const RestoreBody = z.object({ setId: z.number().int().positive(), currentSetId: z.number().int().positive() }).strict();
 
 export function lessonsRoutes() {
   const app = new Hono<RouteEnv>();
@@ -1023,6 +1447,45 @@ export function lessonsRoutes() {
     // switch whose pack update was not yet requested.
     await queueContextExport(c);
     return c.json(await readLessonsState(c.env));
+  });
+
+  // The two set-changing routes end the same way: a refusal carries the fresh
+  // state so the page can redraw; a change queues the export, then answers.
+  const answer = async (c: Context<RouteEnv>, run: () => Promise<LessonEditResult>) => {
+    let out: LessonEditResult;
+    try {
+      out = await run();
+    } catch (e) {
+      if (tableMissing(e)) return c.json({ error: "not_migrated" }, 503);
+      throw e;
+    }
+    if (!out.ok) return c.json({ error: out.error, state: await readLessonsState(c.env) }, out.status);
+    if (!out.noop) await queueContextExport(c);
+    return c.json({ ...(await readLessonsState(c.env)), ...(out.prefs !== undefined ? { prefs: out.prefs } : {}) });
+  };
+
+  const readBody = async (c: Context<RouteEnv>): Promise<unknown> => {
+    try {
+      return await c.req.json();
+    } catch {
+      return undefined;
+    }
+  };
+
+  app.post("/edit", requireAdmin, async (c) => {
+    const body = await readBody(c);
+    if (body === undefined) return c.json({ error: "invalid_json" }, 400);
+    const parsed = EditBody.safeParse(body);
+    if (!parsed.success) return c.json({ error: "validation_failed", issues: parsed.error.issues }, 400);
+    return answer(c, () => editLesson(c.env, { ...parsed.data, userId: currentUserId(c), source: editSource(c) }));
+  });
+
+  app.post("/restore", requireAdmin, async (c) => {
+    const body = await readBody(c);
+    if (body === undefined) return c.json({ error: "invalid_json" }, 400);
+    const parsed = RestoreBody.safeParse(body);
+    if (!parsed.success) return c.json({ error: "validation_failed", issues: parsed.error.issues }, 400);
+    return answer(c, () => restoreLessonSet(c.env, { ...parsed.data, userId: currentUserId(c) }));
   });
 
   return app;

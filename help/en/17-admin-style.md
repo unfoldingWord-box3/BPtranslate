@@ -43,14 +43,24 @@ You cannot add or edit rules on this page. New rules are added by the developmen
 Lessons are **Off** for every project until an admin turns them on. While they are off, the page says so: the AI is NOT learning from editor corrections, and new drafts get only the sections above. Turn lessons on when your editors have approved enough notes, for example after a few weeks of work.
 
 - On a night with new approvals, the app compares the AI draft with the approved note for the notes that count as examples (see **Examples** above), in the 2 most recently approved chapters. If there are more notes than it can compare in one night, the next night finishes the same chapters first, even if editors have moved on to other chapters, and the newest chapters come after that.
-- The app makes one call to your AI service on each night it runs. Your project's AI account pays for it. The page shows the last run, what happened, and about what it cost. A night with no new approvals makes no call, unless the night before failed or did not finish its chapters: then the app tries again. If a run is cut off part-way, a later run the same night can start it again, which can cost a second call.
+- The app calls your AI service once on a night that found corrections to learn from. Your project's AI account pays for it. The page shows the last run, what happened, and about what it cost. A night that finds no corrections makes no call. A night with no new approvals makes no call either, unless an earlier night failed or did not finish its notes: then the app tries again, and after a run that ran out of time that can still happen two nights later. If a run is cut off part-way, a later run the same night can start it again, which can cost a second call.
 - Lessons need Claude or Gemini in **AI service**. With another provider the page says **Not available with your AI provider**, and lessons cannot be turned on.
-- A lesson stays until editors start changing its words back. A lesson that works makes its correction rarer, and that does not remove it.
+- A lesson stays until editors start changing its words back, or until you delete it. A lesson that works makes its correction rarer, and that does not remove it.
 - A new lesson that only repeats a term, a template, the instructions or the common issues is left out. At most 25 lessons are kept.
 - In Arabic, writing or leaving out the vowel on a shadda (أنَّ or أنّ) is a choice, not an error, so it never becomes a lesson.
 - When a night changes the wording or examples of the lessons, the app exports the context pack again, and the AI gets the new lessons from then on. When you turn lessons off, the next export leaves them out. The list is kept.
 
-You cannot edit or remove lessons on this page yet.
+### Pin, delete, or move a lesson to Common issues
+Each lesson has three buttons. Each change is saved as a new version of the list, and the context pack is exported again so the AI gets the new list.
+
+- **Pin** keeps the lesson, word for word, every night. A night cannot reword it, remove it as reversed, or drop it to make room. **Unpin** lets nights change it again.
+- **Delete** removes the lesson. A night does not bring it back from the notes it was learned from. It comes back only if editors make the same correction again in notes approved after you deleted it.
+- **Move to Common issues** adds the lesson and its example to the end of **Common issues** (above) and removes it from the list. As with Delete, a night does not write it back from the same notes. The change to Common issues shows in its **History** like any other save. While Common issues has unsaved changes on the same page, this button waits until you save or undo them.
+
+If a night's run is in progress, or someone else changed the list after you opened the page, the page says so and shows the current list. Try again.
+
+### Restore an earlier list
+Under **Earlier versions of this list**, each night's list and each change made here is shown with its date and number of lessons. **Restore** makes that version the current list again. The list you had stays in the history, so you can restore it too. A restored lesson is a current lesson again, even one you had deleted or moved to Common issues. A restore does not change Common issues: a line a lesson added there stays.
 
 ## See who changed the preferences, and undo a change
 Every save of **Brief**, **Instructions** and **Common issues** is kept, whether it was made here or by the chat assistant. Press **History** above the Brief section to see the list, newest first.

@@ -98,11 +98,11 @@ export const ADMIN_SURFACES: AdminSurfaceEntry[] = [
   },
   {
     id: "lessons",
-    label: "Lessons from editor corrections (nightly AI-written lessons in instructions.md; on/off switch, read-only list, last run and cost)",
+    label: "Lessons from editor corrections (nightly AI-written lessons in instructions.md; on/off switch, per-lesson pin / delete / move to Common issues, restore an earlier set, last run and cost)",
     classic: { section: "lessons", file: PREFS },
     desk: { page: "style", file: STYLE, anchor: "<LessonsSection" },
     notes:
-      "#817 part 1. Both sides mount the shared LessonsSection (components/LessonsSection.tsx); admin-only, like GET/PUT /api/translation-memory/lessons. Off by default for every workspace. Per-lesson delete / pin / promote and restoring an older night's set are part 2 (still open on #817).",
+      "#817 part 1, #908 part 2. Both sides mount the shared LessonsSection (components/LessonsSection.tsx) with onPrefsChanged, so a lesson moved to Common issues shows in that editor at once; admin-only, like /api/translation-memory/lessons (GET, PUT, POST /edit, POST /restore). Off by default for every workspace.",
   },
   {
     id: "setupWizard",

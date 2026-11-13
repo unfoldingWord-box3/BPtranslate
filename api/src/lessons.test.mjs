@@ -31,7 +31,13 @@ import {
   loadCurrentLessons,
   PROMPT_CHAR_CAP,
   RUN_STALE_SECONDS,
+  editLesson,
+  restoreLessonSet,
+  deletedStill,
+  appendCommonIssue,
+  promotedLine,
 } from "./lessons.ts";
+import { buildInbox, computeInbox, coveredByLesson } from "./suggestionInbox.ts";
 import { runContextExportExclusive, startQueuedContextExport } from "./contextExportQueue.ts";
 import { Hono } from "hono";
 import { encryptApiKey } from "./aiKeyCrypto.ts";
@@ -913,4 +919,359 @@ test("a call that throws before any usage comes back still counts as a call", as
   const row = f.runs().at(-1);
   assert.equal(row.calls, 1, "the page must not say no call was made");
   assert.equal(row.cost_usd, null);
+});
+
+// ── part 2 (#908): delete, pin, promote, restore; coveredByLesson; leftovers ──
+
+const NIGHT3 = NIGHT2 + 86400;
+const NIGHT4 = NIGHT3 + 86400;
+const THREE = [
+  { id: null, lesson: "Start with «فيمكنك».", before: "يمكنك", after: "فيمكنك", evidence: 5 },
+  { id: null, lesson: "Say «ذلك» here.", before: "هذا", after: "ذلك", evidence: 3 },
+  { id: null, lesson: "Use «لكي» for purpose.", before: "أن", after: "لكي", evidence: 2 },
+];
+const replyWith = (lessons, reversed = []) => () => ({
+  text: `${BEGIN_OUTPUT}\n${JSON.stringify({ lessons, reversed })}\n${END_OUTPUT}`,
+  usage: { inputTokens: 10, outputTokens: 5 },
+  stopReason: "end_turn",
+});
+// One more hand-approved note in MRK 4 with an unrelated change.
+function approveOther(f, tag) {
+  const id = `z${tag}`;
+  f.sqlite
+    .prepare(
+      `INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, support_reference, quote, note, sort_order, version, translation_state, updated_at)
+       VALUES (?, 'MRK', 4, 1, '4:1', 'rc://*/ta/man/translate/figs-metaphor', 'q', ?, 10, 2, 'validated', 1000)`,
+    )
+    .run(id, `كلام آخر ${tag}`);
+  f.sqlite
+    .prepare(
+      `INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action, source, payload_json)
+       VALUES ('tn', ?, 'MRK', NULL, 1, 2, 'update', 'ai_pipeline', ?)`,
+    )
+    .run(id, JSON.stringify({ id, note: `قول آخر ${tag}` }));
+  f.sqlite
+    .prepare(`INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action) VALUES ('tn', ?, 'MRK', 9, 2, 2, 'validate')`)
+    .run(id);
+}
+
+async function withThree() {
+  const f = await fresh();
+  f.setReply(replyWith(THREE));
+  assert.equal((await f.run()).status, "ok");
+  f.setReply(null);
+  return f;
+}
+
+test("routes (#908): admin pins, deletes, promotes and restores; each is a new set and the last run stays the night's", async () => {
+  const f = await withThree();
+  const admin = appFor(f.env, "admin");
+  const post = (path, body, who = admin) =>
+    who(`/api/translation-memory/lessons/${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+  let state = await (await admin("/api/translation-memory/lessons", { method: "GET" })).json();
+  const s1 = state.setId;
+  assert.equal(state.lessons.length, 3);
+  assert.deepEqual(state.sets.map((s) => [s.kind, s.count]), [["night", 3]]);
+
+  // Pin the second lesson.
+  let res = await post("edit", { setId: s1, position: 2, action: "pin" });
+  assert.equal(res.status, 200);
+  state = await res.json();
+  assert.notEqual(state.setId, s1, "a pin writes a new set");
+  assert.deepEqual(state.lessons.map((l) => l.pinned), [false, true, false]);
+  assert.equal(state.lastRun.status, "ok", "an admin change is not shown as the last run");
+  assert.equal(state.lastRun.id, s1);
+  assert.deepEqual(state.sets.map((s) => [s.kind, s.action, s.count]), [["edit", "pin", 3], ["night", null, 3]]);
+
+  // The old set id is stale now.
+  res = await post("edit", { setId: s1, position: 1, action: "delete" });
+  assert.equal(res.status, 409);
+  const stale = await res.json();
+  assert.equal(stale.error, "stale_set");
+  assert.equal(stale.state.setId, state.setId, "the refusal carries the fresh state");
+
+  // Delete the first lesson.
+  res = await post("edit", { setId: state.setId, position: 1, action: "delete" });
+  assert.equal(res.status, 200);
+  state = await res.json();
+  assert.deepEqual(state.lessons.map((l) => l.lesson), ["Say «ذلك» here.", "Use «لكي» for purpose."]);
+  assert.equal(state.lessons[0].pinned, true, "the pin survives the next change");
+  const del = f.sqlite.prepare(`SELECT * FROM lesson_deletions`).all();
+  assert.equal(del.length, 1);
+  assert.equal(del[0].example_before, "يمكنك");
+  assert.ok(del[0].approvals_through > 0);
+
+  // Promote the last lesson to Common issues.
+  const v0 = f.sqlite.prepare(`SELECT version FROM translation_prefs WHERE id = 1`).get().version;
+  res = await post("edit", { setId: state.setId, position: 2, action: "promote" });
+  assert.equal(res.status, 200);
+  state = await res.json();
+  assert.deepEqual(state.lessons.map((l) => l.lesson), ["Say «ذلك» here."]);
+  assert.equal(state.prefs.common_issues_md, "- «قال» → «يقول»\n- Use «لكي» for purpose. Example: «أن» → «لكي»");
+  assert.equal(state.prefs.version, v0 + 1, "a prefs save: the version moves, so an open editor cannot overwrite it");
+  const hist = f.sqlite.prepare(`SELECT * FROM edit_log WHERE kind = 'prefs' ORDER BY id DESC LIMIT 1`).get();
+  assert.equal(hist.prev_version, v0);
+  assert.equal(hist.new_version, v0 + 1);
+  assert.equal(JSON.parse(hist.payload_json).changed.common_issues_md.new, state.prefs.common_issues_md);
+
+  // Restore the night's set: a new set, history untouched.
+  res = await post("restore", { setId: s1, currentSetId: state.setId });
+  assert.equal(res.status, 200);
+  state = await res.json();
+  assert.deepEqual(state.lessons.map((l) => l.lesson), THREE.map((l) => l.lesson));
+  assert.deepEqual(state.lessons.map((l) => l.pinned), [false, false, false], "a restored set comes back as it was stored");
+  assert.deepEqual(state.sets.map((s) => s.action), ["restore", "promote", "delete", "pin", null]);
+  assert.equal(f.sqlite.prepare(`SELECT COUNT(*) AS n FROM lessons WHERE run_id = ?`).get(s1).n, 3, "the night's set is never rewritten");
+  assert.equal((await loadLessonsForRender(f.env.DB)).length, 3, "the pack renders the restored set");
+  assert.equal((await post("restore", { setId: state.setId, currentSetId: state.setId })).status, 400);
+  assert.equal((await post("restore", { setId: 999, currentSetId: state.setId })).status, 404);
+  assert.equal((await post("edit", { setId: state.setId, position: 9, action: "pin" })).status, 404);
+  assert.equal((await post("edit", { setId: state.setId, position: 1, action: "rename" })).status, 400);
+
+  // Editors get 403 on every lessons route.
+  const editor = appFor(f.env, "editor");
+  assert.equal((await post("edit", { setId: state.setId, position: 1, action: "delete" }, editor)).status, 403);
+  assert.equal((await post("restore", { setId: s1, currentSetId: state.setId }, editor)).status, 403);
+  assert.equal((await loadCurrentLessons(f.env.DB)).runId, state.setId, "nothing changed");
+});
+
+test("an admin change answers only after the context export is marked pending (#908)", async () => {
+  const f = await withThree();
+  const created = [];
+  const env = { ...f.env, DCS_SERVICE_TOKEN: "service-token", EXPORT_WORKFLOW: { create: async (o) => (created.push(o), { id: o.id }) } };
+  const app = new Hono();
+  app.use("*", async (c, next) => {
+    c.set("userId", 9);
+    c.set("role", "admin");
+    await next();
+  });
+  app.route("/api/translation-memory", translationMemory);
+  const { runId: setId } = await loadCurrentLessons(f.env.DB);
+  const res = await app.request(
+    "/api/translation-memory/lessons/edit",
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ setId, position: 1, action: "delete" }) },
+    env,
+    { waitUntil() {}, passThroughOnException() {} },
+  );
+  assert.equal(res.status, 200);
+  assert.equal(created.length, 1, "the export was started before the answer");
+});
+
+test("no admin change lands while a nightly run is in progress; a killed run does not block (#908)", async () => {
+  const f = await withThree();
+  const { runId } = await loadCurrentLessons(f.env.DB);
+  const now = NIGHT2;
+  f.sqlite.prepare(`INSERT INTO lesson_runs (night, started_at, status, approvals_through) VALUES ('2026-11-13', ?, 'running', 1)`).run(now - 60);
+  let out = await editLesson(f.env, { setId: runId, position: 1, action: "delete", userId: 9, now });
+  assert.deepEqual(out, { ok: false, status: 409, error: "run_in_progress" });
+  assert.equal((await loadCurrentLessons(f.env.DB)).runId, runId);
+  assert.equal(f.sqlite.prepare(`SELECT COUNT(*) AS n FROM lesson_deletions`).get().n, 0, "nothing of the change landed");
+  out = await editLesson(f.env, { setId: runId, position: 1, action: "delete", userId: 9, now: now + RUN_STALE_SECONDS + 1 });
+  assert.equal(out.ok, true);
+});
+
+test("a pinned lesson survives the night: the model cannot reverse, reword or crowd it out (#908)", async () => {
+  const f = await withThree();
+  const { runId } = await loadCurrentLessons(f.env.DB);
+  assert.equal((await editLesson(f.env, { setId: runId, position: 3, action: "pin", userId: 9, now: NIGHT1 + 60 })).ok, true);
+  f.approveMore();
+  // The model rewords L3 (the pinned one) under its id and reverses L1.
+  f.setReply(replyWith([{ id: "L3", lesson: "Never use «لكي».", before: "لكي", after: "أن", evidence: 9 }, { id: "L2", lesson: "Say «ذلك».", before: "هذا", after: "ذلك", evidence: 4 }], ["L1"]));
+  assert.equal((await f.run(NIGHT2)).status, "ok");
+  const after = (await loadCurrentLessons(f.env.DB)).lessons;
+  assert.deepEqual(after.map((l) => [l.lesson, l.pinned]), [["Say «ذلك».", false], ["Use «لكي» for purpose.", true]]);
+  assert.match(f.calls.at(-1).user, /^L3\. Use «لكي» for purpose\./m, "the pinned lesson is still in the prompt as a current lesson");
+
+  // Over the cap, new lessons go and the pinned one stays.
+  const current = Array.from({ length: MAX_LESSONS }, (_, i) => ({ ...L(`old ${i}`), pinned: i === MAX_LESSONS - 1 }));
+  const merged = mergeLessons(current, { lessons: [{ id: null, lesson: "new", before: "", after: "", evidence: 1 }], reversed: [`L${MAX_LESSONS}`] }, ctx, 3);
+  assert.equal(merged.length, MAX_LESSONS);
+  assert.equal(merged.filter((l) => l.pinned).length, 1, "a pinned lesson named as reversed stays");
+});
+
+test("a deleted lesson does not come back from the notes it was learned from, only from newer approvals (#908)", async () => {
+  const f = await fresh();
+  assert.equal((await f.run()).status, "ok");
+  const first = await loadCurrentLessons(f.env.DB);
+  assert.match(first.lessons[0].lesson, /فيمكنك/);
+  assert.equal((await editLesson(f.env, { setId: first.runId, position: 1, action: "delete", userId: 9, now: NIGHT1 + 60 })).ok, true);
+
+  // A new approval with an unrelated change: the window still shows يمكنك → فيمكنك
+  // (older notes) and the fake model proposes it again. Dropped.
+  approveOther(f, "a");
+  assert.equal((await f.run(NIGHT2)).status, "ok");
+  assert.equal(f.calls.length, 2);
+  assert.deepEqual((await loadCurrentLessons(f.env.DB)).lessons, [], "not brought back from the same old notes");
+
+  // An editor makes the same correction in a note approved after the delete: it may return.
+  f.approveMore();
+  assert.equal((await f.run(NIGHT3)).status, "ok");
+  const back = (await loadCurrentLessons(f.env.DB)).lessons;
+  assert.equal(back.length, 1);
+  assert.equal(back[0].after, "فيمكنك");
+
+  // deletedStill, directly: wording alone matches too, and an example-less deletion never lifts.
+  const d = [{ lesson: "Do X.", before: "", after: "", approvalsThrough: 5 }];
+  assert.equal(deletedStill({ lesson: "do x.", before: "a", after: "b" }, d, [{ before: "a", after: "b", lastApproval: 99 }]), true);
+  assert.equal(deletedStill({ lesson: "Other.", before: "a", after: "b" }, d, []), false);
+});
+
+test("promote: the line is added once, and a full Common issues refuses with 413 (#908)", async () => {
+  assert.equal(appendCommonIssue(null, "- a"), "- a");
+  assert.equal(appendCommonIssue("x\n\n", "- a"), "x\n- a");
+  assert.equal(appendCommonIssue("x\n- a\n", "- a"), "x\n- a\n", "an existing identical line is not added again");
+  assert.equal(promotedLine({ lesson: "L.", before: "b", after: "", evidence: 7, firstSeenAt: 1, pinned: false }), "- L. Example: «b» → «∅»");
+
+  const f = await withThree();
+  f.sqlite.prepare(`UPDATE translation_prefs SET common_issues_md = ? WHERE id = 1`).run("x".repeat(49990));
+  const { runId } = await loadCurrentLessons(f.env.DB);
+  const out = await editLesson(f.env, { setId: runId, position: 1, action: "promote", userId: 9 });
+  assert.deepEqual(out, { ok: false, status: 413, error: "common_issues_full" });
+  assert.equal((await loadCurrentLessons(f.env.DB)).lessons.length, 3, "the lesson stays when promote is refused");
+
+  // No prefs row yet: promote creates it (version 1) with a 'create' history entry.
+  f.sqlite.prepare(`DELETE FROM translation_prefs`).run();
+  const ok = await editLesson(f.env, { setId: runId, position: 1, action: "promote", userId: 9 });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.prefs.version, 1);
+  assert.equal(ok.prefs.common_issues_md, "- Start with «فيمكنك». Example: «يمكنك» → «فيمكنك»");
+  assert.equal(f.sqlite.prepare(`SELECT action FROM edit_log WHERE kind = 'prefs' ORDER BY id DESC LIMIT 1`).get().action, "create");
+});
+
+test("suggestion inbox: a card whose change is a current lesson's example is covered, only while lessons are on (#908)", async () => {
+  const rows = Array.from({ length: 10 }, (_, i) => ({ id: `x${i}`, chapter: 1 + (i % 3), draftNote: `مهم جدا ${i}`, finalNote: `مهم ${i}` }));
+  const base = { rules: [], terms: [], templates: [], commonIssues: "", rejected: new Set() };
+  assert.equal(buildInbox(rows, base).suggestions.length, 1);
+  const covered = buildInbox(rows, { ...base, lessons: [{ before: "جدا", after: "" }] });
+  assert.equal(covered.suggestions.length, 0);
+  assert.equal(covered.excluded.lesson, 1);
+  assert.equal(buildInbox(rows, { ...base, lessons: [{ before: "جدا", after: "كثيرا" }] }).suggestions.length, 1);
+  assert.equal(coveredByLesson({ before: "", after: "" }, [{ before: "", after: "" }]), false);
+
+  // The loader reads the current set only while the switch is on.
+  const f = await fresh();
+  await f.run();
+  const on = await computeInbox(f.env.DB, "MRK");
+  assert.ok(on.excluded.lesson >= 1);
+  await setLessonsEnabled(f.env.DB, false, 9);
+  const off = await computeInbox(f.env.DB, "MRK");
+  assert.equal(off.excluded.lesson, 0);
+  assert.equal(off.suggestions.length, on.suggestions.length + on.excluded.lesson);
+});
+
+test("leftover 6: a database with 0085 but not 0086 reads as not_migrated, not a failure (#908)", async () => {
+  const sqlite = new DatabaseSync(":memory:");
+  const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations");
+  for (const file of readdirSync(dir).filter((x) => x.endsWith(".sql") && x < "0086").sort()) {
+    sqlite.exec(readFileSync(join(dir, file), "utf8"));
+  }
+  const db = makeDb(sqlite);
+  await setLessonsEnabled(db, true, null);
+  assert.deepEqual(await runNightlyLessons({ DB: db, WORKSPACE_SLUG: "x" }, { now: NIGHT1 }), { ran: false, reason: "not_migrated" });
+});
+
+test("leftover 4: a stored resume whose approvals were un-approved since is stale; the newest chapters are mined (#908)", async () => {
+  const f = await fresh();
+  await f.runWith(NIGHT1, { cells: 1 });
+  assert.equal(f.runs().at(-1).truncated, 1, "night 1 stopped among new approvals in MRK 3 + MRK 2");
+  // Every note of MRK 2 and MRK 3 is sent back to draft, then editors approve in MRK 4.
+  f.sqlite.prepare(`UPDATE tn_rows SET translation_state = 'draft' WHERE chapter IN (2, 3)`).run();
+  approveIn(f, 4, "c401");
+  const out = await f.run(NIGHT2);
+  assert.equal(out.status, "ok");
+  assert.match(f.calls[1].user, /Chapters: MRK 4, MRK 1\./, "not the stale MRK 3, MRK 2");
+});
+
+test("a lesson moved to Common issues does not come back from the same notes, even with no word on one side (#908)", async () => {
+  const f = await fresh();
+  // A deletion-shaped lesson: Common issues' own cover needs a word on both sides, so it cannot stop it.
+  const del = [{ id: null, lesson: "Drop «جدا» here.", before: "جدا", after: "", evidence: 3 }];
+  f.setReply(replyWith(del));
+  assert.equal((await f.run()).status, "ok");
+  const { runId } = await loadCurrentLessons(f.env.DB);
+  assert.equal((await editLesson(f.env, { setId: runId, position: 1, action: "promote", userId: 9, now: NIGHT1 + 60 })).ok, true);
+  assert.equal(f.sqlite.prepare(`SELECT COUNT(*) AS n FROM lesson_deletions`).get().n, 1);
+  approveOther(f, "p");
+  assert.equal((await f.run(NIGHT2)).status, "ok");
+  assert.deepEqual((await loadCurrentLessons(f.env.DB)).lessons, [], "not written back the next night");
+});
+
+// ── gate review (#908): G2 kept lessons and tombstones, G3 no-op pin, G4 restore clears tombstones ──
+
+test("G2: a night cannot rewrite a kept lesson into a deleted one from the old notes (#908)", () => {
+  const current = [L("Keep A.", "أ", "ب"), L("Keep B.", "ج", "د")];
+  const deleted = [{ lesson: "Gone.", before: "x", after: "y", approvalsThrough: 100 }];
+  const parsed = {
+    lessons: [
+      { id: "L1", lesson: "Gone.", before: "أ", after: "ب", evidence: 4 },
+      { id: "L2", lesson: "Keep B, reworded.", before: "x", after: "y", evidence: 6 },
+    ],
+    reversed: [],
+  };
+  const out = mergeLessons(current, parsed, { ...ctx, deleted, changes: [{ before: "x", after: "y", lastApproval: 90 }] }, 5);
+  assert.deepEqual(
+    out.map((l) => [l.lesson, l.before, l.after]),
+    [["Keep A.", "أ", "ب"], ["Keep B.", "ج", "د"]],
+    "both kept lessons keep their own wording and example",
+  );
+  assert.equal(out[1].evidence, 6, "the new evidence count is still taken");
+  // Supported anew (a note approved after the delete): the rewrite is allowed.
+  const anew = mergeLessons(current, parsed, { ...ctx, deleted, changes: [{ before: "x", after: "y", lastApproval: 101 }] }, 5);
+  assert.deepEqual(anew[1].lesson, "Keep B, reworded.");
+});
+
+function countingExportEnv(f) {
+  const seen = { lock: 0 };
+  const db = f.env.DB;
+  return {
+    seen,
+    env: {
+      ...f.env,
+      DB: { ...db, prepare: (sql) => (/context_export_lock/.test(sql) && seen.lock++, db.prepare(sql)) },
+      DCS_SERVICE_TOKEN: "service-token",
+      EXPORT_WORKFLOW: { create: async (o) => ({ id: o.id }) },
+    },
+  };
+}
+
+test("G3: pinning a lesson that is already pinned changes nothing and queues no export (#908)", async () => {
+  const f = await withThree();
+  const { seen, env } = countingExportEnv(f);
+  const admin = appFor(env, "admin");
+  const post = (body) =>
+    admin("/api/translation-memory/lessons/edit", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const { runId } = await loadCurrentLessons(f.env.DB);
+  let res = await post({ setId: runId, position: 1, action: "unpin" });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).setId, runId, "no new set");
+  assert.equal(seen.lock, 0, "no context export queued");
+  res = await post({ setId: runId, position: 1, action: "pin" });
+  const pinned = await res.json();
+  assert.notEqual(pinned.setId, runId);
+  assert.ok(seen.lock > 0, "a real change queues the export");
+  const before = seen.lock;
+  res = await post({ setId: pinned.setId, position: 1, action: "pin" });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).setId, pinned.setId);
+  assert.equal(seen.lock, before, "pinning again queues nothing");
+  assert.equal((await post({ setId: runId, position: 1, action: "pin" })).status, 409, "a stale set is still refused");
+});
+
+test("G4: restoring a set clears the tombstones of the lessons it brings back; Common issues is left alone (#908)", async () => {
+  const f = await withThree();
+  const s1 = (await loadCurrentLessons(f.env.DB)).runId;
+  let out = await editLesson(f.env, { setId: s1, position: 1, action: "delete", userId: 9, now: NIGHT1 + 60 });
+  assert.equal(out.ok, true);
+  let cur = (await loadCurrentLessons(f.env.DB)).runId;
+  out = await editLesson(f.env, { setId: cur, position: 2, action: "promote", userId: 9, now: NIGHT1 + 61 });
+  assert.equal(out.ok, true);
+  const ci = out.prefs.common_issues_md;
+  assert.equal(f.sqlite.prepare(`SELECT COUNT(*) AS n FROM lesson_deletions`).get().n, 2);
+  cur = (await loadCurrentLessons(f.env.DB)).runId;
+  assert.equal((await restoreLessonSet(f.env, { setId: s1, currentSetId: cur, userId: 9, now: NIGHT1 + 62 })).ok, true);
+  assert.equal(f.sqlite.prepare(`SELECT COUNT(*) AS n FROM lesson_deletions`).get().n, 0, "both restored lessons are live again");
+  assert.equal(f.sqlite.prepare(`SELECT common_issues_md FROM translation_prefs WHERE id = 1`).get().common_issues_md, ci);
+  // The night that follows may keep, reword or re-add them like any other lesson.
+  assert.deepEqual(deletedStill({ lesson: THREE[0].lesson, before: THREE[0].before, after: THREE[0].after }, [], []), false);
 });

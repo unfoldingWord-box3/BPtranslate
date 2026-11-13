@@ -29,6 +29,7 @@ import { getLatestSuccessfulContextExport } from "./contextExportResults.ts";
 import { queueContextExport } from "./contextExportQueue.ts";
 import { compileRule, ruleFromRow, type HouseStyleRuleRow } from "./houseStyle.ts";
 import { lessonsRoutes } from "./lessons.ts";
+import { PREFS_HISTORY_SQL } from "./prefsHistorySql.ts";
 
 export const translationMemory = new Hono<{
   Bindings: Env;
@@ -122,17 +123,8 @@ function prefsHistoryPayload(prev: PrefsFields, next: PrefsFields): string {
   return JSON.stringify({ changed });
 }
 
-// One edit_log entry per successful save (issue #786): kind 'prefs', row_key
-// '1' (the singleton), book NULL; source is editSource(c), so 'chat' for the
-// chat assistant and NULL for the web app. Batched after the write it audits
-// and gated on changes(), so a lost CAS or first-write race records nothing.
-// Every edit_log reader filters on kind (tn/tq/twl/verse/tw/ta/template), so
-// these entries change nothing they compute; the retention sweep in index.ts
-// skips kind 'prefs' so the trail outlives 180 days.
-// ?1 user, ?2 prev_version, ?3 action, ?4 source, ?5 payload.
-const PREFS_HISTORY_SQL = `INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action, source, payload_json)
-  SELECT 'prefs', '1', NULL, ?1, ?2, ?2 + 1, ?3, ?4, ?5
-   WHERE (SELECT changes()) > 0`;
+// PREFS_HISTORY_SQL (the edit_log entry every save writes) lives in
+// prefsHistorySql.ts, so the lessons promote route (#908) writes the same entry.
 
 // PUT /prefs — admin-only. If-Match version CAS. Upserts the singleton: on the
 // first write (row absent) the INSERT fires with version 1; thereafter the

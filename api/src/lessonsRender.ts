@@ -11,7 +11,9 @@ type Db = {
   };
 };
 
-const tableMissing = (e: unknown) => /no such table/i.test(e instanceof Error ? e.message : String(e));
+// A missing table OR column: a database a migration behind (0085 without 0086
+// or 0087) reads as not migrated, not as a failure (#908 leftover 6).
+export const tableMissing = (e: unknown) => /no such (?:table|column)/i.test(e instanceof Error ? e.message : String(e));
 
 export const LESSONS_HEADING = "## Lessons from recent editor corrections";
 
@@ -25,6 +27,8 @@ export type Lesson = {
   evidence: number;
   /** When this lesson first appeared (unix seconds). */
   firstSeenAt: number;
+  /** Pinned by an admin (#908): every nightly merge keeps it as it is. */
+  pinned: boolean;
 };
 
 /** The switch. No row, or a missing table (unmigrated workspace), reads as off. */
@@ -44,33 +48,45 @@ type LessonRow = {
   example_after: string;
   evidence: number;
   first_seen_at: number;
+  pinned: number;
 };
 
-/** The set written by the newest successful run (empty when none). Missing tables read as empty. */
+/**
+ * Statuses whose lesson_runs row holds a lesson set: a night's successful run
+ * ('ok') and an admin's change ('edited', #908). The newest one is current.
+ */
+export const SET_STATUSES_SQL = `('ok', 'edited')`;
+
+/** One stored set's lessons, in order. */
+export async function loadLessonSet(db: Db, runId: number): Promise<Lesson[]> {
+  const rs = await db
+    .prepare(
+      `SELECT lesson, example_before, example_after, evidence, first_seen_at, pinned
+         FROM lessons WHERE run_id = ?1 ORDER BY position`,
+    )
+    .bind(runId)
+    .all<LessonRow>();
+  return (rs.results ?? []).map((r) => ({
+    lesson: r.lesson,
+    before: r.example_before,
+    after: r.example_after,
+    evidence: r.evidence,
+    firstSeenAt: r.first_seen_at,
+    pinned: r.pinned === 1,
+  }));
+}
+
+/**
+ * The current set: the newest night's successful run or admin change (empty
+ * when none). runId is that set's lesson_runs id. Missing tables read as empty.
+ */
 export async function loadCurrentLessons(db: Db): Promise<{ runId: number | null; setAt: number | null; lessons: Lesson[] }> {
   try {
     const run = await db
-      .prepare(`SELECT id, finished_at FROM lesson_runs WHERE status = 'ok' ORDER BY id DESC LIMIT 1`)
+      .prepare(`SELECT id, finished_at FROM lesson_runs WHERE status IN ${SET_STATUSES_SQL} ORDER BY id DESC LIMIT 1`)
       .first<{ id: number; finished_at: number | null }>();
     if (!run) return { runId: null, setAt: null, lessons: [] };
-    const rs = await db
-      .prepare(
-        `SELECT lesson, example_before, example_after, evidence, first_seen_at
-           FROM lessons WHERE run_id = ?1 ORDER BY position`,
-      )
-      .bind(run.id)
-      .all<LessonRow>();
-    return {
-      runId: run.id,
-      setAt: run.finished_at,
-      lessons: (rs.results ?? []).map((r) => ({
-        lesson: r.lesson,
-        before: r.example_before,
-        after: r.example_after,
-        evidence: r.evidence,
-        firstSeenAt: r.first_seen_at,
-      })),
-    };
+    return { runId: run.id, setAt: run.finished_at, lessons: await loadLessonSet(db, run.id) };
   } catch (e) {
     if (tableMissing(e)) return { runId: null, setAt: null, lessons: [] };
     throw e;

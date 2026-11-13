@@ -370,7 +370,12 @@ export function PreferencesWorkspace({ onNavigate, onBack, section, role }: Prop
           ) : section === "houseStyle" && role === "admin" ? (
             <HouseStyleRulesSection />
           ) : section === "lessons" && role === "admin" ? (
-            <LessonsSection />
+            <LessonsSection
+              onPrefsChanged={(p) => {
+                prefsState.apply(p);
+                setPrefsGen((g) => g + 1);
+              }}
+            />
           ) : cfg === null ? null : !isTranslation ? (
             <Alert severity="info" variant="outlined">
               {t("preferences.glOnly")}
