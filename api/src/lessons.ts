@@ -239,14 +239,19 @@ export async function approvalWatermark(db: Db): Promise<number | null> {
   return r?.w ?? null;
 }
 
-/** The chapters whose newest hand approval is newest. */
-export async function recentApprovedChapters(db: Db, n = RECENT_CHAPTERS): Promise<ChapterRef[]> {
+/**
+ * The chapters whose newest hand approval is newest, counting only approvals
+ * up to `upTo` when given (the night's watermark: a later one must not push a
+ * chapter out of tonight's window, #923).
+ */
+export async function recentApprovedChapters(db: Db, n = RECENT_CHAPTERS, upTo: number | null = null): Promise<ChapterRef[]> {
   const rs = await db
     .prepare(
       `SELECT t.book AS book, t.chapter AS chapter, MAX(e.id) AS last_id ${HAND_APPROVAL_JOIN}
+          AND (?2 IS NULL OR e.id <= ?2)
         GROUP BY t.book, t.chapter ORDER BY last_id DESC LIMIT ?1`,
     )
-    .bind(n)
+    .bind(n, upTo)
     .all<{ book: string; chapter: number }>();
   return (rs.results ?? []).map((r) => ({ book: r.book, chapter: r.chapter }));
 }
@@ -869,16 +874,17 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
   // un-approved since) is stale, however old: mine the newest chapters instead
   // (#908 leftover 4). Otherwise: the newest chapters, plus any chapter a
   // resume left owed (marked below the watermark, still holding a new
-  // approval) that is no longer among them. Every read is bounded by the
-  // watermark read first: an approval committed after it is the next night's
-  // (#923).
+  // approval) that is no longer among them. The newest-chapters window, the
+  // new-approval checks below and the mining's "new" count only approvals up
+  // to the watermark read first: one committed after it is the next night's
+  // and cannot move tonight's window (#923).
   const marks = parseMarks(prev?.marks_json ?? null);
   const afterIn: AfterIn = (c) => marks.get(chapterKey(c))?.through ?? last;
   try {
     watermark = await approvalWatermark(db);
     if (watermark == null) return { ran: false, reason: "no_new_approvals" };
     const upTo = watermark;
-    newest = await recentApprovedChapters(db);
+    newest = await recentApprovedChapters(db, RECENT_CHAPTERS, upTo);
     const stored = prev?.truncated ? parseChapters(prev.chapters_json) : [];
     resume = stored.length > 0 && (await chaptersWithNew(db, stored, afterIn, upTo)).length > 0 ? stored : [];
     const owed =
