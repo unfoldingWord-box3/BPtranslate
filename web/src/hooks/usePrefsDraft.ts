@@ -101,7 +101,6 @@ export function usePrefsDraft<F extends PrefsFields>(
     }
     const next = { text: h.text, base: h.base, baseVersion: h.baseVersion };
     stateRef.current = next;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- seeds once from two async sources (the prefs row and the IndexedDB draft read).
     setState(next);
   }, [prefs, stored, key, pick, canSave]);
 
