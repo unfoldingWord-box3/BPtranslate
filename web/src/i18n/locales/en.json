@@ -2924,6 +2924,7 @@
       "applying": "Applying…",
       "errForbidden": "Only admins can change review state in bulk.",
       "errLockedByTranslate": "An AI translation is rewriting notes in this range, so they can't be approved yet. Try again after it finishes.",
+      "errLockedQuestions": "An AI run is working on a chapter in this range, so its questions can't be approved yet. Try again after it finishes.",
       "errMaybeApplied": "The change could not be confirmed ({{detail}}). It may have been partly or fully applied, so check the counts below before trying again."
     },
     "scorecard": {

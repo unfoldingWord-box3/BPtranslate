@@ -1492,9 +1492,8 @@ async function recordArticleNoApplyAlert(
 // this read and the apply's write is covered by the #561/#602 route locks (the
 // job is 'running' while it applies), and a content edit is also caught by the
 // version CAS in applyTranslateTnRow / applyTranslateTqRow. For questions the
-// lock covers PATCH and Approve (/rows/tq/:id/validate, #752). The admin
-// review-state approve sweep locks notes only, so a tq approve sweep landing
-// inside that window is not caught.
+// lock covers PATCH, Approve (/rows/tq/:id/validate) and the admin
+// review-state approve sweep (#752).
 // tW/tA articles (#734): kind is the resource, ids are paths, and `book` is
 // null (article edit_log rows have a NULL book; `book IS ?1` matches it). The
 // article routes have no lock at all, so for them neither an edit nor an
