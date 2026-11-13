@@ -7,6 +7,7 @@ import {
   afterPrefsSave,
   afterPrefsSavedElsewhere,
   hydratePrefsDraft,
+  newestPrefs,
   prefsDiscardMatches,
   prefsDraftClearable,
   prefsDraftDroppable,
@@ -249,11 +250,18 @@ export function usePrefsDraft<F extends PrefsFields>(
       // Posted before this tab's draft is cleared, so another tab showing the
       // saved text is clean before it can see the record gone (#913 A2).
       announcePrefsDraft({ type: "prefs-saved", key, row: row as unknown as Record<string, unknown> & { version: number } });
-      commit(afterPrefsSave(s.text, textAtSave.current ?? s.text, pick(row), row.version));
+      // Settle on the newest row this page knows: another tab's newer save
+      // may have arrived (and been taken) while this response was on its
+      // way. Settling on the older response would show stale boxes and send
+      // a stale version next time (#913 review D1).
+      const latest = newestPrefs(prefsRef.current, row);
+      commit(afterPrefsSave(s.text, textAtSave.current ?? s.text, pick(latest), latest.version));
     },
     conflicted: (current: TranslationPrefs) => {
       const s = stateRef.current;
-      if (s) commit(afterPrefsConflict(s.text, s.base, pick(current), current.version));
+      // The same for a late 409 body older than the row this page holds.
+      const latest = newestPrefs(prefsRef.current, current);
+      if (s) commit(afterPrefsConflict(s.text, s.base, pick(latest), latest.version));
     },
   };
 }
