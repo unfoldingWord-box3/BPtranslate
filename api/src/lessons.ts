@@ -11,12 +11,16 @@
 //
 //   switch    lesson_settings (migration 0085). No row = OFF. Off means no
 //             mining, no AI call, no run row, and no lessons in the pack.
-//   when      the CONTEXT_CRON tick (index.ts), before the daily context
-//             export is requested, so that export carries the new set. Only
-//             when there is a hand approval newer than the last run's
-//             watermark (edit_log 'validate' entries of validated tN rows with
-//             no admin_bulk_state stamp, #833), and only once per UTC day
-//             (lesson_runs.night is UNIQUE).
+//   when      the CONTEXT_CRON tick (index.ts), after every workspace's daily
+//             export has been requested; a run that stores a changed set
+//             queues one more context export so the set reaches the pack. Only
+//             when there is a hand approval newer than the watermark of the
+//             last run that finished its mining ('ok' or 'no_changes'; a
+//             failed or killed run's approvals are mined again), counting
+//             edit_log 'validate' entries of validated tN rows with no
+//             admin_bulk_state stamp (#833), and only once per UTC day
+//             (lesson_runs.night is UNIQUE). A run left 'running' from an
+//             earlier night is closed as failed ('interrupted').
 //   provider  the workspace's own key, only for providers with an in-Worker
 //             adapter (Claude, Gemini: hasInternalAdapter). Anything else is
 //             "not available": no call, no run row.
@@ -135,7 +139,15 @@ export type LessonRun = {
 
 export type LessonJobOutcome =
   | { ran: false; reason: "off" | "not_migrated" | "no_new_approvals" | "already_ran" | string }
-  | { ran: true; runId: number; status: Exclude<RunStatus, "running">; failureReason: string | null; lessons: number };
+  | {
+      ran: true;
+      runId: number;
+      status: Exclude<RunStatus, "running">;
+      failureReason: string | null;
+      lessons: number;
+      /** True when the stored set differs from the one before: the context pack needs an export. */
+      changed: boolean;
+    };
 
 type Db = Env["DB"];
 
@@ -170,27 +182,37 @@ export async function recentApprovedChapters(db: Db, n = RECENT_CHAPTERS): Promi
   return (rs.results ?? []).map((r) => ({ book: r.book, chapter: r.chapter }));
 }
 
-const SHORT_VOWELS = /[ً-ِ]/;
-const isShadda = (c: string) => c === "ّ";
+const SHORT_VOWEL = /[ً-ِ]/u;
+const SHADDA = "ّ";
 
-// Drop every short vowel or tanween that touches a shadda. NFC puts the vowel
-// BEFORE the shadda, legacy text after it, so both sides are checked.
-function stripShaddaVowels(s: string): string {
-  const cs = [...s];
-  return cs
-    .filter((c, i) => !(SHORT_VOWELS.test(c) && (isShadda(cs[i - 1] ?? "") || isShadda(cs[i + 1] ?? ""))))
-    .join("");
-}
+// A base character with the combining marks that follow it (a leading mark
+// stands alone). Marks on a letter, in either order, stay in its cluster.
+const CLUSTERS = /\p{M}+|\P{M}\p{M}*/gu;
+const clusters = (s: string) => s.match(CLUSTERS) ?? [];
 
 /**
- * True when before and after differ only in a vowel on a shadda (أنَّ / أنّ).
- * The Arabic editor writes it or leaves it out by preference (2026-11-10), so it
- * is not a correction to learn from.
+ * True when before and after differ ONLY in whether a letter with a shadda
+ * carries a short vowel or tanween: present on one side, absent on the other
+ * (أنَّ / أنّ). The Arabic editor writes it or leaves it out by preference
+ * (2026-11-10), so it is not a correction to learn from. A vowel swapped for
+ * another on a shadda (الربُّ → الربَّ) is a real grammar fix and is kept.
  */
 export function isShaddaVowelOnly(before: string, after: string): boolean {
-  const b = nfc(before);
-  const a = nfc(after);
-  return b !== a && stripShaddaVowels(b) === stripShaddaVowels(a);
+  const b = clusters(nfc(before));
+  const a = clusters(nfc(after));
+  if (b.length !== a.length) return false;
+  let differs = false;
+  for (let i = 0; i < b.length; i++) {
+    if (b[i] === a[i]) continue;
+    if (!b[i].includes(SHADDA) || !a[i].includes(SHADDA)) return false;
+    const vowels = (c: string) => [...c].filter((ch) => SHORT_VOWEL.test(ch));
+    const rest = (c: string) => [...c].filter((ch) => !SHORT_VOWEL.test(ch)).join("");
+    if (rest(b[i]) !== rest(a[i])) return false;
+    // One side bare, the other with vowel(s): a preference. Both with vowels: a swap.
+    if ((vowels(b[i]).length === 0) === (vowels(a[i]).length === 0)) return false;
+    differs = true;
+  }
+  return differs;
 }
 
 /** Group the corrections of the given chapters. */
@@ -242,7 +264,23 @@ export async function mineChanges(
 
 export type PromptTerm = { source: string; target: string | null; status: string; replacement: string | null };
 
-const cap = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
+/**
+ * At most n code points, cut only between clusters (a letter keeps its marks),
+ * with "…" when anything was cut.
+ */
+export function capText(s: string, n: number): string {
+  if ([...s].length <= n) return s;
+  let out = "";
+  let used = 0;
+  for (const c of clusters(s)) {
+    const len = [...c].length;
+    if (used + len > n) break;
+    out += c;
+    used += len;
+  }
+  return `${out}…`;
+}
+const cap = capText;
 
 export function buildLessonsPrompt(input: {
   languageName: string;
@@ -362,7 +400,14 @@ function cleanLessonText(s: string): string {
   return cap(oneLine(s).replace(/^(?:#+|[-*•]|\d+[.)])\s*/, "").trim(), LESSON_CHAR_CAP);
 }
 
-export type CoverContext = { terms: InboxTerm[]; templates: string[]; instructionsMd: string; commonIssuesMd: string };
+export type CoverContext = {
+  terms: InboxTerm[];
+  templates: string[];
+  instructionsMd: string;
+  commonIssuesMd: string;
+  /** Notes compared in this run: no lesson can claim more evidence than that. */
+  maxEvidence?: number;
+};
 
 function covered(l: { before: string; after: string }, ctx: CoverContext): boolean {
   if (!l.after) return false;
@@ -372,6 +417,11 @@ function covered(l: { before: string; after: string }, ctx: CoverContext): boole
     coveredByCommonIssues(l, ctx.commonIssuesMd) ||
     coveredByCommonIssues(l, ctx.instructionsMd)
   );
+}
+
+function clampEvidence(n: number, max = Number.MAX_SAFE_INTEGER): number {
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(Math.floor(n), Math.max(0, Math.floor(max))));
 }
 
 /** The new set: the model's list checked against the rules above. */
@@ -405,7 +455,7 @@ export function mergeLessons(
       lesson: text,
       before,
       after,
-      evidence: p.evidence ?? prev?.evidence ?? 0,
+      evidence: clampEvidence(p.evidence ?? prev?.evidence ?? 0, ctx.maxEvidence),
       firstSeenAt: prev?.firstSeenAt ?? now,
       fresh: !prev,
     });
@@ -443,12 +493,30 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
   const db = env.DB;
   const now = deps.now ?? Math.floor(Date.now() / 1000);
   if (!(await lessonsEnabledRead(db))) return { ran: false, reason: "off" };
+  const night = new Date(now * 1000).toISOString().slice(0, 10);
 
   const watermark = await approvalWatermark(db);
   if (watermark == null) return { ran: false, reason: "no_new_approvals" };
   let last: number | null;
   try {
-    last = (await db.prepare(`SELECT MAX(approvals_through) AS w FROM lesson_runs`).first<{ w: number | null }>())?.w ?? null;
+    // A run from an earlier night still 'running' was killed (isolate evicted,
+    // timeout): close it as failed so the page says so.
+    await db
+      .prepare(
+        `UPDATE lesson_runs SET status = 'failed', failure_reason = 'interrupted', finished_at = ?2
+          WHERE status = 'running' AND night <> ?1`,
+      )
+      .bind(night, now)
+      .run();
+    // Only runs that finished their mining move the watermark: a failed or
+    // killed run's corrections are mined again on a later night. Spend stays
+    // at one call a night through the night claim below.
+    last =
+      (
+        await db
+          .prepare(`SELECT MAX(approvals_through) AS w FROM lesson_runs WHERE status IN ('ok', 'no_changes')`)
+          .first<{ w: number | null }>()
+      )?.w ?? null;
   } catch (e) {
     if (tableMissing(e)) return { ran: false, reason: "not_migrated" };
     throw e;
@@ -462,7 +530,6 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
   const { provider, model } = availability;
 
   // One run per UTC day: the claim is the run row itself.
-  const night = new Date(now * 1000).toISOString().slice(0, 10);
   const claim = await db
     .prepare(
       `INSERT INTO lesson_runs (night, started_at, approvals_through, provider, model)
@@ -501,7 +568,7 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
     changes = mined.groups.length;
     if (mined.groups.length === 0) {
       await finish("no_changes", null).run();
-      return { ran: true, runId, status: "no_changes", failureReason: null, lessons: 0 };
+      return { ran: true, runId, status: "no_changes", failureReason: null, lessons: 0, changed: false };
     }
 
     const cfg = await getProjectConfig(env);
@@ -553,13 +620,13 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
       // The code only: provider error bodies can echo the prompt.
       console.error(`lessons: AI call failed (${provider}, ${code})`);
       await finish("failed", code).run();
-      return { ran: true, runId, status: "failed", failureReason: code, lessons: current.lessons.length };
+      return { ran: true, runId, status: "failed", failureReason: code, lessons: current.lessons.length, changed: false };
     }
 
     const parsed = parseLessonsOutput(text);
     if (!parsed) {
       await finish("failed", "unreadable_output").run();
-      return { ran: true, runId, status: "failed", failureReason: "unreadable_output", lessons: current.lessons.length };
+      return { ran: true, runId, status: "failed", failureReason: "unreadable_output", lessons: current.lessons.length, changed: false };
     }
     const next = mergeLessons(
       current.lessons,
@@ -569,6 +636,7 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
         templates: (templateRs.results ?? []).map((t) => t.target_md),
         instructionsMd: prefs?.instructions_md ?? "",
         commonIssuesMd: prefs?.common_issues_md ?? "",
+        maxEvidence: mined.compared,
       },
       now,
     );
@@ -580,7 +648,8 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
       ...next.map((l, i) => insert.bind(runId, i + 1, l.lesson, l.before, l.after, l.evidence, l.firstSeenAt)),
       finish("ok", null),
     ]);
-    return { ran: true, runId, status: "ok", failureReason: null, lessons: next.length };
+    const key = (ls: readonly Lesson[]) => JSON.stringify(ls.map((l) => [l.lesson, l.before, l.after, l.evidence]));
+    return { ran: true, runId, status: "ok", failureReason: null, lessons: next.length, changed: key(next) !== key(current.lessons) };
   } catch (e) {
     // Leave a finished row behind (the cost so far included), then let the caller log it.
     try {
@@ -704,6 +773,13 @@ export function lessonsRoutes() {
     }
     const parsed = PutBody.safeParse(body);
     if (!parsed.success) return c.json({ error: "validation_failed", issues: parsed.error.issues }, 400);
+    // Same check the night job makes (resolveProvider decrypts the key in
+    // both modes), so "On" is only possible when a run could call the AI.
+    // Switching off is always allowed.
+    if (parsed.data.enabled) {
+      const { availability } = await resolveProvider(c.env, false);
+      if (!availability.available) return c.json({ error: "lessons_unavailable", reason: availability.reason }, 409);
+    }
     try {
       await setLessonsEnabled(c.env.DB, parsed.data.enabled, currentUserId(c));
     } catch (e) {
