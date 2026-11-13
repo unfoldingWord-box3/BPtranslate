@@ -1199,6 +1199,8 @@ export async function readLessonsState(env: Env): Promise<LessonsState> {
   let sets: LessonSetSummary[] = [];
   try {
     enabled = (await db.prepare(`SELECT enabled FROM lesson_settings WHERE id = 1`).first<{ enabled: number }>())?.enabled === 1;
+    // Probe 0088 (marks_json): the night reads it, so without it every night is not_migrated.
+    await db.prepare(`SELECT marks_json FROM lesson_runs LIMIT 0`).first();
     const r = await db.prepare(`SELECT * FROM lesson_runs WHERE status <> 'edited' ORDER BY id DESC LIMIT 1`).first<RunRow>();
     lastRun = r ? runFromRow(r) : null;
     const rs = await db
