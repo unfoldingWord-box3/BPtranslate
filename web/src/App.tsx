@@ -777,6 +777,9 @@ export function App() {
     // session row, and best-effort revokes the DCS access token. Set the
     // local UX flag so the next boot doesn't silent-mint in dev.
     await authLogout();
+    // No reload follows, so the next user on this browser must not have
+    // their prefs drafts stamped with this user's id (#913 review C2).
+    setCurrentUserId(null);
     try {
       localStorage.setItem(SIGNED_OUT_KEY, "1");
     } catch {

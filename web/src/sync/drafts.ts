@@ -32,6 +32,7 @@ import type { PrefsDraftSection } from "./prefsDraft";
 import { legacyDbNames, workspaceDbName } from "./workspace";
 import { adoptFromLegacyDbs, type LegacySource } from "./legacyAdoption";
 import { DRAFTS_CHANGED_CHANNEL_BASE, openDraftsChangedChannel, orderedReads } from "./draftsChangedChannel.ts";
+import { openPrefsDraftChannel, PREFS_DRAFT_CHANNEL_BASE, type PrefsDraftMessage } from "./prefsDraftChannel.ts";
 
 // Base name; the actual per-workspace DB name is derived via workspaceDbName()
 // so drafts written in one Door43 org never surface in another (issue #228).
@@ -208,6 +209,27 @@ async function tell(to: Set<Subscriber>) {
 const changedChannel = openDraftsChangedChannel(workspaceDbName(DRAFTS_CHANGED_CHANNEL_BASE), () => {
   void tell(remoteSubscribers);
 });
+
+// A prefs draft discarded or saved in another tab, by key (#913 review A1/A2,
+// prefsDraftChannel.ts). The prefs editors listen; discard() and the editors'
+// saves post.
+const prefsListeners = new Set<(m: PrefsDraftMessage) => void>();
+const prefsChannel = openPrefsDraftChannel(workspaceDbName(PREFS_DRAFT_CHANNEL_BASE), (m) => {
+  for (const l of prefsListeners) {
+    try {
+      l(m);
+    } catch (e) {
+      console.warn("prefs draft listener failed", e);
+    }
+  }
+});
+export function onPrefsDraftElsewhere(fn: (m: PrefsDraftMessage) => void): () => void {
+  prefsListeners.add(fn);
+  return () => prefsListeners.delete(fn);
+}
+export function announcePrefsDraft(m: PrefsDraftMessage): void {
+  prefsChannel.announce(m);
+}
 
 // After a committed change in this tab. Every caller awaits the write's
 // transaction first, so another tab that re-reads on the message sees it.
@@ -437,6 +459,9 @@ export const drafts = {
   async discard(key: string): Promise<void> {
     pendingKeys.delete(key);
     latestGenerationByKey.delete(key);
+    // Other tabs showing a prefs draft reset their box too, before the record
+    // is gone, so none of them writes it back (#913 review A1).
+    if (key.startsWith("prefs:")) prefsChannel.announce({ type: "prefs-discard", key });
     await (await db()).delete(STORE, key);
     for (const l of discardListeners) {
       try {

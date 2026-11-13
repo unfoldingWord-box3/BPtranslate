@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { drafts, onDraftDiscarded, type DraftRecord } from "../sync/drafts";
+import { announcePrefsDraft, drafts, onDraftDiscarded, onPrefsDraftElsewhere, type DraftRecord } from "../sync/drafts";
 import { useShowDraftEditors } from "../sync/draftEditors";
 import { currentUserId, type TranslationPrefs } from "../sync/api";
 import {
   afterPrefsConflict,
   afterPrefsSave,
+  afterPrefsSavedElsewhere,
   hydratePrefsDraft,
   prefsDraftClearable,
   prefsDraftDroppable,
@@ -141,29 +142,52 @@ export function usePrefsDraft<F extends PrefsFields>(
     setState(next);
   }, [prefs, stored, key, pick, canSave]);
 
-  // Discarded from the unsaved menu while this editor is open: show the
-  // server's text again instead of keeping the thrown-away typing (H7).
+  // Discarded from the unsaved menu, in this tab or another one (#913 review
+  // A1), while this editor is open: show the server's text again instead of
+  // keeping the thrown-away typing (H7). Nothing is written.
+  const discarded = useCallback(() => {
+    const s = stateRef.current;
+    if (!s) {
+      // Not loaded yet: the draft must not be restored (#913 item 6).
+      discardedEarly.current = true;
+      return;
+    }
+    // The server's text as this page knows it; if the prefs row is gone for
+    // now, the text the typing started from (review C1).
+    const p = prefsRef.current;
+    const fields = p ? pick(p) : s.base;
+    const next = { text: fields, base: fields, baseVersion: p ? p.version : s.baseVersion };
+    stateRef.current = next;
+    lastWritten.current = null;
+    // A save of the discarded typing may be in flight. Its 200 compares
+    // with what the box shows now, so the box settles on the saved text
+    // instead of this reset coming back as typing (#913 item 2).
+    textAtSave.current = fields;
+    setState(next);
+  }, [pick]);
   useEffect(
     () =>
       onDraftDiscarded((k) => {
-        if (k !== key) return;
-        const p = prefsRef.current;
-        if (!stateRef.current || !p) {
-          // Not loaded yet: the draft must not be restored (#913 item 6).
-          discardedEarly.current = true;
+        if (k === key) discarded();
+      }),
+    [key, discarded],
+  );
+
+  // Another tab discarded this draft (A1), or saved this editor's fields (A2):
+  // showing exactly the saved text, this editor is clean at the new version.
+  useEffect(
+    () =>
+      onPrefsDraftElsewhere((m) => {
+        if (m.key !== key) return;
+        if (m.type === "prefs-discard") {
+          discarded();
           return;
         }
-        const fields = pick(p);
-        const next = { text: fields, base: fields, baseVersion: p.version };
-        stateRef.current = next;
-        lastWritten.current = null;
-        // A save of the discarded typing may be in flight. Its 200 compares
-        // with what the box shows now, so the box settles on the saved text
-        // instead of this reset coming back as typing (#913 item 2).
-        textAtSave.current = fields;
-        setState(next);
+        const s = stateRef.current;
+        const next = s && afterPrefsSavedElsewhere(s, m.text, m.version);
+        if (next) commit(next);
       }),
-    [key, pick],
+    [key, discarded, commit],
   );
 
   useShowDraftEditors(state ? [key] : []);
@@ -189,7 +213,11 @@ export function usePrefsDraft<F extends PrefsFields>(
     },
     saved: (row: TranslationPrefs) => {
       const s = stateRef.current;
-      if (s) commit(afterPrefsSave(s.text, textAtSave.current ?? s.text, pick(row), row.version));
+      if (!s) return;
+      // Posted before this tab's draft is cleared, so another tab showing the
+      // saved text is clean before it can see the record gone (#913 A2).
+      announcePrefsDraft({ type: "prefs-saved", key, text: pick(row), version: row.version });
+      commit(afterPrefsSave(s.text, textAtSave.current ?? s.text, pick(row), row.version));
     },
     conflicted: (current: TranslationPrefs) => {
       const s = stateRef.current;

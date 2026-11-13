@@ -142,6 +142,20 @@ export function afterPrefsSave<F extends PrefsFields>(
   return { text: out, base: saved, baseVersion: savedVersion };
 }
 
+// Another tab saved `saved` at `savedVersion` for this editor's fields (#913
+// review A2). When this editor shows exactly that text, it is saved: the text
+// becomes the base at the new version, so nothing is unsaved and the next Save
+// sends the current version. Other text is kept as it is (null): it is still
+// unsaved, and a Save of it answers 409 and settles from there.
+export function afterPrefsSavedElsewhere<F extends PrefsFields>(
+  state: PrefsDraftState<F>,
+  saved: PrefsFields,
+  savedVersion: number,
+): PrefsDraftState<F> | null {
+  if (!sameFields(state.text, saved)) return null;
+  return { text: state.text, base: state.text, baseVersion: savedVersion };
+}
+
 // Whether a stored prefs draft may be deleted by this tab: only when it holds
 // one of `texts` (what this tab last wrote, or what it is settling to). The
 // store is shared by every tab of the workspace, so another tab's newer typing

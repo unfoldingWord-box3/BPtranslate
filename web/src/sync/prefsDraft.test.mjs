@@ -2,6 +2,7 @@ import assert from "node:assert";
 import {
   afterPrefsConflict,
   afterPrefsSave,
+  afterPrefsSavedElsewhere,
   hydratePrefsDraft,
   prefsDraftClearable,
   prefsDraftDroppable,
@@ -156,6 +157,20 @@ assert.ok(!prefsDraftClearable({ content: 1 }, [typed]));
 assert.ok(prefsDraftLost(typed, start, false));
 assert.ok(!prefsDraftLost(typed, start, true));
 assert.ok(!prefsDraftLost(start, start, false));
+
+// ── afterPrefsSavedElsewhere (#913 review A2) ─────────────────────────────
+// Another tab saved exactly the text this editor shows: it is clean at the
+// new version. Different text stays as it is.
+assert.deepStrictEqual(afterPrefsSavedElsewhere({ text: typed, base: start, baseVersion: 3 }, typed, 5), {
+  text: typed,
+  base: typed,
+  baseVersion: 5,
+});
+assert.strictEqual(afterPrefsSavedElsewhere({ text: typed, base: start, baseVersion: 3 }, fromB, 5), null);
+assert.strictEqual(
+  afterPrefsSavedElsewhere({ text: briefTyped, base: briefServer, baseVersion: 3 }, { ...briefTyped, purpose: "other" }, 5),
+  null,
+);
 
 // ── prefsDraftDroppable (#913 item 5) ──────────────────────────────────────
 // Drafts are per workspace, not per user. A user who cannot save drops only a
