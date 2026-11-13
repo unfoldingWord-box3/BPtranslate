@@ -108,14 +108,27 @@ export function LessonsSection({ heading = true }: { heading?: boolean }) {
 
   const availability = state?.availability;
   const unavailable = availability && !availability.available ? availability : null;
-  // On, but no run can call the AI: say so as plainly as Off.
+  // No run can call the AI: say so as plainly as Off. When the switch is on
+  // and a set is already saved, that set still reaches the drafts, so the
+  // message says that instead of "not learning" (one message, no caption).
+  const storedStillUsed = !!unavailable && !!state?.enabled && (state?.lessons.length ?? 0) > 0;
   const unavailableText = !unavailable
     ? null
-    : unavailable.reason === "provider_not_supported"
-      ? t("lessons.unavailableProvider", { provider: unavailable.provider ?? "?" })
-      : unavailable.reason === "not_translation_project"
-        ? t("lessons.unavailableNotTranslation")
-        : t("lessons.unavailableNoKey");
+    : storedStillUsed
+      ? t("lessons.unavailableStillUsed", {
+          why:
+            unavailable.reason === "provider_not_supported"
+              ? t("lessons.why.provider", { provider: unavailable.provider ?? "?" })
+              : unavailable.reason === "not_translation_project"
+                ? t("lessons.why.notTranslation")
+                : t("lessons.why.noKey"),
+          n: state?.lessons.length ?? 0,
+        })
+      : unavailable.reason === "provider_not_supported"
+        ? t("lessons.unavailableProvider", { provider: unavailable.provider ?? "?" })
+        : unavailable.reason === "not_translation_project"
+          ? t("lessons.unavailableNotTranslation")
+          : t("lessons.unavailableNoKey");
 
   return (
     <Stack spacing={2} data-testid="lessons-section">
@@ -192,11 +205,6 @@ export function LessonsSection({ heading = true }: { heading?: boolean }) {
             {state.lessons.length > 0 && !state.enabled && (
               <Typography variant="caption" color="text.secondary" component="p" sx={{ mt: 1 }}>
                 {t("lessons.storedNotUsed")}
-              </Typography>
-            )}
-            {state.lessons.length > 0 && state.enabled && unavailable && (
-              <Typography variant="caption" color="text.secondary" component="p" sx={{ mt: 1 }}>
-                {t("lessons.storedStillUsed")}
               </Typography>
             )}
             <Typography variant="caption" color="text.secondary" component="p" sx={{ mt: 1 }}>

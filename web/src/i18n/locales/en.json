@@ -646,7 +646,12 @@
     "before": "AI wrote",
     "after": "Editor wrote",
     "storedNotUsed": "These lessons are kept, but the AI is not given them while this is off.",
-    "storedStillUsed": "The AI is still given these lessons, but no new ones are written. Turn this off to stop giving them.",
+    "unavailableStillUsed": "No new lessons can be written: {{why}} The {{n}} lessons already saved are still given to the AI. Turn this off to stop giving them.",
+    "why": {
+      "provider": "your AI provider ({{provider}}) cannot write lessons; they need Claude or Gemini.",
+      "noKey": "the AI service is not set up, or its key cannot be used.",
+      "notTranslation": "lessons are for translation projects only."
+    },
     "readOnly": "Lessons cannot be edited or removed here yet.",
     "loadFailed": "Could not load the lessons. Reload the page to try again.",
     "saveFailed": "Could not change the setting. Try again.",
