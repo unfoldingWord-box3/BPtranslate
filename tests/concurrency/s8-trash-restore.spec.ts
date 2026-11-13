@@ -1,5 +1,8 @@
 import { expect, test, request as apiRequest } from "@playwright/test";
 import { mintToken, newUserContext, gotoVerse } from "./helpers";
+import { ZEC_CHAPTERS } from "./chapters";
+
+const CHAPTER = ZEC_CHAPTERS.shared.chapter;
 
 // S8 — Trash & restore for translation notes. The note delete button no longer
 // hard-deletes: it moves the note to a visible, restorable "trash" state
@@ -31,7 +34,7 @@ test("alice's TRASH keeps the row visible+restorable in bob's view, then RESTORE
       "x-csrf-token": setupAuth.csrf,
       "Content-Type": "application/json",
     },
-    data: { book: "ZEC", chapter: 6, verse: 1, ref_raw: "6:1", note: `to-be-trashed ${Date.now()}` },
+    data: { book: "ZEC", chapter: CHAPTER, verse: 1, ref_raw: `${CHAPTER}:1`, note: `to-be-trashed ${Date.now()}` },
   });
   expect(createRes.status()).toBe(201);
   const created = await createRes.json();
@@ -39,7 +42,7 @@ test("alice's TRASH keeps the row visible+restorable in bob's view, then RESTORE
 
   const { context: bobCtx } = await newUserContext(browser, "bob");
   const bob = await bobCtx.newPage();
-  await gotoVerse(bob, "ZEC", 6, 1);
+  await gotoVerse(bob, "ZEC", CHAPTER, 1);
   const bobCard = bob.locator(`[data-note-id="${created.id}"]`);
   await bobCard.waitFor({ timeout: 10_000 });
   await bob.waitForTimeout(500); // let the WS subscription open
@@ -61,7 +64,7 @@ test("alice's TRASH keeps the row visible+restorable in bob's view, then RESTORE
   ).toBeVisible({ timeout: 5_000 });
 
   // The chapter read still returns the row, now trashed.
-  const readRes = await aliceCtx.get(`/api/chapters/ZEC/6`, {
+  const readRes = await aliceCtx.get(`/api/chapters/ZEC/${CHAPTER}`, {
     headers: { Authorization: `Bearer ${aliceAuth.token}` },
   });
   const afterTrash = (await readRes.json()).tn.find((r: { id: string }) => r.id === created.id);

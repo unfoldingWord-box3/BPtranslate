@@ -3,6 +3,9 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { newUserContext } from "./helpers";
+import { ZEC_CHAPTERS } from "./chapters";
+
+const CHAPTER = ZEC_CHAPTERS.shared.chapter;
 
 // Phone header titles (#517).
 //
@@ -19,10 +22,10 @@ import { newUserContext } from "./helpers";
 // Every phone h1 reads "ZEC 6", so the caption is the screen-specific signal
 // that the NEW screen's header has portalled in, not the previous route's.
 const ROUTES: [string, string][] = [
-  ["#/notes/ZEC/6", "flowTranslate.title"],
-  ["#/questions/ZEC/6", "flowQuestions.title"],
-  ["#/scripture/ZEC/6", "flowScripture.title"],
-  ["#/alignment/ZEC/6/1", "flowAlign.desk.title"],
+  [`#/notes/ZEC/${CHAPTER}`, "flowTranslate.title"],
+  [`#/questions/ZEC/${CHAPTER}`, "flowQuestions.title"],
+  [`#/scripture/ZEC/${CHAPTER}`, "flowScripture.title"],
+  [`#/alignment/ZEC/${CHAPTER}/1`, "flowAlign.desk.title"],
 ];
 
 const LOCALES = resolve(dirname(fileURLToPath(import.meta.url)), "../../web/src/i18n/locales");
@@ -95,7 +98,7 @@ for (const uiLang of ["en", "ar"]) {
             screenName(uiLang, captionKey),
             { timeout: 15_000 },
           );
-          await expect(h1, route).toHaveText("ZEC 6");
+          await expect(h1, route).toHaveText(`ZEC ${CHAPTER}`);
           // Poll the layout until it settles instead of reading it once.
           await expect
             .poll(
@@ -172,7 +175,7 @@ for (const [uiLang, width, update] of WIDE_CASES) {
         if (index === 0) {
           // An unsaved draft, written through the app's own drafts store (the
           // Vite dev server serves the same module instance the app uses).
-          await page.evaluate(async () => {
+          await page.evaluate(async (chapter) => {
             // @ts-expect-error — a Vite dev-server URL the browser resolves; tsc cannot resolve it
             const m = await import(/* @vite-ignore */ "/src/sync/drafts.ts");
             await m.drafts.set(m.rowKey("tn", "ZEC", "phone-header-draft"), { note: "draft" }, 1, {
@@ -180,10 +183,10 @@ for (const [uiLang, width, update] of WIDE_CASES) {
               rowKind: "tn",
               id: "phone-header-draft",
               book: "ZEC",
-              chapter: 6,
+              chapter,
               verse: 1,
             });
-          });
+          }, CHAPTER);
         }
         await context.setOffline(true);
         const toolbar = page.locator('[role="toolbar"]');

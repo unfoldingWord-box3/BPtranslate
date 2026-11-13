@@ -1,5 +1,6 @@
 import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 import { fetchChapter, newUserContext, type TnRow } from "./helpers";
+import { ZEC_CHAPTERS } from "./chapters";
 
 // Rapid check's verse placement (be:rapidVersePlacement): the open note's
 // verse pinned at the top (the default), or each verse group's lanes inline
@@ -10,7 +11,7 @@ import { fetchChapter, newUserContext, type TnRow } from "./helpers";
 // set are read from the server at run time). Nothing here saves a note.
 
 const BOOK = "ZEC";
-const CHAPTER = 13;
+const CHAPTER = ZEC_CHAPTERS.rapidLanes.chapter;
 
 test.describe.configure({ timeout: 120_000 });
 

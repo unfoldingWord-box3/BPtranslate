@@ -1,5 +1,6 @@
 import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 import { authedRequest, closeTolerant, fetchChapter, newUserContext, type TnRow } from "./helpers";
+import { ZEC_CHAPTERS } from "./chapters";
 
 // Rapid check bulk actions (#829): checkboxes with Shift+click ranges,
 // select-all, Space / X / Shift+J to check from the keyboard, and the bulk
@@ -10,7 +11,7 @@ import { authedRequest, closeTolerant, fetchChapter, newUserContext, type TnRow 
 // ZEC 4's notes as AI drafts so they can be approved.
 
 const BOOK = "ZEC";
-const CHAPTER = 4;
+const CHAPTER = ZEC_CHAPTERS.rapidBulk.chapter;
 
 test.describe.configure({ timeout: 120_000 });
 
