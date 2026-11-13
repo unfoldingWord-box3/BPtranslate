@@ -29,6 +29,8 @@ test.afterEach(async () => {
 interface Prefs {
   version: number;
   audience: string | null;
+  purpose: string | null;
+  notes: string | null;
   instructions_md: string | null;
   common_issues_md: string | null;
 }
@@ -65,6 +67,32 @@ async function putPrefs(request: APIRequestContext, csrf: string, patch: Partial
 }
 
 const briefBox = (p: Page) => p.locator('#style-sec-brief textarea:not([aria-hidden="true"])').first();
+const purposeBox = (p: Page) => p.locator('#style-sec-brief textarea:not([aria-hidden="true"])').nth(1);
+
+// The text of every prefs draft in this page's drafts store, by key.
+async function prefsDrafts(page: Page): Promise<Record<string, string>> {
+  return page.evaluate(async () => {
+    const out: Record<string, string> = {};
+    for (const info of await indexedDB.databases()) {
+      if (!info.name?.startsWith("bible-editor-drafts")) continue;
+      const db = await new Promise<IDBDatabase>((res, rej) => {
+        const r = indexedDB.open(info.name!);
+        r.onsuccess = () => res(r.result);
+        r.onerror = () => rej(r.error);
+      });
+      if (db.objectStoreNames.contains("drafts")) {
+        const all = await new Promise<Array<{ key: string; payload: { text?: unknown } }>>((res, rej) => {
+          const r = db.transaction("drafts").objectStore("drafts").getAll();
+          r.onsuccess = () => res(r.result);
+          r.onerror = () => rej(r.error);
+        });
+        for (const rec of all) if (rec.key.startsWith("prefs:")) out[rec.key] = JSON.stringify(rec.payload.text);
+      }
+      db.close();
+    }
+    return out;
+  });
+}
 const commonBox = (p: Page) => p.locator('#style-sec-commonIssues textarea:not([aria-hidden="true"])').first();
 const saveIn = (p: Page, section: string) => p.locator(`#style-sec-${section}`).getByRole("button", { name: "Save" });
 
@@ -261,3 +289,180 @@ for (const typed of [false, true]) {
     if (SHOTS) await pageA.screenshot({ path: `${SHOTS}/style-page-drafts-conflict-${typed ? "typed" : "untyped"}.png` });
   });
 }
+
+// ── Gate review fixes ───────────────────────────────────────────────────────
+
+// H1: Brief is judged box by box. A types only in Audience; another admin
+// changes Purpose and notes. A's stale save gets the 409, Purpose then shows
+// their text, and "save again" keeps their Purpose and notes.
+test("H1: typing in one Brief box does not bring back another box's stale text", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const stamp = Date.now();
+  await putPrefs(setup!.context.request, setup!.csrf, {
+    audience: `h1 audience ${stamp}`,
+    purpose: `h1 purpose ${stamp}`,
+    notes: `h1 notes ${stamp}`,
+    common_issues_md: `h1 common ${stamp}`,
+  });
+  const a = await adminContext(browser, "a");
+  const page = await a.context.newPage();
+  await openStyle(page, `h1 common ${stamp}`);
+  await briefBox(page).click();
+  await page.keyboard.press("End");
+  await page.keyboard.type(" A-TYPED");
+
+  const b = await adminContext(browser, "b");
+  await putPrefs(b.context.request, b.csrf, { purpose: `h1 purpose from B ${stamp}`, notes: `h1 notes from B ${stamp}` });
+
+  expect(await clickSave(page, "brief")).toBe(409);
+  await expect(purposeBox(page)).toHaveValue(`h1 purpose from B ${stamp}`);
+  await expect(briefBox(page)).toHaveValue(`h1 audience ${stamp} A-TYPED`);
+  expect(await clickSave(page, "brief")).toBe(200);
+  const p = await getPrefs(setup!.context.request);
+  expect(p.audience).toBe(`h1 audience ${stamp} A-TYPED`);
+  expect(p.purpose).toBe(`h1 purpose from B ${stamp}`);
+  expect(p.notes).toBe(`h1 notes from B ${stamp}`);
+});
+
+// H1, remount: the stored Brief draft brings back only the typed box.
+test("H1: after a reload, only the typed Brief box comes back from the draft", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const stamp = Date.now();
+  await putPrefs(setup!.context.request, setup!.csrf, {
+    audience: `h1r audience ${stamp}`,
+    purpose: `h1r purpose ${stamp}`,
+    common_issues_md: `h1r common ${stamp}`,
+  });
+  const a = await adminContext(browser, "a");
+  const page = await a.context.newPage();
+  await openStyle(page, `h1r common ${stamp}`);
+  await briefBox(page).click();
+  await page.keyboard.press("End");
+  await page.keyboard.type(" A-TYPED");
+  await expect.poll(() => prefsDrafts(page)).toHaveProperty("prefs:brief");
+
+  await putPrefs(setup!.context.request, setup!.csrf, { purpose: `h1r purpose from B ${stamp}` });
+  await page.reload();
+  await expect(briefBox(page)).toHaveValue(`h1r audience ${stamp} A-TYPED`, { timeout: 20_000 });
+  await expect(purposeBox(page)).toHaveValue(`h1r purpose from B ${stamp}`);
+  // Audience did not change on the server: the save lands first time.
+  expect(await clickSave(page, "brief")).toBe(200);
+  expect((await getPrefs(setup!.context.request)).purpose).toBe(`h1r purpose from B ${stamp}`);
+});
+
+// H2: a user whose save would be refused keeps no prefs draft, and one left
+// from before is dropped when the editor opens. The page is told the user is
+// an editor; the server still accepts this dev user, which this test does not
+// rely on.
+test("H2: a non-admin on classic Preferences keeps no prefs drafts", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const stamp = Date.now();
+  await putPrefs(setup!.context.request, setup!.csrf, { common_issues_md: `h2 common ${stamp}` });
+  const a = await adminContext(browser, "a");
+  const page = await a.context.newPage();
+  page.on("dialog", (d) => void d.accept());
+  const box = page.locator('#pref-sec-commonIssues textarea:not([aria-hidden="true"])').first();
+
+  // As an admin, a draft is kept.
+  await page.goto(`${BASE}/#/preferences/commonIssues`);
+  await expect(box).toHaveValue(`h2 common ${stamp}`, { timeout: 20_000 });
+  await box.click();
+  await page.keyboard.press("End");
+  await page.keyboard.type(" ADMIN-TYPED");
+  await expect.poll(() => prefsDrafts(page)).toHaveProperty("prefs:common_issues_md");
+
+  // Now the app sees an editor: the old draft is dropped, typing keeps none.
+  const asEditor = async (route: import("@playwright/test").Route) => {
+    const res = await route.fetch();
+    const body = (await res.json()) as Record<string, unknown>;
+    await route.fulfill({ response: res, json: { ...body, role: "editor" } });
+  };
+  await page.route("**/api/auth/me", asEditor);
+  await page.route("**/api/auth/dev", asEditor);
+  await page.reload();
+  await expect(box).toHaveValue(`h2 common ${stamp}`, { timeout: 20_000 });
+  await expect.poll(() => prefsDrafts(page)).toEqual({});
+  await box.click();
+  await page.keyboard.press("End");
+  await page.keyboard.type(" EDITOR-TYPED");
+  await page.waitForTimeout(500);
+  expect(await prefsDrafts(page)).toEqual({});
+});
+
+// H3: a 409 whose body carries no `current` row: the editor fetches the row
+// and rebases, so the next Save lands instead of 409ing for ever.
+test("H3: a 409 without a current row still lets the next Save land", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const stamp = Date.now();
+  await putPrefs(setup!.context.request, setup!.csrf, { common_issues_md: `h3 common ${stamp}` });
+  const a = await adminContext(browser, "a");
+  const page = await a.context.newPage();
+  await openStyle(page, `h3 common ${stamp}`);
+  await commonBox(page).click();
+  await page.keyboard.press("End");
+  await page.keyboard.type(" A-TYPED");
+  await putPrefs(setup!.context.request, setup!.csrf, { common_issues_md: `h3 common from B ${stamp}` });
+
+  let bare = true;
+  await page.route(`**${PREFS}`, async (route) => {
+    if (route.request().method() === "PUT" && bare) {
+      bare = false;
+      await route.fulfill({ status: 409, json: { error: "version_mismatch" } });
+    } else await route.continue();
+  });
+  expect(await clickSave(page, "commonIssues")).toBe(409);
+  // Save again applies the typed text (the existing conflict handling).
+  expect(await clickSave(page, "commonIssues")).toBe(200);
+  expect((await getPrefs(setup!.context.request)).common_issues_md).toBe(`h3 common ${stamp} A-TYPED`);
+});
+
+// H5: two tabs of one browser share the drafts store. Tab B's newer Common
+// issues typing survives tab A saving its own.
+test("H5: one tab's save does not clear another tab's newer draft", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const stamp = Date.now();
+  await putPrefs(setup!.context.request, setup!.csrf, { common_issues_md: `h5 common ${stamp}` });
+  const { context } = await adminContext(browser, "a");
+  const pageA = await context.newPage();
+  await openStyle(pageA, `h5 common ${stamp}`);
+  const pageB = await context.newPage();
+  await openStyle(pageB, `h5 common ${stamp}`);
+
+  await pageA.bringToFront();
+  await commonBox(pageA).click();
+  await pageA.keyboard.press("End");
+  await pageA.keyboard.type(" A");
+  await pageB.bringToFront();
+  await commonBox(pageB).click();
+  await pageB.keyboard.press("End");
+  await pageB.keyboard.type(" B-NEWER");
+  await expect
+    .poll(() => prefsDrafts(pageA))
+    .toEqual({ "prefs:common_issues_md": JSON.stringify({ common_issues_md: `h5 common ${stamp} B-NEWER` }) });
+
+  await pageA.bringToFront();
+  expect(await clickSave(pageA, "commonIssues")).toBe(200);
+  await pageA.waitForTimeout(500);
+  expect(await prefsDrafts(pageA)).toEqual({
+    "prefs:common_issues_md": JSON.stringify({ common_issues_md: `h5 common ${stamp} B-NEWER` }),
+  });
+});
+
+// H7: Discard from the unsaved menu while the editor is open puts the
+// server's text back in the box.
+test("H7: discarding the draft from the unsaved menu resets the open editor", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const stamp = Date.now();
+  await putPrefs(setup!.context.request, setup!.csrf, { common_issues_md: `h7 common ${stamp}` });
+  const { context } = await adminContext(browser, "a");
+  const page = await context.newPage();
+  await openStyle(page, `h7 common ${stamp}`);
+  await commonBox(page).click();
+  await page.keyboard.press("End");
+  await page.keyboard.type(" THROWN-AWAY");
+  await page.getByText("1 unsaved").first().click();
+  await page.getByRole("presentation").getByText("1 unsaved").click();
+  await page.getByRole("button", { name: "Discard this edit" }).click();
+  await expect(commonBox(page)).toHaveValue(`h7 common ${stamp}`);
+  await expect(page.getByText(/\d+ unsaved/)).toHaveCount(0);
+});
