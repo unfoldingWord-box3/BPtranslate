@@ -8,6 +8,7 @@ import {
   afterPrefsSavedElsewhere,
   hydratePrefsDraft,
   newestPrefs,
+  prefsAfterConflict,
   prefsDiscardMatches,
   prefsDraftClearable,
   prefsDraftDroppable,
@@ -263,13 +264,13 @@ export function usePrefsDraft<F extends PrefsFields>(
       const latest = newestPrefs(prefsRef.current, row);
       commit(afterPrefsSave(s.text, textAtSave.current ?? s.text, pick(latest), latest.version));
     },
-    // The 409's row is the server's truth, taken even when older than the
-    // row this page holds (an admin database restore can lower the version,
-    // #922 item 2). A late 409 body overtaken by a newer save costs one more
-    // 409 at most: the next Save sends the older version and gets the newest.
-    conflicted: (current: TranslationPrefs) => {
+    // `sent`: the If-Match of the Save that got the 409. A late 409 body
+    // older than the row this page holds is not taken, unless the version
+    // went down (an admin database restore, #922 item 2; prefsAfterConflict).
+    conflicted: (current: TranslationPrefs, sent: number) => {
       const s = stateRef.current;
-      if (s) commit(afterPrefsConflict(s.text, s.base, pick(current), current.version));
+      const latest = prefsAfterConflict(prefsRef.current, current, sent);
+      if (s) commit(afterPrefsConflict(s.text, s.base, pick(latest), latest.version));
     },
   };
 }

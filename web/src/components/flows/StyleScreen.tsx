@@ -218,8 +218,8 @@ function BriefPanel({ prefsState }: { prefsState: PrefsState }) {
         // the next save carries the right If-Match; typed text is kept.
         const current = await prefsConflictRow(e.body, () => api.getTranslationPrefs().then((r) => r.prefs));
         if (current) {
-          applyConflict(current);
-          prefsDraft.conflicted(current);
+          applyConflict(current, plan.version);
+          prefsDraft.conflicted(current, plan.version);
         } else refetch();
         save.setMsg(t("moreTools.style.saveConflict"));
       } else if (e instanceof ApiError && e.status === 403) {
@@ -370,8 +370,8 @@ function MarkdownPrefPanel({
       if (e instanceof ApiError && e.status === 409) {
         const current = await prefsConflictRow(e.body, () => api.getTranslationPrefs().then((r) => r.prefs));
         if (current) {
-          applyConflict(current);
-          prefsDraft.conflicted(current);
+          applyConflict(current, plan.version);
+          prefsDraft.conflicted(current, plan.version);
         } else refetch();
         save.setMsg(t("moreTools.style.saveConflict"));
       } else if (e instanceof ApiError && e.status === 403) {

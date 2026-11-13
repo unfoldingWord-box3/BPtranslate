@@ -7,7 +7,7 @@ import {
   type ContextExportStatus,
 } from "../sync/api";
 import { onPrefsDraftElsewhere } from "../sync/drafts";
-import { newestPrefs } from "../sync/prefsDraft";
+import { newestPrefs, prefsAfterConflict } from "../sync/prefsDraft";
 
 // Preferences singleton (brief + instructions + register + assisted flag).
 // `enabled === false` yields an idle result so the caller can gate on the
@@ -18,7 +18,7 @@ export function useTranslationPrefs(enabled: boolean): {
   error: Error | null;
   refetch: () => void;
   apply: (p: TranslationPrefs) => void;
-  applyConflict: (p: TranslationPrefs) => void;
+  applyConflict: (p: TranslationPrefs, sent: number) => void;
 } {
   const [prefs, setPrefs] = useState<TranslationPrefs | null>(null);
   const [loading, setLoading] = useState(false);
@@ -36,13 +36,12 @@ export function useTranslationPrefs(enabled: boolean): {
   // Adopt a prefs object we already have in hand (a PUT response, or the
   // `current` row from a 409 conflict body) without a round-trip refetch.
   const apply = take;
-  // The `current` row of a 409: the server's row right now, taken even when
-  // its version is lower than the one held. An admin database restore or row
-  // reset can lower it, and keeping the higher one made every Save conflict
-  // until a reload (#922 item 2).
-  const applyConflict = useCallback((p: TranslationPrefs) => {
-    newest.current = p;
-    setPrefs(p);
+  // The `current` row of a 409 for a Save sent with If-Match `sent`: taken
+  // even when older than the row held if the version went down (an admin
+  // database restore), else as take() would (prefsAfterConflict, #922 item 2).
+  const applyConflict = useCallback((p: TranslationPrefs, sent: number) => {
+    newest.current = prefsAfterConflict(newest.current, p, sent);
+    setPrefs(newest.current);
   }, []);
 
   useEffect(() => {

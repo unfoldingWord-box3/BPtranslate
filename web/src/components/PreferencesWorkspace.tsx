@@ -1214,8 +1214,8 @@ function BriefSection({ prefsState, canSave }: { prefsState: PrefsState; canSave
         // ever sends Brief's own fields.
         const current = await prefsConflictRow(e.body, () => api.getTranslationPrefs().then((r) => r.prefs));
         if (current) {
-          applyConflict(current);
-          prefsDraft.conflicted(current);
+          applyConflict(current, plan.version);
+          prefsDraft.conflicted(current, plan.version);
         } else refetch();
         save.setMsg(t("preferences.conflictKeptEdits"));
       } else if (e instanceof ApiError && e.status === 403) {
@@ -1346,8 +1346,8 @@ function MarkdownPrefSection({
         // next save re-sends it against that row's version.
         const current = await prefsConflictRow(e.body, () => api.getTranslationPrefs().then((r) => r.prefs));
         if (current) {
-          applyConflict(current);
-          prefsDraft.conflicted(current);
+          applyConflict(current, plan.version);
+          prefsDraft.conflicted(current, plan.version);
         } else refetch();
         save.setMsg(t("preferences.conflictKeptEdits"));
       } else if (e instanceof ApiError && e.status === 403) {
