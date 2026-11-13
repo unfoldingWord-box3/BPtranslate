@@ -33,6 +33,7 @@ import {
   onAuthRefreshed,
   setReadOnly,
   setIsAdmin,
+  setCurrentUserId,
   updateLastLocation,
   type MeResponse,
   type Role,
@@ -393,6 +394,7 @@ function useAuthGate(): [AuthState, (s: AuthState) => void] {
           clearSignedOutFlag();
           setReadOnly(me.role === "viewer");
           setIsAdmin(me.role === "admin");
+          setCurrentUserId(me.userId);
           setState({ kind: "ready", me, role: me.role });
           return;
         }
@@ -418,6 +420,7 @@ function useAuthGate(): [AuthState, (s: AuthState) => void] {
           clearSignedOutFlag();
           setReadOnly(devMe.role === "viewer");
           setIsAdmin(devMe.role === "admin");
+          setCurrentUserId(devMe.userId);
           setState({ kind: "ready", me: devMe, role: devMe.role });
         } catch (err: unknown) {
           if (cancelled) return;

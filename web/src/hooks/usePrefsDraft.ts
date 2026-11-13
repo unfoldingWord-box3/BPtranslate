@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { drafts, onDraftDiscarded, type DraftRecord } from "../sync/drafts";
 import { useShowDraftEditors } from "../sync/draftEditors";
-import type { TranslationPrefs } from "../sync/api";
+import { currentUserId, type TranslationPrefs } from "../sync/api";
 import {
   afterPrefsConflict,
   afterPrefsSave,
   hydratePrefsDraft,
   prefsDraftClearable,
+  prefsDraftDroppable,
   prefsDraftKey,
+  prefsDraftLost,
   prefsSavePayload,
   prefsVersionToSend,
   typedKeys,
@@ -28,10 +30,12 @@ import {
 // typing. `pick` must be stable (a module-level function).
 //
 // `canSave` is false for a user whose Save would be refused (not an admin, or
-// not a translation project): no draft is written for them, and one already
-// stored is dropped when the editor opens, so the "N unsaved" count, the
-// unload prompt and the reminder toast never point at text that cannot be
-// saved (#909 gate review H2).
+// not a translation project): no draft is written for them, and one they typed
+// before (when they could save) is dropped when the editor opens, so the "N
+// unsaved" count, the unload prompt and the reminder toast never point at text
+// that cannot be saved (#909 gate review H2). Drafts are per workspace, not
+// per user, so another user's draft on a shared browser is left alone (#913
+// item 5): each draft records who typed it.
 export function usePrefsDraft<F extends PrefsFields>(
   section: PrefsDraftSection,
   prefs: TranslationPrefs | null,
@@ -48,6 +52,9 @@ export function usePrefsDraft<F extends PrefsFields>(
   // What the boxes showed when the last Save was clicked (toSave), so a change
   // made while that save was in flight survives its 200 (round 2, J2).
   const textAtSave = useRef<F | null>(null);
+  // Discarded from the unsaved menu before this editor finished loading: the
+  // stored record it read (or is reading) must not come back (#913 item 6).
+  const discardedEarly = useRef(false);
   const prefsRef = useRef(prefs);
   useEffect(() => {
     prefsRef.current = prefs;
@@ -66,6 +73,21 @@ export function usePrefsDraft<F extends PrefsFields>(
     };
   }, [key]);
 
+  // Store typed state as this editor's draft, stamped with who typed it.
+  const write = useCallback(
+    (s: PrefsDraftState<F>) => {
+      lastWritten.current = s.text;
+      const owner = currentUserId();
+      void drafts.set(
+        key,
+        { text: s.text, base: s.base, ...(owner != null ? { owner } : {}) },
+        s.baseVersion,
+        { kind: "prefs", section },
+      );
+    },
+    [key, section],
+  );
+
   // Write the state and keep the store in step: a draft while a box is typed
   // in, none once nothing is.
   const commit = useCallback(
@@ -77,22 +99,37 @@ export function usePrefsDraft<F extends PrefsFields>(
         const own = [next.text, ...(lastWritten.current ? [lastWritten.current] : [])];
         void drafts.clearIf(key, (rec) => prefsDraftClearable(rec.payload, own));
       } else {
-        lastWritten.current = next.text;
-        void drafts.set(key, { text: next.text, base: next.base }, next.baseVersion, { kind: "prefs", section });
+        write(next);
       }
     },
-    [key, section, canSave],
+    [key, canSave, write],
   );
+
+  // Another tab that restored this editor's draft can delete it (a one-step
+  // undo or a save there) while this editor still shows the typing. Write it
+  // again, so the "N unsaved" count, the unload warning and a reload still
+  // find it (#913 item 1). Only a missing record is rewritten, so two tabs
+  // cannot take turns overwriting each other.
+  useEffect(() => {
+    if (!canSave) return;
+    return drafts.subscribe(
+      (all) => {
+        const s = stateRef.current;
+        if (s && prefsDraftLost(s.text, s.base, all.some((d) => d.key === key))) write(s);
+      },
+      { remote: true },
+    );
+  }, [key, canSave, write]);
 
   useEffect(() => {
     if (stateRef.current || !prefs || !stored) return;
-    const rec = stored.rec;
+    const rec = discardedEarly.current ? undefined : stored.rec;
     const h = hydratePrefsDraft(pick(prefs), prefs.version, canSave ? rec : undefined);
     // Delete only the record that was read, not one written since (by another
-    // tab, say).
-    if (rec && (h.clearStored || !canSave)) {
+    // tab, say). A user who cannot save leaves another user's draft alone.
+    if (rec && (h.clearStored || (!canSave && prefsDraftDroppable(rec.payload, currentUserId())))) {
       void drafts.clearIf(key, (r) => r.generation === rec.generation && r.updatedAt === rec.updatedAt);
-    } else if (rec) {
+    } else if (rec && canSave) {
       // The restored record is this editor's own: a later "nothing typed any
       // more" (a save, an undo) clears it even though the merged text shown
       // differs from it (round 2, J1).
@@ -109,12 +146,21 @@ export function usePrefsDraft<F extends PrefsFields>(
   useEffect(
     () =>
       onDraftDiscarded((k) => {
+        if (k !== key) return;
         const p = prefsRef.current;
-        if (k !== key || !p || !stateRef.current) return;
+        if (!stateRef.current || !p) {
+          // Not loaded yet: the draft must not be restored (#913 item 6).
+          discardedEarly.current = true;
+          return;
+        }
         const fields = pick(p);
         const next = { text: fields, base: fields, baseVersion: p.version };
         stateRef.current = next;
         lastWritten.current = null;
+        // A save of the discarded typing may be in flight. Its 200 compares
+        // with what the box shows now, so the box settles on the saved text
+        // instead of this reset coming back as typing (#913 item 2).
+        textAtSave.current = fields;
         setState(next);
       }),
     [key, pick],

@@ -21,6 +21,9 @@ export type PrefsFields = Record<string, string | null>;
 export interface PrefsDraftPayload {
   text: PrefsFields;
   base: PrefsFields;
+  // The id of the user who typed it (#913 item 5). Absent on drafts written
+  // before it was recorded.
+  owner?: number;
 }
 
 export interface PrefsDraftState<F extends PrefsFields = PrefsFields> {
@@ -149,6 +152,24 @@ export function prefsDraftClearable(payload: unknown, texts: PrefsFields[]): boo
   return texts.some((t) => sameFields(p.text as PrefsFields, t));
 }
 
+// Whether this editor's draft has gone from the store while the editor still
+// shows typed text: another tab that restored it deleted it (a one-step undo
+// or a save there, #913 item 1). The editor then writes it again, so the
+// "N unsaved" count, the unload warning and a reload still find the typing
+// this tab is showing.
+export function prefsDraftLost(text: PrefsFields, base: PrefsFields, stored: boolean): boolean {
+  return !stored && typedKeys(text, base).length > 0;
+}
+
+// Whether a user who cannot save may delete a stored prefs draft when the
+// editor opens (#909 gate review H2): only one they typed themselves, before
+// they lost the right to save. The store is per workspace, not per user, so on
+// a shared browser it can hold an admin's typing, which is left alone, as is a
+// draft with no author recorded (#913 item 5).
+export function prefsDraftDroppable(payload: unknown, userId: number | null): boolean {
+  const p = payload as Partial<PrefsDraftPayload> | null;
+  return userId != null && !!p && p.owner === userId;
+}
 
 function isFields(v: unknown): v is PrefsFields {
   if (!v || typeof v !== "object" || Array.isArray(v)) return false;
