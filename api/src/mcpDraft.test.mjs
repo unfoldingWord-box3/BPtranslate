@@ -9,6 +9,14 @@
 // chat is admin-only (Benjamin, 2026-10-30): the chat principal is capped at
 // editor, so the tool asks chatIsAdmin, which reads the user's real role in the
 // workspace, as index.ts does.
+//
+// #747 (Benjamin chose option B): bpt_draft is two calls. A preview (no
+// confirm_token) starts nothing and lists the rows the run would redo, how many
+// of them are approved (a run on chosen rows or a verse range redrafts approved
+// rows; only a whole-chapter run keeps them, and chat refuses whole chapters),
+// and a token signed for bpt_draft alone. Only a confirm with that token, the
+// same arguments and the same rows starts the run. The `draft` helper below
+// does both steps for tests about what happens after the start.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -20,7 +28,7 @@ import { Hono } from "hono";
 
 import { pipelines, jobResultCounts } from "./pipelines.ts";
 import { chapters } from "./chapters.ts";
-import { attachAuth, chatWriteEnv, requireCsrf } from "./auth.ts";
+import { attachAuth, chatConfirmMac, chatWriteEnv, requireCsrf } from "./auth.ts";
 import { chatIsAdmin } from "./chatLinks.ts";
 import { requireWorkspaceMatch } from "./workspaces.ts";
 import { blockViewerWrites } from "./viewerGuard.ts";
@@ -63,7 +71,10 @@ const API_KEY = "sk-test-chat-draft";
 
 let slugSeq = 0;
 
-async function fresh({ orgKey = true } = {}) {
+// signingKey: false runs with no JWT_SIGNING_KEY (no confirm tokens at all).
+// macIgnoresPurpose signs every tool's token under one prefix, to show the
+// token body's own purpose tag still keeps the tools apart.
+async function fresh({ orgKey = true, signingKey = true, macIgnoresPurpose = false } = {}) {
   const sqlite = new DatabaseSync(":memory:");
   const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations");
   for (const f of readdirSync(dir).filter((f) => f.endsWith(".sql")).sort()) {
@@ -87,6 +98,9 @@ async function fresh({ orgKey = true } = {}) {
   tq.run("q001", BOOK, 1, "2:1");
   tq.run("q002", BOOK, 2, "2:2");
   tq.run("q003", BOOK, 3, "2:3");
+  // Written a minute ago: bpt_bulk_set_state's preview leaves out rows written
+  // in its own second, and the #747 tests preview it on these rows.
+  sqlite.exec(`UPDATE tn_rows SET updated_at = unixepoch() - 60; UPDATE tq_rows SET updated_at = unixepoch() - 60;`);
   if (orgKey) {
     const { ciphertextB64, ivB64 } = await encryptApiKey(WRAPPING_KEY, API_KEY);
     sqlite
@@ -112,6 +126,7 @@ async function fresh({ orgKey = true } = {}) {
     WORKSPACE_SLUG,
     BT_API_TOKEN: "tok",
     AI_KEY_WRAPPING_KEY: WRAPPING_KEY,
+    ...(signingKey ? { JWT_SIGNING_KEY: "test-signing-key" } : {}),
     CHAPTER_ROOM: {
       idFromName: () => "room",
       get: () => ({ fetch: async () => new Response(null, { status: 204 }) }),
@@ -139,7 +154,8 @@ async function fresh({ orgKey = true } = {}) {
     },
     packageRefs: async () => ({}),
     sourceNotes: async () => ({ ok: false, reason: "test" }),
-    confirmMac: async () => null,
+    // As index.ts wires it.
+    confirmMac: (data, purpose) => chatConfirmMac(env, data, macIgnoresPurpose ? "bpt_bulk_set_state" : purpose),
     isAdmin: () => chatIsAdmin(env, principal.username),
     jobResults: (jobId) => jobResultCounts(env, jobId),
   });
@@ -159,7 +175,15 @@ async function fresh({ orgKey = true } = {}) {
     return { isError: reply.result.isError === true, data: JSON.parse(reply.result.content[0].text) };
   };
   const jobs = () => sqlite.prepare(`SELECT job_id, user_id, pipeline_type, book, start_chapter, end_chapter, session_key, state, options_json FROM pipeline_jobs ORDER BY created_at, job_id`).all().map((r) => ({ ...r }));
-  return { sqlite, env, call, jobs, toolCtx };
+  // Preview, then confirm with its token: the two calls a reviewer's yes sits
+  // between. A refused preview comes back as it is.
+  const draft = async (args, token = ADMIN) => {
+    const preview = await call("bpt_draft", args, token);
+    if (preview.isError) return preview;
+    assert.equal(preview.data.status, "preview", JSON.stringify(preview.data));
+    return call("bpt_draft", { ...args, confirm_token: preview.data.confirm_token }, token);
+  };
+  return { sqlite, env, call, draft, jobs, toolCtx };
 }
 
 // bp-assistant's start contract (unfoldingWord/bp-assistant src/api/pipeline.js,
@@ -211,9 +235,9 @@ async function withBot(fn, { status = { state: "running", current: { chapter: 1,
 const DRAFT = { book: BOOK, kind: "tn", chapter: 1, verse_start: 2, verse_end: 4 };
 
 test("bpt_draft: an admin starts a verse-range translate through the real start route; the job records the chat link", async () => {
-  const { call, jobs } = await fresh();
+  const { call, draft, jobs } = await fresh();
   await withBot(async (calls) => {
-    const r = await call("bpt_draft", DRAFT);
+    const r = await draft(DRAFT);
     assert.equal(r.isError, false, JSON.stringify(r.data));
     assert.equal(r.data.status, "running");
     assert.ok(r.data.job_id);
@@ -239,9 +263,9 @@ test("bpt_draft: an admin starts a verse-range translate through the real start 
 });
 
 test("bpt_draft: row ids scope the job to those notes", async () => {
-  const { call, jobs } = await fresh();
+  const { draft, jobs } = await fresh();
   await withBot(async () => {
-    const r = await call("bpt_draft", { book: BOOK, kind: "tq", chapter: 2, ids: ["q002", "q001"] });
+    const r = await draft({ book: BOOK, kind: "tq", chapter: 2, ids: ["q002", "q001"] });
     assert.equal(r.isError, false, JSON.stringify(r.data));
     assert.equal(r.data.status, "running");
     const opts = JSON.parse(jobs()[0].options_json);
@@ -264,9 +288,9 @@ test("bpt_draft: an editor and a viewer are refused before anything is read or s
 });
 
 test("bpt_draft: with no org AI key the refusal says so and nothing is enqueued", async () => {
-  const { call, jobs } = await fresh({ orgKey: false });
+  const { draft, jobs } = await fresh({ orgKey: false });
   await withBot(async (calls) => {
-    const r = await call("bpt_draft", DRAFT);
+    const r = await draft(DRAFT);
     assert.equal(r.isError, true, JSON.stringify(r.data));
     assert.match(r.data.error, /no AI key of its own/);
     assert.match(r.data.error, /Nothing was started/);
@@ -303,14 +327,14 @@ test("bpt_draft: a bare chapter, a range or ids covering the whole chapter, ids 
 });
 
 test("bpt_draft: the same draft twice points at the running job; another admin's same draft is reported busy", async () => {
-  const { call, jobs } = await fresh();
+  const { draft, jobs } = await fresh();
   await withBot(async () => {
-    const first = await call("bpt_draft", DRAFT);
-    const again = await call("bpt_draft", DRAFT);
+    const first = await draft(DRAFT);
+    const again = await draft(DRAFT);
     assert.equal(again.isError, false, JSON.stringify(again.data));
     assert.equal(again.data.status, "already_running");
     assert.equal(again.data.job_id, first.data.job_id);
-    const other = await call("bpt_draft", DRAFT, OTHER_ADMIN);
+    const other = await draft(DRAFT, OTHER_ADMIN);
     assert.equal(other.isError, false, JSON.stringify(other.data));
     assert.equal(other.data.status, "busy");
     assert.equal(other.data.job_id, undefined, "another user's job id is not handed out: bpt_job_status would not show it");
@@ -322,9 +346,9 @@ test("bpt_draft: the same draft twice points at the running job; another admin's
 });
 
 test("bpt_job_status: the starter sees state and progress, and result counts once proposals are staged", async () => {
-  const { call, sqlite } = await fresh();
+  const { call, draft, sqlite } = await fresh();
   await withBot(async () => {
-    const started = await call("bpt_draft", DRAFT);
+    const started = await draft(DRAFT);
     const s = await call("bpt_job_status", { job_id: started.data.job_id });
     assert.equal(s.isError, false, JSON.stringify(s.data));
     assert.equal(s.data.job_id, started.data.job_id);
@@ -355,9 +379,9 @@ test("bpt_job_status: the starter sees state and progress, and result counts onc
 });
 
 test("bpt_job_status: questions and tW/tA articles kept because a person changed them are reported, not just notes (#760)", async () => {
-  const { call, sqlite } = await fresh();
+  const { call, draft, sqlite } = await fresh();
   await withBot(async () => {
-    const started = await call("bpt_draft", DRAFT);
+    const started = await draft(DRAFT);
     const setReport = (report) =>
       sqlite
         .prepare(`UPDATE pipeline_jobs SET state = 'done', apply_skipped_json = ? WHERE job_id = ?`)
@@ -382,9 +406,9 @@ test("bpt_job_status: questions and tW/tA articles kept because a person changed
 });
 
 test("bpt_job_status: rows kept because approved, English echoes not applied and a skipped English check are reported apart (#794)", async () => {
-  const { call, sqlite } = await fresh();
+  const { call, draft, sqlite } = await fresh();
   await withBot(async () => {
-    const started = await call("bpt_draft", DRAFT);
+    const started = await draft(DRAFT);
     const setReport = (report) =>
       sqlite
         .prepare(`UPDATE pipeline_jobs SET state = 'done', apply_skipped_json = ? WHERE job_id = ?`)
@@ -418,8 +442,8 @@ test("bpt_job_status: another user's job, a job in another workspace and an unkn
   const a = await fresh();
   const b = await fresh();
   await withBot(async () => {
-    const mine = await a.call("bpt_draft", DRAFT);
-    const there = await b.call("bpt_draft", DRAFT);
+    const mine = await a.draft(DRAFT);
+    const there = await b.draft(DRAFT);
     assert.equal(there.isError, false, JSON.stringify(there.data));
     const answers = [
       await a.call("bpt_job_status", { job_id: mine.data.job_id }, OTHER_ADMIN),
@@ -437,10 +461,10 @@ test("bpt_job_status: another user's job, a job in another workspace and an unkn
 });
 
 test("bpt_draft: a run the bot refuses comes back as a plain refusal with the failed job's id, not an internal error", async () => {
-  const { call, jobs } = await fresh();
+  const { call, draft, jobs } = await fresh();
   await withBot(
     async () => {
-      const r = await call("bpt_draft", DRAFT);
+      const r = await draft(DRAFT);
       assert.equal(r.isError, true, JSON.stringify(r.data));
       assert.doesNotMatch(r.data.error, /Internal error/);
       const j = jobs()[0];
@@ -459,4 +483,181 @@ test("bpt_draft: a run the bot refuses comes back as a plain refusal with the fa
     },
     { startStatus: 503 },
   );
+});
+
+// ── #747: preview, then a confirm that covers exactly that list ─────────────
+
+const tokenBody = (tok) => JSON.parse(Buffer.from(tok.split(".")[0], "base64url").toString("utf8"));
+const RANGE = { book: BOOK, kind: "tn", chapter: 1, verse_start: 2, verse_end: 4 };
+const tnStates = (sqlite) =>
+  sqlite.prepare(`SELECT translation_state AS s FROM tn_rows WHERE id IN ('t002','t003','t004') ORDER BY id`).all().map((x) => x.s);
+
+test("bpt_draft preview: starts nothing, lists the rows it would redo and how many approved ones it would replace", async () => {
+  const { call, sqlite, jobs } = await fresh();
+  // t003 already needs review; t004 is Not needed (trashed), which the apply
+  // leaves alone (#735), so it is neither redone nor counted.
+  sqlite.prepare(`UPDATE tn_rows SET translation_state = 'edited' WHERE id = 't003'`).run();
+  sqlite.prepare(`UPDATE tn_rows SET trashed_at = 100 WHERE id = 't004'`).run();
+  await withBot(async (calls) => {
+    const r = await call("bpt_draft", DRAFT);
+    assert.equal(r.isError, false, JSON.stringify(r.data));
+    assert.equal(r.data.status, "preview");
+    assert.deepEqual([r.data.book, r.data.kind, r.data.chapter, r.data.verse_start, r.data.verse_end], [BOOK, "tn", 1, 2, 4]);
+    assert.equal(r.data.will_redraft, 2);
+    assert.deepEqual(r.data.rows.map((x) => [x.id, x.ref, x.state]), [["t002", "TIT 1:2", "validated"], ["t003", "TIT 1:3", "edited"]]);
+    assert.equal(r.data.approved_will_be_replaced, 1, "a verse-range run redrafts approved rows (#794 keeps them only for a whole chapter)");
+    assert.deepEqual(r.data.approved_ids, ["t002"]);
+    assert.equal(r.data.left_alone.length, 1, JSON.stringify(r.data.left_alone));
+    assert.deepEqual([r.data.left_alone[0].reason, r.data.left_alone[0].count, r.data.left_alone[0].ids], ["trashed", 1, ["t004"]]);
+    assert.equal(typeof r.data.confirm_token, "string");
+    assert.match(r.data.message, /Nothing was started/);
+    assert.match(r.data.message, /1 of them approved/);
+    assert.equal(calls.length, 0, "the bot was not called");
+    assert.equal(jobs().length, 0, "no job was enqueued");
+    assert.equal(tokenBody(r.data.confirm_token).p, "bpt_draft", "the token body names the tool it is for");
+  });
+});
+
+test("bpt_draft confirm: the token starts exactly the previewed scope, by verse range or by ids", async () => {
+  const { call, jobs } = await fresh();
+  await withBot(async (calls) => {
+    const p = await call("bpt_draft", DRAFT);
+    const r = await call("bpt_draft", { ...DRAFT, confirm_token: p.data.confirm_token });
+    assert.equal(r.isError, false, JSON.stringify(r.data));
+    assert.equal(r.data.status, "running");
+    assert.equal(jobs().length, 1);
+    const opts = JSON.parse(jobs()[0].options_json);
+    assert.deepEqual([opts.verseStart, opts.verseEnd, opts.rowIds], [2, 4, undefined]);
+    assert.equal(calls.filter((c) => c.url.endsWith("/api/pipeline/start")).length, 1);
+  });
+  const two = await fresh();
+  await withBot(async () => {
+    const args = { book: BOOK, kind: "tq", chapter: 2, ids: ["q002", "q001"] };
+    const p = await two.call("bpt_draft", args);
+    assert.equal(p.data.will_redraft, 2, JSON.stringify(p.data));
+    assert.equal(p.data.approved_will_be_replaced, 2);
+    // The same ids in another order are the same list.
+    const r = await two.call("bpt_draft", { ...args, ids: ["q001", "q002"], confirm_token: p.data.confirm_token });
+    assert.equal(r.isError, false, JSON.stringify(r.data));
+    assert.deepEqual(JSON.parse(two.jobs()[0].options_json).rowIds, ["q001", "q002"]);
+  });
+});
+
+test("bpt_draft confirm: tampered, expired, other-scope, other-ids, other-link and bpt_bulk_set_state tokens are refused and start nothing", async (t) => {
+  const { call, jobs } = await fresh();
+  await withBot(async (calls) => {
+    const p = await call("bpt_draft", DRAFT);
+    const token = p.data.confirm_token;
+    const idsArgs = { book: BOOK, kind: "tn", chapter: 1, ids: ["t002", "t003", "t004"] };
+    const idsToken = (await call("bpt_draft", idsArgs)).data.confirm_token;
+    const refused = async (args, tok = ADMIN) => {
+      const r = await call("bpt_draft", args, tok);
+      assert.equal(r.isError, true, JSON.stringify([args, r.data]));
+      assert.match(r.data.error, /Nothing was started/);
+      return r.data.error;
+    };
+    // Tampered: the scope widened in the body, the signature kept; a bent MAC.
+    const [body, mac] = token.split(".");
+    const forged = `${Buffer.from(JSON.stringify({ ...tokenBody(token), ve: 5 })).toString("base64url")}.${mac}`;
+    assert.match(await refused({ ...DRAFT, verse_end: 5, confirm_token: forged }), /not one this tool issued/);
+    assert.match(await refused({ ...DRAFT, confirm_token: `${body}.${mac.slice(0, -2)}${mac.endsWith("AA") ? "BB" : "AA"}` }), /not one this tool issued/);
+    await refused({ ...DRAFT, confirm_token: "not-a-token" });
+    // Other scope than the preview's.
+    assert.match(await refused({ ...DRAFT, verse_end: 5, confirm_token: token }), /different preview/);
+    await refused({ ...DRAFT, verse_start: 3, confirm_token: token });
+    await refused({ book: BOOK, kind: "tq", chapter: 2, verse_start: 1, verse_end: 2, confirm_token: token });
+    // Other ids: one more, one fewer, and the same rows asked for by verse range.
+    await refused({ ...idsArgs, ids: [...idsArgs.ids, "t005"], confirm_token: idsToken });
+    await refused({ ...idsArgs, ids: ["t002", "t003"], confirm_token: idsToken });
+    assert.match(await refused({ ...DRAFT, confirm_token: idsToken }), /different preview/);
+    assert.match(await refused({ ...idsArgs, confirm_token: token }), /different preview/);
+    // Another admin's link.
+    await refused({ ...DRAFT, confirm_token: token }, OTHER_ADMIN);
+    // A bpt_bulk_set_state preview token for the very same book, kind,
+    // chapter and verse range: only the tool it was issued for differs.
+    const bulk = await call("bpt_bulk_set_state", RANGE);
+    assert.equal(typeof bulk.data.confirm_token, "string", JSON.stringify(bulk.data));
+    assert.match(await refused({ ...DRAFT, confirm_token: bulk.data.confirm_token }), /not one this tool issued/);
+    // Expired: ten minutes and a bit later.
+    const real = Date.now();
+    t.mock.method(Date, "now", () => real + 11 * 60_000);
+    assert.match(await refused({ ...DRAFT, confirm_token: token }), /expired/);
+    t.mock.restoreAll();
+
+    assert.equal(calls.length, 0, "the bot was never called");
+    assert.equal(jobs().length, 0, "nothing was enqueued");
+    // The genuine token, with the same arguments, still works.
+    const ok = await call("bpt_draft", { ...DRAFT, confirm_token: token });
+    assert.equal(ok.data.status, "running", JSON.stringify(ok.data));
+  });
+});
+
+test("a bpt_draft token cannot confirm bpt_bulk_set_state: the approved rows stay approved", async () => {
+  const { call, sqlite } = await fresh();
+  const p = await call("bpt_draft", RANGE);
+  assert.equal(typeof p.data.confirm_token, "string", JSON.stringify(p.data));
+  const r = await call("bpt_bulk_set_state", { ...RANGE, confirm_token: p.data.confirm_token });
+  assert.equal(r.isError, true, JSON.stringify(r.data));
+  assert.match(r.data.error, /not one this tool issued/);
+  assert.match(r.data.error, /Nothing was changed/);
+  assert.deepEqual(tnStates(sqlite), ["validated", "validated", "validated"]);
+});
+
+test("the token body's purpose tag alone keeps the tools apart, even if both signed under one prefix", async () => {
+  const { call, sqlite, jobs } = await fresh({ macIgnoresPurpose: true });
+  await withBot(async (calls) => {
+    const bulk = await call("bpt_bulk_set_state", RANGE);
+    const r = await call("bpt_draft", { ...RANGE, confirm_token: bulk.data.confirm_token });
+    assert.equal(r.isError, true, JSON.stringify(r.data));
+    assert.match(r.data.error, /not one this tool issued/);
+    const d = await call("bpt_draft", RANGE);
+    const b = await call("bpt_bulk_set_state", { ...RANGE, confirm_token: d.data.confirm_token });
+    assert.equal(b.isError, true, JSON.stringify(b.data));
+    assert.match(b.data.error, /not one this tool issued/);
+    assert.equal(calls.length, 0);
+    assert.equal(jobs().length, 0);
+    assert.deepEqual(tnStates(sqlite), ["validated", "validated", "validated"]);
+  });
+});
+
+test("bpt_draft confirm: a row approved, edited or added in the range after the preview means a new preview, and nothing starts", async () => {
+  for (const change of [
+    (s) => s.prepare(`UPDATE tn_rows SET translation_state = 'validated' WHERE id = 't003'`).run(),
+    (s) => s.prepare(`UPDATE tn_rows SET note = 'changed', version = version + 1 WHERE id = 't002'`).run(),
+    (s) => s.prepare(`INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, note, sort_order, version, translation_state) VALUES ('t033', ?, 1, 3, '1:3', 'n', 20, 1, 'edited')`).run(BOOK),
+  ]) {
+    const { call, sqlite, jobs } = await fresh();
+    sqlite.prepare(`UPDATE tn_rows SET translation_state = 'edited' WHERE id = 't003'`).run();
+    await withBot(async (calls) => {
+      const p = await call("bpt_draft", DRAFT);
+      change(sqlite);
+      const r = await call("bpt_draft", { ...DRAFT, confirm_token: p.data.confirm_token });
+      assert.equal(r.isError, true, JSON.stringify(r.data));
+      assert.match(r.data.error, /changed since the preview/);
+      assert.match(r.data.error, /Nothing was started/);
+      assert.equal(calls.length, 0);
+      assert.equal(jobs().length, 0);
+    });
+  }
+});
+
+test("bpt_draft preview: a note whose reference spans verses is in a range it overlaps, as the run selects it", async () => {
+  const { call, sqlite } = await fresh();
+  sqlite.prepare(`INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, note, sort_order, version, translation_state) VALUES ('t045', ?, 1, 4, '1:4-5', 'n', 20, 1, 'validated')`).run(BOOK);
+  const r = await call("bpt_draft", { book: BOOK, kind: "tn", chapter: 1, verse_start: 5, verse_end: 5 });
+  assert.equal(r.isError, false, JSON.stringify(r.data));
+  assert.deepEqual(r.data.rows.map((x) => x.id).sort(), ["t005", "t045"]);
+  assert.equal(r.data.approved_will_be_replaced, 2);
+});
+
+test("bpt_draft: with no signing key the preview is refused and nothing starts", async () => {
+  const { call, jobs } = await fresh({ signingKey: false });
+  await withBot(async (calls) => {
+    const r = await call("bpt_draft", DRAFT);
+    assert.equal(r.isError, true, JSON.stringify(r.data));
+    assert.match(r.data.error, /not set up on this server/);
+    assert.match(r.data.error, /Nothing was started/);
+    assert.equal(calls.length, 0);
+    assert.equal(jobs().length, 0);
+  });
 });
