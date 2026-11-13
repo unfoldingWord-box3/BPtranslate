@@ -698,6 +698,42 @@ test("pollAllNonTerminal (#726): a running job of a retired type that finishes u
   assert.equal(sqlite.prepare(`SELECT COUNT(*) AS n FROM pending_imports`).all()[0].n, 0, "nothing staged");
 });
 
+test("pollAllNonTerminal (#726): a retired-type job that ends upstream with no output, or failed/cancelled, is still failed as pipeline_type_retired", async () => {
+  const cases = [
+    ["done, empty output", { state: "done", output: [] }],
+    ["done, no output field", { state: "done" }],
+    ["failed upstream", { state: "failed", current: { chapter: 1, skill: "tqs", status: "failed", errorKind: "sdk_error", error: "boom" } }],
+    ["cancelled upstream", { state: "cancelled" }],
+  ];
+  for (const [label, upstream] of cases) {
+    const sqlite = freshSqlite();
+    sqlite
+      .prepare(
+        `INSERT INTO pipeline_jobs
+           (job_id, user_id, pipeline_type, book, start_chapter, end_chapter, session_key,
+            state, upstream_job_id, runner, created_at, updated_at)
+         VALUES ('legacy-run', 1, 'tqs', 'OBA', 1, 1, 'sess-legacy-run', 'running', 'bot-legacy', NULL, unixepoch(), unixepoch())`,
+      )
+      .run();
+    const env = freshEnv(sqlite);
+    const status = { jobId: "bot-legacy", current: { chapter: 1, skill: "tqs", status: "done" }, ...upstream };
+    const urls = [];
+    await withFetch(
+      async (url) => {
+        urls.push(String(url));
+        if (String(url).endsWith("/api/pipeline/bot-legacy")) return new Response(JSON.stringify(status), { status: 200 });
+        throw new Error(`unexpected fetch ${url}`);
+      },
+      async () => pollAllNonTerminal(env),
+    );
+    const row = jobRow(sqlite, "legacy-run");
+    assert.equal(row.state, "failed", label);
+    assert.equal(row.error_kind, "pipeline_type_retired", label);
+    assert.equal(row.output_json, null, `${label}: nothing recorded as imported`);
+    assert.deepEqual(urls.filter((u) => !u.endsWith("/api/pipeline/bot-legacy")), [], `${label}: no output fetched`);
+  }
+});
+
 function sideRouteApp() {
   const app = new Hono();
   app.use("*", attachAuth);
