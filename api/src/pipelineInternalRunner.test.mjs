@@ -1706,6 +1706,7 @@ test("POST /start stamps the job with the edit_log watermark", async () => {
 
 const EN_TN = fixture("tn_OBA.tsv");
 const EN_TQ = fixture("tq_OBA.tsv");
+const TQ_OPTIONS = { resourceType: "tq", sourceRef: "unfoldingWord/en_tq@master" };
 
 // DCS raw fake keyed by org/repo/path, so the target repo can 404 while the
 // English source serves.
@@ -1852,7 +1853,7 @@ test("internal run (#895): a whole-chapter tq job leaves the approved question o
   const sqlite = freshSqlite();
   seedOneTqRow(sqlite, "jbuh", 1, "validated");
   seedOneTqRow(sqlite, "en3z", 3, null);
-  const { env, params } = await dispatchInternal(sqlite, { ...TRANSLATE_OPTIONS, resourceType: "tq" });
+  const { env, params } = await dispatchInternal(sqlite, { ...TRANSLATE_OPTIONS, ...TQ_OPTIONS });
 
   const { sent } = await runInternalSteps(env, params, { "unfoldingWord/en_tq/tq_OBA.tsv": EN_TQ });
   assert.ok(!sent.includes("jbuh"), "the approved question is not in any request to the AI");
@@ -1882,7 +1883,7 @@ test("internal run (#895): a whole-chapter job on a fully approved chapter calls
     const [ref, id] = line.split("\t");
     seedOneTqRow(sqlite, id, Number(ref.split(":")[1]), "validated");
   }
-  const { env, params } = await dispatchInternal(sqlite, { ...TRANSLATE_OPTIONS, resourceType: "tq" });
+  const { env, params } = await dispatchInternal(sqlite, { ...TRANSLATE_OPTIONS, ...TQ_OPTIONS });
 
   const { sent, calls, src } = await runInternalSteps(env, params, { "unfoldingWord/en_tq/tq_OBA.tsv": EN_TQ });
   assert.equal(calls, 0, "nothing was bought");

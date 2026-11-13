@@ -247,6 +247,46 @@ async function translateSelection(env: Env, jobId: string): Promise<TranslateSel
   return { rowIds, verseStart, verseEnd };
 }
 
+// #895: the approved rows an internal whole-chapter translate job has no
+// proposal for, because guardAndSourceStep (translate/workflowSteps.ts) left them
+// out of the AI request. Read at apply rather than recorded at dispatch, so the
+// list is what the apply guard would say now: approved, live, not marked Not
+// needed (a Not needed note reports as trashed, not approved), in the job's
+// range with the book introduction riding a tn job that starts at chapter 1.
+// Rows that do have a proposal are left to the loops, which report them. The
+// job's own resource kind only: a tn job never lists questions.
+type LeftOutRow = { kind: "tn" | "tq"; id: string; chapter: number; verse: number };
+async function approvedWithoutProposal(env: Env, job: ImportContext): Promise<LeftOutRow[]> {
+  const r = await env.DB.prepare(`SELECT options_json FROM pipeline_jobs WHERE job_id = ?1`)
+    .bind(job.jobId)
+    .first<{ options_json: string | null }>();
+  let resourceType: unknown = "tn";
+  try {
+    const o: unknown = r?.options_json ? JSON.parse(r.options_json) : null;
+    const rt = o && typeof o === "object" ? (o as { resourceType?: unknown }).resourceType : null;
+    if (typeof rt === "string" && rt) resourceType = rt;
+  } catch {
+    /* unreadable options: the tn default, as translate/dispatch.ts reads it */
+  }
+  if (resourceType !== "tn" && resourceType !== "tq") return [];
+  const kind = resourceType;
+  const scope =
+    kind === "tn"
+      ? `trashed_at IS NULL AND (chapter BETWEEN ?2 AND ?3 OR (chapter = 0 AND ?2 = 1))`
+      : `chapter BETWEEN ?2 AND ?3`;
+  const rs = await env.DB.prepare(
+    `SELECT id, chapter, verse FROM ${kind}_rows
+      WHERE book = ?1 AND deleted_at IS NULL AND translation_state = 'validated' AND ${scope}
+        AND id NOT IN (
+          SELECT json_extract(payload_json, '$.id') FROM pending_imports
+           WHERE job_id = ?4 AND kind = ?5 AND json_extract(payload_json, '$.id') IS NOT NULL)
+      ORDER BY chapter, verse, id`,
+  )
+    .bind(job.book, job.startChapter, job.endChapter, job.jobId, kind)
+    .all<{ id: string; chapter: number; verse: number }>();
+  return (rs.results ?? []).map((x) => ({ kind, id: x.id, chapter: x.chapter, verse: x.verse }));
+}
+
 // #794: the English a translate job translated from, "org/repo@ref", as
 // buildTranslateOptions stored it in options_json (the project's source on
 // master, or a caller's pinned ref). null when the job has none.
@@ -677,11 +717,19 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
     // after this job was queued keeps their work. One query per kind for the
     // whole job (not one per row), so a whole-chapter apply stays inside the
     // subrequest budget.
+    // An internal run can end with no proposals at all (#895: every row was
+    // approved and left out), so it reads its selection regardless.
     const selection =
-      tnProposals.length > 0 || tqProposals.length > 0 ? await translateSelection(env, job.jobId) : null;
+      tnProposals.length > 0 || tqProposals.length > 0 || job.runner === "internal"
+        ? await translateSelection(env, job.jobId)
+        : null;
     const requested = new Set(selection?.rowIds ?? []);
     // #794: a whole-chapter run (no rowIds, no verse range) keeps approved rows.
     const keepApproved = selection === null;
+    // #895: an internal whole-chapter run left approved rows out of the AI
+    // request (translate/workflowSteps.ts guardAndSourceStep), so they have no
+    // proposal here. They are listed as kept all the same.
+    const leftOut = keepApproved && job.runner === "internal" ? await approvedWithoutProposal(env, job) : [];
     // #794: the English source notes, read once per job for every chapter with
     // a note proposal (cached per isolate). The English is the file the job
     // translated from: its options_json.sourceRef ("org/repo@ref", set at start,
@@ -746,13 +794,23 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
       approved: noRefs(),
       english: noRefs(),
     };
-    const recordSkip = (reason: SkipReason, kind: "tn" | "tq", p: PendingImportRow) => {
+    const recordSkip = (reason: SkipReason, kind: "tn" | "tq", p: { chapter: number; verse: number }) => {
       const s = skipped[reason][kind];
       // Book intro is chapter 0; a chapter intro is verse 0 of its chapter.
       s.refs.push(p.chapter === 0 ? "intro" : p.verse === 0 ? `${p.chapter}:intro` : `${p.chapter}:${p.verse}`);
       s.firstChapter ??= p.chapter;
     };
-    const tnTouched = await touchedLookup("tn", tnProposals, job.book, "id", requested);
+    for (const r of leftOut) {
+      if (r.kind === "tn") {
+        result.tnSkippedApproved += 1;
+        result.tnSkippedApprovedIds.push(r.id);
+      } else {
+        result.tqSkippedApproved += 1;
+        result.tqSkippedApprovedIds.push(r.id);
+      }
+      recordSkip("approved", r.kind, r);
+    }
+    const tnTouched =await touchedLookup("tn", tnProposals, job.book, "id", requested);
     for (const p of tnProposals) {
       const proposedId = tnTouched(p);
       if (proposedId !== null) {
@@ -868,7 +926,7 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
     // bot's own output, so the apply's skip report has its own column. Written
     // on every tn, tq or article translate apply, so a retry replaces it rather
     // than adding.
-    if (tnProposals.length > 0 || tqProposals.length > 0 || articleProposals.length > 0) {
+    if (tnProposals.length > 0 || tqProposals.length > 0 || articleProposals.length > 0 || leftOut.length > 0) {
       const report = applySkippedOf(result);
       await env.DB.prepare(`UPDATE pipeline_jobs SET apply_skipped_json = ?2 WHERE job_id = ?1`)
         .bind(job.jobId, report ? JSON.stringify(report) : null)
