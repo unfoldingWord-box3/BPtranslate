@@ -26,6 +26,8 @@ import {
   LESSONS_HEADING,
 } from "./lessons.ts";
 import { encryptApiKey } from "./aiKeyCrypto.ts";
+import { loadContextPackInputs, renderContextPack, renderInstructionsMd } from "./contextExport.ts";
+import { contextShrinkRefused } from "./contextExportLib.ts";
 import { clearProjectConfigCache } from "./projectConfig.ts";
 import { BEGIN_OUTPUT, END_OUTPUT } from "./translate/llm.ts";
 
@@ -191,6 +193,15 @@ test("fixture: يمكنك → فيمكنك 20× across 3 chapters becomes a less
   const section = renderLessonsSection(lessons);
   assert.ok(section.startsWith(LESSONS_HEADING));
   assert.match(section, /Example: «يمكنك» → «فيمكنك» \(seen in 13 notes\)/);
+  // The export's own loader and renderer put it in instructions.md as the third section.
+  const inputs = await loadContextPackInputs(f.env.DB);
+  const md = renderInstructionsMd(inputs.prefs, inputs.lessons);
+  assert.equal(
+    md,
+    `Write plainly.\n\n## Common issues\n\n- «قال» → «يقول»\n\n${LESSONS_HEADING}\n\n` +
+      "Written automatically each night from what editors changed in recent AI drafts before approving them.\n\n" +
+      "- Start the clause with «فيمكنك», not «يمكنك». Example: «يمكنك» → «فيمكنك» (seen in 13 notes)\n",
+  );
 });
 
 test("switch off (the default): no AI call, no run row, nothing rendered", async () => {
@@ -332,4 +343,47 @@ test("shadda vowel on either side of the shadda is a preference", () => {
   assert.equal(isShaddaVowelOnly("أنّ", "أنّ"), false, "no change at all");
   assert.equal(isShaddaVowelOnly("مفيدا", "مفيدًا"), false, "tanween with no shadda is a real change");
   assert.equal(isShaddaVowelOnly("يمكنك", "فيمكنك"), false);
+});
+
+// ── context pack ────────────────────────────────────────────────────────────
+
+const cfg = { languageCode: "ar", languageName: "Arabic", languageTitle: "العربية", direction: "rtl", exportOrg: "BSOJ", org: "BSOJ" };
+const prefs = { audience: null, purpose: null, register: "default", script_notes: null, instructions_md: "Be brief.", common_issues_md: null };
+const pack = (lessons) =>
+  renderContextPack({
+    cfg,
+    prefs,
+    terms: [],
+    tnRows: [],
+    tqRows: [],
+    sources: { tn: new Map(), tq: new Map() },
+    templates: [],
+    lessons,
+    exportedAt: new Date("2026-11-12T04:15:00Z"),
+  });
+
+test("context pack: lessons render only when present, and never count toward the shrink guard", () => {
+  const off = pack([]);
+  const on = pack(Array.from({ length: 25 }, (_, i) => L(`Lesson number ${i} with some words in it.`, "قبل", "بعد", 12)));
+  const instr = (r) => r.files.find((f) => f.path === "instructions.md")?.content;
+  assert.equal(instr(off), "Be brief.\n");
+  assert.ok(instr(on).includes(LESSONS_HEADING));
+  assert.equal(on.stats.guardBytes, off.stats.guardBytes, "the lessons section is left out of guardBytes");
+  assert.ok(on.stats.totalBytes > off.stats.totalBytes);
+  assert.equal(contextShrinkRefused(off.stats, on.stats), null, "switching lessons off never trips the shrink guard");
+  // Lessons alone still make an instructions.md.
+  const only = renderInstructionsMd({ ...prefs, instructions_md: null }, [L("x")]);
+  assert.ok(only.startsWith(LESSONS_HEADING));
+});
+
+test("context pack loader: a database without the lesson tables loads no lessons", async () => {
+  const sqlite = new DatabaseSync(":memory:");
+  const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations");
+  for (const f of readdirSync(dir).filter((f) => f.endsWith(".sql") && f < "0085").sort()) {
+    sqlite.exec(readFileSync(join(dir, f), "utf8"));
+  }
+  const inputs = await loadContextPackInputs(makeDb(sqlite));
+  assert.deepEqual(inputs.lessons, []);
+  const state = await runNightlyLessons({ DB: makeDb(sqlite), WORKSPACE_SLUG: "x" });
+  assert.deepEqual(state, { ran: false, reason: "off" });
 });
