@@ -17,7 +17,10 @@
 //            tq/twl are locked.
 //   DELETE — locked for EVERY kind, tn included ("no carve-out for tn here").
 //   POST /api/rows — locked (a run will rearrange the row set when it lands).
-//   /validate /preserve /hint /trash /restore — no lock check at all.
+//   /validate (approve only) — tn: refused while a translate run will write
+//            the note (#602); tq: refused while any run holds the chapter (#752).
+//   /trash /restore — tn: refused while a translate run will write the note (#602).
+//   /preserve /hint — no lock check at all.
 // The card disables exactly what the server would actually reject — no more.
 // Disabling note editing during a run would block writes the server accepts.
 //
@@ -754,9 +757,10 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
       if (err instanceof ApiError && err.status === 404) {
         say(t("flowReview.queue.approveNeedsDraft"), "warning");
       } else if (err instanceof ApiError && isChapterLockedBody(err.body)) {
-        // An AI translation will write this note; the server refuses the
-        // approval until it finishes (issue #602).
-        say(t("shell.noteLockedByTranslate"), "warning");
+        // An AI translation will write this note (issue #602), or an AI run
+        // holds this question's chapter (#752); the server refuses the
+        // approval until it finishes.
+        say(t(activeKind === "tn" ? "shell.noteLockedByTranslate" : "shell.questionLockedByRun"), "warning");
       } else {
         say(t("flowReview.queue.approveFailed", { status: statusOf(err) }), "warning");
       }
@@ -814,14 +818,15 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
     setApproveAllProgress(null);
     if (firstFailure) {
       const st = firstFailure.status;
-      // A 409 is either workspace_mismatch (which reloads the page) or, for a
-      // note, chapter_locked: an AI translation will write it, so the server
-      // refuses the approval until the run finishes (issue #602).
+      // A 409 is either workspace_mismatch (which reloads the page) or
+      // chapter_locked: an AI translation will write the note (issue #602), or
+      // an AI run holds the question's chapter (#752), so the server refuses
+      // the approval until the run finishes.
       const extra =
         st === 404
           ? t("flowReview.queue.approveAllExtraNoDraft")
           : firstFailure.locked
-            ? ` ${t("shell.noteLockedByTranslate")}`
+            ? ` ${t(kind === "tn" ? "shell.noteLockedByTranslate" : "shell.questionLockedByRun")}`
             : "";
       setApproveAllError(
         t("flowReview.queue.approveAllPartial", {

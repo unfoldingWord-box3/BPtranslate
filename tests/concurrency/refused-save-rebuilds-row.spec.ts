@@ -1,5 +1,6 @@
 import { expect, test, request as apiRequest, type BrowserContext, type Page } from "@playwright/test";
 import { closeTolerant, fetchChapter, gotoVerse, mintToken, newUserContext } from "./helpers";
+import { ZEC_CHAPTERS } from "./chapters";
 
 // Honor BE_BASE_URL so the suite runs on a relocated port (mirrors s8).
 const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
@@ -16,7 +17,7 @@ const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
 // Refused requests are answered by page.route and never reach the server. ZEC
 // 11 is used because no other spec writes to it; globalSetup re-imports ZEC
 // each run.
-const CHAPTER = 11;
+const CHAPTER = ZEC_CHAPTERS.rebuildsRow.chapter;
 
 interface TqRow {
   id: string;

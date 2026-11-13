@@ -93,7 +93,7 @@ function parseServerEmittedKinds() {
     for (const q of m[1].matchAll(new RegExp(`"${KIND}"`, "g"))) if (!kinds.has(q[1])) kinds.set(q[1], "translate/llm.ts");
   }
   // One known kind per pattern family, so a silent regex miss can't pass.
-  for (const known of ["workspace_unknown", "merge_shrink_refused", "internal_error", "lane_fenced", "pipeline_api_disabled", "interrupted", "rate_limited"]) {
+  for (const known of ["workspace_unknown", "merge_shrink_refused", "internal_error", "ai_provider_unavailable", "pipeline_api_disabled", "interrupted", "rate_limited"]) {
     assert.ok(kinds.has(known), `Parser rot: expected server kind "${known}" was not found in api/src`);
   }
   return kinds;

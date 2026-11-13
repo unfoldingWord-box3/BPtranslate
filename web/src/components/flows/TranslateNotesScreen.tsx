@@ -199,7 +199,7 @@ import {
   withPendingReverts,
   type PendingRowSave,
 } from "../../sync/draftSaveState";
-import { onOutboxDrop, onOutboxResult, outbox, type OutboxOp } from "../../sync/outbox";
+import { onOpDropped, onOutboxResult, outbox, type DroppedOp, type OutboxOp } from "../../sync/outbox";
 import { pipelineStore, getSessionKey, type PipelineJob } from "../../sync/pipelineStore";
 import { jobLocksChapterNotes, jobLocksNote, lockJobReleased } from "../../lib/chapterLock";
 import { redoOutcome } from "../../lib/applySkipped";
@@ -874,7 +874,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
   // (also after a keep-mine, where saveDraft no longer moves it), and the
   // persist effect re-runs against it, so a kept revert stays a draft.
   useEffect(() => {
-    const end = (op: OutboxOp, ok: boolean) => {
+    const end = (op: DroppedOp, ok: boolean) => {
       endedOpsRef.current.add(op.id);
       const sent = sentRef.current;
       if (!sent || !isEditorsPendingSave(sent, op, { rowKind: "tn", id: sent.id, book })) return;
@@ -891,7 +891,8 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
     const offResult = onOutboxResult((op, result) => {
       if (rowSaveEnded(result)) end(op, result.kind === "ok");
     });
-    const offDrop = onOutboxDrop((op) => end(op, false));
+    // A discard in this tab or another (#637 review item 1).
+    const offDrop = onOpDropped((op) => end(op, false));
     return () => {
       offResult();
       offDrop();
@@ -1552,7 +1553,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
         applyLocalRowPatch("tn", target.id, baseline as Partial<TnRow & TqRow>);
       }
     });
-    offDrop = onOutboxDrop((op) => {
+    offDrop = onOpDropped((op) => {
       if (op.id !== opId) return;
       offResult();
       offDrop();
@@ -1884,6 +1885,10 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
         // The job finished but left this note alone: someone changed it after
         // the job was queued (#601). Nothing new landed, so the draft stays.
         say(t("flowTranslate.redoKeptYourEdit"), "info");
+      } else if (outcome === "english") {
+        // The AI returned the English note unchanged, so the draft was not
+        // applied (#794). Nothing new landed; the note keeps its text.
+        say(t("flowTranslate.redoSameAsEnglish"), "warning");
       } else if (outcome === "drafted") {
         void drafts.clear(rowKey("tn", book, pending.rowId));
         void refetch().then(() => setReloadNonce((n) => n + 1));

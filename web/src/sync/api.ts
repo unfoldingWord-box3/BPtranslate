@@ -1167,6 +1167,9 @@ export interface TnQuickResponse {
 // Types mirror the bp-assistant client-side contract; both sides change
 // together if the contract is revised.
 
+// translate is the only type that can start (#726). generate/notes/tqs are
+// retired; they stay in this union because old job rows still carry them and
+// the job history labels them.
 export type PipelineType = "generate" | "notes" | "tqs" | "translate";
 
 // Translate-pipeline overrides (only meaningful when pipelineType ===
@@ -1587,54 +1590,31 @@ export type PipelineErrorKind =
   | "merge_failed"
   | "merge_shrink_refused"
   // Dispatch-time failures written by api/src/pipelines.ts dispatchNext.
+  // lane_fenced came from the retired generate type's stamp check (#726); it
+  // is still on old failed rows.
   | "lane_fenced"
   | "pipeline_api_disabled"
-  // #551: a queued generate/notes/tqs job, which can't run on the org's own key yet.
-  | "ai_needs_org_key";
+  // #551: a queued generate/notes/tqs job, which couldn't run on the org's own
+  // key. Still on old failed rows.
+  | "ai_needs_org_key"
+  // #726: a queued or running job of a retired type (generate/notes/tqs).
+  | "pipeline_type_retired";
 // The union is hand-kept; the wire value is any string. Fields that carry an
 // errorKind from the server are typed `string`, and lib/aiErrorCopy.ts falls
 // back for a kind it doesn't know. lib/aiErrorCopy.test.mjs scans api/src and
 // fails when the server can write a kind that has no copy.
 
-// Mirrors the bp-assistant contract (docs/ai-pipeline-integration.md §3).
-// Server validates with .strict(); unknown keys are rejected. Per-pipeline-type
-// flag mixing (e.g. contentTypes on a "notes" run) is also rejected.
-export interface PipelineRequestOptions {
-  model?: "sonnet" | "opus";
-  /** Clear prior checkpoint + outputs. Useful for retrying a failed run. */
-  fresh?: boolean;
-
-  // -- generate-only --
-  /** Restrict to a subset of content types. Default is both. */
-  contentTypes?: ("ult" | "ust")[];
-  /** Skip alignment + repo-insert; USFM is NOT pushed to Door43. */
-  noAlign?: boolean;
-  /** Reuse already-generated USFM and only run alignment + repo-insert. */
-  alignOnly?: boolean;
-  /** Push the unaligned USFM to Door43 (no alignment performed). */
-  textOnly?: boolean;
-
-  // -- notes-only --
-  /** Skip the chapter intro generation step. */
-  noIntro?: boolean;
-  /** Pause before generating Alternate Translations so a human can review. */
-  pauseBeforeATs?: boolean;
-}
-
 export interface PipelineStartRequest {
-  pipelineType: PipelineType;
+  pipelineType: "translate";
   // Optional for article translate jobs (tw/ta), which are scoped by
-  // translate.articleId, not book/chapter. Row-keyed jobs (generate/notes/
-  // tqs and tn/tq translate) still pass both.
+  // translate.articleId, not book/chapter. tn/tq translate jobs pass both.
   book?: string;
   startChapter?: number;
   endChapter?: number;
   sessionKey: string;
-  options?: PipelineRequestOptions;
   /**
-   * Translate-pipeline overrides (only meaningful when pipelineType ===
-   * 'translate'; ignored otherwise). The server builds the full option set
-   * from the active project config and folds these in.
+   * Translate-pipeline overrides. The server builds the full option set from
+   * the active project config and folds these in.
    */
   translate?: TranslateRequestOptions;
 }
@@ -1682,7 +1662,13 @@ export interface PipelineStatusResponse {
    */
   queuePosition?: number;
   queueAhead?: number;
-  /** Notes (#601), questions (#725) or tW/tA articles (#734, by path) a translate apply left alone because a person changed them after the job was queued. */
+  /**
+   * What a translate apply left alone: notes (#601), questions (#725) or tW/tA
+   * articles (#734, by path) a person changed after the job was queued;
+   * approved notes and questions a whole-chapter run kept (#794); note drafts
+   * not applied because they were the English source note, and why that check
+   * could not run when it could not (#794).
+   */
   applySkipped?: {
     tnTouched?: number;
     tnTouchedIds?: string[];
@@ -1690,6 +1676,13 @@ export interface PipelineStatusResponse {
     tqTouchedIds?: string[];
     articleTouched?: number;
     articleTouchedPaths?: string[];
+    tnApproved?: number;
+    tnApprovedIds?: string[];
+    tqApproved?: number;
+    tqApprovedIds?: string[];
+    tnSameAsEnglish?: number;
+    tnSameAsEnglishIds?: string[];
+    tnEnglishCheckNotRun?: string;
   };
 }
 
@@ -2288,8 +2281,9 @@ export const api = {
   // bumping, mirrors setPreserveNote. Returns the updated row so the caller can
   // refresh local state (the collapsed/green treatment keys off the new state).
   // `bulk`: set by Approve-all loops. A one-at-a-time approval clears a bulk
-  // approval stamp (the row becomes an AI example again); Approve-all is itself
-  // a bulk approval and keeps it (#414).
+  // approval stamp (the row becomes an AI example again, #414); Approve-all is
+  // itself a bulk approval and stamps an AI draft nobody changed so it is not
+  // an AI example; an edited note counts like a single approval (#833).
   // expectedVersion / expectedState: approve only if the row is still at the
   // version and translation_state the caller showed (If-Match + expected_state;
   // 409 otherwise, and a trashed row is refused). Rapid check's circle sends
@@ -2320,7 +2314,9 @@ export const api = {
     }),
 
   // Translation-mode "Approve" for translationQuestions — the tQ analogue of
-  // validateNote. value=true → 'validated'; value=false → 'edited'.
+  // validateNote. value=true → 'validated'; value=false → 'edited'. Approving is
+  // refused (409 chapter_locked) while any AI run holds the question's chapter,
+  // the same rule as saving a question edit (#752).
   validateQuestion: (id: string, book: string, value: boolean, opts?: { bulk?: boolean }) =>
     request<TqRow>(`/api/rows/tq/${encodeURIComponent(id)}/validate?book=${encodeURIComponent(book)}`, {
       method: "POST",

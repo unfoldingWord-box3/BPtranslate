@@ -1,5 +1,8 @@
 import { expect, test, request as apiRequest } from "@playwright/test";
 import { fetchChapter, saveNote, gotoVerse, mintToken, newUserContext, noteTextarea, waitForServerNote } from "./helpers";
+import { ZEC_CHAPTERS } from "./chapters";
+
+const CHAPTER = ZEC_CHAPTERS.shared.chapter;
 
 // Honor BE_BASE_URL so the suite runs on a relocated port (mirrors s8).
 const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
@@ -16,15 +19,15 @@ test("two users editing adjacent verses both land — no clobber", async ({ brow
   // The seed (globalSetup) gives us a fresh ZEC; we read its current shape.
   const probe = await apiRequest.newContext({ baseURL: BASE });
   const probeAuth = await mintToken(probe, "probe");
-  const chapter = await fetchChapter(probe, probeAuth.token, "ZEC", 6);
+  const chapter = await fetchChapter(probe, probeAuth.token, "ZEC", CHAPTER);
 
   // Find one TN row on verse 1 and one on verse 2. Both must exist in the
   // seed; if the sample data ever changes, fail loudly here instead of
   // halfway through a flaky UI test.
   const aliceTarget = chapter.tn.find((r) => r.verse === 1);
   const bobTarget = chapter.tn.find((r) => r.verse === 2);
-  expect(aliceTarget, "expected at least one TN on ZEC 6:1").toBeDefined();
-  expect(bobTarget, "expected at least one TN on ZEC 6:2").toBeDefined();
+  expect(aliceTarget, `expected at least one TN on ZEC ${CHAPTER}:1`).toBeDefined();
+  expect(bobTarget, `expected at least one TN on ZEC ${CHAPTER}:2`).toBeDefined();
   await probe.dispose();
 
   const { context: aliceCtx } = await newUserContext(browser, "alice");
@@ -36,8 +39,8 @@ test("two users editing adjacent verses both land — no clobber", async ({ brow
   // resource column filters notes to the active verse, so a row on v2 isn't
   // mounted at the default v1.
   await Promise.all([
-    gotoVerse(alice, "ZEC", 6, aliceTarget!.verse),
-    gotoVerse(bob, "ZEC", 6, bobTarget!.verse),
+    gotoVerse(alice, "ZEC", CHAPTER, aliceTarget!.verse),
+    gotoVerse(bob, "ZEC", CHAPTER, bobTarget!.verse),
   ]);
 
   const aliceNote = noteTextarea(alice, aliceTarget!.id);
@@ -60,8 +63,8 @@ test("two users editing adjacent verses both land — no clobber", async ({ brow
   const serverCtx = await apiRequest.newContext({ baseURL: BASE });
   const serverAuth = await mintToken(serverCtx, "verifier");
   const [aliceFinal, bobFinal] = await Promise.all([
-    waitForServerNote(serverCtx, serverAuth.token, "ZEC", 6, aliceTarget!.id, (n) => n === aliceText),
-    waitForServerNote(serverCtx, serverAuth.token, "ZEC", 6, bobTarget!.id, (n) => n === bobText),
+    waitForServerNote(serverCtx, serverAuth.token, "ZEC", CHAPTER, aliceTarget!.id, (n) => n === aliceText),
+    waitForServerNote(serverCtx, serverAuth.token, "ZEC", CHAPTER, bobTarget!.id, (n) => n === bobText),
   ]);
 
   expect(aliceFinal.note).toBe(aliceText);

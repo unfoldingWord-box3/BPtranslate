@@ -49,14 +49,16 @@ In a translation project it is a sparkle icon, **Start an AI run**. It opens a m
 
 After **Translate chapter** or **Translate questions**, a confirm window opens: type a chapter or a range under **Chapter or range** and press **Start**.
 
+A **Translate questions** run does not redraft questions that are already approved. It keeps them as they are, and when the run ends a banner lists them. To get a new AI draft for an approved question, run the AI on that question alone.
+
 In a source project, one that does not translate from another language (such as unfoldingWord's English), the icon is a download icon, **Import from Door43**. It opens the import window straight away, with no menu.
 
 On a phone the icon is not in the top bar. It is the first item in your account menu, with the same name.
 
-While a **Translate chapter** or **Translate questions** run is starting, running or paused on a chapter, that chapter's questions can't be saved. A run that is still waiting in line locks nothing. Admins follow the runs in [AI studio](#help:admin-ai).
+While any AI run is starting, running or paused on a chapter, that chapter's questions can't be saved or approved. A run that is still waiting in line locks nothing. Admins follow the runs in [AI studio](#help:admin-ai).
 
 ## Good to know
 - Your typing is kept in your browser until you select **Save**. The top bar shows **N unsaved**. See [Saving and working offline](#help:save-and-sync).
-- If an AI run is rewriting the chapter, a save is refused. The screen says your edit was dropped. Try again when the run ends.
+- If an AI run is rewriting the chapter, a save is refused. The screen says your edit was dropped. **Save & Approve** is refused too, and the screen says the questions can't be approved yet. Try again when the run ends.
 - If another editor saved the question first, a banner says your version was not saved. Select **Reload question**.
 - If you only have view access, you can read the questions but not edit them.

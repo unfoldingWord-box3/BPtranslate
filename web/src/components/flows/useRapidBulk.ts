@@ -9,12 +9,14 @@
 // skips that row, and 401/403 stop the run (ReviewQueue.handleApproveAll).
 //
 // Decisions (see the PR for #829):
-// - Approve sends `bulk: true`. A checked range is not a one-at-a-time read of
-//   each note, so it keeps any admin_bulk_state stamp (api/src/rows.ts,
-//   HAND_APPROVAL_CLAUSE): a stamped row stays out of the AI examples until a
-//   person approves it on its own. The open note with an unsaved edit goes
-//   through the screen's handleApprove (save, then approve), which is a hand
-//   approval like Ctrl+Enter.
+// - Approve is a hand approval: it sends no `bulk` flag (issue #833, option B).
+//   Each checked note's text sits on screen beside the English note, so a
+//   checked range counts as read. The approval becomes an AI example and clears
+//   any admin_bulk_state stamp (api/src/rows.ts, HAND_APPROVAL_CLAUSE), the same
+//   as approving the note on its own. Only the Approve-all buttons (review queue,
+//   classic editor) send `bulk: true`, which stamps AI drafts nobody changed. The open note with an unsaved
+//   edit goes through the screen's handleApprove (save, then approve), which is
+//   a hand approval like Ctrl+Enter.
 // - Approve has no Undo: un-approving sets 'edited', not the state the note
 //   had before (validateNote(id, book, false)), so an "Undo" would not undo.
 // - Not needed has Undo: trash only sets trashed_at, and restore clears it.
@@ -111,7 +113,7 @@ export function useRapidBulk(a: RapidBulkArgs) {
   // bulk Redo they belong to. A selection over 50 notes is several jobs; the
   // result line reports once, when the last of them settles.
   const redoJobsRef = useRef(new Map<string, { batch: number; rowIds: string[] }>());
-  const redoBatchesRef = useRef(new Map<number, { open: number; drafted: number; kept: number; failed: string | null }>());
+  const redoBatchesRef = useRef(new Map<number, { open: number; drafted: number; kept: number; english: number; failed: string | null }>());
   const nextBatchRef = useRef(0);
 
   function summarize(lead: string, skipped: Record<SkipReason, number>, stopped: boolean): RapidBulkResult {
@@ -265,7 +267,6 @@ export function useRapidBulk(a: RapidBulkArgs) {
           // Approve exactly what is on screen: a peer's edit or set-aside
           // since then comes back 409 instead of being approved unseen.
           const updated = await api.validateNote(id, book, true, {
-            bulk: true,
             expectedVersion: r.version,
             expectedState: r.translation_state === "ai_draft" || r.translation_state === "edited" ? r.translation_state : undefined,
           });
@@ -671,7 +672,7 @@ export function useRapidBulk(a: RapidBulkArgs) {
     let openChanged = false;
     const alreadyOver: Parameters<typeof settleRedo>[0][] = [];
     const batchId = ++nextBatchRef.current;
-    const batch = { open: 0, drafted: 0, kept: 0, failed: null as string | null };
+    const batch = { open: 0, drafted: 0, kept: 0, english: 0, failed: null as string | null };
     // Registered before the first start: a job can end before the next starts.
     redoBatchesRef.current.set(batchId, batch);
     try {
@@ -767,19 +768,27 @@ export function useRapidBulk(a: RapidBulkArgs) {
     batch.open--;
     if (job.state !== "done") batch.failed = job.error_message ?? job.state;
     else {
-      const kept = entry.rowIds.filter((id) => redoOutcome(job, id) === "kept").length;
+      const outcomes = entry.rowIds.map((id) => redoOutcome(job, id));
+      const kept = outcomes.filter((o) => o === "kept").length;
+      // #794: drafts that were the English note copied back were not applied.
+      const english = outcomes.filter((o) => o === "english").length;
       batch.kept += kept;
-      batch.drafted += entry.rowIds.length - kept;
+      batch.english += english;
+      batch.drafted += entry.rowIds.length - kept - english;
       a.reload();
     }
     if (batch.open > 0) return;
     redoBatchesRef.current.delete(entry.batch);
     const parts: string[] = [];
-    if (batch.drafted + batch.kept > 0) {
+    if (batch.drafted + batch.kept + batch.english > 0) {
       parts.push(t("flowTranslate.rapid.bulk.redoDone", { drafted: batch.drafted, kept: batch.kept }));
     }
+    if (batch.english > 0) parts.push(t("flowTranslate.rapid.bulk.redoSameAsEnglish", { count: batch.english }));
     if (batch.failed) parts.push(t("flowTranslate.rapid.bulk.redoFailed", { status: batch.failed }));
-    show({ text: parts.join(" "), severity: batch.failed ? "warning" : batch.kept > 0 ? "info" : "success" });
+    show({
+      text: parts.join(" "),
+      severity: batch.failed || batch.english > 0 ? "warning" : batch.kept > 0 ? "info" : "success",
+    });
   }
   // The store listeners below subscribe once; they call the latest render's
   // settleRedo through this ref.

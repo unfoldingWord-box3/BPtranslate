@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { AI_DRAFT_CHAPTERS, ZEC_CHAPTERS } from "./chapters";
 
 // Synthetic RTL fixture for the direction-guard spec (rtl-direction.spec.ts,
 // issues #293 and #486). The seed applied in globalSetup below pins the
@@ -31,7 +32,7 @@ import { fileURLToPath } from "node:url";
 // script (versionIsRtl) — is left completely alone.
 export const RTL_FIXTURE = {
   book: "ZEC",
-  chapter: 6,
+  chapter: ZEC_CHAPTERS.shared.chapter,
   verse: 1,
   // "This is Arabic text AVD for testing the text direction." — a distinctive,
   // first-strong-RTL string so `dir="auto"` resolves the lane to rtl.
@@ -158,14 +159,12 @@ export default async function globalSetup() {
       // ...and ONE tn note with Arabic for the note surfaces (#486).
       `UPDATE tn_rows SET note = '${sq(RTL_FIXTURE.arabicNote)}' ` +
       `WHERE book = '${RTL_FIXTURE.book}' AND id = '${RTL_FIXTURE.noteId}';\n` +
-      // ZEC 3's notes as AI drafts, so notes-rapid-check.spec can approve them
-      // (/validate refuses a note with no draft state). The only other spec on ZEC 3,
-      // notes-rapid-columns.spec, only reads it.
-      `UPDATE tn_rows SET translation_state = 'ai_draft' WHERE book = 'ZEC' AND chapter = 3;\n` +
-      // ZEC 13 likewise, for notes-rapid-lanes.spec (approve, un-approve, quote).
-      `UPDATE tn_rows SET translation_state = 'ai_draft' WHERE book = 'ZEC' AND chapter = 13;\n` +
-      // ZEC 4 for notes-rapid-bulk.spec (bulk approve / Not needed / Undo); no other spec opens ZEC 4.
-      `UPDATE tn_rows SET translation_state = 'ai_draft' WHERE book = 'ZEC' AND chapter = 4;\n`,
+      // The chapters.ts entries with seed: "ai_draft" get their notes as AI
+      // drafts, so the rapid-check specs can approve them (/validate refuses a
+      // note with no draft state). Each entry's `why` says which spec needs it.
+      AI_DRAFT_CHAPTERS.map(
+        (c) => `UPDATE tn_rows SET translation_state = 'ai_draft' WHERE book = 'ZEC' AND chapter = ${c};\n`,
+      ).join(""),
   );
   const seed = spawnSync(
     "npx",

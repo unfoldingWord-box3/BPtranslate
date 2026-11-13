@@ -953,6 +953,7 @@
     "couldntDeleteNote": "Couldn't delete note: {{message}}",
     "couldntRestoreNote": "Couldn't restore note: {{message}}",
     "noteLockedByTranslate": "An AI translation is writing this note. Try again after it finishes.",
+    "questionLockedByRun": "An AI run is working on this chapter, so its questions can't be approved yet. Try again after it finishes.",
     "couldntApproveNote": "Couldn't approve note: {{message}}",
     "couldntTranslateNote": "Couldn't start translation: {{message}}",
     "cantPreserveAlignment": "This edit can't preserve word alignment on words you didn't change, so it wasn't saved ({{ref}} {{bibleVersion}}{{affected}}). Please note this verse ({{ref}}) for your admin to file a bug-fix review, or re-align in the alignment panel.",
@@ -1622,10 +1623,6 @@
     "daysAgo_one": "{{count}} day(s) ago",
     "daysAgo_other": "{{count}} day(s) ago",
     "inLine": "#{{n}} in line",
-    "retryQueuedFor": "Retry queued for {{scope}}",
-    "retryUnavailable": "AI not configured — retry unavailable",
-    "alreadyRunningElsewhere": "Already running or queued elsewhere",
-    "retryFailed": "Could not retry — try again",
     "cancelTooLate": "Couldn't cancel — it already started running.",
     "cancelFailed": "Couldn't cancel — try again",
     "cantRetryTranslate": "Can't retry a translate run — the job row doesn't record which resource type (ULT/UST) it drafted",
@@ -1686,7 +1683,8 @@
       "merge_shrink_refused": "The AI's result was rejected because it would have removed existing content. The chapter was not changed.",
       "lane_fenced": "The project's source text changed or was locked after this run was queued, so it did not start. Nothing was changed — start a new run.",
       "pipeline_api_disabled": "The external AI service isn't set up on this server, so this run could not start. An admin needs to check the AI settings.",
-      "ai_needs_org_key": "This needs your organization's AI key, and it can't use one yet, so this run did not start. Nothing was changed."
+      "ai_needs_org_key": "This needs your organization's AI key, and it can't use one yet, so this run did not start. Nothing was changed.",
+      "pipeline_type_retired": "This kind of AI run has been retired, so the app did not use its result. Start a Translate run instead."
     }
   },
   "flowTranslate": {
@@ -1750,6 +1748,7 @@
     "redoStarted": "The AI is redrafting this note in the background — the new draft appears here when it lands.",
     "redoTimedOut": "The AI redraft is taking too long — try Redo again, or check the AI status panel.",
     "redoKeptYourEdit": "Your note was kept: it was changed after the AI job was queued, so the AI left it alone. Press Redo again if you still want a new draft.",
+    "redoSameAsEnglish": "The AI returned the English note unchanged, so its draft was not applied. Your note keeps its current text. Press Redo to try again.",
     "approveNeedsDraft": "Approve needs a draft first — this note hasn't been through the AI pipeline yet.",
     "approveFailed": "Approve failed ({{status}}).",
     "notNeededFailed": "Could not set this aside ({{status}}).",
@@ -1870,6 +1869,7 @@
         "restored": "Restored: {{count}}.",
         "redoStarted": "Redo with AI started. Notes in the job: {{count}}. They stay read-only until it finishes.",
         "redoDone": "Redo with AI finished. New drafts: {{drafted}}. Kept because someone changed them: {{kept}}.",
+        "redoSameAsEnglish": "Not applied because the AI returned the English note unchanged: {{count}}.",
         "redoFailed": "Redo with AI did not run ({{status}}).",
         "skipped": "Skipped: {{count}} ({{reasons}}).",
         "listSep": ", ",
@@ -2923,6 +2923,7 @@
       "applying": "Applying…",
       "errForbidden": "Only admins can change review state in bulk.",
       "errLockedByTranslate": "An AI translation is rewriting notes in this range, so they can't be approved yet. Try again after it finishes.",
+      "errLockedQuestions": "An AI run is working on a chapter in this range, so its questions can't be approved yet. Try again after it finishes.",
       "errMaybeApplied": "The change could not be confirmed ({{detail}}). It may have been partly or fully applied, so check the counts below before trying again."
     },
     "scorecard": {

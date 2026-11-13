@@ -8,36 +8,24 @@
 
 import type { Env } from "./index";
 import {
-  collectSourceWords,
   curlifyText,
-  curlifyVerseObjects,
-  extractPlainText,
   extractVersesForRange,
-  dropDuplicateSourceMilestones,
-  healReplacementChars,
   normalizeNoteWhitespace,
   parseTsv,
-  recomputeTargetOccurrences,
   refParts,
-  stripOrphanAlignmentMarkers,
-  type SourceWord,
   type VerseExtract,
 } from "./importParsers.ts";
-import { canonizeAlignmentSource } from "./canonizeHebrew.ts";
-import { assertLaneWritable, laneForBibleVersion } from "./scriptureLane.ts";
-import { NT_BOOKS } from "./dcsSources.ts";
 import type { ProjectConfig } from "./projectConfig";
-import { newRowId, isValidRowId, coerceRowId, deriveAltRowId } from "./rowId.ts";
-import { tnContentKey } from "./tnDedup.ts";
 import { IMPORT_CLAIM_STALE_SECONDS } from "./pipelineImportClaim.ts";
 import { nextPreDraftJson } from "./preDraftSnapshot.ts";
 import { fetchBotOutputWith } from "./botOutput.ts";
 import { getText, outKey } from "./translate/storage.ts";
 import { selectRows } from "./translate/core.ts";
 import { rawUrlOriginError } from "./rawUrlPin.ts";
-import { sameDcsName } from "./repoUrl.ts";
 import { HUMAN_TOUCH_ACTIONS, HUMAN_TOUCH_SOURCES } from "./pipelineDedupSql.ts";
 import { houseStyleForProposal, loadEnabledHouseStyleRules, type HouseStyleRule } from "./houseStyle.ts";
+import { readBookSourceNotes, readPinnedSourceNotes, type SourceNotes } from "./sourceNotes.ts";
+import { isTranslationConfig } from "./workflowLayouts.ts";
 
 interface OutputEntry {
   type?: string;
@@ -56,7 +44,7 @@ interface OutputEntry {
 
 interface ImportContext {
   jobId: string;
-  pipelineType: "generate" | "notes" | "tqs" | string;
+  pipelineType: string;
   book: string;
   startChapter: number;
   endChapter: number;
@@ -162,7 +150,7 @@ interface StagedRow {
 // tnPayload / tqPayload are exported for the direct regression tests in
 // pipelineImport.test.mjs, which assert on the quote-curling below (JER 32/33,
 // NUM 26:53 prod forensics — straight quotes in AI-generated note prose).
-// Not intended as a public API beyond that — same rationale as deleteUnkeptTns.
+// Not intended as a public API beyond that.
 export function tnPayload(book: string, refRaw: string, row: Record<string, string>) {
   const [ch, v] = refParts(refRaw);
   const occRaw = row["Occurrence"];
@@ -182,11 +170,11 @@ export function tnPayload(book: string, refRaw: string, row: Record<string, stri
       occurrence,
       // Collapse bp-assistant's double-space-after-punctuation artifact so the
       // stored note matches DCS master's normalized form (see
-      // normalizeNoteWhitespace) — both apply paths (applyTnInsert and the hint
-      // expansion) and the edit_log audit read this same staged note. Curl
-      // straight quotes with the SAME contextual rule verse text ingest uses
+      // normalizeNoteWhitespace) — the apply and the edit_log audit read this
+      // same staged note. Curl straight quotes with the SAME contextual rule
+      // verse text ingest uses
       // (curlifyText, not tsvFormat.ts's educateQuotes — see the module
-      // comment above curlifyVerseObjects in importParsers.ts for why the two
+      // comment above curlifyText in importParsers.ts for why the two
       // ingest paths must share one rule) so an AI-authored note never lands
       // with straight ' / " and never disagrees with an AI-authored verse
       // curled in the same run.
@@ -257,6 +245,62 @@ async function translateSelection(env: Env, jobId: string): Promise<TranslateSel
   const verseEnd = typeof o.verseEnd === "number" ? o.verseEnd : null;
   if (!rowIds && verseStart == null) return null;
   return { rowIds, verseStart, verseEnd };
+}
+
+// #895: the approved rows an internal whole-chapter translate job has no
+// proposal for, because guardAndSourceStep (translate/workflowSteps.ts) left them
+// out of the AI request. Read at apply rather than recorded at dispatch, so the
+// list is what the apply guard would say now: approved, live, not marked Not
+// needed (a Not needed note reports as trashed, not approved), in the job's
+// range with the book introduction riding a tn job that starts at chapter 1.
+// Rows that do have a proposal are left to the loops, which report them. The
+// job's own resource kind only: a tn job never lists questions.
+type LeftOutRow = { kind: "tn" | "tq"; id: string; chapter: number; verse: number };
+async function approvedWithoutProposal(env: Env, job: ImportContext): Promise<LeftOutRow[]> {
+  const r = await env.DB.prepare(`SELECT options_json FROM pipeline_jobs WHERE job_id = ?1`)
+    .bind(job.jobId)
+    .first<{ options_json: string | null }>();
+  let resourceType: unknown = "tn";
+  try {
+    const o: unknown = r?.options_json ? JSON.parse(r.options_json) : null;
+    const rt = o && typeof o === "object" ? (o as { resourceType?: unknown }).resourceType : null;
+    if (typeof rt === "string" && rt) resourceType = rt;
+  } catch {
+    /* unreadable options: the tn default, as translate/dispatch.ts reads it */
+  }
+  if (resourceType !== "tn" && resourceType !== "tq") return [];
+  const kind = resourceType;
+  const scope =
+    kind === "tn"
+      ? `trashed_at IS NULL AND (chapter BETWEEN ?2 AND ?3 OR (chapter = 0 AND ?2 = 1))`
+      : `chapter BETWEEN ?2 AND ?3`;
+  const rs = await env.DB.prepare(
+    `SELECT id, chapter, verse FROM ${kind}_rows
+      WHERE book = ?1 AND deleted_at IS NULL AND translation_state = 'validated' AND ${scope}
+        AND id NOT IN (
+          SELECT json_extract(payload_json, '$.id') FROM pending_imports
+           WHERE job_id = ?4 AND kind = ?5 AND json_extract(payload_json, '$.id') IS NOT NULL)
+      ORDER BY chapter, verse, id`,
+  )
+    .bind(job.book, job.startChapter, job.endChapter, job.jobId, kind)
+    .all<{ id: string; chapter: number; verse: number }>();
+  return (rs.results ?? []).map((x) => ({ kind, id: x.id, chapter: x.chapter, verse: x.verse }));
+}
+
+// #794: the English a translate job translated from, "org/repo@ref", as
+// buildTranslateOptions stored it in options_json (the project's source on
+// master, or a caller's pinned ref). null when the job has none.
+async function translateSourceRef(env: Env, jobId: string): Promise<string | null> {
+  const r = await env.DB.prepare(`SELECT options_json FROM pipeline_jobs WHERE job_id = ?1`)
+    .bind(jobId)
+    .first<{ options_json: string | null }>();
+  try {
+    const o: unknown = r?.options_json ? JSON.parse(r.options_json) : null;
+    const ref = o && typeof o === "object" ? (o as { sourceRef?: unknown }).sourceRef : null;
+    return typeof ref === "string" && ref.trim() ? ref.trim() : null;
+  } catch {
+    return null;
+  }
 }
 
 async function parseOutputEntry(
@@ -388,8 +432,7 @@ async function parseOutputEntry(
 //      the last chunk commits; a partial prior stage is dropped and redone.
 //   2. APPLY — for every unresolved pending_imports row, mutate the live
 //      tn_rows / tq_rows / verses tables and mark accepted_at.
-//      Idempotent at the per-row level (accepted_at IS NULL filter) plus
-//      the TN-delete phase, which only targets unkept rows.
+//      Idempotent at the per-row level (accepted_at IS NULL filter).
 //
 // Throws on hard errors (Door43 fetch failure, malformed input, batch error).
 // Callers should NOT mark output_json in pipeline_jobs unless this resolves
@@ -539,7 +582,8 @@ export interface ApplyResult {
   // A tq_rows UPDATE lost its version CAS to a concurrent write (e.g. a
   // translator's edit landing between our read and write) — the proposal is
   // left unaccepted for a later pass / manual review, not silently clobbered.
-  // See applyTqUpsert.
+  // Set only by the retired tqs apply (#726), so always 0 now; as are
+  // tnDeleted, tnCreated, tnHintExpanded, tnSkippedDup, tqCreated and verseUpdated.
   tqSkippedConflict: number;
   // Translate apply only (#601, option B): notes a person edited, approved,
   // marked Not needed or restored after this job was queued. Their AI draft is
@@ -554,6 +598,20 @@ export interface ApplyResult {
   // the apply ran, so they get no AI draft. Kept apart from the touched count
   // above, which covers only changes made after the job was queued.
   tnSkippedTrashed: number;
+  // Translate apply only (#794, option B): a whole-chapter run (no rowIds, no
+  // verse range) leaves approved notes and questions as they are. A run that
+  // names the row (one-note redo, verse range) still redrafts it.
+  tnSkippedApproved: number;
+  tnSkippedApprovedIds: string[];
+  tqSkippedApproved: number;
+  tqSkippedApprovedIds: string[];
+  // Translate apply only (#794): note drafts that were the English source note
+  // copied back (isEnglishEcho), so they were not applied.
+  tnSkippedEnglish: number;
+  tnSkippedEnglishIds: string[];
+  // Why the English check could not run for a note that was then applied
+  // anyway (it fails open), or null when it ran for every applied note.
+  tnEnglishCheckNotRun: string | null;
   // tw/ta article files updated in place by the translate apply (by path).
   articleUpdated: number;
   // The same for tW/tA articles (#734), by path: edited or approved after the
@@ -589,8 +647,7 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
   // write is attributed to them, matching the contract that says the run
   // was triggered on their behalf.
   const starter = await env.DB.prepare(
-    `SELECT user_id, source_generation, source_owner, source_repo, source_ref,
-            source_stamps_json, pipeline_type, created_at, edit_log_watermark
+    `SELECT user_id, created_at, edit_log_watermark
        FROM pipeline_jobs WHERE job_id = ?1`,
   )
     .bind(job.jobId)
@@ -598,23 +655,9 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
       user_id: number;
       created_at: number;
       edit_log_watermark: number | null;
-      source_generation: number | null;
-      source_owner: string | null;
-      source_repo: string | null;
-      source_ref: string | null;
-      source_stamps_json: string | null;
-      pipeline_type: string;
     }>();
   if (!starter) throw new Error(`apply: pipeline_jobs row not found for ${job.jobId}`);
   const userId = starter.user_id;
-  const jobStamp = {
-    source_generation: starter.source_generation,
-    source_owner: starter.source_owner,
-    source_repo: starter.source_repo,
-    source_ref: starter.source_ref,
-    source_stamps_json: starter.source_stamps_json,
-    pipeline_type: starter.pipeline_type,
-  };
 
   // All unresolved proposals for this job, in stable order so retries do
   // the same work in the same sequence.
@@ -632,7 +675,6 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
   const tnProposals = rows.filter((r) => r.kind === "tn");
   const tqProposals = rows.filter((r) => r.kind === "tq");
   const articleProposals = rows.filter((r) => r.kind === "article");
-  const verseProposals = rows.filter((r) => r.kind === "verse");
 
   const result: ApplyResult = {
     tnDeleted: 0,
@@ -647,6 +689,13 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
     tqSkippedTouched: 0,
     tqSkippedTouchedIds: [],
     tnSkippedTrashed: 0,
+    tnSkippedApproved: 0,
+    tnSkippedApprovedIds: [],
+    tqSkippedApproved: 0,
+    tqSkippedApprovedIds: [],
+    tnSkippedEnglish: 0,
+    tnSkippedEnglishIds: [],
+    tnEnglishCheckNotRun: null,
     articleUpdated: 0,
     articleSkippedTouched: 0,
     articleSkippedTouchedPaths: [],
@@ -658,21 +707,47 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
   // and returned so the caller can hint open tabs once per changed chapter.
   const affected = new Set<number>();
 
-  // Translate pipeline (multilingual): a wholly separate apply path. It UPDATEs
-  // existing target rows by rowId, never deletes, never inserts — so it skips
-  // the entire English delete-sweep/insert machinery below. A given translate
-  // job produces exactly one resource kind (tn OR tq OR tw/ta articles), so
-  // only the matching loop does work. Article apply is keyed by (resource,
-  // path) against article_units. Returns early so a translate job can never
-  // trip deleteUnkeptTns.
+  // Translate pipeline (multilingual): the only apply path (#726). It UPDATEs
+  // existing target rows by rowId, never deletes, never inserts. A given
+  // translate job produces exactly one resource kind (tn OR tq OR tw/ta
+  // articles), so only the matching loop does work. Article apply is keyed by
+  // (resource, path) against article_units.
   if (job.pipelineType === "translate") {
     // Option B on #601 (notes) and #725 (questions): a row a person changed
     // after this job was queued keeps their work. One query per kind for the
     // whole job (not one per row), so a whole-chapter apply stays inside the
     // subrequest budget.
-    const requested = new Set(
-      (tnProposals.length > 0 || tqProposals.length > 0 ? (await translateSelection(env, job.jobId))?.rowIds : null) ?? [],
-    );
+    // An internal run can end with no proposals at all (#895: every row was
+    // approved and left out), so it reads its selection regardless.
+    const selection =
+      tnProposals.length > 0 || tqProposals.length > 0 || job.runner === "internal"
+        ? await translateSelection(env, job.jobId)
+        : null;
+    const requested = new Set(selection?.rowIds ?? []);
+    // #794: a whole-chapter run (no rowIds, no verse range) keeps approved rows.
+    const keepApproved = selection === null;
+    // #895: an internal whole-chapter run left approved rows out of the AI
+    // request (translate/workflowSteps.ts guardAndSourceStep), so they have no
+    // proposal here. They are listed as kept all the same.
+    const leftOut = keepApproved && job.runner === "internal" ? await approvedWithoutProposal(env, job) : [];
+    // #794: the English source notes, read once per job for every chapter with
+    // a note proposal (cached per isolate). The English is the file the job
+    // translated from: its options_json.sourceRef ("org/repo@ref", set at start,
+    // possibly pinned to a commit), one read for the whole job. A job without
+    // one (queued before sourceRef was stored) falls back to the project's
+    // per-chapter source on master. A project that writes its notes in English
+    // has no English source, so nothing is read.
+    const english = new Map<number, SourceNotes>();
+    if (tnProposals.length > 0 && isTranslationConfig(job.cfg)) {
+      const chapters = [...new Set(tnProposals.map((p) => p.chapter))];
+      const sourceRef = await translateSourceRef(env, job.jobId);
+      if (sourceRef) {
+        const notes = await readPinnedSourceNotes(env, sourceRef, job.book);
+        for (const ch of chapters) english.set(ch, notes);
+      } else {
+        for (const [ch, notes] of await readBookSourceNotes(env, job.book, chapters)) english.set(ch, notes);
+      }
+    }
     // #815: this workspace's enabled house-style rules, read once per job (not
     // per row) and applied to every drafted note / question below.
     const houseRules =
@@ -706,28 +781,64 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
     };
     // A skipped proposal is left unresolved, like a no_match: nothing accepts
     // it later, and the one-retry import path skips it the same way.
-    const skipped: Record<"tn" | "tq", { refs: string[]; firstChapter: number | null }> = {
+    type SkipRefs = { refs: string[]; firstChapter: number | null };
+    const noRefs = (): Record<"tn" | "tq", SkipRefs> => ({
       tn: { refs: [], firstChapter: null },
       tq: { refs: [], firstChapter: null },
+    });
+    // touched: a person changed it after the enqueue (#601/#725); approved:
+    // approved before a whole-chapter run (#794); english: the draft was the
+    // English source note (#794, notes only).
+    const skipped: Record<SkipReason, Record<"tn" | "tq", SkipRefs>> = {
+      touched: noRefs(),
+      approved: noRefs(),
+      english: noRefs(),
     };
-    const recordSkip = (kind: "tn" | "tq", p: PendingImportRow) => {
+    const recordSkip = (reason: SkipReason, kind: "tn" | "tq", p: { chapter: number; verse: number }) => {
+      const s = skipped[reason][kind];
       // Book intro is chapter 0; a chapter intro is verse 0 of its chapter.
-      skipped[kind].refs.push(p.chapter === 0 ? "intro" : p.verse === 0 ? `${p.chapter}:intro` : `${p.chapter}:${p.verse}`);
-      skipped[kind].firstChapter ??= p.chapter;
+      s.refs.push(p.chapter === 0 ? "intro" : p.verse === 0 ? `${p.chapter}:intro` : `${p.chapter}:${p.verse}`);
+      s.firstChapter ??= p.chapter;
     };
-    const tnTouched = await touchedLookup("tn", tnProposals, job.book, "id", requested);
+    for (const r of leftOut) {
+      if (r.kind === "tn") {
+        result.tnSkippedApproved += 1;
+        result.tnSkippedApprovedIds.push(r.id);
+      } else {
+        result.tqSkippedApproved += 1;
+        result.tqSkippedApprovedIds.push(r.id);
+      }
+      recordSkip("approved", r.kind, r);
+    }
+    const tnTouched =await touchedLookup("tn", tnProposals, job.book, "id", requested);
     for (const p of tnProposals) {
       const proposedId = tnTouched(p);
       if (proposedId !== null) {
         result.tnSkippedTouched += 1;
         result.tnSkippedTouchedIds.push(proposedId);
-        recordSkip("tn", p);
+        recordSkip("touched", "tn", p);
         continue;
       }
-      const outcome = await applyTranslateTnRow(env, p, job, userId, houseRules);
+      const payload = JSON.parse(p.payload_json) as { id?: unknown; note?: unknown };
+      const id = typeof payload.id === "string" ? payload.id : null;
+      const source = english.get(p.chapter);
+      const englishEcho =
+        source?.ok === true && id !== null && isEnglishEcho(payload.note, source.notes.get(id));
+      const outcome = await applyTranslateTnRow(env, p, job, userId, houseRules, { keepApproved, englishEcho });
       if (outcome === "drafted") {
         affected.add(p.chapter);
         result.tnHintExpanded += 1; // reuses the "updated in place" counter
+        // Fail open (#794): the draft was applied without the English check.
+        if (source && !source.ok) result.tnEnglishCheckNotRun ??= source.reason;
+      } else if (outcome === "approved" && id !== null) {
+        result.tnSkippedApproved += 1;
+        result.tnSkippedApprovedIds.push(id);
+        recordSkip("approved", "tn", p);
+      } else if (outcome === "same_as_english" && id !== null) {
+        // Left unresolved, like a touched skip; the note keeps its text.
+        result.tnSkippedEnglish += 1;
+        result.tnSkippedEnglishIds.push(id);
+        recordSkip("english", "tn", p);
       } else if (outcome === "trashed") {
         // Marked Not needed before the apply: the proposal is left unresolved,
         // like a no_match, and the note keeps its text and state (#735).
@@ -743,13 +854,18 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
       if (proposedId !== null) {
         result.tqSkippedTouched += 1;
         result.tqSkippedTouchedIds.push(proposedId);
-        recordSkip("tq", p);
+        recordSkip("touched", "tq", p);
         continue;
       }
-      const outcome = await applyTranslateTqRow(env, p, job, userId, houseRules);
+      const outcome = await applyTranslateTqRow(env, p, job, userId, houseRules, { keepApproved });
       if (outcome === "drafted") {
         affected.add(p.chapter);
         result.tqUpdated += 1; // reuses the "updated in place" counter
+      } else if (outcome === "approved") {
+        const id = (JSON.parse(p.payload_json) as { id: string }).id;
+        result.tqSkippedApproved += 1;
+        result.tqSkippedApprovedIds.push(id);
+        recordSkip("approved", "tq", p);
       }
     }
     // #734: the same for tW/tA articles. Their edit_log rows carry the resource
@@ -793,22 +909,24 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
     if (articleAttempted > 0 && result.articleUpdated === 0) {
       await recordArticleNoApplyAlert(env, job, userId, articleAttempted);
     }
-    for (const kind of ["tn", "tq"] as const) {
-      const s = skipped[kind];
-      if (s.firstChapter !== null) {
-        // The book intro (chapter 0) is shown on chapter 1.
-        await recordSkippedTouchedAlert(env, job, userId, kind, s.refs, `#/${job.book}/${Math.max(1, s.firstChapter)}`);
+    for (const reason of ["touched", "approved", "english"] as const) {
+      for (const kind of ["tn", "tq"] as const) {
+        const s = skipped[reason][kind];
+        if (s.firstChapter !== null) {
+          // The book intro (chapter 0) is shown on chapter 1.
+          await recordSkippedAlert(env, job, userId, reason, kind, s.refs, `#/${job.book}/${Math.max(1, s.firstChapter)}`);
+        }
       }
     }
     for (const resource of ["tw", "ta"] as const) {
       const paths = articleSkipped[resource];
-      if (paths.length > 0) await recordSkippedTouchedAlert(env, job, userId, resource, paths, `#/articles/${resource}`);
+      if (paths.length > 0) await recordSkippedAlert(env, job, userId, "touched", resource, paths, `#/articles/${resource}`);
     }
     // The job result the status and list APIs read (#601): output_json is the
     // bot's own output, so the apply's skip report has its own column. Written
     // on every tn, tq or article translate apply, so a retry replaces it rather
     // than adding.
-    if (tnProposals.length > 0 || tqProposals.length > 0 || articleProposals.length > 0) {
+    if (tnProposals.length > 0 || tqProposals.length > 0 || articleProposals.length > 0 || leftOut.length > 0) {
       const report = applySkippedOf(result);
       await env.DB.prepare(`UPDATE pipeline_jobs SET apply_skipped_json = ?2 WHERE job_id = ?1`)
         .bind(job.jobId, report ? JSON.stringify(report) : null)
@@ -818,326 +936,12 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
     return result;
   }
 
-  // TN delete phase: only fires when this job produced TN proposals AND
-  // there are unkept TNs in scope. Idempotent — re-running finds none left.
-  if (tnProposals.length > 0) {
-    result.tnDeleted = await deleteUnkeptTns(env, job, userId);
-    // A delete mutates whatever chapters this job re-proposed TN for; those are
-    // exactly the chapters carried by tnProposals.
-    if (result.tnDeleted > 0) for (const p of tnProposals) affected.add(p.chapter);
-  }
-
-  // Content-dedup claim set (defense-in-depth, layered ON TOP of the AI-aware
-  // sweep above). Seeded from the rows that SURVIVED the delete phase — kept
-  // notes (preserve/hint/human-edited) plus, if the sweep ever fails to clear a
-  // prior AI run, its leftovers — so a proposal whose exact content already
-  // exists live is dropped instead of inserted as a duplicate. tnContentKey is
-  // the same id-independent identity key the reimport's Guard 2 uses (includes
-  // occurrence; excludes id/sort_order/tags). Grown as we insert so two
-  // identical proposals in one file also collapse. This is the last line of
-  // defense against the re-run doubling (ISA 36/41): even if the sweep misses a
-  // row, its content key blocks the second copy.
-  const claimedTnKeys = new Set<string>();
-  if (tnProposals.length > 0) {
-    const live = await env.DB.prepare(
-      `SELECT chapter, verse, occurrence, support_reference, quote, note
-         FROM tn_rows
-        WHERE book = ?1 AND chapter BETWEEN ?2 AND ?3 AND deleted_at IS NULL`,
-    )
-      .bind(job.book, job.startChapter, job.endChapter)
-      .all<{
-        chapter: number;
-        verse: number;
-        occurrence: number | null;
-        support_reference: string | null;
-        quote: string | null;
-        note: string | null;
-      }>();
-    // Normalize the LIVE row's note the same way tnPayload normalizes an
-    // incoming proposal's note (curlifyText) before keying it. Without this,
-    // a pre-fix straight-quote note that deleteUnkeptTns deliberately skips
-    // (preserve=1 / hint=1) keeps a RAW key built from its stored straight
-    // quotes, while a re-run's identical-content proposal is keyed from its
-    // NOW-curled `payload.note` — the two keys never match, so content-dedup
-    // silently fails to recognize the duplicate and a second copy gets
-    // inserted. `quote` is deliberately left untouched here, matching
-    // tnPayload — it must stay byte-exact for occurrence matching.
-    for (const r of live.results ?? []) {
-      claimedTnKeys.add(tnContentKey({ ...r, note: r.note ? curlifyText(r.note) : r.note }));
-    }
-  }
-
-  // sort_order assignment. Proposals arrive ordered (chapter, verse, id) where
-  // id is the staging order = the AI file's row order, so a per-verse counter
-  // reproduces the source file order on export. For TN we seed each verse's
-  // counter from the MAX sort_order of the rows that SURVIVED the delete phase
-  // (preserve=1 / hint=1 / translator-edited), so freshly minted AI notes
-  // append after the translator's kept notes rather than colliding with them.
-  // For TQ there's no delete/preserve concept — every run fully reorders the
-  // verse to match the file — so its counters start from zero.
-  const tnBases = await maxSortOrderPerVerse(env, "tn_rows", job);
-  const tnCounters = new Map<number, number>();
-  const tqCounters = new Map<number, number>();
-  const verseKey = (p: PendingImportRow) => p.chapter * 100000 + p.verse;
-
-  for (const p of tnProposals) {
-    // Hint expansion: if the AI's proposed id matches a queued hint stub in
-    // this job's scope, UPDATE that row in place instead of minting a new
-    // one. The hint's rowId round-trips through bp-assistant as the TSV ID
-    // column — see docs/bp-assistant-tn-hints-contract.md. The stub keeps the
-    // sort_order it was created with (it's a surviving row, already folded
-    // into tnBases), so we don't consume a counter slot for it.
-    // Content key of this proposal — computed up front so a hint expansion can
-    // claim it too (the expanded stub now carries this content live, so a later
-    // identical insert proposal in the same run must be suppressed).
-    const payload = JSON.parse(p.payload_json) as Record<string, unknown>;
-    const contentKey = tnContentKey({
-      chapter: p.chapter,
-      verse: p.verse,
-      occurrence: (payload.occurrence as number | null | undefined) ?? null,
-      support_reference: (payload.support_reference as string | null | undefined) ?? null,
-      quote: (payload.quote as string | null | undefined) ?? null,
-      note: (payload.note as string | null | undefined) ?? null,
-    });
-
-    const expanded = await applyTnHintExpansionIfMatch(env, p, job, userId);
-    if (expanded) {
-      claimedTnKeys.add(contentKey);
-      affected.add(p.chapter);
-      result.tnHintExpanded += 1;
-      continue;
-    }
-    // Drop a proposal whose exact content already exists live in scope (a kept
-    // note, an expanded hint, or a prior-AI row the sweep somehow missed). Keyed
-    // on content, not id, so the fresh id bp-assistant mints each run can't
-    // sneak a duplicate past. A genuinely new/changed note has a different key
-    // and still inserts.
-    if (claimedTnKeys.has(contentKey)) {
-      // Resolve the proposal so it doesn't linger as an unreviewed item in the
-      // pending-imports review endpoint — the note it proposes already exists,
-      // so accepting (without inserting) is the truthful resolution.
-      await env.DB.prepare(
-        `UPDATE pending_imports SET accepted_at = unixepoch(), accepted_by = ?2 WHERE id = ?1`,
-      )
-        .bind(p.id, userId)
-        .run();
-      result.tnSkippedDup += 1;
-      continue;
-    }
-    claimedTnKeys.add(contentKey);
-    const k = verseKey(p);
-    const sortOrder = (tnCounters.get(k) ?? tnBases.get(k) ?? 0) + 100;
-    tnCounters.set(k, sortOrder);
-    await applyTnInsert(env, p, userId, sortOrder);
-    affected.add(p.chapter);
-    result.tnCreated += 1;
-  }
-
-  // Ids this pass has already written. Two distinct proposed ids can hash to
-  // the same alternate (~1 in 786k per pair); without this, the second
-  // proposal would find the first's brand-new row at the same chapter+verse,
-  // read it as "mine from a previous run", and UPDATE over it — losing a
-  // question silently. Proposal order is stable (ORDER BY kind, chapter, verse,
-  // id), so which proposal wins the shared id is deterministic across re-runs
-  // and each keeps landing on the same row. TN has the same idea in
-  // claimedTnKeys, keyed on content rather than id.
-  const claimedTqIds = new Set<string>();
-  for (const p of tqProposals) {
-    const k = verseKey(p);
-    const sortOrder = (tqCounters.get(k) ?? 0) + 100;
-    tqCounters.set(k, sortOrder);
-    const action = await applyTqUpsert(env, p, userId, sortOrder, claimedTqIds);
-    if (action === "conflict") {
-      result.tqSkippedConflict += 1;
-    } else {
-      affected.add(p.chapter);
-      if (action === "created") result.tqCreated += 1;
-      else result.tqUpdated += 1;
-    }
-  }
-
-  // Preload the book's UHB/UGNT source words once (a single query — cap-safe)
-  // so each verse's alignment canonize + U+FFFD heal read from memory instead
-  // of issuing a per-verse D1 read (a whole-book generate would otherwise blow
-  // the ~1000-subrequest budget). Empty map when there are no verse proposals.
-  const uhbWordsByVerse =
-    verseProposals.length > 0
-      ? await loadUhbSourceWords(env, job)
-      : new Map<number, SourceWord[]>();
-
-  for (const p of verseProposals) {
-    await applyVerseUpdate(env, p, userId, uhbWordsByVerse, jobStamp);
-    affected.add(p.chapter);
-    result.verseUpdated += 1;
-  }
-
-  result.affectedChapters = [...affected].sort((a, b) => a - b);
-  return result;
+  // #726: only translate jobs import. The retired types (generate/notes/tqs)
+  // had their own delete-and-insert apply here; it is gone, and the poll fails
+  // such a job before calling the import at all. This guards any other path.
+  throw new Error(`apply: pipeline type '${job.pipelineType}' is retired; its output is not imported`);
 }
 
-// Highest sort_order currently stored per (chapter, verse) in scope. Used to
-// seed AI insert counters so new rows append after surviving rows in a verse.
-// Run AFTER the TN delete phase so swept rows don't inflate the base.
-async function maxSortOrderPerVerse(
-  env: Env,
-  table: "tn_rows" | "tq_rows",
-  job: ImportContext,
-): Promise<Map<number, number>> {
-  const rs = await env.DB.prepare(
-    `SELECT chapter, verse, MAX(sort_order) AS mx FROM ${table}
-      WHERE book = ?1 AND chapter BETWEEN ?2 AND ?3 AND deleted_at IS NULL
-      GROUP BY chapter, verse`,
-  )
-    .bind(job.book, job.startChapter, job.endChapter)
-    .all<{ chapter: number; verse: number; mx: number | null }>();
-  const m = new Map<number, number>();
-  for (const r of rs.results ?? []) {
-    if (r.mx != null) m.set(r.chapter * 100000 + r.verse, r.mx);
-  }
-  return m;
-}
-
-async function deleteUnkeptTns(
-  env: Env,
-  job: ImportContext,
-  userId: number,
-): Promise<number> {
-  // Identify which rows we're about to delete so the audit row can carry
-  // the right pre-deletion version. A bulk UPDATE would lose that fidelity.
-  // preserve=1 rows are translator-marked "keep through AI runs"; hint=1
-  // rows are stubs queued for in-place expansion by the AI — both must
-  // survive the sweep.
-  //
-  // Two classes are swept: (a) pristine rows the AI never touched
-  // (updated_by IS NULL — the original bootstrap/reimport notes), and (b) the
-  // PRIOR AI run's own output. applyTnInsert stamps updated_by = the pipeline
-  // starter on every note it creates, so a re-run's notes are NOT pristine and
-  // a plain `updated_by IS NULL` sweep would skip them — leaving them in place
-  // while the re-run inserts a full fresh set, DOUBLING every note (ISA 36/41,
-  // 2026-06). Class (b) is identified by the most-recent CONTENT-bearing
-  // edit_log entry (action IN create/update) still being source 'ai_pipeline'.
-  // The action filter matters: /preserve/hint/trash toggles write NULL-source
-  // audit rows (rows.ts), so an AI note that was preserved-then-unpreserved
-  // would otherwise look human-owned (its LATEST audit row is 'unpreserve',
-  // source NULL) and dodge the sweep forever. A real human content edit writes
-  // action 'update' source NULL, and a hint expansion writes 'hint_expansion'
-  // — both correctly take the latest content action off 'ai_pipeline', so an
-  // edited / hint-owned note is protected. The reimport never rewrites an AI
-  // row (its UPDATE/prune are updated_by-IS-NULL gated), so the content source
-  // stays 'ai_pipeline' reliably.
-  //
-  // trashed_at IS NULL: a trashed AI note is left alone — the content-dedup
-  // claim set below (seeded from deleted_at IS NULL rows, which includes
-  // trashed) suppresses the AI's re-proposal of it, so it stays trashed.
-  // Sweeping it instead would delete it and let the re-insert RESURRECT it
-  // un-trashed against the user's intent.
-  // Scope the sweep to the (chapter, verse) pairs this job actually produced
-  // proposals for (`pending_imports` for the job). The chapter-wide sweep
-  // assumed the result covers every verse it requested; when it doesn't — a
-  // partial result, or a concurrent apply that already consumed some proposals
-  // — deleting across the whole chapter wipes notes for verses the new run
-  // never re-supplies. Bounding the delete to supplied verses means a verse
-  // missing from the result keeps its existing notes (mildly stale) instead of
-  // being emptied. Match on BOTH chapter and verse: a job may span multiple
-  // chapters (endChapter > startChapter is a valid range), and scoping by verse
-  // number alone would let a proposal for ch2:v1 make ch1:v1 eligible for
-  // deletion. Defense-in-depth alongside the single-applier claim in
-  // importJobOutput.
-  const targets = await env.DB.prepare(
-    `SELECT id, version FROM tn_rows t
-      WHERE book = ?1 AND chapter BETWEEN ?2 AND ?3
-        AND deleted_at IS NULL AND trashed_at IS NULL
-        AND preserve = 0 AND hint = 0
-        AND EXISTS (
-          SELECT 1 FROM pending_imports pi
-            WHERE pi.job_id = ?5 AND pi.kind = 'tn'
-              AND pi.chapter = t.chapter AND pi.verse = t.verse
-        )
-        AND (
-          updated_by IS NULL
-          OR (
-            SELECT source FROM edit_log
-              WHERE kind = 'tn' AND row_key = t.id
-                AND (book = t.book OR book IS NULL)
-                AND action IN ('create', 'update')
-              ORDER BY id DESC LIMIT 1
-          ) = ?4
-        )`,
-  )
-    .bind(job.book, job.startChapter, job.endChapter, AI_SOURCE, job.jobId)
-    .all<{ id: string; version: number }>();
-  const list = targets.results ?? [];
-  if (list.length === 0) return 0;
-
-  const now = Math.floor(Date.now() / 1000);
-  const CHUNK = 25; // 2 statements per row + headroom
-  let deleted = 0;
-  for (let i = 0; i < list.length; i += CHUNK) {
-    const slice = list.slice(i, i + CHUNK);
-    const stmts = [];
-    for (const t of slice) {
-      stmts.push(
-        env.DB
-          .prepare(
-            // Re-assert the safety predicate at write time, not just in the
-            // SELECT above: TN edits are allowed mid-pipeline (rows.ts), so a
-            // change landing between the SELECT and this UPDATE must ABORT the
-            // delete. A translator content edit bumps version — caught by the
-            // version-CAS (`version = ?5`); a preserve/hint toggle is caught by
-            // re-asserting `preserve = 0 AND hint = 0`; a trash toggle does NOT
-            // bump version (rows.ts setTnTrashed), so it needs its own
-            // `trashed_at IS NULL` re-assertion. (We can't re-use the old
-            // `updated_by IS NULL` guard: a swept PRIOR-AI row already carries
-            // the starter's updated_by, so that clause would abort every
-            // legitimate AI-output delete.) Composite-key scoped so a
-            // colliding-id row in another book is never touched.
-            `UPDATE tn_rows
-               SET deleted_at = ?1, version = version + 1,
-                   updated_at = ?1, updated_by = ?2
-             WHERE id = ?3 AND book = ?4 AND deleted_at IS NULL
-               AND trashed_at IS NULL AND preserve = 0 AND hint = 0 AND version = ?5`,
-          )
-          .bind(now, userId, t.id, job.book, t.version),
-        env.DB
-          .prepare(
-            // Audit only if the UPDATE above actually tombstoned this row in
-            // THIS batch (D1 runs batch statements sequentially on one
-            // connection, so this SELECT sees the prior UPDATE's effect). A
-            // delete the pristine guard aborted writes no edit_log row.
-            `INSERT INTO edit_log
-               (kind, row_key, book, user_id, prev_version, new_version, action, source)
-             SELECT 'tn', ?1, ?2, ?3, ?4, ?5, 'delete', ?6
-              WHERE EXISTS (
-                SELECT 1 FROM tn_rows
-                 WHERE id = ?1 AND book = ?2
-                   AND deleted_at = ?7 AND updated_by = ?3
-              )`,
-          )
-          .bind(t.id, job.book, userId, t.version, t.version + 1, AI_SOURCE, now),
-      );
-    }
-    const res = await env.DB.batch(stmts);
-    // UPDATE results sit at even indices (update, audit, update, audit, ...).
-    // Count only rows the guard actually deleted.
-    for (let j = 0; j < res.length; j += 2) {
-      deleted += res[j]?.meta?.changes ?? 0;
-    }
-  }
-  return deleted;
-}
-
-// Per-revision source label for hint expansions. Distinct from AI_SOURCE so
-// the row's AI chip (keyed on latest_source === 'ai_pipeline' in chapters.ts)
-// stays off — standing authorship of a hinted note's existence is the human
-// who created the stub, even though this specific revision was written by
-// the AI. The history dialog can render this label however it likes.
-const HINT_EXPANSION_SOURCE = "hint_expansion";
-
-// Returns true if the proposal was applied as a hint expansion (UPDATE in
-// place against an existing hint=1 stub), false if there's no match and the
-// caller should fall through to applyTnInsert. Scoped to the job's chapter
-// range so an id collision outside that range (vanishingly rare with 4-char
-// random ids, but possible) doesn't accidentally clobber an unrelated row.
 // Translate-pipeline apply (multilingual; PIPELINE-SPEC §2.1). The translate
 // output is exactly one target row per input row, keyed by the same rowId, with
 // only the Note translated — Reference/ID/SupportReference/Quote/Occurrence are
@@ -1156,7 +960,8 @@ async function applyTranslateTnRow(
   job: ImportContext,
   userId: number,
   houseRules: HouseStyleRule[],
-): Promise<"drafted" | "no_match" | "trashed"> {
+  guard: { keepApproved: boolean; englishEcho: boolean },
+): Promise<"drafted" | "no_match" | "trashed" | "approved" | "same_as_english"> {
   const payload = JSON.parse(p.payload_json) as Record<string, unknown>;
   const proposedId = typeof payload.id === "string" ? payload.id : null;
   if (!proposedId) return "no_match";
@@ -1184,6 +989,11 @@ async function applyTranslateTnRow(
   // A note marked Not needed gets no AI draft, as on the English apply path:
   // restoring it later must not bring back AI text nobody reviewed (#735).
   if (target.trashed_at != null) return "trashed";
+  // #794: a whole-chapter run leaves an approved note as it is; only a run
+  // that names the note (one-note redo, verse range) redrafts it.
+  if (guard.keepApproved && target.translation_state === "validated") return "approved";
+  // #794: a draft that is the English source note copied back is not applied.
+  if (guard.englishEcho) return "same_as_english";
 
   const now = Math.floor(Date.now() / 1000);
   const newVersion = target.version + 1;
@@ -1223,9 +1033,12 @@ async function applyTranslateTnRow(
                 version = version + 1,
                 updated_at = ?5,
                 updated_by = ?6
-          WHERE id = ?7 AND book = ?8 AND deleted_at IS NULL AND trashed_at IS NULL AND version = ?9`,
+          WHERE id = ?7 AND book = ?8 AND deleted_at IS NULL AND trashed_at IS NULL AND version = ?9
+            AND (?11 = 0 OR translation_state IS NOT 'validated')`,
       )
-      .bind(note, tags, srcHash, draftMeta, now, userId, target.id, job.book, target.version, preDraftJson),
+      // ?11: an Approve does not bump the version, so the CAS alone would not
+      // catch one landing between the read above and this write (#794).
+      .bind(note, tags, srcHash, draftMeta, now, userId, target.id, job.book, target.version, preDraftJson, guard.keepApproved ? 1 : 0),
     env.DB
       .prepare(
         // Audit gated on the CAS having won (post-update fingerprint present).
@@ -1250,7 +1063,19 @@ async function applyTranslateTnRow(
       )
       .bind(p.id, userId, target.id, job.book, newVersion, now),
   ]);
-  return (res[0]?.meta?.changes ?? 0) > 0 ? "drafted" : "no_match";
+  if ((res[0]?.meta?.changes ?? 0) > 0) return "drafted";
+  // #794: the write changed nothing. If the state guard was on and the note is
+  // approved now, an Approve landed after the read above: report it as kept.
+  return guard.keepApproved && (await approvedNow(env, "tn_rows", target.id, job.book)) ? "approved" : "no_match";
+}
+
+// #794: is this row approved right now? Read only after a guarded write changed
+// nothing, so a whole-chapter apply pays it only on a lost race.
+async function approvedNow(env: Env, table: "tn_rows" | "tq_rows", id: string, book: string): Promise<boolean> {
+  const r = await env.DB.prepare(`SELECT translation_state FROM ${table} WHERE id = ?1 AND book = ?2 AND deleted_at IS NULL`)
+    .bind(id, book)
+    .first<{ translation_state: string | null }>();
+  return r?.translation_state === "validated";
 }
 
 // Translate-pipeline apply for translationQuestions (multilingual; PIPELINE-SPEC
@@ -1268,7 +1093,8 @@ async function applyTranslateTqRow(
   job: ImportContext,
   userId: number,
   houseRules: HouseStyleRule[],
-): Promise<"drafted" | "no_match"> {
+  guard: { keepApproved: boolean },
+): Promise<"drafted" | "no_match" | "approved"> {
   const payload = JSON.parse(p.payload_json) as Record<string, unknown>;
   const proposedId = typeof payload.id === "string" ? payload.id : null;
   if (!proposedId) return "no_match";
@@ -1288,6 +1114,8 @@ async function applyTranslateTqRow(
       pre_draft_json: string | null;
     }>();
   if (!target) return "no_match";
+  // #794: a whole-chapter run leaves an approved question as it is.
+  if (guard.keepApproved && target.translation_state === "validated") return "approved";
 
   const now = Math.floor(Date.now() / 1000);
   const newVersion = target.version + 1;
@@ -1321,9 +1149,11 @@ async function applyTranslateTqRow(
                 version = version + 1,
                 updated_at = ?5,
                 updated_by = ?6
-          WHERE id = ?7 AND book = ?8 AND deleted_at IS NULL AND version = ?9`,
+          WHERE id = ?7 AND book = ?8 AND deleted_at IS NULL AND version = ?9
+            AND (?11 = 0 OR translation_state IS NOT 'validated')`,
       )
-      .bind(question, response, srcHash, draftMeta, now, userId, target.id, job.book, target.version, preDraftJson),
+      // ?11: as in applyTranslateTnRow (#794).
+      .bind(question, response, srcHash, draftMeta, now, userId, target.id, job.book, target.version, preDraftJson, guard.keepApproved ? 1 : 0),
     env.DB
       .prepare(
         // Audit gated on the CAS having won (post-update fingerprint present).
@@ -1348,7 +1178,9 @@ async function applyTranslateTqRow(
       )
       .bind(p.id, userId, target.id, job.book, newVersion, now),
   ]);
-  return (res[0]?.meta?.changes ?? 0) > 0 ? "drafted" : "no_match";
+  if ((res[0]?.meta?.changes ?? 0) > 0) return "drafted";
+  // #794: see applyTranslateTnRow.
+  return guard.keepApproved && (await approvedNow(env, "tq_rows", target.id, job.book)) ? "approved" : "no_match";
 }
 
 // Translate-pipeline apply for tw/ta markdown articles (multilingual). The
@@ -1492,8 +1324,8 @@ async function recordArticleNoApplyAlert(
 // this read and the apply's write is covered by the #561/#602 route locks (the
 // job is 'running' while it applies), and a content edit is also caught by the
 // version CAS in applyTranslateTnRow / applyTranslateTqRow. For questions the
-// lock covers PATCH only: /rows/tq/:id/validate is not locked (#725 left that
-// to #602), so an Approve landing inside that window is not caught.
+// lock covers PATCH, Approve (/rows/tq/:id/validate) and the admin
+// review-state approve sweep (#752).
 // tW/tA articles (#734): kind is the resource, ids are paths, and `book` is
 // null (article edit_log rows have a NULL book; `book IS ?1` matches it). The
 // article routes have no lock at all, so for them neither an edit nor an
@@ -1535,9 +1367,14 @@ async function humanTouchedIds(
 
 /**
  * pipeline_jobs.apply_skipped_json: what a translate apply left alone (#601
- * notes, #725 questions, #734 tW/tA articles by path). A kind's keys are
- * present only when it skipped something; a job translates one kind, so in
- * practice one pair is set.
+ * notes, #725 questions, #734 tW/tA articles by path), each key pair present
+ * only when it skipped something:
+ * - *Touched: a person changed the row after the job was queued.
+ * - *Approved (#794): approved before a whole-chapter run, so kept as it is.
+ * - tnSameAsEnglish (#794): the note draft was the English source note, so it
+ *   was not applied.
+ * - tnEnglishCheckNotRun (#794): why the English check could not run for
+ *   notes that were applied anyway (it fails open).
  */
 export interface ApplySkipped {
   tnTouched?: number;
@@ -1546,30 +1383,66 @@ export interface ApplySkipped {
   tqTouchedIds?: string[];
   articleTouched?: number;
   articleTouchedPaths?: string[];
+  tnApproved?: number;
+  tnApprovedIds?: string[];
+  tqApproved?: number;
+  tqApprovedIds?: string[];
+  tnSameAsEnglish?: number;
+  tnSameAsEnglishIds?: string[];
+  tnEnglishCheckNotRun?: string;
 }
 /** The skip report for an apply, or null when it skipped nothing. */
 export function applySkippedOf(r: ApplyResult): ApplySkipped | null {
-  if (r.tnSkippedTouched === 0 && r.tqSkippedTouched === 0 && r.articleSkippedTouched === 0) return null;
-  return {
+  const report: ApplySkipped = {
     ...(r.tnSkippedTouched > 0 ? { tnTouched: r.tnSkippedTouched, tnTouchedIds: r.tnSkippedTouchedIds } : {}),
     ...(r.tqSkippedTouched > 0 ? { tqTouched: r.tqSkippedTouched, tqTouchedIds: r.tqSkippedTouchedIds } : {}),
     ...(r.articleSkippedTouched > 0
       ? { articleTouched: r.articleSkippedTouched, articleTouchedPaths: r.articleSkippedTouchedPaths }
       : {}),
+    ...(r.tnSkippedApproved > 0 ? { tnApproved: r.tnSkippedApproved, tnApprovedIds: r.tnSkippedApprovedIds } : {}),
+    ...(r.tqSkippedApproved > 0 ? { tqApproved: r.tqSkippedApproved, tqApprovedIds: r.tqSkippedApprovedIds } : {}),
+    ...(r.tnSkippedEnglish > 0
+      ? { tnSameAsEnglish: r.tnSkippedEnglish, tnSameAsEnglishIds: r.tnSkippedEnglishIds }
+      : {}),
+    ...(r.tnEnglishCheckNotRun !== null ? { tnEnglishCheckNotRun: r.tnEnglishCheckNotRun } : {}),
   };
+  return Object.keys(report).length > 0 ? report : null;
+}
+
+// rc:// links (the same token rule as translate/checks.ts RC_LINK_RE) and web
+// links. A note with no letter left once these are removed is links only.
+const NOTE_LINK_RE = /(?:rc|https?):\/\/[^\s\])]+/g;
+
+/**
+ * #794: is this AI note draft the English source note copied back? The staged
+ * draft went through normalizeNoteWhitespace and curlifyText (tnPayload), so
+ * the English gets the same two steps; then both sides are NFC-normalized and
+ * trimmed, and must match exactly. An empty English never counts, nor does a
+ * links-only one (no letter outside its links), which is legitimately the same
+ * in every language.
+ */
+export function isEnglishEcho(draft: unknown, english: string | undefined): boolean {
+  if (typeof draft !== "string" || english == null) return false;
+  const norm = (t: string) => t.normalize("NFC").trim();
+  const e = norm(curlifyText(normalizeNoteWhitespace(english)));
+  if (e === "" || !/\p{L}/u.test(e.replace(NOTE_LINK_RE, ""))) return false;
+  return norm(draft) === e;
 }
 
 // Banner alert for the job's starter listing the notes, questions or tW/tA
-// articles the translate apply left alone because a person changed them after
-// the job was queued (#601, #725, #734). Same shape as
-// recordArticleNoApplyAlert: server-side English text, one alert per job
-// (replaced on a retry), best-effort. `refs` are verse refs for tn/tq and
-// paths for articles.
+// articles the translate apply left alone: because a person changed them after
+// the job was queued (#601, #725, #734), because they were approved before a
+// whole-chapter run (#794), or because the note draft was the English source
+// note (#794). Same shape as recordArticleNoApplyAlert: server-side English
+// text, one alert per job and reason (replaced on a retry), best-effort.
+// `refs` are verse refs for tn/tq and paths for articles.
+type SkipReason = "touched" | "approved" | "english";
 const SKIPPED_REFS_SHOWN = 10;
-async function recordSkippedTouchedAlert(
+async function recordSkippedAlert(
   env: Env,
   job: ImportContext,
   userId: number,
+  reason: SkipReason,
   kind: TouchKind,
   refs: string[],
   linkUrl: string,
@@ -1580,15 +1453,30 @@ async function recordSkippedTouchedAlert(
       .first<{ dcs_username: string }>();
     const username = u?.dcs_username;
     if (!username) return;
-    const source = `translate_${kind}_skipped_touched:${job.jobId}`;
+    const source =
+      reason === "touched"
+        ? `translate_${kind}_skipped_touched:${job.jobId}`
+        : reason === "approved"
+          ? `translate_${kind}_kept_approved:${job.jobId}`
+          : `translate_${kind}_same_as_english:${job.jobId}`;
     const shown = refs.slice(0, SKIPPED_REFS_SHOWN).join(", ");
     const more = refs.length > SKIPPED_REFS_SHOWN ? ` and ${refs.length - SKIPPED_REFS_SHOWN} more` : "";
     const one = refs.length === 1;
+    const noun = kind === "tn" ? "note" : "question";
     // Questions have no Not needed or Restore, so their text names only edit
     // and Approve. A single question can be re-run from the classic editor
     // (Shell.handleTranslateQuestion queues a tq job with rowIds: [id]).
     const message =
-      kind === "tn"
+      reason === "approved"
+        ? `AI translation of ${job.book}: ${one ? `1 approved ${noun} was` : `${refs.length} approved ${noun}s were`} ` +
+          `kept as ${one ? "it is" : "they are"} (${job.book} ${shown}${more}). A run on a whole chapter does not redraft ` +
+          `approved ${noun}s. To get a new draft for one, run the AI on that ${noun} alone.`
+        : reason === "english"
+          ? `AI translation of ${job.book}: the AI returned the English note unchanged for ` +
+            `${one ? "1 note" : `${refs.length} notes`} (${job.book} ${shown}${more}), so ` +
+            `${one ? "that draft was" : "those drafts were"} not applied and ${one ? "the note keeps its" : "the notes keep their"} ` +
+            `current text. Run the AI on a note again to try for a translation.`
+          : kind === "tn"
         ? `AI translation of ${job.book}: ${one ? "1 note was" : `${refs.length} notes were`} left as people changed ` +
           `${one ? "it" : "them"} (${job.book} ${shown}${more}). Someone edited, approved, marked Not needed or ` +
           `restored ${one ? "it" : "them"} while the job waited in the queue, so the AI ${one ? "draft was" : "drafts were"} ` +
@@ -1614,873 +1502,6 @@ async function recordSkippedTouchedAlert(
       .bind(username, source, message, linkUrl)
       .run();
   } catch (e) {
-    console.error(`${kind} skipped-touched alert failed`, { error: e instanceof Error ? e.message : String(e) });
+    console.error(`${kind} skipped-${reason} alert failed`, { error: e instanceof Error ? e.message : String(e) });
   }
-}
-
-async function applyTnHintExpansionIfMatch(
-  env: Env,
-  p: PendingImportRow,
-  job: ImportContext,
-  userId: number,
-): Promise<boolean> {
-  const payload = JSON.parse(p.payload_json) as Record<string, unknown>;
-  const proposedId = typeof payload.id === "string" ? payload.id : null;
-  if (!proposedId) return false;
-
-  const stub = await env.DB.prepare(
-    `SELECT id, version FROM tn_rows
-      WHERE id = ?1 AND hint = 1 AND deleted_at IS NULL
-        AND book = ?2 AND chapter BETWEEN ?3 AND ?4`,
-  )
-    .bind(proposedId, job.book, job.startChapter, job.endChapter)
-    .first<{ id: string; version: number }>();
-  if (!stub) return false;
-
-  const now = Math.floor(Date.now() / 1000);
-  const newVersion = stub.version + 1;
-  const res = await env.DB.batch([
-    env.DB
-      .prepare(
-        // Update content; clear hint so the row stops being queued for
-        // future runs. Leave preserve and updated_by alone — the row's
-        // standing authorship stays with whoever created the stub, and
-        // any prior preserve intent survives the expansion.
-        //
-        // CAS-guarded: `hint = 1` and `version = ?` must STILL hold at write
-        // time. TN edits are allowed mid-pipeline (rows.ts), so between the
-        // SELECT above and here a translator may (a) un-queue the hint
-        // (hint -> 0, which does NOT bump version — caught by `hint = 1`) or
-        // (b) edit the stub's content (bumps version + sets updated_by —
-        // caught by `version = stub.version`). Either way the expansion must
-        // abort rather than clobber the user's change. NOTE: we deliberately
-        // do NOT guard on `updated_by IS NULL` — a human-created hint stub
-        // already carries the creator's id (createRow sets updated_by), so
-        // that predicate would abort every legitimate expansion.
-        // book-scoped so a colliding stub id in another book isn't clobbered.
-        `UPDATE tn_rows
-            SET quote = ?1,
-                support_reference = ?2,
-                note = ?3,
-                occurrence = ?4,
-                ref_raw = COALESCE(?5, ref_raw),
-                tags = ?6,
-                hint = 0,
-                version = version + 1,
-                updated_at = ?7
-          WHERE id = ?8 AND book = ?9 AND deleted_at IS NULL
-            AND hint = 1 AND version = ?10`,
-      )
-      .bind(
-        (payload.quote as string | null | undefined) ?? null,
-        (payload.support_reference as string | null | undefined) ?? null,
-        (payload.note as string | null | undefined) ?? null,
-        (payload.occurrence as number | null | undefined) ?? null,
-        (payload.ref_raw as string | null | undefined) ?? null,
-        (payload.tags as string | null | undefined) ?? null,
-        now,
-        stub.id,
-        job.book,
-        stub.version,
-      ),
-    env.DB
-      .prepare(
-        // Audit row, gated on the CAS having WON: the post-update fingerprint
-        // (new version + hint cleared + our updated_at) is present only if the
-        // UPDATE above actually fired. A lost CAS writes neither audit nor
-        // accept. AI wrote this revision, but with the hint_expansion label so
-        // the row-level AI chip stays off.
-        `INSERT INTO edit_log
-           (kind, row_key, book, user_id, prev_version, new_version, action, payload_json, source)
-         SELECT 'tn', ?1, ?2, ?3, ?4, ?5, 'update', ?6, ?7
-          WHERE EXISTS (
-            SELECT 1 FROM tn_rows
-             WHERE id = ?1 AND book = ?2
-               AND version = ?5 AND hint = 0 AND updated_at = ?8
-          )`,
-      )
-      .bind(
-        stub.id,
-        job.book,
-        userId,
-        stub.version,
-        newVersion,
-        JSON.stringify(payload),
-        HINT_EXPANSION_SOURCE,
-        now,
-      ),
-    env.DB
-      .prepare(
-        // Mark the proposal accepted only if the CAS won (same fingerprint).
-        // On a lost CAS this stays unresolved and the caller falls through to
-        // applyTnInsert below, materializing the AI note as a fresh row
-        // instead of dropping it.
-        `UPDATE pending_imports
-            SET accepted_at = unixepoch(), accepted_by = ?2
-          WHERE id = ?1 AND EXISTS (
-            SELECT 1 FROM tn_rows
-             WHERE id = ?3 AND book = ?4
-               AND version = ?5 AND hint = 0 AND updated_at = ?6
-          )`,
-      )
-      .bind(p.id, userId, stub.id, job.book, newVersion, now),
-  ]);
-  // CAS won iff the UPDATE changed a row. On a lost CAS return false so the
-  // caller materializes the proposal via applyTnInsert (its proposed id now
-  // PK-collides with the concurrently-edited stub, so it retries to a fresh
-  // id) — the translator's edit survives and the AI note isn't lost.
-  return (res[0]?.meta?.changes ?? 0) > 0;
-}
-
-async function applyTnInsert(
-  env: Env,
-  p: PendingImportRow,
-  userId: number,
-  sortOrder: number,
-): Promise<void> {
-  const payload = JSON.parse(p.payload_json) as Record<string, unknown>;
-  const insertCols = [
-    "id",
-    "book",
-    "chapter",
-    "verse",
-    "ref_raw",
-    "tags",
-    "support_reference",
-    "quote",
-    "occurrence",
-    "note",
-    "updated_by",
-    "sort_order",
-  ];
-
-  // PRESERVE bp-assistant's proposed id. It's the SAME id that lands on master,
-  // so keeping it lets the nightly reimport recognize this row instead of
-  // re-adding a divergent-id copy of the same note — the TN duplication bug
-  // (each AI-generated note ending up doubled). Only mint a fresh id when the
-  // proposed one is malformed (bp-assistant occasionally emits an id that fails
-  // the 4-char [a-z][a-z0-9]{3} format — usually a first char that isn't [a-z])
-  // or when it actually PK-collides; attempt 0 uses the proposed id, later
-  // attempts mint. TQ already preserves its proposed id (insertTqAtId).
-  const proposedId =
-    typeof payload.id === "string" && isValidRowId(payload.id) ? payload.id : null;
-  let id = "";
-  let lastErr: unknown = null;
-  for (let attempt = 0; attempt < 8; attempt++) {
-    id = attempt === 0 && proposedId ? proposedId : newRowId();
-    const values: unknown[] = [
-      id,
-      payload.book ?? null,
-      payload.chapter ?? null,
-      payload.verse ?? null,
-      payload.ref_raw ?? null,
-      payload.tags ?? null,
-      payload.support_reference ?? null,
-      payload.quote ?? null,
-      payload.occurrence ?? null,
-      payload.note ?? null,
-      userId,
-      sortOrder,
-    ];
-    try {
-      await env.DB.batch([
-        env.DB
-          .prepare(
-            `INSERT INTO tn_rows (${insertCols.join(", ")})
-             VALUES (${insertCols.map((_, i) => `?${i + 1}`).join(", ")})`,
-          )
-          .bind(...values),
-        env.DB
-          .prepare(
-            `INSERT INTO edit_log
-               (kind, row_key, book, user_id, prev_version, new_version, action, payload_json, source)
-             VALUES ('tn', ?1, ?2, ?3, NULL, 1, 'create', ?4, ?5)`,
-          )
-          .bind(id, p.book, userId, JSON.stringify(payload), AI_SOURCE),
-        env.DB
-          .prepare(
-            `UPDATE pending_imports
-                SET accepted_at = unixepoch(), accepted_by = ?2
-              WHERE id = ?1`,
-          )
-          .bind(p.id, userId),
-      ]);
-      lastErr = null;
-      break;
-    } catch (e) {
-      lastErr = e;
-      const msg = e instanceof Error ? e.message : String(e);
-      if (!/UNIQUE|PRIMARY KEY/i.test(msg)) throw e;
-    }
-  }
-  if (lastErr) throw new Error(`tn id collision exhausted after 8 attempts`);
-}
-
-async function applyTqUpsert(
-  env: Env,
-  p: PendingImportRow,
-  userId: number,
-  sortOrder: number,
-  claimedIds: Set<string>,
-): Promise<"created" | "updated" | "conflict"> {
-  const payload = JSON.parse(p.payload_json) as Record<string, unknown>;
-  const rawId = typeof payload.id === "string" && payload.id.length > 0 ? payload.id : null;
-
-  // Candidate-id chain. Attempt 0 is bp-assistant's proposed id (coerced if it
-  // violates the 4-char grammar); later attempts are DETERMINISTIC derivations
-  // of it. Determinism is the point: when the preferred id can't be used it
-  // stays unusable, so a re-run of this chapter walks the identical chain,
-  // finds the row the previous run created, and updates it. Minting randomly
-  // instead would insert a second copy of the same question on every re-run.
-  const seedId = rawId ? coerceRowId(rawId) : null;
-
-  for (let attempt = 0; attempt < 8; attempt++) {
-    const id = seedId ? (attempt === 0 ? seedId : deriveAltRowId(seedId, attempt)) : newRowId();
-
-    // Book-scoped to match the composite PK — a colliding id in another book is
-    // a "not found here", not a stale match.
-    const existing = await env.DB.prepare(
-      `SELECT version, chapter, verse FROM tq_rows WHERE id = ?1 AND book = ?2 AND deleted_at IS NULL`,
-    )
-      .bind(id, p.book)
-      .first<{ version: number; chapter: number; verse: number }>();
-    if (existing) {
-      // The id is live. Whether that row is OURS depends on where the candidate
-      // came from, and guessing wrong overwrites someone else's question with
-      // this one — silent loss, since the proposal is then marked accepted.
-      //
-      //   attempt 0 with a seed — the id bp-assistant asserts owns this row.
-      //     Adopt it anywhere in this chapter; the update rewrites verse/ref_raw
-      //     so a question moved within the chapter stays consistent. A match in
-      //     a DIFFERENT chapter is a stale/reused id, not ours: TQ rows don't
-      //     migrate between chapters, and adopting would rewrite an unrelated
-      //     question while leaving it filed under its own chapter.
-      //
-      //   derived candidate (attempt >= 1) — not claimed by anyone; it's just
-      //     the next free slot in this seed's deterministic chain. A live row
-      //     here is ours ONLY if it's the row a previous run of this same chain
-      //     created, which sits at this same chapter AND verse. Two different
-      //     seeds can hash to the same alternate (~1 in 786k per pair); without
-      //     the verse check the second proposal would UPDATE over the first.
-      //
-      //   no seed (random mint) — the candidate asserts nothing at all, so a
-      //     live row is never ours. Step on. Without this, a random id that
-      //     happens to hit a live row in this chapter silently overwrites it.
-      //   ...and never a row THIS pass already wrote (claimedIds): that row
-      //     belongs to an earlier proposal in this same run, not to a previous
-      //     run of our chain, so adopting it would overwrite a question we just
-      //     created. This is the same-verse case the chapter/verse check alone
-      //     cannot separate.
-      const isOurs =
-        seedId !== null &&
-        existing.chapter === p.chapter &&
-        (attempt === 0 || existing.verse === p.verse) &&
-        !claimedIds.has(id);
-      if (!isOurs) continue;
-      const newVersion = existing.version + 1;
-      const now = Math.floor(Date.now() / 1000);
-      const patch = {
-        ref_raw: payload.ref_raw ?? null,
-        tags: payload.tags ?? null,
-        quote: payload.quote ?? null,
-        occurrence: payload.occurrence ?? null,
-        question: payload.question ?? null,
-        response: payload.response ?? null,
-      };
-      // CAS-guarded, mirroring applyVerseUpdate below. tq_rows is live editable
-      // content (TQ has no active-pipeline PATCH guard the way tn does, so a
-      // translator's edit can land here between our SELECT above and this
-      // write). Without `AND version = ?13` this UPDATE would unconditionally
-      // overwrite it and then mark the proposal accepted — silently discarding
-      // the concurrent edit. The whole write stays ONE D1 batch (one
-      // transaction), so a lost CAS can never leave the content UPDATE
-      // committed with its audit trail missing.
-      //
-      // The accept runs immediately after the UPDATE so its `changes() > 0`
-      // reads THAT mutation's row count (an intervening statement would reset
-      // changes()); the audit INSERT self-gates in SQL on a causal fingerprint
-      // (version = newVersion AND updated_by = our userId AND updated_at = now)
-      // rather than JS branching, which a D1 batch can't make conditional on an
-      // earlier statement. updated_by is the AI-pipeline user, never a human's,
-      // so a translator CAS racing from the same starting version — which
-      // computes the identical newVersion — can't satisfy the fingerprint.
-      const results = await env.DB.batch([
-        env.DB
-          .prepare(
-            // sort_order is refreshed too: TQ has no preserve/keep semantics —
-            // each run fully reorders the verse to match the incoming file.
-            // `verse` is rewritten alongside ref_raw so a question the run
-            // moved to another verse of this chapter can't end up filed under
-            // its old verse while displaying the new reference.
-            `UPDATE tq_rows
-                SET ref_raw = ?1, tags = ?2, quote = ?3, occurrence = ?4,
-                    question = ?5, response = ?6, sort_order = ?7, verse = ?8,
-                    version = version + 1, updated_at = ?9, updated_by = ?10
-              WHERE id = ?11 AND book = ?12 AND deleted_at IS NULL AND version = ?13`,
-          )
-          .bind(
-            patch.ref_raw,
-            patch.tags,
-            patch.quote,
-            patch.occurrence,
-            patch.question,
-            patch.response,
-            sortOrder,
-            p.verse,
-            now,
-            userId,
-            id,
-            p.book,
-            existing.version,
-          ),
-        env.DB
-          .prepare(
-            `UPDATE pending_imports SET accepted_at = unixepoch(), accepted_by = ?2
-              WHERE id = ?1 AND changes() > 0`,
-          )
-          .bind(p.id, userId),
-        env.DB
-          .prepare(
-            `INSERT INTO edit_log
-               (kind, row_key, book, user_id, prev_version, new_version, action, payload_json, source)
-             SELECT 'tq', ?1, ?2, ?3, ?4, ?5, 'update', ?6, ?7
-              WHERE EXISTS (
-                SELECT 1 FROM tq_rows
-                 WHERE id = ?1 AND book = ?2 AND version = ?5
-                   AND updated_by = ?3 AND updated_at = ?8
-              )`,
-          )
-          .bind(id, p.book, userId, existing.version, newVersion, JSON.stringify(patch), AI_SOURCE, now),
-      ]);
-      if ((results[0]?.meta?.changes ?? 0) === 0) {
-        // Lost the race: a concurrent write advanced this row's version between
-        // our SELECT and the UPDATE, so the CAS matched nothing — the accept and
-        // audit both self-gated shut. Leave pending_imports unaccepted: it stays
-        // visible via GET /api/pending-imports for review, and is deliberately
-        // NOT auto-retried (re-applying this now-stale AI content over the
-        // concurrent edit would reproduce the exact clobber this guard prevents).
-        // The id is NOT claimed — nothing of ours landed on it.
-        console.warn("pipeline apply: tq CAS conflict — row changed since read, skipping (needs manual review)", {
-          id,
-          book: p.book,
-          chapter: p.chapter,
-          verse: p.verse,
-          expectedVersion: existing.version,
-        });
-        return "conflict";
-      }
-      claimedIds.add(id);
-      return "updated";
-    }
-
-    // No LIVE row at this id. It's either free, or held by a TOMBSTONE: the
-    // lookup above filters `deleted_at IS NULL` while the constraint the insert
-    // must satisfy is `PRIMARY KEY (book, id)`, which has no deleted_at
-    // component — so a soft-deleted row is invisible here yet owns its slot
-    // forever. Let the INSERT be the arbiter and step to the next candidate on
-    // collision. Stepping (rather than reusing the slot) is deliberate:
-    // overwriting a tombstone would silently resurrect a row a translator
-    // deleted, into whatever verse the new proposal belongs to.
-    //
-    // (1CH 23:7 proposed `hoig`, held by a hand-deleted 1CH 5:4 question. The
-    // previously unguarded insert threw out of applyJobOutput and killed the
-    // whole job, twice, terminally.)
-    try {
-      await insertTqAtId(env, p, payload, id, userId, sortOrder);
-      claimedIds.add(id);
-      return "created";
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      if (!/UNIQUE|PRIMARY KEY/i.test(msg)) throw e;
-    }
-  }
-  throw new Error(
-    `tq id collision exhausted after 8 attempts (book ${p.book}, ref ${p.chapter}:${p.verse}, proposed id ${rawId ?? "none"})`,
-  );
-}
-
-async function insertTqAtId(
-  env: Env,
-  p: PendingImportRow,
-  payload: Record<string, unknown>,
-  id: string,
-  userId: number,
-  sortOrder: number,
-): Promise<void> {
-  const cols = ["id", "book", "chapter", "verse", "ref_raw", "tags", "quote", "occurrence", "question", "response", "updated_by", "sort_order"];
-  // book/chapter/verse come from the pending_imports row, NOT the payload.
-  // `p.book` is the job's book and is what the caller's liveness lookup, the
-  // (book, id) collision guard, and the edit_log row below all key on; taking
-  // them from the payload instead would let a stray TSV cell insert the row
-  // into a different (book, id) space than the one just checked, leaving the
-  // audit row pointing at a row that doesn't exist there.
-  const values = [
-    id,
-    p.book,
-    p.chapter,
-    p.verse,
-    payload.ref_raw ?? null,
-    payload.tags ?? null,
-    payload.quote ?? null,
-    payload.occurrence ?? null,
-    payload.question ?? null,
-    payload.response ?? null,
-    userId,
-    sortOrder,
-  ];
-  await env.DB.batch([
-    env.DB
-      .prepare(
-        `INSERT INTO tq_rows (${cols.join(", ")})
-         VALUES (${cols.map((_, i) => `?${i + 1}`).join(", ")})`,
-      )
-      .bind(...values),
-    env.DB
-      .prepare(
-        `INSERT INTO edit_log
-           (kind, row_key, book, user_id, prev_version, new_version, action, payload_json, source)
-         VALUES ('tq', ?1, ?2, ?3, NULL, 1, 'create', ?4, ?5)`,
-      )
-      .bind(id, p.book, userId, JSON.stringify(payload), AI_SOURCE),
-    env.DB
-      .prepare(
-        `UPDATE pending_imports SET accepted_at = unixepoch(), accepted_by = ?2 WHERE id = ?1`,
-      )
-      .bind(p.id, userId),
-  ]);
-}
-
-// Load every UHB/UGNT source verse in the job's chapter range in ONE query and
-// index its `\w` source words by verse. Used to canonize alignment source attrs
-// (and heal U+FFFD) against the exact source without a per-verse D1 read.
-async function loadUhbSourceWords(
-  env: Env,
-  job: ImportContext,
-): Promise<Map<number, SourceWord[]>> {
-  const srcVersion = NT_BOOKS.has(job.book) ? "UGNT" : "UHB";
-  const rs = await env.DB.prepare(
-    `SELECT chapter, verse, content_json FROM verses
-      WHERE book = ?1 AND chapter BETWEEN ?2 AND ?3 AND bible_version = ?4
-        AND source_generation = 1`,
-  )
-    .bind(job.book, job.startChapter, job.endChapter, srcVersion)
-    .all<{ chapter: number; verse: number; content_json: string }>();
-  const map = new Map<number, SourceWord[]>();
-  for (const r of rs.results ?? []) {
-    try {
-      const vo = (JSON.parse(r.content_json) as { verseObjects?: unknown[] }).verseObjects ?? [];
-      map.set(r.chapter * 100000 + r.verse, collectSourceWords(vo));
-    } catch {
-      /* skip an unparseable source verse — canonize/heal then no-op for it */
-    }
-  }
-  return map;
-}
-
-// Source words for a target verse, unioned across a verse bridge (verse_end) so
-// a bridged ULT/UST verse can match source words from every verse it spans.
-function sourceWordsForRange(
-  map: Map<number, SourceWord[]>,
-  chapter: number,
-  verse: number,
-  verseEnd: number | null,
-): SourceWord[] {
-  const end = verseEnd != null && verseEnd >= verse ? verseEnd : verse;
-  if (end === verse) return map.get(chapter * 100000 + verse) ?? [];
-  const out: SourceWord[] = [];
-  for (let v = verse; v <= end; v++) {
-    const ws = map.get(chapter * 100000 + v);
-    if (ws) out.push(...ws);
-  }
-  return out;
-}
-
-async function applyVerseUpdate(
-  env: Env,
-  p: PendingImportRow,
-  userId: number,
-  uhbWordsByVerse: Map<number, SourceWord[]>,
-  jobStamp?: {
-    source_generation: number | null;
-    source_owner: string | null;
-    source_repo: string | null;
-    source_ref: string | null;
-    source_stamps_json: string | null;
-    pipeline_type: string;
-  },
-): Promise<void> {
-  const payload = JSON.parse(p.payload_json) as Record<string, unknown>;
-  const book = String(payload.book ?? p.book);
-  const chapter = Number(payload.chapter ?? p.chapter);
-  const verse = Number(payload.verse ?? p.verse);
-  const verseEndRaw = payload.verse_end;
-  const verseEnd =
-    typeof verseEndRaw === "number" && Number.isFinite(verseEndRaw) ? verseEndRaw : null;
-  const uhbWords = sourceWordsForRange(uhbWordsByVerse, chapter, verse, verseEnd);
-  const bibleVersion = String(payload.bible_version ?? p.bible_version ?? "");
-  let contentJson = String(payload.content_json ?? "");
-  // Mutable: the AI-supplied value is the starting point, but every mutation
-  // pass below that can change `.text` or drop/rewrite a node makes it stale
-  // the moment it fires — see the re-derive after the ULT/UST self-heal block.
-  let plainText = (payload.plain_text as string | null) ?? null;
-  const rowKey = `${book}/${chapter}/${verse}/${bibleVersion}`;
-
-  // Scripture-lane guard: never let an AI pipeline write scripture into a lane
-  // that's frozen for a replacement (or still requires one). The generation is
-  // about to flip; a late apply would land on the superseded generation. TSV
-  // resources (tn/tq) are lane-agnostic and don't reach this path.
-  const lane = laneForBibleVersion(bibleVersion);
-  let sourceGeneration = 1;
-  if (lane) {
-    const gate = await assertLaneWritable(env, lane, "pipeline");
-    if (!gate.ok) {
-      // Mark the pending row accepted-with-skip so the job can finalize instead
-      // of retrying a write the freeze will keep rejecting.
-      await env.DB.prepare(
-        `UPDATE pending_imports SET accepted_at = unixepoch(), accepted_by = ?2 WHERE id = ?1`,
-      )
-        .bind(p.id, userId)
-        .run();
-      return;
-    }
-    // Generate jobs must have stamped a generation at create; refuse applies
-    // that would land on a different generation than the job was started for.
-    // Dual-lane jobs fence each bible version against THAT lane's stamp.
-    if (jobStamp?.pipeline_type === "generate") {
-      let laneStamp: {
-        generation: number;
-        owner: string;
-        repo: string;
-        ref: string;
-      } | null = null;
-      if (jobStamp.source_stamps_json) {
-        try {
-          const parsed = JSON.parse(jobStamp.source_stamps_json) as Record<
-            string,
-            { generation: number; owner: string; repo: string; ref: string }
-          >;
-          laneStamp = parsed[lane] ?? null;
-        } catch {
-          laneStamp = null;
-        }
-      }
-      if (!laneStamp && jobStamp.source_generation != null) {
-        laneStamp = {
-          generation: jobStamp.source_generation,
-          owner: jobStamp.source_owner!,
-          repo: jobStamp.source_repo!,
-          ref: jobStamp.source_ref!,
-        };
-      }
-      if (!laneStamp) {
-        await env.DB.prepare(
-          `UPDATE pending_imports SET accepted_at = unixepoch(), accepted_by = ?2 WHERE id = ?1`,
-        )
-          .bind(p.id, userId)
-          .run();
-        return;
-      }
-      if (
-        gate.generation !== laneStamp.generation ||
-        // owner/repo are DCS names (case-insensitive); ref stays exact.
-        !sameDcsName(gate.config.source.owner, laneStamp.owner) ||
-        !sameDcsName(gate.config.source.repo, laneStamp.repo) ||
-        gate.config.source.ref !== laneStamp.ref
-      ) {
-        await env.DB.prepare(
-          `UPDATE pending_imports SET accepted_at = unixepoch(), accepted_by = ?2 WHERE id = ?1`,
-        )
-          .bind(p.id, userId)
-          .run();
-        return;
-      }
-      sourceGeneration = laneStamp.generation;
-    } else {
-      sourceGeneration = gate.generation;
-    }
-  }
-
-  // Self-heal target `\w` occurrence numbering before the AI-applied alignment
-  // lands in D1. The bot can emit colliding/`occurrences="1"` data; recomputing
-  // from document position keeps note-highlight / colors / quote-builder correct
-  // and the DCS export valid. No-op on clean output; source text left untouched.
-  if (bibleVersion === "ULT" || bibleVersion === "UST") {
-    try {
-      const parsed = JSON.parse(contentJson) as { verseObjects?: unknown[] };
-      if (Array.isArray(parsed?.verseObjects)) {
-        // Drop AI-mangled orphan `\zaln-e` end-markers / bare "-e" junk before
-        // recompute, so the cleaned tree lands in D1 (and exports clean). See
-        // stripOrphanAlignmentMarkers — MIC 6:10 UST.
-        parsed.verseObjects = stripOrphanAlignmentMarkers(parsed.verseObjects);
-        // Collapse any `\zaln-s` compound that wraps the same source token twice
-        // (the doubled-source defect, e.g. JER 31:33 `אֶת אֶת בֵּית`) before it
-        // lands in D1 / exports. No-op on clean output; source text untouched.
-        parsed.verseObjects = dropDuplicateSourceMilestones(parsed.verseObjects);
-        // Canonize `\zaln-s` source attrs (x-content / x-lemma) to the exact UHB
-        // bytes — fixing combining-mark order and dropped joiners the AI aligner
-        // emits — so stored + exported Hebrew matches the source and downstream
-        // nfc() compares become no-ops. Structure-preserving; no-op when nothing
-        // matches or the source verse wasn't loaded. See canonizeHebrew.ts.
-        canonizeAlignmentSource(parsed.verseObjects, uhbWords);
-        // Curl straight quotes bp-assistant wrote into verse text (JER 32/33,
-        // NUM 26:53 prod forensics) before it lands in D1 / exports to master.
-        // Structure-preserving — see curlifyVerseObjects: it only ever
-        // reassigns a `.text` string, never a `\zaln-s` source attribute, so
-        // this can't unalign a word or touch Hebrew/Greek. No-op on clean
-        // output. MUST run BEFORE recomputeTargetOccurrences: curling can make
-        // two `\w` nodes' text byte-identical (an already-curly "LORD’s" and an
-        // AI-written straight "LORD's" both become "LORD’s"), and occurrence
-        // numbering is keyed on exact text equality — recomputing first would
-        // stamp the two as distinct occurrences of what are now the same word,
-        // recreating the very `${text}|${occurrence}` collision that recompute
-        // exists to prevent. Curling first means the recompute below always
-        // sees the FINAL text.
-        curlifyVerseObjects(parsed.verseObjects);
-        recomputeTargetOccurrences(parsed.verseObjects);
-        contentJson = JSON.stringify(parsed);
-        // Re-derive plain_text from the FINAL corrected tree. Every pass
-        // above can change what plain_text should read — curlifyVerseObjects
-        // rewrites `.text`, stripOrphanAlignmentMarkers strips junk text,
-        // dropDuplicateSourceMilestones can drop a duplicated wrapper — so
-        // trusting the AI-supplied payload.plain_text past this point would
-        // store it stale. A stale plain_text breaks FindReplaceOverlay /
-        // source search (both match against plain_text) and, worse, makes
-        // the next nightly bookReimport compare master's freshly-extracted
-        // text against THIS stale value, see a false diff, and spuriously
-        // re-seed the verse every night. Cheap and always correct to
-        // recompute unconditionally here rather than tracking a changed-flag
-        // across the differently-shaped healers.
-        plainText = extractPlainText(parsed);
-      }
-    } catch {
-      /* leave contentJson/plainText as-is if it isn't parseable JSON */
-    }
-  }
-
-  // Heal AI-mangled U+FFFD in `\zaln-s` source attributes (the generator can emit
-  // garbled multi-byte Hebrew, e.g. וּזְה❖❖בָם for "gold") before it lands in D1
-  // — otherwise it shows as a broken aligner card and exports the garble to DCS.
-  // Reconstruct from the parallel UHB/UGNT row; gated on the rare defect, and
-  // structure-preserving so no word unaligns. See healReplacementChars. Does
-  // NOT re-derive plainText: it only ever reassigns a milestone's source
-  // attribute string (x-content/x-lemma/x-morph), never a node's `.text`, so
-  // plain_text (which concatenates `.text` only) cannot change here.
-  if ((bibleVersion === "ULT" || bibleVersion === "UST") && contentJson.includes("�")) {
-    try {
-      const parsed = JSON.parse(contentJson) as { verseObjects?: unknown[] };
-      // Reuse the preloaded source words (same UHB/UGNT verse, now union of the
-      // bridge range) instead of a per-verse read — see loadUhbSourceWords.
-      const report = healReplacementChars(parsed.verseObjects ?? [], uhbWords);
-      if (report.repaired.length > 0) contentJson = JSON.stringify(parsed);
-      if (report.unrepaired.length > 0) {
-        console.warn("pipeline apply: unrepaired U+FFFD in alignment source attrs", {
-          book,
-          chapter,
-          verse,
-          bibleVersion,
-          unrepaired: report.unrepaired,
-        });
-      }
-    } catch {
-      /* leave contentJson as-is if anything is unparseable */
-    }
-  }
-
-  // Pull the outgoing row too (not just its version): the AI write overwrites
-  // content_json, so this is our one chance to preserve the PRE-AI state ("v0")
-  // for verse history — see the guarded baseline insert below.
-  const existing = await env.DB.prepare(
-    `SELECT version, content_json, plain_text, updated_at FROM verses
-      WHERE book = ?1 AND chapter = ?2 AND verse = ?3 AND bible_version = ?4
-        AND source_generation = ?5`,
-  )
-    .bind(book, chapter, verse, bibleVersion, sourceGeneration)
-    .first<{ version: number; content_json: string; plain_text: string | null; updated_at: number }>();
-
-  const now = Math.floor(Date.now() / 1000);
-  if (existing) {
-    const expectedVersion = existing.version;
-    const newVersion = expectedVersion + 1;
-    // Param order for the UPDATE: content…, book coords, source_generation,
-    // expectedVersion, [lane]. Lane EXISTS uses the generation + lane binds.
-    const lanePred = lane
-      ? `AND EXISTS (
-            SELECT 1 FROM scripture_lane_state
-             WHERE lane = ?12 AND replacement_job_id IS NULL
-               AND replacement_required = 0 AND active_generation = ?10
-          )`
-      : "";
-    await env.DB.batch([
-      // Expected-version CAS: only this mutation may advance expected → expected+1.
-      env.DB
-        .prepare(
-          `UPDATE verses
-              SET content_json = ?1, plain_text = ?2, verse_end = ?3,
-                  version = version + 1, updated_at = ?4, updated_by = ?5
-            WHERE book = ?6 AND chapter = ?7 AND verse = ?8 AND bible_version = ?9
-              AND source_generation = ?10 AND version = ?11
-              ${lanePred}`,
-        )
-        .bind(
-          ...(lane
-            ? [
-                contentJson,
-                plainText,
-                verseEnd,
-                now,
-                userId,
-                book,
-                chapter,
-                verse,
-                bibleVersion,
-                sourceGeneration,
-                expectedVersion,
-                lane,
-              ]
-            : [
-                contentJson,
-                plainText,
-                verseEnd,
-                now,
-                userId,
-                book,
-                chapter,
-                verse,
-                bibleVersion,
-                sourceGeneration,
-                expectedVersion,
-              ]),
-        ),
-      // Accept immediately after the UPDATE so changes() reflects THAT mutation
-      // (not a concurrent writer's version bump). Intervening statements would
-      // overwrite changes().
-      env.DB
-        .prepare(
-          `UPDATE pending_imports SET accepted_at = unixepoch(), accepted_by = ?2
-            WHERE id = ?1 AND changes() > 0`,
-        )
-        .bind(p.id, userId),
-      // Audit only if THIS mutation landed: match the causal fingerprint we wrote
-      // (version + updated_by + content_json + updated_at). A competitor that
-      // created newVersion with different bytes must not fabricate our history.
-      env.DB
-        .prepare(
-          `INSERT INTO edit_log
-             (kind, row_key, book, user_id, prev_version, new_version, action, payload_json, source, created_at, source_generation)
-           SELECT 'verse', ?1, ?2, NULL, NULL, ?3, 'baseline', ?4, NULL, ?5, ?6
-            WHERE EXISTS (
-              SELECT 1 FROM verses
-               WHERE book = ?7 AND chapter = ?8 AND verse = ?9 AND bible_version = ?10
-                 AND source_generation = ?11 AND version = ?12
-                 AND updated_by = ?13 AND content_json = ?14 AND updated_at = ?15
-            )
-              AND NOT EXISTS (
-              SELECT 1 FROM edit_log WHERE kind = 'verse' AND row_key = ?1 AND new_version = ?3
-            )`,
-        )
-        .bind(
-          rowKey,
-          book,
-          expectedVersion,
-          JSON.stringify({ plain_text: existing.plain_text, content: existing.content_json }),
-          existing.updated_at,
-          sourceGeneration,
-          book,
-          chapter,
-          verse,
-          bibleVersion,
-          sourceGeneration,
-          newVersion,
-          userId,
-          contentJson,
-          now,
-        ),
-      env.DB
-        .prepare(
-          `INSERT INTO edit_log
-             (kind, row_key, book, user_id, prev_version, new_version, action, payload_json, source, source_generation)
-           SELECT 'verse', ?1, ?2, ?3, ?4, ?5, 'update', ?6, ?7, ?8
-            WHERE EXISTS (
-              SELECT 1 FROM verses
-               WHERE book = ?9 AND chapter = ?10 AND verse = ?11 AND bible_version = ?12
-                 AND source_generation = ?13 AND version = ?5
-                 AND updated_by = ?3 AND content_json = ?14 AND updated_at = ?15
-            )`,
-        )
-        .bind(
-          rowKey,
-          book,
-          userId,
-          expectedVersion,
-          newVersion,
-          JSON.stringify({ plain_text: plainText, content: contentJson }),
-          AI_SOURCE,
-          sourceGeneration,
-          book,
-          chapter,
-          verse,
-          bibleVersion,
-          sourceGeneration,
-          contentJson,
-          now,
-        ),
-    ]);
-    return;
-  }
-
-  // The verse should exist from the initial book import; this branch is the
-  // defensive case where the seed missed something. Insert as a brand-new row.
-  await env.DB.batch([
-    lane
-      ? env.DB
-          .prepare(
-            `INSERT INTO verses (book, chapter, verse, verse_end, bible_version, source_generation, content_json, plain_text, updated_by)
-             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9
-              WHERE EXISTS (
-                SELECT 1 FROM scripture_lane_state
-                 WHERE lane = ?10 AND replacement_job_id IS NULL
-                   AND replacement_required = 0 AND active_generation = ?6
-              )`,
-          )
-          .bind(book, chapter, verse, verseEnd, bibleVersion, sourceGeneration, contentJson, plainText, userId, lane)
-      : env.DB
-          .prepare(
-            `INSERT INTO verses (book, chapter, verse, verse_end, bible_version, source_generation, content_json, plain_text, updated_by)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`,
-          )
-          .bind(book, chapter, verse, verseEnd, bibleVersion, sourceGeneration, contentJson, plainText, userId),
-    // Accept immediately after INSERT so changes() reflects that mutation.
-    env.DB
-      .prepare(
-        `UPDATE pending_imports SET accepted_at = unixepoch(), accepted_by = ?2
-          WHERE id = ?1 AND changes() > 0`,
-      )
-      .bind(p.id, userId),
-    env.DB
-      .prepare(
-        `INSERT INTO edit_log
-           (kind, row_key, book, user_id, prev_version, new_version, action, payload_json, source, source_generation)
-         SELECT 'verse', ?1, ?2, ?3, NULL, 1, 'create', ?4, ?5, ?6
-          WHERE EXISTS (
-            SELECT 1 FROM verses
-             WHERE book = ?7 AND chapter = ?8 AND verse = ?9 AND bible_version = ?10
-               AND source_generation = ?11 AND version = 1
-               AND updated_by = ?3 AND content_json = ?12
-          )`,
-      )
-      .bind(
-        rowKey,
-        book,
-        userId,
-        JSON.stringify({ plain_text: plainText, content: contentJson }),
-        AI_SOURCE,
-        sourceGeneration,
-        book,
-        chapter,
-        verse,
-        bibleVersion,
-        sourceGeneration,
-        contentJson,
-      ),
-  ]);
 }

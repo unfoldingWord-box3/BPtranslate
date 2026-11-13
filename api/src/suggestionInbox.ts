@@ -14,7 +14,8 @@
 //
 // The rules, exactly (the help and the page say them in plain words):
 //
-//   rows      validated tN rows of the book. draft = the note in the row's
+//   rows      validated tN rows of the book, hand approvals only (no
+//             admin_bulk_state stamp, #833). draft = the note in the row's
 //             latest ai_pipeline edit_log payload (the scorecard's lookup, with
 //             its book-matched COALESCE). Since #815 that is the text after
 //             house-style rules ran, i.e. what the editor saw. final = the

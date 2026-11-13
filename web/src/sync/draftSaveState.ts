@@ -205,10 +205,13 @@ export function pendingRevertSave(
 // recovered from the outbox (#658), else by row and exact patch.
 export function isEditorsPendingSave(
   sent: PendingRowSave,
-  op: Pick<OutboxOp, "id" | "target" | "patch"> & Partial<Pick<OutboxOp, "action">>,
+  op: Pick<OutboxOp, "id" | "target" | "patch"> & Partial<Pick<OutboxOp, "action">> & { twinQueued?: boolean },
   target: { rowKind: string; id: string; book: string },
 ): boolean {
   if (sent.opId !== undefined) return op.id === sent.opId;
+  // Another tab's drop whose twin (same row and patch) is still queued: the
+  // twin is this editor's save, not the dropped op (hasQueuedTwin).
+  if (op.twinQueued) return false;
   return isPendingRowSave(sent.patch, op, target);
 }
 

@@ -20,6 +20,9 @@ import {
   rebuiltRow,
   rowRebuildAction,
 } from "./outboxTargeting.ts";
+import { hasQueuedTwin, openRowDropChannel } from "./rowDropChannel.ts";
+import { isEditorsPendingSave } from "./draftSaveState.ts";
+import { holdOnDrop, holdOnSave, EMPTY_HOLD } from "./refusedSaveHold.ts";
 
 const target = { kind: "row", rowKind: "tq", id: "q-1", book: "ZEC" };
 const otherRow = { kind: "row", rowKind: "tq", id: "q-2", book: "ZEC" };
@@ -184,4 +187,165 @@ test("B1: of two overlapping rebuilds for a row, only the one started last appli
     const applied = order.filter((name) => g.isCurrent(key, gens[name]));
     assert.deepEqual(applied, ["second"], `returns in order ${order.join(", ")}`);
   }
+});
+
+// Issue #637 item 3: a row op thrown away in one tab (Discard of a failed or
+// conflicted save, keep theirs) must reach the other open tabs, which rebuild
+// their cached row from the server as the discarding tab does. Each tab opens
+// one channel; Node's BroadcastChannel stands in for the browser's. The
+// channel is named per workspace, as the outbox database is.
+const CHANNEL = "be-row-drop-test";
+function twoTabs(name = CHANNEL) {
+  const heard = { a: [], b: [] };
+  const a = openRowDropChannel(name, (d) => heard.a.push(d));
+  const b = openRowDropChannel(name, (d) => heard.b.push(d));
+  return { a, b, heard, close: () => (a.close(), b.close()) };
+}
+// Delivery is async; wait for it rather than for a fixed time (the suite runs
+// files in parallel, so a short sleep can lose the race).
+async function until(pred, ms = 3000) {
+  const end = Date.now() + ms;
+  while (!pred()) {
+    if (Date.now() > end) throw new Error("timed out waiting for a cross-tab message");
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
+test("cross-tab: a discarded row save reaches the other tab, which rebuilds that row", async () => {
+  const tabs = twoTabs();
+  try {
+    const current = { ...server, version: 3 };
+    tabs.a.announce(op("op-1", { response: "ABC" }, { status: "conflict", conflictCurrent: current }));
+    await until(() => tabs.heard.b.length > 0);
+    assert.deepEqual(tabs.heard.b, [
+      { id: "op-1", target, action: "patch", patch: { response: "ABC" }, conflictCurrent: current },
+    ]);
+    assert.deepEqual(tabs.heard.a, [], "the discarding tab already rebuilt from its own drop");
+  } finally {
+    tabs.close();
+  }
+});
+
+test("cross-tab: the other tab's editor ends its hold on the discarded save, as a local Discard does", async () => {
+  const tabs = twoTabs();
+  try {
+    tabs.a.announce(op("op-1", { response: "ABC" }, { status: "failed", lastError: "http 422" }));
+    await until(() => tabs.heard.b.length > 0);
+    const [drop] = tabs.heard.b;
+    const held = { sent: [], held: [{ patch: { response: "ABC" }, version: 2, fields: { response: "ABC" } }] };
+    assert.deepEqual(holdOnDrop(held, drop, target), { state: EMPTY_HOLD, released: { response: "ABC" } });
+    // A save of other text in that tab is not this op: its watch stays.
+    const mine = holdOnSave(EMPTY_HOLD, { response: "MINE" }, 2);
+    assert.equal(holdOnDrop(mine, drop, target).state, mine);
+  } finally {
+    tabs.close();
+  }
+});
+
+test("cross-tab: a discarded delete carries its action, so the other tab may put the row back", async () => {
+  const tabs = twoTabs();
+  try {
+    tabs.a.announce({ ...op("op-d", undefined), action: "delete", status: "failed", lastError: "http 422" });
+    await until(() => tabs.heard.b.length > 0);
+    assert.equal(tabs.heard.b.length, 1);
+    assert.equal(tabs.heard.b[0].action, "delete");
+  } finally {
+    tabs.close();
+  }
+});
+
+test("cross-tab: the message names the op, so an editor that knows its op id matches only that op", async () => {
+  // Review item 2: two tabs saving the same text to the same row. Tab A
+  // discards its op; tab B's editor, whose own save is op-mine, keeps it.
+  const tabs = twoTabs();
+  try {
+    tabs.a.announce(op("op-1", { note: "SAME" }, { status: "conflict" }));
+    await until(() => tabs.heard.b.length > 0);
+    const [drop] = tabs.heard.b;
+    assert.equal(drop.id, "op-1");
+    assert.equal(isEditorsPendingSave({ opId: "op-mine", patch: { note: "SAME" } }, drop, target), false);
+    assert.equal(isEditorsPendingSave({ opId: "op-1", patch: { note: "SAME" } }, drop, target), true);
+  } finally {
+    tabs.close();
+  }
+});
+
+test("cross-tab: another workspace's channel does not hear the drop", async () => {
+  // Review item 3: outbox and drafts are per workspace, so is the channel.
+  const tabs = twoTabs();
+  const other = [];
+  const orgB = openRowDropChannel(`${CHANNEL}-orgb`, (d) => other.push(d));
+  try {
+    tabs.a.announce(op("op-1", { response: "ABC" }));
+    await until(() => tabs.heard.b.length > 0);
+    await new Promise((r) => setTimeout(r, 50));
+    assert.deepEqual(other, []);
+  } finally {
+    orgB.close();
+    tabs.close();
+  }
+});
+
+test("cross-tab: verse ops and malformed messages are ignored; no BroadcastChannel is a no-op", async () => {
+  const tabs = twoTabs();
+  const raw = new BroadcastChannel(CHANNEL);
+  try {
+    tabs.a.announce({ ...op("op-v", { text: "x" }), target: { kind: "verse", book: "ZEC", chapter: 1, verse: 1, bibleVersion: "ult" } });
+    raw.postMessage({ target: { kind: "row", rowKind: "nope", id: "q-1", book: "ZEC" }, action: "patch", patch: {} });
+    raw.postMessage({ id: "x", target: { kind: "row", rowKind: "tq", id: 7, book: "ZEC" }, action: "patch", patch: {} });
+    // Review item 5: the patch must be a plain object, and the op id a string.
+    raw.postMessage({ id: "x", target, action: "patch", patch: [] });
+    raw.postMessage({ id: "x", target, action: "patch", patch: null });
+    raw.postMessage({ target, action: "patch", patch: {} });
+    raw.postMessage("hello");
+    // One valid message last from the same sender: once it arrives, every
+    // earlier one has too (a channel delivers one sender's posts in order).
+    raw.postMessage({ id: "last", target, action: "patch", patch: { response: "LAST" } });
+    await until(() => tabs.heard.b.length > 0);
+    assert.deepEqual(tabs.heard.b.map((d) => d.patch), [{ response: "LAST" }]);
+  } finally {
+    raw.close();
+    tabs.close();
+  }
+  const none = openRowDropChannel(CHANNEL, () => assert.fail("never called"), () => null);
+  none.announce(op("op-1", { response: "ABC" }));
+  none.close();
+  const throws = openRowDropChannel(CHANNEL, () => undefined, () => {
+    throw new Error("blocked");
+  });
+  throws.announce(op("op-1", { response: "ABC" }));
+  throws.close();
+});
+
+// Round 2 review: tabs A and B each queue a save of the same text to the same
+// row (ops X and Y). A discards X. An editor in B that knows its save only by
+// content must not take X for its own Y while Y is still queued: it would end
+// its type-back protection, Save gate and refused-text hold for a save that
+// can still land or be refused. The receiving tab checks the shared outbox
+// for a twin of the dropped op and passes `twinQueued` on.
+test("cross-tab: a dropped op's twin still queued is found; the dropped op itself, other rows and deletes are not", () => {
+  const drop = { id: "op-x", target, action: "patch", patch: { note: "SAME" } };
+  const y = op("op-y", { note: "SAME" });
+  assert.equal(hasQueuedTwin(drop, [y]), true);
+  assert.equal(hasQueuedTwin(drop, [op("op-x", { note: "SAME" })]), false, "the dropped op itself is no twin");
+  assert.equal(hasQueuedTwin(drop, [{ ...y, target: otherRow }]), false);
+  assert.equal(hasQueuedTwin(drop, [op("op-z", { note: "OTHER" })]), false);
+  assert.equal(hasQueuedTwin(drop, [{ ...y, action: "delete" }]), false);
+  assert.equal(hasQueuedTwin(drop, null), false, "an unreadable outbox keeps today's behaviour");
+  assert.equal(hasQueuedTwin({ ...drop, action: "delete" }, [y]), false);
+});
+
+test("cross-tab: with a twin queued, a content-matched editor keeps its save; an id-matched one still matches by id", () => {
+  const drop = { id: "op-x", target, action: "patch", patch: { note: "SAME" }, twinQueued: true };
+  // Content-matched (no op id): the drop is not this editor's save.
+  assert.equal(isEditorsPendingSave({ patch: { note: "SAME" } }, drop, target), false);
+  // Id-matched: the id decides, twin or not.
+  assert.equal(isEditorsPendingSave({ opId: "op-x", patch: { note: "SAME" } }, drop, target), true);
+  assert.equal(isEditorsPendingSave({ opId: "op-y", patch: { note: "SAME" } }, drop, target), false);
+  // Without a twin the content match stands, as for a local drop.
+  assert.equal(isEditorsPendingSave({ patch: { note: "SAME" } }, { ...drop, twinQueued: false }, target), true);
+  // The refused-save hold keeps its hold and its watch.
+  const held = { sent: [{ patch: { note: "SAME" }, version: 2 }], held: [{ patch: { note: "SAME" }, version: 2, fields: { note: "SAME" } }] };
+  assert.deepEqual(holdOnDrop(held, drop, target), { state: held, released: null });
+  assert.deepEqual(holdOnDrop(held, { ...drop, twinQueued: false }, target).released, { note: "SAME" });
 });

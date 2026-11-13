@@ -11,7 +11,7 @@
 //     each field still showing them.
 
 import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
-import { onOutboxDrop, onOutboxResult } from "../sync/outbox";
+import { onOpDropped, onOutboxResult } from "../sync/outbox";
 import { onDraftDiscarded, rowKey } from "../sync/drafts";
 import type { RowKind } from "../sync/api";
 import {
@@ -45,7 +45,12 @@ export function useRefusedSaveHold(
     const offResult = onOutboxResult((op, result) => {
       stateRef.current = holdOnResult(stateRef.current, op, result, target);
     });
-    const offDrop = onOutboxDrop((op) => {
+    // A drop in this tab or another (#637 item 3): another tab's Discard of
+    // this editor's save ends the hold as a local one does, so a field still
+    // showing the discarded text goes back to the row's; newer typing stays.
+    // Matched by patch content, as local results and drops are: the hold
+    // never sees its save's op id (the save goes through Shell).
+    const offDrop = onOpDropped((op) => {
       const { state, released } = holdOnDrop(stateRef.current, op, target);
       stateRef.current = state;
       if (released) onReleaseRef.current(released);

@@ -34,10 +34,11 @@
 //     { pipelineType: "translate", translate: { resourceType: "tq", rowIds } }).
 //     If users ask for per-question redo, bring the button back wired to that.
 //
-//   * Chapter lock: unlike tn, tq PATCH is NOT lock-exempt (api/src/rows.ts:597
-//     — the carve-out covers tn only), so a save during an AI run comes back 409
-//     locked and is dropped rather than overwritten. /validate IS lock-exempt
-//     (rows.ts:1173). The banner therefore says something real here.
+//   * Chapter lock: unlike tn, tq PATCH is NOT lock-exempt (api/src/rows.ts —
+//     the carve-out covers tn only), so a save during an AI run comes back 409
+//     locked and is dropped rather than overwritten. Approve (/validate) is
+//     refused the same way while any run holds the chapter (#752); un-approve
+//     is not. The banner therefore says something real here.
 //
 // ── 2026-08-10 responsive layouts (Benjamin) ─────────────────────────────────
 //
@@ -122,8 +123,8 @@ import {
   withPendingReverts,
   type PendingRowSave,
 } from "../../sync/draftSaveState";
-import { onOutboxDrop, onOutboxResult, outbox, type OutboxOp } from "../../sync/outbox";
-import { api, ApiError, type ChapterLockedBody, type TqRow } from "../../sync/api";
+import { onOpDropped, onOutboxResult, outbox, type DroppedOp, type OutboxOp } from "../../sync/outbox";
+import { api, ApiError, isChapterLockedBody, type ChapterLockedBody, type TqRow } from "../../sync/api";
 import { SCRIPTURE_FONT_STACK } from "../../theme";
 
 export interface TranslateQuestionsScreenProps extends FlowScreenContext {
@@ -846,7 +847,7 @@ export default function TranslateQuestionsScreen({
   // (also after a keep-mine, where saveDraft no longer moves it), and the
   // persist effect re-runs against it, so a kept revert stays a draft.
   useEffect(() => {
-    const end = (op: OutboxOp, ok: boolean) => {
+    const end = (op: DroppedOp, ok: boolean) => {
       endedOpsRef.current.add(op.id);
       const sent = sentRef.current;
       if (!sent || !isEditorsPendingSave(sent, op, { rowKind: "tq", id: sent.id, book })) return;
@@ -867,7 +868,8 @@ export default function TranslateQuestionsScreen({
     const offResult = onOutboxResult((op, result) => {
       if (rowSaveEnded(result)) end(op, result.kind === "ok");
     });
-    const offDrop = onOutboxDrop((op) => end(op, false));
+    // A discard in this tab or another (#637 review item 1).
+    const offDrop = onOpDropped((op) => end(op, false));
     return () => {
       offResult();
       offDrop();
@@ -1061,6 +1063,8 @@ export default function TranslateQuestionsScreen({
       if (hasDiff && !(await saveDraft(row))) return;
       const updated = await api.validateQuestion(row.id, book, true);
       applyLocalRowReplacement("tq", updated);
+      // The server accepted it, so no run holds the chapter any more.
+      setChapterLock(null);
       setStatuses((prev) => ({ ...prev, [row.id]: "approved" }));
       setEditingField(null);
       setToast(t("translation.stateApproved"));
@@ -1068,6 +1072,11 @@ export default function TranslateQuestionsScreen({
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) {
         say(t("flowQuestions.approveNeedsDraft"));
+      } else if (err instanceof ApiError && isChapterLockedBody(err.body)) {
+        // An AI run holds this chapter; the server refuses the approval until
+        // it finishes (#752), the same rule as saving an edit.
+        setChapterLock(err.body);
+        say(t("shell.questionLockedByRun"));
       } else {
         say(
           t("flowQuestions.approveFailed", {
@@ -1354,7 +1363,7 @@ export default function TranslateQuestionsScreen({
     <>
         {chapterLock && (
           // Unlike notes, tq PATCH is NOT lock-exempt: saves are refused with a
-          // 409 while a run holds the chapter. Approve still lands.
+          // 409 while a run holds the chapter, and so is Approve (#752).
           <LockBanner pipelineType={chapterLock.pipelineType} startedAt={chapterLock.startedAt} />
         )}
 

@@ -3,6 +3,9 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test, type Browser, type Page } from "@playwright/test";
 import { closeTolerant, mintToken } from "./helpers";
+import { ZEC_CHAPTERS } from "./chapters";
+
+const CHAPTER = ZEC_CHAPTERS.readOnly.chapter;
 
 // Flows notes screen: read-only ULT alignment strip (issue #431).
 //
@@ -75,7 +78,7 @@ const lexPopover = (page: Page) => page.locator("[data-lex-popover]");
 
 test.describe("notes screen ULT alignment strip (#431)", () => {
   test("desktop: hovering either side lights the aligned group on both", async ({ browser }) => {
-    const { context, page } = await openNotes(browser, "ult-align-desk", 1280, false, "/#/notes/ZEC/1/1");
+    const { context, page } = await openNotes(browser, "ult-align-desk", 1280, false, `/#/notes/ZEC/${CHAPTER}/1`);
     await expect(strip(page)).toBeVisible({ timeout: 20_000 });
     await expect(page.getByRole("button", { name: "Alignment", exact: true })).toHaveAttribute(
       "aria-pressed",
@@ -116,7 +119,7 @@ test.describe("notes screen ULT alignment strip (#431)", () => {
   });
 
   test("a supplied English word lights nothing", async ({ browser }) => {
-    const { context, page } = await openNotes(browser, "ult-align-sup", 1280, false, "/#/notes/ZEC/1/10");
+    const { context, page } = await openNotes(browser, "ult-align-sup", 1280, false, `/#/notes/ZEC/${CHAPTER}/10`);
     await expect(strip(page)).toBeVisible({ timeout: 20_000 });
     const supplied = strip(page).locator('[data-align-en="These"][data-supplied]');
     await expect(supplied).toHaveCount(1);
@@ -127,7 +130,7 @@ test.describe("notes screen ULT alignment strip (#431)", () => {
   });
 
   test("phone: tap selects, tap again clears, no sideways scroll", async ({ browser }) => {
-    const { context, page } = await openNotes(browser, "ult-align-phone", 390, true, "/#/notes/ZEC/1/1");
+    const { context, page } = await openNotes(browser, "ult-align-phone", 390, true, `/#/notes/ZEC/${CHAPTER}/1`);
     await expect(strip(page)).toBeVisible({ timeout: 20_000 });
     await en(page, "Yahweh").tap();
     await expect(litOrig(page)).toHaveCount(3);
@@ -152,7 +155,7 @@ test.describe("notes screen ULT alignment strip (#431)", () => {
     // The suite's D1 has no lexicon, so serve a known entry for יְהוָה and
     // nothing else, and count the calls.
     const lexCalls: string[] = [];
-    const { context, page } = await openNotes(browser, "ult-align-lex", 1280, false, "/#/notes/ZEC/1/1", (p) =>
+    const { context, page } = await openNotes(browser, "ult-align-lex", 1280, false, `/#/notes/ZEC/${CHAPTER}/1`, (p) =>
       p.route("**/api/lexicon?**", (route) => {
         lexCalls.push(route.request().url());
         return route.fulfill({

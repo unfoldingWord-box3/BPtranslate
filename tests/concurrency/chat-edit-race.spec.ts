@@ -3,6 +3,9 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test, request as apiRequest, type APIRequestContext } from "@playwright/test";
 import { fetchChapter, gotoVerse, mintToken, newUserContext, noteTextarea, saveNote, waitForServerNote } from "./helpers";
+import { ZEC_CHAPTERS } from "./chapters";
+
+const CHAPTER = ZEC_CHAPTERS.shared.chapter;
 
 // Honor BE_BASE_URL so the suite runs on a relocated port (mirrors s8).
 const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
@@ -52,9 +55,9 @@ test("web edit vs chat edit on one note: the chat gets a conflict with both vers
   const session_token = link.data.session_token as string;
 
   // The chat shows the reviewer one note, at version N.
-  const chapter = await fetchChapter(chat, reviewer.token, "ZEC", 6);
+  const chapter = await fetchChapter(chat, reviewer.token, "ZEC", CHAPTER);
   const target = chapter.tn.find((r) => r.verse === 1)!;
-  expect(target, "expected a TN row on ZEC 6:1").toBeTruthy();
+  expect(target, `expected a TN row on ZEC ${CHAPTER}:1`).toBeTruthy();
   const shown = await tool(chat, bearer!, "bpt_get_row", { session_token, book: "ZEC", kind: "tn", id: target.id });
   expect(shown.isError, JSON.stringify(shown.data)).toBe(false);
   const shownVersion = shown.data.version as number;
@@ -62,11 +65,11 @@ test("web edit vs chat edit on one note: the chat gets a conflict with both vers
   // A translator saves the same note in the web app.
   const { context: webCtx } = await newUserContext(browser, "webtranslator");
   const web = await webCtx.newPage();
-  await gotoVerse(web, "ZEC", 6, target.verse);
+  await gotoVerse(web, "ZEC", CHAPTER, target.verse);
   const webText = `WEB ${Date.now()}`;
   await noteTextarea(web, target.id).fill(webText);
   await saveNote(web, target.id);
-  const landed = await waitForServerNote(chat, reviewer.token, "ZEC", 6, target.id, (n) => n === webText);
+  const landed = await waitForServerNote(chat, reviewer.token, "ZEC", CHAPTER, target.id, (n) => n === webText);
   expect(landed.version).toBe(shownVersion + 1);
 
   // The chat saves the reviewer's correction against the version it showed.
@@ -81,7 +84,7 @@ test("web edit vs chat edit on one note: the chat gets a conflict with both vers
   expect(edit.data.current.version).toBe(shownVersion + 1);
 
   // The web text stands.
-  const after = await fetchChapter(chat, reviewer.token, "ZEC", 6);
+  const after = await fetchChapter(chat, reviewer.token, "ZEC", CHAPTER);
   expect(after.tn.find((r) => r.id === target.id)!.note).toBe(webText);
 
   await webCtx.close();

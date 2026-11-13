@@ -13,7 +13,7 @@ Living checklist of things that need eyes-on verification — UI behaviors, live
 
 ## Pending verification
 
-> Since #470 the AI menu no longer offers "Generate ULT + UST", "Write translation notes" or "Write translation questions" (they were switched off in #551). Items below that start one of those runs from the menu can't be exercised any more.
+> Since #470 the AI menu no longer offers "Generate ULT + UST", "Write translation notes" or "Write translation questions" (they were switched off in #551, and their server code was removed in #726). Items below that start one of those runs, or the "Generate everything" chain, can't be exercised any more.
 
 ### Phase 2d — PR #14 (asymmetric alignment, AI chip, stage bar, cron polling)
 
