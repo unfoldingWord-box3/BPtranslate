@@ -11,8 +11,8 @@ type Db = {
   };
 };
 
-// A missing table OR column: a database a migration behind (0085 without 0086
-// or 0087) reads as not migrated, not as a failure (#908 leftover 6).
+// A missing table OR column: a database a migration behind (0085 without 0086,
+// 0087 or 0088) reads as not migrated, not as a failure (#908 leftover 6).
 export const tableMissing = (e: unknown) => /no such (?:table|column)/i.test(e instanceof Error ? e.message : String(e));
 
 export const LESSONS_HEADING = "## Lessons from recent editor corrections";
