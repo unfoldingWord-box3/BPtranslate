@@ -254,13 +254,19 @@ export async function recentApprovedChapters(db: Db, n = RECENT_CHAPTERS): Promi
 /** Where a chapter's hand approvals count as new: above this edit_log id (any, when null). */
 type AfterIn = (ch: ChapterRef) => number | null;
 
-/** The chapters holding a hand approval newer than their own `afterIn` mark. */
-async function chaptersWithNew(db: Db, chapters: readonly ChapterRef[], afterIn: AfterIn): Promise<ChapterRef[]> {
+/**
+ * The chapters holding a hand approval newer than their own `afterIn` mark and
+ * no newer than `upTo`, the night's watermark: one committed after it was read
+ * is the next night's (#923).
+ */
+async function chaptersWithNew(db: Db, chapters: readonly ChapterRef[], afterIn: AfterIn, upTo: number): Promise<ChapterRef[]> {
   const out: ChapterRef[] = [];
   for (const ch of chapters) {
     const r = await db
-      .prepare(`SELECT 1 AS x ${HAND_APPROVAL_JOIN} AND t.book = ?1 AND t.chapter = ?2 AND (?3 IS NULL OR e.id > ?3) LIMIT 1`)
-      .bind(ch.book, ch.chapter, afterIn(ch))
+      .prepare(
+        `SELECT 1 AS x ${HAND_APPROVAL_JOIN} AND t.book = ?1 AND t.chapter = ?2 AND (?3 IS NULL OR e.id > ?3) AND e.id <= ?4 LIMIT 1`,
+      )
+      .bind(ch.book, ch.chapter, afterIn(ch), upTo)
       .first();
     if (r) out.push(ch);
   }
@@ -349,9 +355,10 @@ const NOTE_CELLS = DIFF_SEGMENT_CAP * DIFF_SEGMENT_CAP;
 export async function mineChanges(
   db: Db,
   chapters: readonly ChapterRef[],
-  opts: { after?: number | null; afterIn?: AfterIn; cells?: number } = {},
+  opts: { after?: number | null; afterIn?: AfterIn; upTo?: number | null; cells?: number } = {},
 ): Promise<MineResult> {
   const afterIn: AfterIn = opts.afterIn ?? (() => opts.after ?? null);
+  const upTo = opts.upTo ?? null;
   const runCells = opts.cells ?? MINING_CELL_BUDGET;
   type Row = { id: string; final_note: string | null; draft_note: unknown; approval_id: number | null; after: number | null };
   const rows: Row[] = [];
@@ -368,7 +375,10 @@ export async function mineChanges(
       .all<Omit<Row, "after">>();
     rows.push(...(rs.results ?? []).map((r) => ({ ...r, after })));
   }
-  const isNew = (r: Row) => r.approval_id != null && (r.after == null || r.approval_id > r.after);
+  // New: approved after the chapter's mark, and no later than the night's
+  // watermark (`upTo`): a later one is the next night's (#923).
+  const isNew = (r: Row) =>
+    r.approval_id != null && (r.after == null || r.approval_id > r.after) && (upTo == null || r.approval_id <= upTo);
   const fresh = rows.filter(isNew).sort((a, b) => a.approval_id! - b.approval_id!);
   // Array.sort is stable: rows without a hand approval keep their window order, last.
   const rest = rows.filter((r) => !isNew(r)).sort((a, b) => (b.approval_id ?? -1) - (a.approval_id ?? -1));
@@ -846,9 +856,10 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
     if (tableMissing(e)) return { ran: false, reason: "not_migrated" };
     throw e;
   }
-  const watermark = await approvalWatermark(db);
-  if (watermark == null) return { ran: false, reason: "no_new_approvals" };
-
+  let watermark: number | null = null;
+  let newest: ChapterRef[];
+  let resume: ChapterRef[];
+  let tonight: ChapterRef[];
   // Which chapters tonight mines, and from where (#915). A chapter the last
   // run left a mark for is mined from that mark, any other from the watermark.
   // Resume: when the last finished run stopped among new approvals, this run
@@ -858,28 +869,56 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
   // un-approved since) is stale, however old: mine the newest chapters instead
   // (#908 leftover 4). Otherwise: the newest chapters, plus any chapter a
   // resume left owed (marked below the watermark, still holding a new
-  // approval) that is no longer among them.
+  // approval) that is no longer among them. Every read is bounded by the
+  // watermark read first: an approval committed after it is the next night's
+  // (#923).
   const marks = parseMarks(prev?.marks_json ?? null);
   const afterIn: AfterIn = (c) => marks.get(chapterKey(c))?.through ?? last;
-  const newest = await recentApprovedChapters(db);
-  const stored = prev?.truncated ? parseChapters(prev.chapters_json) : [];
-  const resume = stored.length > 0 && (await chaptersWithNew(db, stored, afterIn)).length > 0 ? stored : [];
-  const owed =
-    resume.length > 0 || last == null
-      ? []
-      : await chaptersWithNew(
-          db,
-          [...marks.values()]
-            .filter((m) => m.through < last && !newest.some((c) => chapterKey(c) === chapterKey(m)))
-            .map((m) => ({ book: m.book, chapter: m.chapter })),
-          afterIn,
-        );
-  const tonight = resume.length > 0 ? resume : [...newest, ...owed];
-  // Only a night with a new approval in the chapters it mines runs: notes a
-  // resume already compared past the watermark are not new again.
-  if (resume.length === 0 && owed.length === 0 && (await chaptersWithNew(db, newest, afterIn)).length === 0) {
-    return { ran: false, reason: "no_new_approvals" };
+  try {
+    watermark = await approvalWatermark(db);
+    if (watermark == null) return { ran: false, reason: "no_new_approvals" };
+    const upTo = watermark;
+    newest = await recentApprovedChapters(db);
+    const stored = prev?.truncated ? parseChapters(prev.chapters_json) : [];
+    resume = stored.length > 0 && (await chaptersWithNew(db, stored, afterIn, upTo)).length > 0 ? stored : [];
+    const owed =
+      resume.length > 0 || last == null
+        ? []
+        : await chaptersWithNew(
+            db,
+            [...marks.values()]
+              .filter((m) => m.through < last && !newest.some((c) => chapterKey(c) === chapterKey(m)))
+              .map((m) => ({ book: m.book, chapter: m.chapter })),
+            afterIn,
+            upTo,
+          );
+    tonight = resume.length > 0 ? resume : [...newest, ...owed];
+    // Only a night with a new approval in the chapters it mines runs: notes a
+    // resume already compared past the watermark are not new again.
+    if (resume.length === 0 && owed.length === 0 && (await chaptersWithNew(db, newest, afterIn, upTo)).length === 0) {
+      return { ran: false, reason: "no_new_approvals" };
+    }
+  } catch (e) {
+    // These reads come before the night claim, so leave the failed run the
+    // claim would have: the admin page then shows the night (#923). Never over
+    // a row tonight already has; the original error is the one rethrown.
+    try {
+      await db
+        .prepare(
+          `INSERT INTO lesson_runs (night, started_at, finished_at, status, failure_reason, approvals_through)
+           VALUES (?1, ?2, ?2, 'failed', 'internal_error', ?3) ON CONFLICT(night) DO NOTHING`,
+        )
+        .bind(night, now, Math.max(watermark ?? 0, last ?? 0))
+        .run();
+    } catch {
+      // Nothing more to record; the caller logs the original error.
+    }
+    throw e;
   }
+  // The watermark this night stores: never below the last one (#923). After an
+  // un-approval the newest approval can be older than it, and a lower value
+  // would leave the next night's marks relative to a watermark it never reads.
+  const cover = last == null ? watermark : Math.max(last, watermark);
 
   const { availability, apiKey } = await resolveProvider(env, true);
   if (!availability.available || !apiKey) {
@@ -904,7 +943,7 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
         `INSERT INTO lesson_runs (night, started_at, approvals_through, provider, model)
          VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(night) DO NOTHING`,
       )
-      .bind(night, now, watermark, provider, model),
+      .bind(night, now, cover, provider, model),
   ]);
   if (!claim?.meta?.changes) return { ran: false, reason: "already_ran" };
   // Tonight's row is ours now: night is UNIQUE, and only an interrupted row is ever replaced.
@@ -930,7 +969,7 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
   let changes = 0;
   // The watermark this run covers: the claimed one, or, when the mining
   // budget ran out among new approvals, just below the first one left undiffed.
-  let through = watermark;
+  let through = cover;
   let truncated = false;
   // Stopped among new approvals: the next run finishes these chapters first.
   let stopped = false;
@@ -952,7 +991,7 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
 
   try {
     chapters = tonight;
-    const mined = await mineChanges(db, chapters, { afterIn, cells: deps.cells });
+    const mined = await mineChanges(db, chapters, { afterIn, upTo: watermark, cells: deps.cells });
     changes = mined.groups.length;
     truncated = mined.truncated;
     if (mined.stoppedAt != null) {
@@ -986,7 +1025,7 @@ export async function runNightlyLessons(env: Env, deps: LessonDeps = {}): Promis
     const mark = (c: ChapterRef, t: number) => progress.set(chapterKey(c), { book: c.book, chapter: c.chapter, through: t });
     for (const m of marks.values()) if (resume.length > 0 || m.through > through) mark(m, m.through);
     if (resume.length > 0) for (const c of newest) mark(c, afterIn(c) ?? 0);
-    const done = mined.stoppedAt != null ? mined.stoppedAt - 1 : watermark;
+    const done = mined.stoppedAt != null ? mined.stoppedAt - 1 : cover;
     for (const c of chapters) mark(c, Math.max(afterIn(c) ?? 0, done));
     marksOut = [...progress.values()].filter((m) => m.through !== through);
     if (mined.groups.length === 0) {
