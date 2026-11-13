@@ -4,7 +4,9 @@ import {
   afterPrefsSave,
   hydratePrefsDraft,
   prefsDraftClearable,
+  prefsDraftDroppable,
   prefsDraftKey,
+  prefsDraftLost,
   prefsSavePayload,
   prefsVersionToSend,
   sameFields,
@@ -146,6 +148,24 @@ assert.deepStrictEqual(afterPrefsSave(briefTyped, briefTyped, savedBrief, 10), {
 assert.ok(prefsDraftClearable({ text: typed, base: start }, [typed]));
 assert.ok(!prefsDraftClearable({ text: { common_issues_md: "tab B" }, base: start }, [typed, start]));
 assert.ok(!prefsDraftClearable({ content: 1 }, [typed]));
+
+// ── prefsDraftLost (#913 item 1) ───────────────────────────────────────────
+// Another tab that restored this tab's draft can delete the record (its undo
+// or save). While this editor still shows typed text, the record is missing
+// and gets written again; with nothing typed, there is nothing to keep.
+assert.ok(prefsDraftLost(typed, start, false));
+assert.ok(!prefsDraftLost(typed, start, true));
+assert.ok(!prefsDraftLost(start, start, false));
+
+// ── prefsDraftDroppable (#913 item 5) ──────────────────────────────────────
+// Drafts are per workspace, not per user. A user who cannot save drops only a
+// draft they typed themselves (H2: they lost admin since); another user's
+// draft on a shared browser, or one with no author recorded, is left alone.
+assert.ok(prefsDraftDroppable({ text: typed, base: start, owner: 7 }, 7));
+assert.ok(!prefsDraftDroppable({ text: typed, base: start, owner: 7 }, 8));
+assert.ok(!prefsDraftDroppable({ text: typed, base: start }, 7));
+assert.ok(!prefsDraftDroppable({ text: typed, base: start, owner: 7 }, null));
+assert.ok(!prefsDraftDroppable(null, 7));
 
 // ── prefsConflictRow (gate review H3) ──────────────────────────────────────
 const row = { version: 4, error: undefined };

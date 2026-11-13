@@ -519,3 +519,119 @@ test("H7: discarding the draft from the unsaved menu resets the open editor", as
   await expect(commonBox(page)).toHaveValue(`h7 common ${stamp}`);
   await expect(page.getByText(/\d+ unsaved/)).toHaveCount(0);
 });
+
+// ── Issue #913: edge cases left by #909 ─────────────────────────────────────
+
+// Item 1: tab A restores the draft tab B is still showing. A one-step undo or
+// a save in A used to delete that record, so B's "1 unsaved" and its unload
+// warning went away while B still showed the text. B now keeps its record.
+for (const how of ["undo", "save"] as const) {
+  test(`913 item 1: a ${how} in another tab that restored this tab's draft leaves the draft stored`, async ({
+    browser,
+  }) => {
+    test.setTimeout(90_000);
+    const stamp = Date.now();
+    const original = `913-1${how} common ${stamp}`;
+    const typedB = `${original} B-TYPED`;
+    await putPrefs(setup!.context.request, setup!.csrf, { common_issues_md: original });
+    const { context } = await adminContext(browser, "a");
+    const pageB = await context.newPage();
+    await openStyle(pageB, original);
+    await commonBox(pageB).click();
+    await pageB.keyboard.press("End");
+    await pageB.keyboard.type(" B-TYPED");
+    await expect
+      .poll(() => prefsDrafts(pageB))
+      .toEqual({ "prefs:common_issues_md": JSON.stringify({ common_issues_md: typedB }) });
+
+    // Tab A opens the page and restores B's typing.
+    const pageA = await context.newPage();
+    await openStyle(pageA, typedB);
+    if (how === "undo") await commonBox(pageA).fill(original);
+    else expect(await clickSave(pageA, "commonIssues")).toBe(200);
+    await pageA.waitForTimeout(1000);
+
+    // B still shows its typing, so its draft is still stored and counted.
+    await pageB.bringToFront();
+    await expect(commonBox(pageB)).toHaveValue(typedB);
+    await expect
+      .poll(() => prefsDrafts(pageB), { timeout: 5_000 })
+      .toEqual({ "prefs:common_issues_md": JSON.stringify({ common_issues_md: typedB }) });
+    await expect(pageB.getByText("1 unsaved").first()).toBeVisible();
+  });
+}
+
+// Item 2: Discard from the unsaved menu while the save of that typing is in
+// flight. The save lands, so the box shows the saved text with nothing
+// unsaved, instead of the discarded-to text coming back as "1 unsaved".
+test("913 item 2: a discard while the save is in flight settles on the saved text", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const stamp = Date.now();
+  const original = `913-2 common ${stamp}`;
+  await putPrefs(setup!.context.request, setup!.csrf, { common_issues_md: original });
+  const { context } = await adminContext(browser, "a");
+  const page = await context.newPage();
+  await openStyle(page, original);
+  await commonBox(page).click();
+  await page.keyboard.press("End");
+  await page.keyboard.type(" A1");
+  await expect.poll(() => prefsDrafts(page)).toHaveProperty("prefs:common_issues_md");
+
+  // Hold the PUT until the discard is done.
+  let release = () => {};
+  const gate = new Promise<void>((r) => (release = r));
+  await page.route(`**${PREFS}`, async (route) => {
+    if (route.request().method() === "PUT") await gate;
+    await route.continue();
+  });
+  const resp = page.waitForResponse((r) => r.url().includes(PREFS) && r.request().method() === "PUT");
+  await saveIn(page, "commonIssues").click();
+  await page.getByText("1 unsaved").first().click();
+  await page.getByRole("presentation").getByText("1 unsaved").click();
+  await page.getByRole("button", { name: "Discard this edit" }).click();
+  await expect(commonBox(page)).toHaveValue(original);
+  release();
+  expect((await resp).status()).toBe(200);
+  expect((await getPrefs(setup!.context.request)).common_issues_md).toBe(`${original} A1`);
+
+  await expect(commonBox(page)).toHaveValue(`${original} A1`);
+  await page.waitForTimeout(500);
+  await expect(page.getByText(/\d+ unsaved/)).toHaveCount(0);
+  expect(await prefsDrafts(page)).toEqual({});
+});
+
+// Item 5: drafts are per workspace, not per user. On a shared browser, another
+// user who cannot save opens classic Preferences: the admin's stored draft is
+// left alone (H2 still drops a draft the same user typed before losing admin).
+test("913 item 5: a user who cannot save does not delete another user's prefs draft", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const stamp = Date.now();
+  await putPrefs(setup!.context.request, setup!.csrf, { common_issues_md: `913-5 common ${stamp}` });
+  const a = await adminContext(browser, "a");
+  const page = await a.context.newPage();
+  page.on("dialog", (d) => void d.accept());
+  const box = page.locator('#pref-sec-commonIssues textarea:not([aria-hidden="true"])').first();
+  await page.goto(`${BASE}/#/preferences/commonIssues`);
+  await expect(box).toHaveValue(`913-5 common ${stamp}`, { timeout: 20_000 });
+  await box.click();
+  await page.keyboard.press("End");
+  await page.keyboard.type(" ADMIN-TYPED");
+  const adminDraft = { "prefs:common_issues_md": JSON.stringify({ common_issues_md: `913-5 common ${stamp} ADMIN-TYPED` }) };
+  await expect.poll(() => prefsDrafts(page)).toEqual(adminDraft);
+
+  // Another user, an editor, on the same browser.
+  const asOtherEditor = async (route: import("@playwright/test").Route) => {
+    const res = await route.fetch();
+    const body = (await res.json()) as Record<string, unknown>;
+    await route.fulfill({
+      response: res,
+      json: { ...body, role: "editor", userId: Number(body.userId) + 100_000, username: "913-other-editor" },
+    });
+  };
+  await page.route("**/api/auth/me", asOtherEditor);
+  await page.route("**/api/auth/dev", asOtherEditor);
+  await page.reload();
+  await expect(box).toHaveValue(`913-5 common ${stamp}`, { timeout: 20_000 });
+  await page.waitForTimeout(1000);
+  expect(await prefsDrafts(page)).toEqual(adminDraft);
+});
