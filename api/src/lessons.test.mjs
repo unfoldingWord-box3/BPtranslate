@@ -1665,6 +1665,21 @@ test("#923 item 1: an approval committed after the watermark was read does not m
   assert.equal(f.calls.length, 2);
 });
 
+test("#923 item 1: an approval committed after the watermark read cannot push a newest chapter out of the window", async () => {
+  const f = await fresh();
+  assert.equal((await f.run(NIGHT1)).status, "ok");
+  // Between nights: a new approval in MRK 2, then one in MRK 3 (the newest two at the watermark).
+  approveIn(f, 2, "n201", "قال الكاتب", "كتب الكاتب");
+  approveIn(f, 3, "n301", "ذهب الرجل", "مضى الرجل");
+  // Night 2: right after the watermark read, an approval lands in a third chapter.
+  const restore = hookDb(f, "SELECT MAX(e.id) AS w", "after", () => approveIn(f, 4, "late4"));
+  assert.equal((await f.run(NIGHT2)).status, "ok", "the night runs on the approvals it read");
+  restore();
+  assert.match(f.calls[1].user, /Chapters: MRK 3, MRK 2\./, "the newest two at the watermark, not MRK 4");
+  assert.match(f.calls[1].user, SAID, "MRK 2's new approval is mined");
+  assert.match(f.calls[1].user, WENT, "MRK 3's new approval is mined");
+});
+
 test("#923 item 1: mining counts only approvals at or below the night's watermark as new", async () => {
   const f = await fresh();
   const w = maxApproval(f);
