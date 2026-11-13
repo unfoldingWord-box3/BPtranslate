@@ -15,7 +15,7 @@
 // Not a test framework; a failed assert exits non-zero.
 
 import { DatabaseSync } from "node:sqlite";
-import { normalizeRowIds, normalizeTranslateRowIdsJson } from "./translateOptions.ts";
+import { normalizeRowIds } from "./translateOptions.ts";
 import {
   PIPELINE_COVERAGE_WHERE,
   COVERING_WHOLE_CHAPTER_COLUMN,
@@ -708,41 +708,6 @@ console.log("\n[#347 item 1] non-translate pipelines are unaffected");
     resolveG({ verseStart: 2, verseEnd: 3 }) === undefined,
     "verse-range translate request is not blocked by an in-flight generate job",
   );
-}
-
-console.log("\n[#347 item 3] normalizeTranslateRowIdsJson keeps follow-up rowIds canonical");
-{
-  // A translate child whose stored options carry un-normalized rowIds (unsorted +
-  // duplicated) must come out sorted+deduped so a same-row request's dedup key
-  // (JSON.stringify(normalizeRowIds([...]))) matches json_extract($.rowIds).
-  const raw = JSON.stringify({ resourceType: "tn", rowIds: ["q", "p", "q", "a"] });
-  const normed = normalizeTranslateRowIdsJson("translate", raw);
-  assert(
-    JSON.parse(normed).rowIds.join(",") === "a,p,q",
-    `rowIds normalized to sorted+deduped set (got ${normed})`,
-  );
-  // Round-trip: the normalized $.rowIds must equal the dedup key a fresh request
-  // for the same set computes — otherwise a same-row follow-up wouldn't dedup.
-  assert(
-    JSON.stringify(JSON.parse(normed).rowIds) === JSON.stringify(normalizeRowIds(["a", "p", "q"])),
-    "normalized follow-up rowIds equals the dedup key for the same set",
-  );
-  // Non-translate child: untouched (a generate/notes follow-up must not be rebuilt).
-  const gen = JSON.stringify({ contentTypes: ["ult"] });
-  assert(normalizeTranslateRowIdsJson("generate", gen) === gen, "non-translate options returned verbatim");
-  // null options → null.
-  assert(normalizeTranslateRowIdsJson("translate", null) === null, "null options_json stays null");
-  // translate options with no rowIds → untouched.
-  const noRows = JSON.stringify({ resourceType: "tq", verseStart: 4 });
-  assert(normalizeTranslateRowIdsJson("translate", noRows) === noRows, "translate options without rowIds returned verbatim");
-  // Empty rowIds array → rowIds dropped (collapses to chapter-wide 'ALL').
-  const empty = JSON.stringify({ resourceType: "tn", rowIds: [] });
-  assert(
-    !("rowIds" in JSON.parse(normalizeTranslateRowIdsJson("translate", empty))),
-    "empty rowIds array is dropped (chapter-wide)",
-  );
-  // Unparseable JSON → returned verbatim (never throws).
-  assert(normalizeTranslateRowIdsJson("translate", "{not json") === "{not json", "unparseable options returned verbatim");
 }
 
 console.log("\n[#794] a narrower request naming an approved row is not covered by a whole-chapter job");

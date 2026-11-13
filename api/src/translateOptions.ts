@@ -22,42 +22,6 @@ export function normalizeRowIds(rowIds: string[] | undefined): string[] | undefi
   return [...new Set(rowIds)].sort();
 }
 
-// #347 item 3: enqueueFollowUp / enqueueFollowUpFromChain (pipelines.ts) write a
-// child job's options_json verbatim from the stored/client options — they never
-// route it through buildTranslateOptions, which is where a translate job's rowIds
-// is normalized. A full buildTranslateOptions rebuild is wrong there: it derives
-// the ENTIRE server-authoritative envelope from the active project config
-// (returning null for non-GL projects), which would corrupt a generate/notes
-// follow-up. The dedupe key's only canonical-set assumption is on rowIds, so the
-// safe, invariant-preserving guard is to normalize just the rowIds array a
-// TRANSLATE child's options_json carries, leaving everything else untouched — so
-// a same-row follow-up still dedups against its canonical form.
-//
-// A no-op today (followUpOptions / ChainStep.options are typed PipelineOptions,
-// which is generate/notes-shaped and cannot carry rowIds), but it defends the
-// canonical-set invariant for when translate follow-ups/chains become expressible,
-// without a schema change or an envelope rebuild. No-op for non-translate children
-// and for options with no rowIds array or unparseable JSON.
-export function normalizeTranslateRowIdsJson(
-  pipelineType: string,
-  optionsJson: string | null,
-): string | null {
-  if (pipelineType !== "translate" || !optionsJson) return optionsJson;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(optionsJson);
-  } catch {
-    return optionsJson;
-  }
-  if (!parsed || typeof parsed !== "object") return optionsJson;
-  const o = parsed as Record<string, unknown>;
-  if (!Array.isArray(o.rowIds)) return optionsJson;
-  const norm = normalizeRowIds(o.rowIds as string[]);
-  if (norm) o.rowIds = norm;
-  else delete o.rowIds; // empty selection → chapter-wide (no $.rowIds → 'ALL')
-  return JSON.stringify(o);
-}
-
 // Client-supplied overrides (a top-level `translate:{…}` field on the start body).
 export type TranslateClientOptions = {
   // Which resource to translate. Row-keyed TSV: tn (default) | tq. Markdown
