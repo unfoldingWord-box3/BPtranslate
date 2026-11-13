@@ -382,15 +382,20 @@ app.notFound((c) => {
   return c.json({ error: "not_found", path: c.req.path }, 404);
 });
 
-// Nightly lessons from editor corrections (#817), run just before a nightly
-// context export is requested so that export carries tonight's set. The job
-// itself does nothing while the workspace's switch is off (the default), and
-// only calls the AI when there are new hand approvals. Isolated: a lessons
-// failure must never stop the export.
-async function runLessonsBeforeExport(env: Env) {
+// Nightly lessons from editor corrections (#817). Runs AFTER every
+// workspace's nightly tick has requested its export (see scheduled() below),
+// so a slow AI call (up to 2 minutes) never delays or starves an export. When
+// a run stores a changed set, it queues a context export for that workspace,
+// the same mark-pending-and-start-if-free a save does, so the new lessons still
+// reach tonight's pack. The job does nothing while the workspace's switch is
+// off (the default) and only calls the AI when there are new hand approvals.
+// Isolated: a lessons failure is logged and never reaches the export or the
+// next workspace.
+async function runNightlyLessonsTick(env: Env) {
   try {
     const out = await runNightlyLessons(env);
     console.log("nightly lessons", { workspace: env.WORKSPACE_SLUG ?? "default", ...out });
+    if (out.ran && out.changed) await requestDailyContextExport(env);
   } catch (e) {
     console.error("nightly lessons failed", e instanceof Error ? e.message : String(e));
   }
@@ -467,7 +472,6 @@ async function runScheduledTick(controller: ScheduledController, env: Env, _ctx:
       // cron (or a retried scheduled event) rejects on the duplicate id
       // instead of running two overlapping nightly exports for the same org;
       // the workspace slug keeps two orgs' same-day runs from colliding.
-      await runLessonsBeforeExport(env);
       const day = new Date(controller.scheduledTime).toISOString().slice(0, 10);
       const wsSlug = env.WORKSPACE_SLUG ?? "default";
       try {
@@ -541,7 +545,6 @@ async function runScheduledTick(controller: ScheduledController, env: Env, _ctx:
       return;
     }
     if (controller.cron === CONTEXT_CRON) {
-      await runLessonsBeforeExport(env);
       await requestDailyContextExport(env);
       return;
     }
@@ -660,7 +663,8 @@ export default {
     // With WORKSPACES unset this is exactly one iteration against DB, same
     // as before workspaces existed.
     await primeWorkspaces(env);
-    for (const ws of listWorkspaces(env)) {
+    const workspaces = listWorkspaces(env);
+    for (const ws of workspaces) {
       try {
         await runScheduledTick(controller, workspaceEnv(env, ws), ctx);
       } catch (e) {
@@ -668,6 +672,16 @@ export default {
           slug: ws.slug,
           error: e instanceof Error ? e.message : String(e),
         });
+      }
+    }
+    // Lessons (#817) only after every workspace's export has been requested.
+    if (controller.cron === CONTEXT_CRON || controller.cron === EXPORT_CRON) {
+      for (const ws of workspaces) {
+        try {
+          await runNightlyLessonsTick(workspaceEnv(env, ws));
+        } catch (e) {
+          console.error("nightly lessons failed for workspace", { slug: ws.slug, error: e instanceof Error ? e.message : String(e) });
+        }
       }
     }
   },
