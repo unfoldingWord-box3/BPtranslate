@@ -1134,13 +1134,21 @@ test("922 item 4: a failed drafts read refuses the move with its own message", a
     edits++;
     return route.abort();
   });
+  // Once switched on, every IndexedDB read by key fails, as an unreadable
+  // drafts store would.
+  await page.addInitScript(() => {
+    const w = window as unknown as { __failIdbGet?: boolean };
+    const get = IDBObjectStore.prototype.get;
+    IDBObjectStore.prototype.get = function (this: IDBObjectStore, ...args: Parameters<IDBObjectStore["get"]>) {
+      if (w.__failIdbGet) throw new DOMException("922 item 4: store unreadable", "UnknownError");
+      return get.apply(this, args);
+    };
+  });
   await page.goto(`${BASE}/#/preferences/lessons`);
   const move = page.getByRole("button", { name: "Move to Common issues" });
   await expect(move).toBeEnabled({ timeout: 20_000 });
-  await page.evaluate(async () => {
-    const url = "/src/sync/drafts.ts";
-    const m = await import(/* @vite-ignore */ url);
-    m.drafts.get = () => Promise.reject(new Error("922 item 4: store unreadable"));
+  await page.evaluate(() => {
+    (window as unknown as { __failIdbGet?: boolean }).__failIdbGet = true;
   });
   await move.click();
   await expect(page.getByText(/Could not check Common issues for unsaved changes/)).toBeVisible();
