@@ -10,7 +10,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { openDraftsChangedChannel } from "./draftsChangedChannel.ts";
+import { latestOnly, openDraftsChangedChannel } from "./draftsChangedChannel.ts";
 
 const CHANNEL = "be-drafts-changed-test";
 
@@ -124,4 +124,53 @@ test("cross-tab drafts: no BroadcastChannel, or one that throws, is a silent no-
     console.warn = warn;
     failsToPost.close();
   }
+});
+
+// Review (Codex): two messages close together start two re-reads of the store.
+// If the first read resolves after the second, delivering it would put back
+// the older count. Only the newest read started is delivered.
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((res, rej) => ((resolve = res), (reject = rej)));
+  return { promise, resolve, reject };
+}
+
+test("cross-tab drafts: overlapping re-reads deliver only the newest, even when the older one resolves last", async () => {
+  const reads = [];
+  const delivered = [];
+  const reread = latestOnly(
+    () => {
+      const d = deferred();
+      reads.push(d);
+      return d.promise;
+    },
+    (v) => delivered.push(v),
+  );
+  const first = reread();
+  const second = reread();
+  reads[1].resolve("new");
+  await second;
+  reads[0].resolve("old");
+  await first;
+  assert.deepEqual(delivered, ["new"]);
+  // A later read on its own is delivered as usual.
+  const third = reread();
+  reads[2].resolve("later");
+  await third;
+  assert.deepEqual(delivered, ["new", "later"]);
+});
+
+// Review (Claude F5): the receive path starts the re-read with `void`, so a
+// failed IndexedDB read must not become an unhandled rejection.
+test("cross-tab drafts: a failed re-read is logged and dropped, not thrown", async () => {
+  const errors = [];
+  const delivered = [];
+  const reread = latestOnly(
+    () => Promise.reject(new Error("idb closed")),
+    (v) => delivered.push(v),
+    (e) => errors.push(e.message),
+  );
+  await reread();
+  assert.deepEqual(errors, ["idb closed"]);
+  assert.deepEqual(delivered, []);
 });
