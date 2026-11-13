@@ -333,6 +333,55 @@ test("#752: approving a question follows the tq edit lock, so any running job on
   assert.equal(qrow("q1v1").translation_state, "ai_draft");
 });
 
+// #752 review: the admin approve sweep over questions sets them to validated
+// with no version bump, the same lost approval as a single Approve. It is
+// refused as a whole (dry run included) when any running job holds a chapter
+// with live questions in its range: the tq edit lock, as for the single route.
+test("#752: a tq approve sweep over a chapter an AI run holds is refused with 409 chapter_locked", async () => {
+  const { sweep, job, qrow } = fresh();
+  job("translate", 1, 1, "running", { resourceType: "tq" });
+
+  const r = await sweep({ resource: "tq", state: "approved", chapter: 1 });
+  assert.equal(r.status, 409);
+  const body = await r.json();
+  assert.equal(body.error, "chapter_locked");
+  assert.equal(body.pipelineType, "translate");
+  assert.equal(qrow("q1v1").translation_state, "ai_draft", "nothing was swept");
+
+  assert.equal((await sweep({ resource: "tq", state: "approved", allChapters: true })).status, 409, "a whole-book sweep too");
+  assert.equal((await sweep({ resource: "tq", state: "approved", chapter: 1 }, "?dryRun=1")).status, 409, "the dry run says so up front");
+  assert.equal(qrow("q2v1").translation_state, "ai_draft", "the refused whole-book sweep wrote nothing");
+
+  const ok = await sweep({ resource: "tq", state: "approved", chapter: 2 });
+  assert.equal(ok.status, 200, "a chapter outside the run can be swept");
+  assert.equal(qrow("q2v1").translation_state, "validated");
+
+  assert.equal((await sweep({ resource: "tq", state: "needs_review", chapter: 1 })).status, 200, "a needs_review sweep is let through");
+});
+
+test("#752: a tq approve sweep with no job, or a finished or queued one, succeeds; any running job on the chapter refuses it", async () => {
+  const a = fresh();
+  assert.equal((await a.sweep({ resource: "tq", state: "approved", allChapters: true })).status, 200);
+  assert.equal(a.qrow("q1v1").translation_state, "validated");
+
+  const b = fresh();
+  b.job("translate", 1, 1, "done", { resourceType: "tq" });
+  b.job("translate", 1, 1, "queued", { resourceType: "tq" });
+  assert.equal((await b.sweep({ resource: "tq", state: "approved", chapter: 1 })).status, 200);
+
+  const c = fresh();
+  c.job("notes", 1, 1);
+  assert.equal((await c.sweep({ resource: "tq", state: "approved", chapter: 1 })).status, 409, "the tq edit lock: any running job");
+
+  const d = fresh();
+  d.job("translate", 5, 5, "running", { resourceType: "tq" });
+  assert.equal(
+    (await d.sweep({ resource: "tq", state: "approved", allChapters: true })).status,
+    200,
+    "a run on a chapter holding no questions does not block the sweep",
+  );
+});
+
 test("#752: an unknown question is still a 404, not a lock refusal", async () => {
   const { job, validateQ } = fresh();
   job("translate", 1, 1, "running", { resourceType: "tq" });
