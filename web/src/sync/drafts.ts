@@ -30,7 +30,7 @@ import {
 } from "./refusedRowDraft";
 import { legacyDbNames, workspaceDbName } from "./workspace";
 import { adoptFromLegacyDbs, type LegacySource } from "./legacyAdoption";
-import { DRAFTS_CHANGED_CHANNEL_BASE, latestOnly, openDraftsChangedChannel } from "./draftsChangedChannel.ts";
+import { DRAFTS_CHANGED_CHANNEL_BASE, openDraftsChangedChannel, orderedReads } from "./draftsChangedChannel.ts";
 
 // Base name; the actual per-workspace DB name is derived via workspaceDbName()
 // so drafts written in one Door43 org never surface in another (issue #228).
@@ -177,10 +177,12 @@ async function listAll(): Promise<DraftRecord[]> {
   return all;
 }
 
+// Every read of the store for subscribers goes through here, so each one gets
+// results in the order the reads started (orderedReads, #896 review).
+const readFor = orderedReads<DraftRecord[]>();
 async function tell(to: Set<Subscriber>) {
   if (to.size === 0) return;
-  const all = await listAll();
-  for (const s of to) s(all);
+  await readFor(listAll, to);
 }
 
 // The store is shared by every tab of the workspace, so a change made here is
@@ -190,13 +192,9 @@ async function tell(to: Set<Subscriber>) {
 // box the first time it sees that draft, so another tab's typing would land
 // there as a stale snapshot. A received message only re-reads, never
 // announces, so tabs cannot ping-pong. Named per workspace, as the database is.
-// latestOnly delivers only the newest of overlapping re-reads and logs a failed
-// one instead of leaving an unhandled rejection.
-const rereadForRemote = latestOnly(listAll, (all) => {
-  for (const s of remoteSubscribers) s(all);
-});
+// tell() never rejects (orderedReads logs a failed read), so `void` is safe.
 const changedChannel = openDraftsChangedChannel(workspaceDbName(DRAFTS_CHANGED_CHANNEL_BASE), () => {
-  if (remoteSubscribers.size > 0) void rereadForRemote();
+  void tell(remoteSubscribers);
 });
 
 // After a committed change in this tab. Every caller awaits the write's
@@ -321,7 +319,9 @@ export const drafts = {
   subscribe(fn: Subscriber, opts?: { remote?: boolean }): () => void {
     subscribers.add(fn);
     if (opts?.remote) remoteSubscribers.add(fn);
-    void listAll().then(fn);
+    // The first list, ordered with every other read: a newer one already
+    // delivered to `fn` wins over this one landing late.
+    void readFor(listAll, [fn]);
     return () => {
       subscribers.delete(fn);
       remoteSubscribers.delete(fn);

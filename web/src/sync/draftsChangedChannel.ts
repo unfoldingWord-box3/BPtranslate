@@ -25,19 +25,22 @@ export const DRAFTS_CHANGED_CHANNEL_BASE = "be-drafts-changed";
 const MESSAGE_TYPE = "drafts-changed";
 
 /**
- * Wrap the re-read a received message starts. Messages can arrive faster than
- * reads finish, and reads can resolve out of order, so only the newest read
- * started is delivered; an older one landing later would show a stale count.
- * A failed read is logged and dropped (the next message reads again), never
- * left as an unhandled rejection.
+ * Deliver store reads to subscribers in the order the reads started. drafts.ts
+ * starts a read for each local change (to every subscriber), for each message
+ * from another tab (to the subscribers that opted in) and on subscribe (to the
+ * new one). Reads can resolve out of order, and the count hears both local and
+ * remote reads, so an older read landing after a newer one would put back an
+ * older list. Every read takes the next number when it starts; a subscriber
+ * gets a result only if it is newer than the last one that subscriber got. A
+ * failed read is logged, delivers nothing and changes no subscriber's last
+ * number, so it never holds back an older read that succeeds.
  */
-export function latestOnly<T>(
-  read: () => Promise<T>,
-  deliver: (value: T) => void,
-  onError: (e: unknown) => void = (e) => console.warn("drafts re-read after another tab's change failed", e),
-): () => Promise<void> {
+export function orderedReads<T>(
+  onError: (e: unknown) => void = (e) => console.warn("drafts read failed", e),
+): (read: () => Promise<T>, targets: Iterable<(value: T) => void>) => Promise<void> {
   let seq = 0;
-  return async () => {
+  const lastDelivered = new WeakMap<(value: T) => void, number>();
+  return async (read, targets) => {
     const mine = ++seq;
     let value: T;
     try {
@@ -46,7 +49,11 @@ export function latestOnly<T>(
       onError(e);
       return;
     }
-    if (mine === seq) deliver(value);
+    for (const s of targets) {
+      if ((lastDelivered.get(s) ?? 0) >= mine) continue;
+      lastDelivered.set(s, mine);
+      s(value);
+    }
   };
 }
 
