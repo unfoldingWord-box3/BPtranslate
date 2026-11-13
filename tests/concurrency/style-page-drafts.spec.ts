@@ -522,11 +522,12 @@ test("H7: discarding the draft from the unsaved menu resets the open editor", as
 
 // ── Issue #913: edge cases left by #909 ─────────────────────────────────────
 
-// Item 1: tab A restores the draft tab B is still showing. A one-step undo or
-// a save in A used to delete that record, so B's "1 unsaved" and its unload
-// warning went away while B still showed the text. B now keeps its record.
+// Item 1: tab A restores the draft tab B is still showing. A one-step undo in
+// A, or a save of different text there, used to delete that record, so B's
+// "1 unsaved" and its unload warning went away while B still showed the text.
+// B now keeps its record. (A save of B's exact text makes B clean: review A2.)
 for (const how of ["undo", "save"] as const) {
-  test(`913 item 1: a ${how} in another tab that restored this tab's draft leaves the draft stored`, async ({
+  test(`913 item 1: ${how === "undo" ? "an undo" : "a save of different text"} in another tab that restored this tab's draft leaves the draft stored`, async ({
     browser,
   }) => {
     test.setTimeout(90_000);
@@ -548,7 +549,12 @@ for (const how of ["undo", "save"] as const) {
     const pageA = await context.newPage();
     await openStyle(pageA, typedB);
     if (how === "undo") await commonBox(pageA).fill(original);
-    else expect(await clickSave(pageA, "commonIssues")).toBe(200);
+    else {
+      await commonBox(pageA).click();
+      await pageA.keyboard.press("End");
+      await pageA.keyboard.type(" A-MORE");
+      expect(await clickSave(pageA, "commonIssues")).toBe(200);
+    }
     await pageA.waitForTimeout(1000);
 
     // B still shows its typing, so its draft is still stored and counted.
@@ -670,4 +676,68 @@ test("913 item 6: a discard before the editor finished loading is not restored",
   await page.waitForTimeout(500);
   await expect(page.getByText(/\d+ unsaved/)).toHaveCount(0);
   expect(await prefsDrafts(page)).toEqual({});
+});
+
+// Two tabs showing one prefs draft. "Discard this edit" in one of them throws
+// the text away in both: each box goes back to the server's text, and the
+// other tab does not write the draft back (review A1).
+test("913 A1: a discard in one tab resets the other tab showing the same draft", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const stamp = Date.now();
+  const original = `913-a1 common ${stamp}`;
+  await putPrefs(setup!.context.request, setup!.csrf, { common_issues_md: original });
+  const { context } = await adminContext(browser, "a");
+  const pageB = await context.newPage();
+  await openStyle(pageB, original);
+  await commonBox(pageB).click();
+  await pageB.keyboard.press("End");
+  await pageB.keyboard.type(" B-TYPED");
+  await expect.poll(() => prefsDrafts(pageB)).toHaveProperty("prefs:common_issues_md");
+  const pageA = await context.newPage();
+  await openStyle(pageA, `${original} B-TYPED`);
+
+  await pageA.getByText("1 unsaved").first().click();
+  await pageA.getByRole("presentation").getByText("1 unsaved").click();
+  await pageA.getByRole("button", { name: "Discard this edit" }).click();
+  await expect(commonBox(pageA)).toHaveValue(original);
+  await pageA.waitForTimeout(1000);
+
+  await pageB.bringToFront();
+  await expect(commonBox(pageB)).toHaveValue(original);
+  expect(await prefsDrafts(pageB)).toEqual({});
+  await expect(pageB.getByText(/\d+ unsaved/)).toHaveCount(0);
+  await expect(pageA.getByText(/\d+ unsaved/)).toHaveCount(0);
+});
+
+// Tab A restores tab B's typing and saves it as it is. B's text is now the
+// saved text, so B is clean too: neither tab shows "1 unsaved" (review A2).
+test("913 A2: a save of this tab's exact text in another tab leaves both tabs clean", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const stamp = Date.now();
+  const original = `913-a2 common ${stamp}`;
+  const typedB = `${original} B-TYPED`;
+  await putPrefs(setup!.context.request, setup!.csrf, { common_issues_md: original });
+  const { context } = await adminContext(browser, "a");
+  const pageB = await context.newPage();
+  await openStyle(pageB, original);
+  await commonBox(pageB).click();
+  await pageB.keyboard.press("End");
+  await pageB.keyboard.type(" B-TYPED");
+  await expect.poll(() => prefsDrafts(pageB)).toHaveProperty("prefs:common_issues_md");
+  const pageA = await context.newPage();
+  await openStyle(pageA, typedB);
+  expect(await clickSave(pageA, "commonIssues")).toBe(200);
+  expect((await getPrefs(setup!.context.request)).common_issues_md).toBe(typedB);
+  await pageA.waitForTimeout(1000);
+
+  await pageB.bringToFront();
+  await expect(commonBox(pageB)).toHaveValue(typedB);
+  expect(await prefsDrafts(pageB)).toEqual({});
+  await expect(pageB.getByText(/\d+ unsaved/)).toHaveCount(0);
+  await expect(pageA.getByText(/\d+ unsaved/)).toHaveCount(0);
+  // B's next save of that box goes through: it holds the new version.
+  await commonBox(pageB).click();
+  await pageB.keyboard.press("End");
+  await pageB.keyboard.type(" B-AGAIN");
+  expect(await clickSave(pageB, "commonIssues")).toBe(200);
 });
