@@ -1311,7 +1311,8 @@ test("#912 item 1: no paid call the night after a resume when nothing it left is
 });
 
 // Item 2 itself (a resume that stops again can pass an approval in the newest
-// chapters) is left open: one watermark cannot hold "the resumed chapters are
+// chapters) was left open here and fixed by #915 with per-chapter marks (see
+// the #915 cases below): one watermark cannot hold "the resumed chapters are
 // done through S" and "the newest chapters are unmined from F" at once.
 // Holding a stopped resume below F made it resume from the same note every
 // night; this case keeps that from coming back.
@@ -1420,6 +1421,18 @@ test("#915: a finished resume's own later approval is not new again: a one-note 
   assert.equal(f.runs().at(-1).approvals_through, a2);
   assert.equal((await f.runWith(NIGHT3 + 86400, { cells: 1 })).reason, "no_new_approvals");
   assert.equal(f.calls.length, 3, "a2 is never sent to the model a second time");
+});
+
+test("#915: a database with 0087 but not 0088 reads as not_migrated, on the night and on the page", async () => {
+  const sqlite = new DatabaseSync(":memory:");
+  const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations");
+  for (const file of readdirSync(dir).filter((x) => x.endsWith(".sql") && x < "0088").sort()) {
+    sqlite.exec(readFileSync(join(dir, file), "utf8"));
+  }
+  const env = { DB: makeDb(sqlite), WORKSPACE_SLUG: "x" };
+  await setLessonsEnabled(env.DB, true, null);
+  assert.deepEqual(await runNightlyLessons(env, { now: NIGHT1 }), { ran: false, reason: "not_migrated" });
+  assert.equal((await readLessonsState(env)).notMigrated, true);
 });
 
 test("#915: no paid call when the only approval above the watermark is one the resume already mined", async () => {
