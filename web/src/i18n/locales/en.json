@@ -3115,7 +3115,7 @@
       "notNeededBooks": "Books: {{books}}",
       "notNeededDismiss": "Dismiss",
       "notNeededDismissed": "Dismissed. This kind will not be listed again.",
-      "notNeededGone": "This kind is no longer listed (another admin may have dismissed it). Reload the page.",
+      "notNeededGone": "This kind is no longer listed.",
       "notNeededNotMigrated": "The server's database is not up to date yet, so kinds cannot be dismissed."
     }
   },

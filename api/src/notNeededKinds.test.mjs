@@ -21,7 +21,7 @@ import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 
 import { suggestionInbox } from "./suggestionInbox.ts";
-import { NOT_NEEDED_WINDOW_DAYS } from "./notNeededKinds.ts";
+import { NOT_NEEDED_WINDOW_DAYS, MARKED_ROWS_SQL } from "./notNeededKinds.ts";
 
 const DAY = 86_400;
 const NOW = Math.floor(Date.now() / 1000);
@@ -258,4 +258,12 @@ test("without migration 0089 the list still shows and Dismiss answers 503", asyn
   assert.equal(r.body.notMigrated, true);
   assert.equal(r.body.kinds.length, 1);
   assert.equal((await h.call("POST", "/not-needed-kinds/dismiss", { kind: YOU_ID })).status, 503);
+});
+
+test("the query reads edit_log by time (edit_log_recent), not every tN edit ever (edit_log_row_by_book)", () => {
+  const h = fixture();
+  const plan = h.sqlite.prepare(`EXPLAIN QUERY PLAN ${MARKED_ROWS_SQL}`).all(NOW - 30 * DAY).map((r) => r.detail);
+  assert.ok(plan.some((d) => /SEARCH e USING INDEX edit_log_recent \(created_at>\?\)/.test(d)), plan.join("\n"));
+  // Only the marks scan (alias e); the per-row EXISTS lookup (alias f) may use edit_log_row_by_book.
+  assert.ok(!plan.some((d) => /^(SEARCH|SCAN) e\b.*edit_log_row_by_book/.test(d)), plan.join("\n"));
 });

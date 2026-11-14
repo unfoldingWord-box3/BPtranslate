@@ -58,7 +58,8 @@ export const MARKED_ROWS_SQL = `
     SELECT e.id, e.book, e.row_key, e.action,
            ROW_NUMBER() OVER (PARTITION BY e.book, e.row_key ORDER BY e.id DESC) AS rn
       FROM edit_log e
-     WHERE e.kind = 'tn' AND e.action IN ('trash', 'untrash') AND e.created_at >= ?1
+     -- "+e.kind": keeps SQLite off edit_log_row_by_book (every tN edit ever) so it reads edit_log_recent by created_at.
+     WHERE +e.kind = 'tn' AND e.action IN ('trash', 'untrash') AND e.created_at >= ?1
   )
   SELECT t.book, t.chapter, t.support_reference
     FROM marks m

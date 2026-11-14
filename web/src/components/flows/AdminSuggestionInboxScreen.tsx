@@ -116,7 +116,7 @@ function NotNeededKinds() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<ReadonlySet<string>>(() => new Set());
   const [msg, setMsg] = useState<Record<string, string>>({});
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ severity: "success" | "info"; text: string } | null>(null);
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -138,16 +138,18 @@ function NotNeededKinds() {
     try {
       await api.dismissNotNeededKind(k.kind);
       setData((d) => (d ? { ...d, kinds: d.kinds.filter((x) => x.kind !== k.kind) } : d));
-      setNotice(i18n.t("adminPages.suggestions.notNeededDismissed"));
+      setNotice({ severity: "success", text: i18n.t("adminPages.suggestions.notNeededDismissed") });
     } catch (err) {
-      const gone = err instanceof ApiError && err.status === 404;
+      if (err instanceof ApiError && err.status === 404) {
+        // No longer listed (below the threshold now, or dismissed by another
+        // admin): drop the card, as a reload would.
+        setData((d) => (d ? { ...d, kinds: d.kinds.filter((x) => x.kind !== k.kind) } : d));
+        setNotice({ severity: "info", text: i18n.t("adminPages.suggestions.notNeededGone") });
+        return;
+      }
       setMsg((m) => ({
         ...m,
-        [k.kind]: gone
-          ? i18n.t("adminPages.suggestions.notNeededGone")
-          : err instanceof Error
-            ? err.message
-            : i18n.t("adminPages.common.loadFailed"),
+        [k.kind]: err instanceof Error ? err.message : i18n.t("adminPages.common.loadFailed"),
       }));
     } finally {
       setBusy((b) => {
@@ -180,8 +182,8 @@ function NotNeededKinds() {
           </Typography>
         )}
         {notice && (
-          <Alert severity="success" onClose={() => setNotice(null)}>
-            {notice}
+          <Alert severity={notice.severity} onClose={() => setNotice(null)}>
+            {notice.text}
           </Alert>
         )}
         {data?.notMigrated && <Alert severity="warning">{t("adminPages.suggestions.notNeededNotMigrated")}</Alert>}
