@@ -1094,6 +1094,27 @@ export interface SuggestionInboxResponse {
   notMigrated: boolean;
 }
 
+// Response of GET /api/suggestion-inbox/not-needed-kinds (api/src/notNeededKinds.ts,
+// issue #158 part A): tN note kinds editors keep marking Not needed.
+export interface NotNeededKind {
+  /** The bare tA id, e.g. "figs-yousingular". */
+  kind: string;
+  notes: number;
+  /** Distinct (book, chapter) pairs. */
+  chapters: number;
+  /** Book codes, in canon order. */
+  books: string[];
+}
+
+export interface NotNeededKindsResponse {
+  windowDays: number;
+  minNotes: number;
+  minChapters: number;
+  kinds: NotNeededKind[];
+  /** The server has not had migration 0089 yet: Dismiss is unavailable. */
+  notMigrated: boolean;
+}
+
 // Responses of POST /api/books/:book/review-state (api/src/reviewState.ts).
 export interface ReviewSweepDryRunResponse {
   ok: true;
@@ -2249,6 +2270,18 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key }),
+      timeoutMs: 60_000,
+    }),
+
+  // Note kinds marked Not needed (#158 part A), for all books. Dismiss takes
+  // only a kind listed now (else 404) and hides it for good; nothing is switched off.
+  getNotNeededKinds: (signal?: AbortSignal) =>
+    request<NotNeededKindsResponse>(`/api/suggestion-inbox/not-needed-kinds`, { signal, timeoutMs: 60_000 }),
+  dismissNotNeededKind: (kind: string) =>
+    request<{ ok: true }>(`/api/suggestion-inbox/not-needed-kinds/dismiss`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind }),
       timeoutMs: 60_000,
     }),
 

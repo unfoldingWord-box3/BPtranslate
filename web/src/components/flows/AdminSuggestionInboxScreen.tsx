@@ -13,6 +13,9 @@
 //     Approve copies a ready line to the clipboard, shows it, and links to the
 //     editor;
 //   - Reject: never suggested again.
+// Below the cards, for all books (#158 part A): the note kinds editors keep
+// marking Not needed (GET /api/suggestion-inbox/not-needed-kinds), each with
+// Dismiss. It only informs; nothing is switched off.
 // The cards are computed when the page loads (no nightly job); the rules are
 // in api/src/suggestionInbox.ts. This page only lays them out.
 import { useCallback, useEffect, useState } from "react";
@@ -41,6 +44,8 @@ import {
   api,
   ApiError,
   type BookListEntry,
+  type NotNeededKind,
+  type NotNeededKindsResponse,
   type Suggestion,
   type SuggestionHome,
   type SuggestionInboxResponse,
@@ -102,6 +107,129 @@ function copyText(s: Suggestion): string {
 // The changed text. Not monospace: monospace fonts lack Arabic shaping, and
 // the live test showed "(مُكيَّف)" with its parentheses drawn apart.
 const changeTextSx = { fontSize: "1.05rem", fontWeight: 600 } as const;
+
+// Note kinds marked Not needed (#158 part A): for all books, so it loads on its
+// own, apart from the book picker and its cards.
+function NotNeededKinds() {
+  const { t } = useTranslation();
+  const [data, setData] = useState<NotNeededKindsResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<ReadonlySet<string>>(() => new Set());
+  const [msg, setMsg] = useState<Record<string, string>>({});
+  const [notice, setNotice] = useState<{ severity: "success" | "info"; text: string } | null>(null);
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    api
+      .getNotNeededKinds(ctrl.signal)
+      .then((res) => {
+        if (!ctrl.signal.aborted) setData(res);
+      })
+      .catch((err) => {
+        if (ctrl.signal.aborted) return;
+        if (err instanceof ApiError && err.status === 403) setError(i18n.t("adminPages.suggestions.errForbidden"));
+        else setError(err instanceof Error ? err.message : i18n.t("adminPages.common.loadFailed"));
+      });
+    return () => ctrl.abort();
+  }, []);
+
+  const dismiss = async (k: NotNeededKind) => {
+    setBusy((b) => new Set(b).add(k.kind));
+    try {
+      await api.dismissNotNeededKind(k.kind);
+      setData((d) => (d ? { ...d, kinds: d.kinds.filter((x) => x.kind !== k.kind) } : d));
+      setNotice({ severity: "success", text: i18n.t("adminPages.suggestions.notNeededDismissed") });
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) {
+        // No longer listed (below the threshold now, or dismissed by another
+        // admin): drop the card, as a reload would.
+        setData((d) => (d ? { ...d, kinds: d.kinds.filter((x) => x.kind !== k.kind) } : d));
+        setNotice({ severity: "info", text: i18n.t("adminPages.suggestions.notNeededGone") });
+        return;
+      }
+      setMsg((m) => ({
+        ...m,
+        [k.kind]: err instanceof Error ? err.message : i18n.t("adminPages.common.loadFailed"),
+      }));
+    } finally {
+      setBusy((b) => {
+        const next = new Set(b);
+        next.delete(k.kind);
+        return next;
+      });
+    }
+  };
+
+  return (
+    <Box sx={panelSx()} data-testid="not-needed-kinds">
+      <Typography component="h2" sx={{ fontSize: "1rem", fontWeight: 700, mb: 1 }}>
+        {t("adminPages.suggestions.notNeededTitle")}
+      </Typography>
+      {data && (
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+          {t("adminPages.suggestions.notNeededIntro", {
+            notes: data.minNotes,
+            chapters: data.minChapters,
+            days: data.windowDays,
+          })}
+        </Typography>
+      )}
+      <Stack spacing={1.5}>
+        {error && <Alert severity="error">{error}</Alert>}
+        {!data && !error && (
+          <Typography variant="body2" color="text.secondary">
+            {t("adminPages.suggestions.notNeededLoading")}
+          </Typography>
+        )}
+        {notice && (
+          <Alert severity={notice.severity} onClose={() => setNotice(null)}>
+            {notice.text}
+          </Alert>
+        )}
+        {data?.notMigrated && <Alert severity="warning">{t("adminPages.suggestions.notNeededNotMigrated")}</Alert>}
+        {data && data.kinds.length === 0 && (
+          <Typography variant="body2" color="text.secondary">
+            {t("adminPages.suggestions.notNeededNone")}
+          </Typography>
+        )}
+        {data?.kinds.map((k) => (
+          <Box
+            key={k.kind}
+            data-testid="not-needed-kind-card"
+            sx={{ border: "1px solid", borderColor: "divider", borderRadius: "10px", p: 1.5 }}
+          >
+            <Stack spacing={1}>
+              {/* The kind id is Latin: its own isolated box, so it never reorders the Arabic sentence. */}
+              <Box component="bdi" dir="ltr" sx={{ ...changeTextSx, alignSelf: "flex-start", bgcolor: "action.hover", px: 0.75, borderRadius: 1 }}>
+                {k.kind}
+              </Box>
+              <Typography variant="body2">
+                {t("adminPages.suggestions.notNeededCount", { count: k.notes, chapters: k.chapters, days: data.windowDays })}
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                {t("adminPages.suggestions.notNeededBooks", {
+                  books: k.books.map((b) => bookName(b)).join(t("adminPages.suggestions.listSep")),
+                })}
+              </Typography>
+              {msg[k.kind] && <Alert severity="error">{msg[k.kind]}</Alert>}
+              <Box>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  color="inherit"
+                  disabled={busy.has(k.kind) || data.notMigrated}
+                  onClick={() => void dismiss(k)}
+                >
+                  {t("adminPages.suggestions.notNeededDismiss")}
+                </Button>
+              </Box>
+            </Stack>
+          </Box>
+        ))}
+      </Stack>
+    </Box>
+  );
+}
 
 export default function AdminSuggestionInboxScreen({ role, me }: FlowScreenContext) {
   const { t } = useTranslation();
@@ -502,6 +630,8 @@ export default function AdminSuggestionInboxScreen({ role, me }: FlowScreenConte
             })}
           </Typography>
         )}
+
+        <NotNeededKinds />
 
         <Box sx={panelSx()}>
           <Typography component="h2" sx={{ fontSize: "1rem", fontWeight: 700, mb: 1 }}>
