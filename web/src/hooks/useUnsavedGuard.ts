@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { drafts, hasUnsavedDrafts } from "../sync/drafts";
+import { countsAsUnsaved, drafts, hasUnsavedDrafts, type DraftRecord } from "../sync/drafts";
 
 // Warn before a full-page unload (reload — including the "App update available"
 // chip's programmatic reload — tab close, or external navigation) when unsaved
@@ -24,27 +24,33 @@ import { drafts, hasUnsavedDrafts } from "../sync/drafts";
 // this session), while the synchronous hasUnsavedDrafts() catches a draft the
 // current session just wrote but whose subscription round-trip hasn't landed —
 // the exact commit-window a quick reload would otherwise slip through.
+//
+// Style typing this user cannot save (another person's on a shared browser)
+// does not count (#920, countsAsUnsaved). The list is kept and judged when the
+// page unloads, since the signed-in user can change while it stays the same.
 export function useUnsavedGuard(panelDirty: boolean): void {
-  const [hasDrafts, setHasDrafts] = useState(false);
+  const [draftList, setDraftList] = useState<DraftRecord[]>([]);
   useEffect(() => {
     // drafts.subscribe returns its own unsubscribe fn; hand it back as the
     // effect cleanup so the subscription is torn down on unmount (no leak).
-    const unsubscribe = drafts.subscribe((all) => setHasDrafts(all.length > 0));
+    const unsubscribe = drafts.subscribe(setDraftList);
     return unsubscribe;
   }, []);
 
-  // Read through a ref so the listener can stay installed once (stable identity)
+  // Read through refs so the listener can stay installed once (stable identity)
   // and always see the latest dirtiness without re-adding on every change.
   // Synced after every commit (no deps), before paint, so the listener never
   // sees a value older than what is on screen.
   const activeRef = useRef(false);
+  const draftsRef = useRef<DraftRecord[]>([]);
   useLayoutEffect(() => {
-    activeRef.current = panelDirty || hasDrafts;
+    activeRef.current = panelDirty;
+    draftsRef.current = draftList;
   });
 
   useEffect(() => {
     const handler = (e: BeforeUnloadEvent) => {
-      if (!activeRef.current && !hasUnsavedDrafts()) return;
+      if (!activeRef.current && !draftsRef.current.some(countsAsUnsaved) && !hasUnsavedDrafts()) return;
       e.preventDefault();
       // Legacy Chrome requires returnValue to be set for the prompt to show.
       e.returnValue = "";

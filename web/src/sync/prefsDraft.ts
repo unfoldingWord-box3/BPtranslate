@@ -221,6 +221,24 @@ export function prefsDraftDroppable(payload: unknown, userId: number | null): bo
   return userId != null && !!p && p.owner === userId;
 }
 
+// Whether a stored draft counts as this viewer's unsaved work: the "N unsaved"
+// count, the reminder toast and the leave-page prompt (#920). A prefs draft
+// counts only for a viewer who can save the Style page, and only when they
+// typed it or no author is recorded (a draft from before #913 may be theirs).
+// Another person's typing on a shared browser, or any when the viewer cannot
+// save, is skipped there but stays stored for its owner. Every other kind of
+// draft counts.
+export function draftCountsAsUnsaved(
+  d: { meta: { kind: string }; payload: unknown },
+  userId: number | null,
+  canSavePrefs: boolean,
+): boolean {
+  if (d.meta.kind !== "prefs") return true;
+  if (!canSavePrefs) return false;
+  const p = d.payload as Partial<PrefsDraftPayload> | null;
+  return p?.owner == null || p.owner === userId;
+}
+
 function isFields(v: unknown): v is PrefsFields {
   if (!v || typeof v !== "object" || Array.isArray(v)) return false;
   return Object.values(v).every((x) => x === null || typeof x === "string");

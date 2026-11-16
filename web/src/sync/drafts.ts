@@ -9,7 +9,7 @@
 // This is not autosave; nothing leaves the browser until the user saves.
 
 import { openDB, type IDBPDatabase } from "idb";
-import { isReadOnly, type RowKind } from "./api";
+import { currentUserId, isAdmin, isReadOnly, type RowKind } from "./api";
 import { isLaneFrozen } from "./laneFreeze";
 import { onOutboxDrop, onOutboxResult, outbox, type OutboxOp } from "./outbox";
 import {
@@ -28,7 +28,7 @@ import {
   rowDraftOnNoDiff,
   withCarriedRefusal,
 } from "./refusedRowDraft";
-import type { PrefsDraftSection } from "./prefsDraft";
+import { draftCountsAsUnsaved, type PrefsDraftSection } from "./prefsDraft";
 import { legacyDbNames, workspaceDbName } from "./workspace";
 import { adoptFromLegacyDbs, type LegacySource } from "./legacyAdoption";
 import { DRAFTS_CHANGED_CHANNEL_BASE, openDraftsChangedChannel, orderedReads } from "./draftsChangedChannel.ts";
@@ -176,6 +176,15 @@ let generationSeq = 0;
 function nextGeneration(): string {
   generationSeq += 1;
   return `${Date.now()}:${generationSeq}:${Math.random().toString(36).slice(2)}`;
+}
+
+// Whether a stored draft counts toward the "N unsaved" count, the reminder
+// toast and the leave-page prompt for the signed-in user (#920). Only an admin
+// can save the Style page, so only an admin's own Style typing counts. Call it
+// at render or unload time, not in a subscription: the signed-in user can
+// change while the list stays the same.
+export function countsAsUnsaved(d: DraftRecord): boolean {
+  return draftCountsAsUnsaved(d, currentUserId(), isAdmin());
 }
 
 export function hasUnsavedDrafts(): boolean {

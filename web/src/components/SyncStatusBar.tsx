@@ -17,7 +17,7 @@ import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import EditNoteIcon from "@mui/icons-material/EditNote";
 import { onOutboxResult, outbox, isOpPending, type OutboxOp, type OpTarget } from "../sync/outbox";
-import { drafts, type DraftRecord, type DraftMeta } from "../sync/drafts";
+import { countsAsUnsaved, drafts, type DraftRecord, type DraftMeta } from "../sync/drafts";
 import { draftFlowHash, formatDraftMeta, PREFS_CLASSIC_SECTION } from "../lib/draftLocation";
 
 // If we believe we're online but haven't seen a successful save in this
@@ -149,8 +149,11 @@ export function useSyncSummary(): SyncSummary {
   // so this count also follows changes other tabs make (`remote`, #896).
   const [draftList, setDraftList] = useState<DraftRecord[]>([]);
   useEffect(() => drafts.subscribe(setDraftList, { remote: true }), []);
-  const activeDrafts = draftList.filter((d) => !d.quarantined);
-  const quarantinedDrafts = draftList.filter((d) => !!d.quarantined);
+  // Style typing this user cannot save (another person's on a shared browser)
+  // is left out of the count, the jump menu and every discard here (#920).
+  const ownDrafts = draftList.filter(countsAsUnsaved);
+  const activeDrafts = ownDrafts.filter((d) => !d.quarantined);
+  const quarantinedDrafts = ownDrafts.filter((d) => !!d.quarantined);
   const draftCount = activeDrafts.length;
 
   // Track navigator.onLine + last successful drain so we can distinguish
