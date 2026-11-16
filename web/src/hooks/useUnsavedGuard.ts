@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import { countsAsUnsaved, drafts, hasUnsavedDrafts, type DraftRecord } from "../sync/drafts";
 
 // Warn before a full-page unload (reload — including the "App update available"
@@ -29,23 +29,25 @@ import { countsAsUnsaved, drafts, hasUnsavedDrafts, type DraftRecord } from "../
 // does not count (#920, countsAsUnsaved). The list is kept and judged when the
 // page unloads, since the signed-in user can change while it stays the same.
 export function useUnsavedGuard(panelDirty: boolean): void {
-  const [draftList, setDraftList] = useState<DraftRecord[]>([]);
+  // A ref, not state: nothing renders from the list, so a draft write must
+  // not re-render the screen that mounts this guard.
+  const draftsRef = useRef<DraftRecord[]>([]);
   useEffect(() => {
     // drafts.subscribe returns its own unsubscribe fn; hand it back as the
     // effect cleanup so the subscription is torn down on unmount (no leak).
-    const unsubscribe = drafts.subscribe(setDraftList);
+    const unsubscribe = drafts.subscribe((all) => {
+      draftsRef.current = all;
+    });
     return unsubscribe;
   }, []);
 
-  // Read through refs so the listener can stay installed once (stable identity)
+  // Read through a ref so the listener can stay installed once (stable identity)
   // and always see the latest dirtiness without re-adding on every change.
   // Synced after every commit (no deps), before paint, so the listener never
   // sees a value older than what is on screen.
   const activeRef = useRef(false);
-  const draftsRef = useRef<DraftRecord[]>([]);
   useLayoutEffect(() => {
     activeRef.current = panelDirty;
-    draftsRef.current = draftList;
   });
 
   useEffect(() => {
