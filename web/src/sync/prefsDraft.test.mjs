@@ -3,6 +3,7 @@ import {
   afterPrefsConflict,
   afterPrefsSave,
   afterPrefsSavedElsewhere,
+  draftCountsAsUnsaved,
   newestPrefs,
   prefsAfterConflict,
   prefsDiscardMatches,
@@ -243,6 +244,33 @@ assert.ok(!prefsDraftDroppable({ text: typed, base: start, owner: 7 }, 8));
 assert.ok(!prefsDraftDroppable({ text: typed, base: start }, 7));
 assert.ok(!prefsDraftDroppable({ text: typed, base: start, owner: 7 }, null));
 assert.ok(!prefsDraftDroppable(null, 7));
+
+// ── draftCountsAsUnsaved (#920) ────────────────────────────────────────────
+// The "N unsaved" count, the reminder toast and the leave-page prompt skip a
+// Style draft this viewer cannot save: someone else's, or anyone's when the
+// viewer lacks Style-save rights. The draft itself stays stored.
+const prefsRec = (owner) => ({
+  key: prefsDraftKey("instructions_md"),
+  meta: { kind: "prefs", section: "instructions_md" },
+  payload: { text: typed, base: start, ...(owner != null ? { owner } : {}) },
+});
+const verseDraft = { key: "verse:ZEC:1:1:ult", meta: { kind: "verse" }, payload: {} };
+// Owner X who can save: counted.
+assert.ok(draftCountsAsUnsaved(prefsRec(7), 7, true));
+// Viewer Y, even one who can save: X's typing is not counted.
+assert.ok(!draftCountsAsUnsaved(prefsRec(7), 8, true));
+// A viewer who cannot save: not counted, whoever typed it.
+assert.ok(!draftCountsAsUnsaved(prefsRec(7), 7, false));
+assert.ok(!draftCountsAsUnsaved(prefsRec(7), 8, false));
+assert.ok(!draftCountsAsUnsaved(prefsRec(null), 8, false));
+// No author recorded (written before #913): counted for anyone who can save,
+// since it may be theirs.
+assert.ok(draftCountsAsUnsaved(prefsRec(null), 8, true));
+// Signed out: a recorded owner is never "this viewer".
+assert.ok(!draftCountsAsUnsaved(prefsRec(7), null, true));
+// Other kinds of draft always count.
+assert.ok(draftCountsAsUnsaved(verseDraft, 8, false));
+assert.ok(draftCountsAsUnsaved(verseDraft, null, false));
 
 // ── prefsConflictRow (gate review H3) ──────────────────────────────────────
 const row = { version: 4, error: undefined };
