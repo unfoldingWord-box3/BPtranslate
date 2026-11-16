@@ -61,6 +61,7 @@ import { reimportBookFromDcs, recordResourceSync, resourceSourceRef, type Resour
 import { lintTnRows, lintUsfmVerses } from "./lint";
 import type { TnRow, VerseRow } from "./types";
 import { ensureLaneState, requireLaneState, origSourceGeneration, activeLaneConfig } from "./scriptureLane";
+import { hideSwitchedOffKinds } from "./noteKindSwitch.ts";
 import {
   acquireExportLease,
   releaseExportLease,
@@ -1219,6 +1220,10 @@ async function importBookFromDcs(
       const sha = await fileCommitSha(env, src.owner, src.repo, file.path, src.ref);
       if (sha) await recordResourceSync(env, book, resource, sha, "import", src);
     }
+
+    // The wipe above dropped every note this book had, hidden ones included.
+    // Hide and mark the fresh notes of any switched-off kind (#924).
+    await hideSwitchedOffKinds(env.DB, { book });
 
     return counts;
   } finally {

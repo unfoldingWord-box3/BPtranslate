@@ -41,6 +41,7 @@ import { blockViewerWrites } from "./viewerGuard";
 import { requestDailyContextExport, sweepContextExportQueue } from "./contextExportQueue";
 import { nightlyLessonsTick } from "./lessons";
 import { listWorkspaces, resolveWorkspaceFresh, workspaceEnv, parseWorkspaceCookie, requireWorkspaceMatch, primeWorkspaces } from "./workspaces";
+import { hideSwitchedOffKinds } from "./noteKindSwitch";
 
 export interface Env {
   DB: D1Database;
@@ -415,6 +416,10 @@ async function runScheduledTick(controller: ScheduledController, env: Env, _ctx:
       } catch (e) {
         console.error("nightly trash finalize failed", e instanceof Error ? e.message : String(e));
       }
+      // Hide notes of a switched-off kind (#924) that reached D1 since the last
+      // pass by any path (for example a note an editor wrote by hand), so the
+      // export below leaves them out. Never throws.
+      await hideSwitchedOffKinds(env.DB);
       // Auto-clean resolved pipeline jobs so failed/done runs don't pile up in
       // the AI-pipelines chip forever (the UI has a manual "mark as seen", this
       // is the safety net for runs nobody dismissed). Failed/cancelled get a

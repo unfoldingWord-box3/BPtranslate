@@ -49,6 +49,7 @@ import type { WorkflowStep } from "cloudflare:workers";
 // and can stay extensionless.
 import { dcsUrls, dcsResourceFile, dcsRawUrl, fileCommitSha, fetchText, fetchTextWithStatus, heldOutNoteResources, releaseLockedLaneHoldOuts, unlockedLaneHoldOutsToProbe, shouldReleaseProbedHoldOut, NT_BOOKS, type FetchTextResult, type LockedLanes } from "./dcsSources.ts";
 import { getProjectConfig, type ProjectConfig } from "./projectConfig.ts";
+import { hideSwitchedOffKinds } from "./noteKindSwitch.ts";
 import { heldOutChapters, isChapterHeldOut, NOTHING_HELD_OUT, type HeldOut } from "./bookSource.ts";
 import {
   collectSourceWords,
@@ -589,6 +590,10 @@ async function runReimport(
     }
   }
 
+  // Notes of a switched-off kind (#924) that this run inserted or reclaimed are
+  // hidden and marked, so a reimport never brings the kind back.
+  if (want.has("tn")) await hideSwitchedOffKinds(env.DB, { book });
+
   for (const r of resources) addCounts(totals, perResource[r]);
 
   return { book, perResource, totals };
@@ -746,7 +751,7 @@ export async function applyTsvRows(
   // overwrite, issues #414/#732).
   const pristineCols =
     kind === "tn"
-      ? "version, updated_by, deleted_at, trashed_at, preserve, hint, admin_bulk_state, translation_state"
+      ? "version, updated_by, deleted_at, trashed_at, preserve, hint, admin_bulk_state, translation_state, switched_off_kind"
       : kind === "tq"
         ? "version, updated_by, deleted_at, admin_bulk_state, translation_state"
         : "version, updated_by, deleted_at";
@@ -1277,6 +1282,9 @@ function isPristineTombstone(kind: TsvKind, row: Record<string, unknown>): boole
     if (row.trashed_at != null) return false;
     if (Number(row.preserve ?? 0) !== 0) return false;
     if (Number(row.hint ?? 0) !== 0) return false;
+    // Hidden by a note-kind switch-off (#924): its latest 'delete' log entry may
+    // still be an old reimport prune, but an admin hid it on purpose since.
+    if (row.switched_off_kind != null) return false;
   }
   return true;
 }
@@ -1403,7 +1411,7 @@ function buildTsvUpdateStmt(
   const pristine = reclaim
     ? deletedGuard
     : kind === "tn"
-      ? `${ownerGuard}${deletedGuard} AND trashed_at IS NULL AND preserve = 0 AND hint = 0${approvedGuard}`
+      ? `${ownerGuard}${deletedGuard} AND trashed_at IS NULL AND preserve = 0 AND hint = 0${approvedGuard}${resurrect ? " AND switched_off_kind IS NULL" : ""}`
       : `${ownerGuard}${deletedGuard}${approvedGuard}`;
   const clearDeleted = resurrect || reclaim ? "deleted_at = NULL, " : "";
   const clearOwner = reseedAi || reclaim ? "updated_by = NULL, " : "";
@@ -1417,7 +1425,13 @@ function buildTsvUpdateStmt(
   // mode leaves these three columns alone (there's nothing to clear: the
   // pristine guard above already requires them clear before a normal
   // UPDATE/resurrect/reseed can proceed at all).
-  const clearProtections = reclaim && kind === "tn" ? "trashed_at = NULL, preserve = 0, hint = 0, " : "";
+  // The note-kind switch-off mark (#924) is the old row's too: master's row is
+  // not one the switch-off hid. If it is of a switched-off kind, the reimport's
+  // hideSwitchedOffKinds pass hides and marks it afresh.
+  const clearProtections =
+    reclaim && kind === "tn"
+      ? "trashed_at = NULL, preserve = 0, hint = 0, switched_off_kind = NULL, switch_restored_at = NULL, "
+      : "";
   // Reclaim ONLY: restored_from_version (the "switch to vN" display chip, all
   // three kinds) and review_kind/review_reason (the flag-for-review markers —
   // tn-only columns in this fork, migration 0031) describe the OLD tombstoned
@@ -2574,7 +2588,7 @@ export async function changedTsvChapters(
 // bumps version → 0 rows → skipped. updated_by → NULL reclaims the tombstone to
 // reimport-owned. The id comparison is against the WHOLE file's id set so a row
 // the update path just moved to another chapter isn't mistaken for removed.
-async function softDeleteRemovedTsvRows(
+export async function softDeleteRemovedTsvRows(
   env: Env,
   book: string,
   kind: TsvKind,
@@ -2611,6 +2625,10 @@ async function softDeleteRemovedTsvRows(
   // the review state), so select literal NULLs for it there and keep one row shape.
   const bulkStateCol =
     kind === "twl" ? "NULL AS admin_bulk_state, NULL AS translation_state" : "admin_bulk_state, translation_state";
+  // A note Switch back on restored (#924, switch_restored_at set) is absent
+  // from master only because the export has not put it back yet: never prune
+  // it. Once master carries it again, clear the mark so it is an ordinary note.
+  const restoredCol = kind === "tn" ? "switch_restored_at" : "NULL AS switch_restored_at";
   const now = Math.floor(Date.now() / 1000);
   let deleted = 0;
   let skippedLocked = 0;
@@ -2621,7 +2639,7 @@ async function softDeleteRemovedTsvRows(
       continue;
     }
     const rs = await env.DB.prepare(
-      `SELECT id, version, updated_by, ${bulkStateCol},
+      `SELECT id, version, updated_by, ${bulkStateCol}, ${restoredCol},
               (SELECT source FROM edit_log
                  WHERE kind = ?3 AND row_key = ${kind}_rows.id
                    AND (book = ?1 OR book IS NULL)
@@ -2636,11 +2654,17 @@ async function softDeleteRemovedTsvRows(
         updated_by: number | null;
         admin_bulk_state: string | null;
         translation_state: string | null;
+        switch_restored_at: number | null;
         latest_source: string | null;
       }>();
+    for (const r of rs.results ?? []) {
+      if (r.switch_restored_at == null || !incomingIds.has(r.id)) continue;
+      await env.DB.prepare(`UPDATE tn_rows SET switch_restored_at = NULL WHERE id = ?1 AND book = ?2`).bind(r.id, book).run();
+    }
     const targets = (rs.results ?? []).filter(
       (r) =>
         !incomingIds.has(r.id) &&
+        r.switch_restored_at == null &&
         isReimportableRow({
           updated_by: r.updated_by,
           latestSource: r.latest_source ?? null,
@@ -3227,6 +3251,10 @@ export async function runChunkedReimport(
     }
     return { cleaned };
   });
+
+  // Notes of a switched-off kind (#924) this run inserted or reclaimed: hide and
+  // mark them before the export that follows renders the book.
+  await step.do(`reimport-switched-off-${book}`, async () => ({ hidden: await hideSwitchedOffKinds(env.DB, { book }) }));
 
   const totals = zeroCounts();
   for (const r of ALL_RESOURCES) addCounts(totals, perResource[r]);

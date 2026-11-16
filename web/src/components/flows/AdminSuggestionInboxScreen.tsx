@@ -47,6 +47,7 @@ import {
   type NotNeededKind,
   type NotNeededKindsResponse,
   type Suggestion,
+  type SwitchedOffKind,
   type SuggestionHome,
   type SuggestionInboxResponse,
 } from "../../sync/api";
@@ -109,7 +110,9 @@ function copyText(s: Suggestion): string {
 const changeTextSx = { fontSize: "1.05rem", fontWeight: 600 } as const;
 
 // Note kinds marked Not needed (#158 part A): for all books, so it loads on its
-// own, apart from the book picker and its cards.
+// own, apart from the book picker and its cards. A listed kind can be switched
+// off for the project, and a switched-off kind back on (#924); the kinds
+// switched off are listed under the cards.
 function NotNeededKinds() {
   const { t } = useTranslation();
   const [data, setData] = useState<NotNeededKindsResponse | null>(null);
@@ -117,6 +120,7 @@ function NotNeededKinds() {
   const [busy, setBusy] = useState<ReadonlySet<string>>(() => new Set());
   const [msg, setMsg] = useState<Record<string, string>>({});
   const [notice, setNotice] = useState<{ severity: "success" | "info"; text: string } | null>(null);
+  const [confirmOff, setConfirmOff] = useState<NotNeededKind | null>(null);
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -132,6 +136,49 @@ function NotNeededKinds() {
       });
     return () => ctrl.abort();
   }, []);
+
+  const withBusy = async (kind: string, run: () => Promise<void>) => {
+    setBusy((b) => new Set(b).add(kind));
+    try {
+      await run();
+    } catch (err) {
+      setMsg((m) => ({ ...m, [kind]: err instanceof Error ? err.message : i18n.t("adminPages.common.loadFailed") }));
+    } finally {
+      setBusy((b) => {
+        const next = new Set(b);
+        next.delete(kind);
+        return next;
+      });
+    }
+  };
+
+  const switchOff = (k: NotNeededKind) =>
+    withBusy(k.kind, async () => {
+      const res = await api.switchOffNoteKind(k.kind);
+      const off: SwitchedOffKind = { kind: k.kind, hidden: res.hidden, switchedOffAt: Math.floor(Date.now() / 1000) };
+      setData((d) =>
+        d
+          ? {
+              ...d,
+              kinds: d.kinds.filter((x) => x.kind !== k.kind),
+              switchedOff: [...d.switchedOff.filter((x) => x.kind !== k.kind), off].sort((a, b) => a.kind.localeCompare(b.kind)),
+            }
+          : d,
+      );
+      setNotice({ severity: "success", text: i18n.t("adminPages.suggestions.switchOffDone", { count: res.hidden }) });
+    });
+
+  const switchOn = (k: SwitchedOffKind) =>
+    withBusy(k.kind, async () => {
+      try {
+        const res = await api.switchOnNoteKind(k.kind);
+        setNotice({ severity: "success", text: i18n.t("adminPages.suggestions.switchOnDone", { count: res.restored }) });
+      } catch (err) {
+        // Switched back on by another admin already: drop it, as a reload would.
+        if (!(err instanceof ApiError && err.status === 404)) throw err;
+      }
+      setData((d) => (d ? { ...d, switchedOff: d.switchedOff.filter((x) => x.kind !== k.kind) } : d));
+    });
 
   const dismiss = async (k: NotNeededKind) => {
     setBusy((b) => new Set(b).add(k.kind));
@@ -212,7 +259,7 @@ function NotNeededKinds() {
                 })}
               </Typography>
               {msg[k.kind] && <Alert severity="error">{msg[k.kind]}</Alert>}
-              <Box>
+              <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
                 <Button
                   size="small"
                   variant="outlined"
@@ -222,11 +269,81 @@ function NotNeededKinds() {
                 >
                   {t("adminPages.suggestions.notNeededDismiss")}
                 </Button>
-              </Box>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  color="warning"
+                  disabled={busy.has(k.kind) || data.switchNotMigrated}
+                  onClick={() => setConfirmOff(k)}
+                >
+                  {t("adminPages.suggestions.switchOff")}
+                </Button>
+              </Stack>
             </Stack>
           </Box>
         ))}
+        {data?.switchNotMigrated && <Alert severity="warning">{t("adminPages.suggestions.switchNotMigrated")}</Alert>}
+        {data && data.switchedOff.length > 0 && (
+          <Box data-testid="switched-off-kinds">
+            <Typography component="h3" sx={{ fontSize: "0.95rem", fontWeight: 700, mb: 0.5 }}>
+              {t("adminPages.suggestions.switchedOffTitle")}
+            </Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+              {t("adminPages.suggestions.switchedOffIntro")}
+            </Typography>
+            <Stack spacing={1}>
+              {data.switchedOff.map((k) => (
+                <Stack
+                  key={k.kind}
+                  data-testid="switched-off-kind"
+                  direction="row"
+                  spacing={1.5}
+                  useFlexGap
+                  sx={{ alignItems: "center", flexWrap: "wrap", border: "1px solid", borderColor: "divider", borderRadius: "10px", p: 1 }}
+                >
+                  <Box component="bdi" dir="ltr" sx={{ ...changeTextSx, bgcolor: "action.hover", px: 0.75, borderRadius: 1 }}>
+                    {k.kind}
+                  </Box>
+                  <Typography variant="body2" sx={{ flex: 1 }}>
+                    {t("adminPages.suggestions.switchedOffCount", { count: k.hidden })}
+                  </Typography>
+                  <Button size="small" variant="outlined" disabled={busy.has(k.kind)} onClick={() => void switchOn(k)}>
+                    {t("adminPages.suggestions.switchOn")}
+                  </Button>
+                  {msg[k.kind] && <Alert severity="error" sx={{ width: "100%" }}>{msg[k.kind]}</Alert>}
+                </Stack>
+              ))}
+            </Stack>
+          </Box>
+        )}
       </Stack>
+      <Dialog open={confirmOff != null} onClose={() => setConfirmOff(null)} maxWidth="sm" fullWidth>
+        <DialogTitle>{t("adminPages.suggestions.switchOffConfirmTitle")}</DialogTitle>
+        <DialogContent>
+          <Stack spacing={1.5}>
+            {confirmOff && (
+              <Box component="bdi" dir="ltr" sx={{ ...changeTextSx, alignSelf: "flex-start", bgcolor: "action.hover", px: 0.75, borderRadius: 1 }}>
+                {confirmOff.kind}
+              </Box>
+            )}
+            <Typography variant="body2">{t("adminPages.suggestions.switchOffConfirmBody")}</Typography>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirmOff(null)}>{t("adminPages.suggestions.switchOffCancel")}</Button>
+          <Button
+            color="warning"
+            variant="contained"
+            onClick={() => {
+              const k = confirmOff;
+              setConfirmOff(null);
+              if (k) void switchOff(k);
+            }}
+          >
+            {t("adminPages.suggestions.switchOffConfirm")}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }

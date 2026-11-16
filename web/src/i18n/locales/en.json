@@ -3107,7 +3107,7 @@
       "howApprove": "Approve on a house-style card asks you to confirm, then adds the rule, switched on, to Style: House style. It changes every AI draft that arrives from then on, in every book, for notes and for questions. On the other cards, Approve copies a line for you to paste into that editor, because those editors cannot be filled in from here. The card goes away once the term, template or Common issues text covers it; if it still shows after your edit, reject it.",
       "howReject": "Reject hides the card for good, in every book.",
       "notNeededTitle": "Note kinds marked Not needed",
-      "notNeededIntro": "Kinds of translation notes that editors marked Not needed at least {{notes}} times, across at least {{chapters}} chapters, in the last {{days}} days, counting all books. This list only informs you: it switches nothing off. Dismiss hides a kind from this list for good.",
+      "notNeededIntro": "Kinds of translation notes that editors marked Not needed at least {{notes}} times, across at least {{chapters}} chapters, in the last {{days}} days, counting all books. Dismiss hides a kind from this list for good. Switch off hides every note of that kind, in every book, until you switch it back on.",
       "notNeededLoading": "Counting notes marked Not needed…",
       "notNeededNone": "No note kind was marked Not needed that often.",
       "notNeededCount_one": "{{count}} note of this kind was marked Not needed in the last {{days}} days, in {{chapters}} chapters.",
@@ -3116,7 +3116,22 @@
       "notNeededDismiss": "Dismiss",
       "notNeededDismissed": "Dismissed. This kind will not be listed again.",
       "notNeededGone": "This kind is no longer listed.",
-      "notNeededNotMigrated": "The server's database is not up to date yet, so kinds cannot be dismissed."
+      "notNeededNotMigrated": "The server's database is not up to date yet, so kinds cannot be dismissed.",
+      "switchOff": "Switch off",
+      "switchOffConfirmTitle": "Switch off this note kind?",
+      "switchOffConfirmBody": "Every note of this kind, in every book, will be hidden from editors and left out of the nightly publish. The notes are not deleted: you can switch the kind back on at any time to bring them back as they were. New notes of this kind that arrive later, for example from an import, are hidden too.",
+      "switchOffConfirm": "Switch off",
+      "switchOffCancel": "Cancel",
+      "switchOffDone_one": "Switched off. {{count}} note is hidden.",
+      "switchOffDone_other": "Switched off. {{count}} notes are hidden.",
+      "switchOnDone_one": "Switched back on. {{count}} note is back.",
+      "switchOnDone_other": "Switched back on. {{count}} notes are back.",
+      "switchedOffTitle": "Switched-off note kinds",
+      "switchedOffIntro": "Notes of these kinds are hidden from editors and from the publish. Switch back on brings back the notes the switch-off hid.",
+      "switchedOffCount_one": "{{count}} note hidden",
+      "switchedOffCount_other": "{{count}} notes hidden",
+      "switchOn": "Switch back on",
+      "switchNotMigrated": "The server's database is not up to date yet, so note kinds cannot be switched off."
     }
   },
   "widgets": {
