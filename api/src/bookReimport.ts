@@ -2523,6 +2523,16 @@ function storedTsvRowToParsed(kind: TsvKind, row: Record<string, unknown>): Pars
 // moves; errs toward "changed" whenever an edited (non-pristine) row is present
 // (excluded from the stored map → chapter re-runs, edited row skipped
 // harmlessly). A perf filter — it can never skip a real update.
+async function clearSwitchRestoredOnMaster(env: Env, book: string, masterIds: Set<string>): Promise<void> {
+  const rs = await env.DB.prepare(`SELECT id FROM tn_rows WHERE book = ?1 AND switch_restored_at IS NOT NULL`)
+    .bind(book)
+    .all<{ id: string }>();
+  for (const r of rs.results ?? []) {
+    if (!masterIds.has(r.id)) continue;
+    await env.DB.prepare(`UPDATE tn_rows SET switch_restored_at = NULL WHERE id = ?1 AND book = ?2`).bind(r.id, book).run();
+  }
+}
+
 export async function changedTsvChapters(
   env: Env,
   book: string,
@@ -2542,6 +2552,13 @@ export async function changedTsvChapters(
     if (!m) incoming.set(p.chapter, (m = new Map()));
     m.set(p.id, tsvRowSignature(kind, p));
   }
+
+  // Notes Switch back on restored (#924) wait, exempt from the prune, until
+  // master carries them again. This is the one place the nightly sync sees the
+  // whole master file, so clear the wait here: once the export has put a note
+  // back, the chapter diff below finds nothing changed and the prune (which
+  // also clears it) never runs for that chapter.
+  if (kind === "tn") await clearSwitchRestoredOnMaster(env, book, new Set([...incoming.values()].flatMap((m) => [...m.keys()])));
 
   const stored = new Map<number, Map<string, string>>();
   const res = await env.DB.prepare(

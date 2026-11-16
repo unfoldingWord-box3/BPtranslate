@@ -19,7 +19,7 @@ import { Hono } from "hono";
 
 import { suggestionInbox } from "./suggestionInbox.ts";
 import { hideSwitchedOffKinds } from "./noteKindSwitch.ts";
-import { applyTsvRows, softDeleteRemovedTsvRows } from "./bookReimport.ts";
+import { applyTsvRows, changedTsvChapters, softDeleteRemovedTsvRows } from "./bookReimport.ts";
 import { buildTnTsv, exportTsvShrinkRefused } from "./export.ts";
 
 const NOW = Math.floor(Date.now() / 1000);
@@ -279,6 +279,21 @@ test("after Switch back on, the reimport's prune keeps restored notes until mast
   // From then on, master removing it is an ordinary removal.
   await softDeleteRemovedTsvRows(h.env, "ZEC", "tn", without, [4]);
   assert.ok(h.row(a).deleted_at, "pruned like any note once master has carried it");
+});
+
+test("the nightly sync's chapter diff clears the restore wait once master carries the note", async () => {
+  const h = fixture();
+  h.listYou();
+  const a = h.note({ chapter: 4, verse: 2 });
+  await h.call("POST", "/not-needed-kinds/switch-off", { kind: YOU_ID });
+  await h.call("POST", "/not-needed-kinds/switch-on", { kind: YOU_ID });
+  assert.ok(h.row(a).switch_restored_at);
+  // Master now equals D1 for chapter 4 (the export put the note back), so the
+  // diff reports no change there and the prune would not run.
+  const tsv = buildTnTsv(h.sqlite.prepare(`SELECT * FROM tn_rows WHERE book = 'ZEC' AND deleted_at IS NULL AND trashed_at IS NULL`).all());
+  const changed = await changedTsvChapters(h.env, "ZEC", "tn", tsv);
+  assert.ok(!changed.has(4), "chapter 4 unchanged");
+  assert.equal(h.row(a).switch_restored_at, null, "the wait is cleared anyway");
 });
 
 test("the nightly pass hides notes of a switched-off kind written since, in every book", async () => {
