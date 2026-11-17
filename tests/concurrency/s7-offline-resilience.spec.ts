@@ -8,6 +8,10 @@ import {
   noteTextarea,
   waitForServerNote,
 } from "./helpers";
+import { ZEC_CHAPTERS } from "./chapters";
+
+const CHAPTER = ZEC_CHAPTERS.shared.chapter;
+const OFFLINE_CHAPTER = ZEC_CHAPTERS.offline.chapter;
 
 // Honor BE_BASE_URL so the suite runs on a relocated port (mirrors s8).
 const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
@@ -26,14 +30,14 @@ test("edits queued while offline survive and flush on reconnect", async ({ brows
   test.setTimeout(60_000);
   const probe = await apiRequest.newContext({ baseURL: BASE });
   const probeAuth = await mintToken(probe, "probe");
-  const chapter = await fetchChapter(probe, probeAuth.token, "ZEC", 6);
+  const chapter = await fetchChapter(probe, probeAuth.token, "ZEC", CHAPTER);
   const target = chapter.tn.find((r) => r.verse === 1);
-  expect(target, "expected a TN row on ZEC 6:1 in the seed").toBeTruthy();
+  expect(target, `expected a TN row on ZEC ${CHAPTER}:1 in the seed`).toBeTruthy();
   await probe.dispose();
 
   const { context } = await newUserContext(browser, "alice");
   const page = await context.newPage();
-  await gotoVerse(page, "ZEC", 6, target!.verse);
+  await gotoVerse(page, "ZEC", CHAPTER, target!.verse);
 
   // Drop the network *after* the chapter has loaded so the resource column
   // is rendered and the note card mounts. The next save attempt then has to
@@ -120,7 +124,7 @@ test("edits queued while offline survive and flush on reconnect", async ({ brows
   // request context that bypasses the offline browser network.
   const sideCtx = await apiRequest.newContext({ baseURL: BASE });
   const sideAuth = await mintToken(sideCtx, "verifier");
-  const beforeOnline = await fetchChapter(sideCtx, sideAuth.token, "ZEC", 6);
+  const beforeOnline = await fetchChapter(sideCtx, sideAuth.token, "ZEC", CHAPTER);
   const beforeRow = beforeOnline.tn.find((r) => r.id === target!.id);
   expect(beforeRow?.note ?? "").not.toBe(offlineText);
 
@@ -146,9 +150,9 @@ test("edits queued while offline survive and flush on reconnect", async ({ brows
 test("server flakiness triggers retry; eventual success drains the outbox", async ({ browser }) => {
   const probe = await apiRequest.newContext({ baseURL: BASE });
   const probeAuth = await mintToken(probe, "probe");
-  const chapter = await fetchChapter(probe, probeAuth.token, "ZEC", 7);
+  const chapter = await fetchChapter(probe, probeAuth.token, "ZEC", OFFLINE_CHAPTER);
   const target = chapter.tn.find((r) => r.verse === 1);
-  expect(target, "expected a TN row on ZEC 7:1").toBeTruthy();
+  expect(target, `expected a TN row on ZEC ${OFFLINE_CHAPTER}:1`).toBeTruthy();
   await probe.dispose();
 
   const { context } = await newUserContext(browser, "bob");
@@ -171,7 +175,7 @@ test("server flakiness triggers retry; eventual success drains the outbox", asyn
     await route.continue();
   });
 
-  await gotoVerse(page, "ZEC", 7, target!.verse);
+  await gotoVerse(page, "ZEC", OFFLINE_CHAPTER, target!.verse);
   const flakyText = `FLAKY bob ${Date.now()}`;
   await noteTextarea(page, target!.id).fill(flakyText);
   await saveNote(page, target!.id);

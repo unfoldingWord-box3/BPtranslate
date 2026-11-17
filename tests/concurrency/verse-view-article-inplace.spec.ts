@@ -1,5 +1,8 @@
 import { expect, test, type Page } from "@playwright/test";
 import { newUserContext } from "./helpers";
+import { ZEC_CHAPTERS } from "./chapters";
+
+const CHAPTER = ZEC_CHAPTERS.readOnly.chapter;
 
 // Verse view: tW / tA articles open in place (issue #478).
 //
@@ -43,7 +46,7 @@ test.describe("verse view in-place articles (#478)", () => {
       const page = await context.newPage();
       await mockDoor43(page);
       await page.setViewportSize({ width, height: 900 });
-      await page.goto("/#/verse/ZEC/1/1");
+      await page.goto(`/#/verse/ZEC/${CHAPTER}/1`);
 
       // --- tW, from a word-link row ---
       const twRow = resourceRow(page, "kt");
@@ -54,7 +57,7 @@ test.describe("verse view in-place articles (#478)", () => {
       const panel = page.locator("[data-verse-article]");
       await expect(panel).toBeVisible();
       await expect(panel.getByText(TW_BODY)).toBeVisible();
-      expect(page.url()).toContain("#/verse/ZEC/1/1");
+      expect(page.url()).toContain(`#/verse/ZEC/${CHAPTER}/1`);
       // The article takes the resource list's place; nothing got a third band.
       await expect(page.locator("[data-resource-row]")).toHaveCount(0);
       // The verse screen stayed mounted, selection included.
@@ -87,7 +90,7 @@ test.describe("verse view in-place articles (#478)", () => {
       await page.getByText("Read the translationAcademy article").click();
       await expect(panel).toBeVisible();
       await expect(panel.getByText(TA_BODY)).toBeVisible();
-      expect(page.url()).toContain("#/verse/ZEC/1/1");
+      expect(page.url()).toContain(`#/verse/ZEC/${CHAPTER}/1`);
 
       await page.keyboard.press("Escape");
       await expect(panel).toHaveCount(0);
@@ -133,7 +136,7 @@ test.describe("verse view in-place articles (#478)", () => {
         return route.fulfill({ response: res, json });
       });
       await page.setViewportSize({ width: 1280, height: 900 });
-      await page.goto("/#/verse/ZEC/1/1");
+      await page.goto(`/#/verse/ZEC/${CHAPTER}/1`);
 
       const tnRow = resourceRow(page, "idiom");
       await expect(tnRow).toBeVisible({ timeout: 15_000 });

@@ -286,6 +286,7 @@ export async function resolveWorkflowWorkspaceFresh(
 export interface StepStmt {
   bind(...values: unknown[]): StepStmt;
   first<T = Record<string, unknown>>(): Promise<T | null>;
+  all<T = Record<string, unknown>>(): Promise<{ results?: T[] }>;
   run(): Promise<{ meta: { changes: number } }>;
 }
 export interface StepDb {
@@ -352,10 +353,38 @@ export type GuardAndSourceResult = {
   /**
    * Every row of the source book was selected, so the merge can create an
    * absent target file without leaving a partial book behind (merge-report's
-   * base guard).
+   * base guard). Counted before approved rows are left out: those are kept,
+   * not missing.
    */
   coversWholeBook: boolean;
+  /**
+   * #895: rows of a whole-chapter run left out of the AI request because they
+   * are approved in D1. Absent on a result persisted before #895 (read as 0).
+   */
+  approvedLeftOut?: number;
 };
+
+/**
+ * #895: ids of this book's approved rows in the job's chapter range. A
+ * whole-chapter run leaves them out of the AI request, since the apply keeps
+ * them anyway (#794, pipelineImport.ts keepApproved), and its report still lists
+ * them. Same scope as the apply's row read: the book introduction (chapter 0)
+ * rides with a tn job that starts at chapter 1. A row marked Not needed is
+ * included, because the apply never drafts it either.
+ */
+async function approvedRowIds(db: StepDb, resourceType: string, book: string, start: number, end: number): Promise<Set<string>> {
+  const table = resourceType === "tq" ? "tq_rows" : "tn_rows";
+  const intro = resourceType === "tq" ? "" : " OR (chapter = 0 AND ?2 = 1)";
+  const rs = await db
+    .prepare(
+      `SELECT id FROM ${table}
+        WHERE book = ?1 AND deleted_at IS NULL AND translation_state = 'validated'
+          AND (chapter BETWEEN ?2 AND ?3${intro})`,
+    )
+    .bind(book, start, end)
+    .all<{ id: string }>();
+  return new Set((rs.results ?? []).map((r) => r.id));
+}
 
 export async function guardAndSourceStep(deps: StepDeps, params: TranslateWorkflowParams): Promise<GuardAndSourceResult> {
   await assertJobLive(deps, params.jobId);
@@ -375,7 +404,21 @@ export async function guardAndSourceStep(deps: StepDeps, params: TranslateWorkfl
   const allRows = normalizeSourceRows(resource.codec.parse(sourceText));
   let rows = sliceChapterRows(allRows, p.startChapter!, p.endChapter!);
   rows = selectRows(rows, { rowIds: p.rowIds, verseStart: p.verseStart, verseEnd: p.verseEnd });
-  if (!rows.length) {
+  const selectedCount = rows.length;
+  // #895: a whole-chapter run ("range"; no rowIds, no verse range, the same rule
+  // as the apply's translateSelection) does not send approved rows. A narrowed
+  // run still redrafts them. The apply guard stays as the safety net for an
+  // Approve that lands after this read.
+  let approvedLeftOut = 0;
+  if (p.mergeMode === "range" && rows.length) {
+    const approved = await approvedRowIds(deps.db, p.resourceType, book, p.startChapter!, p.endChapter!);
+    if (approved.size) {
+      const sent = rows.filter((r) => !approved.has(r.ID));
+      approvedLeftOut = rows.length - sent.length;
+      rows = sent;
+    }
+  }
+  if (!selectedCount) {
     const sel = p.rowIds ? `rowIds ${p.rowIds.join(",")}`
       : p.verseStart != null ? `${p.startChapter}:${p.verseStart}${p.verseEnd !== p.verseStart ? `-${p.verseEnd}` : ""}`
         : `${p.startChapter}-${p.endChapter}`;
@@ -387,8 +430,9 @@ export async function guardAndSourceStep(deps: StepDeps, params: TranslateWorkfl
     await putText(deps.blobs, batchKeys(deps.workspaceSlug, params.jobId, batchNn(i)).source, resource.codec.serialize(batches[i]));
   }
   await progress(deps, params.jobId, p,
-    `source: ${rows.length} row(s) from ${p.sourceRef}${p.mergeMode === "by-id" ? " (by-id subset)" : ""} — ${batches.length} batch(es)`);
-  return { batchCount: batches.length, rowCount: rows.length, coversWholeBook: rows.length === allRows.length };
+    `source: ${rows.length} row(s) from ${p.sourceRef}${p.mergeMode === "by-id" ? " (by-id subset)" : ""}`
+      + `${approvedLeftOut ? `, ${approvedLeftOut} approved row(s) left out` : ""} — ${batches.length} batch(es)`);
+  return { batchCount: batches.length, rowCount: rows.length, coversWholeBook: selectedCount === allRows.length, approvedLeftOut };
 }
 
 // ---------------------------------------------------------------------------
@@ -400,6 +444,13 @@ export type ContextResult = { contextSha: string | null; hasContent: boolean; pe
 
 export async function contextStep(deps: StepDeps, params: TranslateWorkflowParams, batchCount: number): Promise<ContextResult> {
   const p = paramsToTranslateParams(params);
+  // #895: every row of a whole-chapter run was approved and left out. There is
+  // nothing to build context for; merge-report still runs, so the job finishes
+  // done and the apply lists the approved rows as kept.
+  if (batchCount === 0) {
+    await progress(deps, params.jobId, p, "nothing to translate: every row in range is approved");
+    return { contextSha: null, hasContent: false, perBatch: [] };
+  }
   const resource = tsvResource(p.resourceType);
   const book = p.book!;
   const batches = await readBatches(deps, params.jobId, batchCount, resource);
@@ -897,10 +948,15 @@ export async function mergeReportStep(
   // source fetch, a stale selection, a by-hand row set — would silently delete
   // them from the published book. Rows, not bytes, are the unit: a translation
   // legitimately differs in byte length from its source script.
+  //
+  // #895: rows left out because they are approved are kept, not lost. The out/
+  // file is read only by the import, which never deletes a row, so they are left
+  // out of it too (carrying in their base copy would stage DCS's text as a draft
+  // proposal for them), and the guard counts them as present.
   if (existingBookText != null) {
     const baseRows = resource.codec.parse(existingBookText).length;
     const mergedRows = resource.codec.parse(bookText).length;
-    if (shrinkRefused(mergedRows, baseRows)) {
+    if (shrinkRefused(mergedRows + (source.approvedLeftOut ?? 0), baseRows)) {
       throw new TranslateStepError("merge_shrink_refused",
         `merging ${targetRows.length} translated row(s) into ${targetRepoRef} ${resource.file(book)} would leave `
         + `${mergedRows} rows where the fetched base has ${baseRows} — refusing (truncated base or wrong selection).`);

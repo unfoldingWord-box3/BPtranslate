@@ -26,14 +26,18 @@ import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 import { SignJWT } from "jose";
 
-import { dispatchNext, enqueueFollowUp, enqueueFollowUpFromChain, pollAllNonTerminal, pipelines } from "./pipelines.ts";
+import { dispatchNext, pollAllNonTerminal, pipelines } from "./pipelines.ts";
 import { attachAuth } from "./auth.ts";
 import { tnQuick } from "./tnQuick.ts";
 import { templates } from "./templates.ts";
 import { encryptApiKey } from "./aiKeyCrypto.ts";
 import { clearProjectConfigCache } from "./projectConfig.ts";
+import { clearSourceNotesCache } from "./sourceNotes.ts";
+import { isEnglishEcho } from "./pipelineImport.ts";
 import { outKey } from "./translate/storage.ts";
-import { memoryBlobStore } from "./translate/fixtures.mjs";
+import { fixture, memoryBlobStore } from "./translate/fixtures.mjs";
+import * as steps from "./translate/workflowSteps.ts";
+import { BEGIN_OUTPUT, END_OUTPUT } from "./translate/llm.ts";
 
 const WRAPPING_KEY = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64");
 const API_KEY = "sk-ant-api03-PLAINTEXT-MUST-NEVER-LEAVE-DISPATCH";
@@ -44,6 +48,8 @@ const API_KEY = "sk-ant-api03-PLAINTEXT-MUST-NEVER-LEAVE-DISPATCH";
 
 function makeDb(sqlite) {
   const mk = (sql, args) => ({
+    sql,
+    args,
     bind: (...a) => mk(sql, a),
     async all() {
       return { results: sqlite.prepare(sql).all(...args), success: true };
@@ -117,6 +123,10 @@ const realFetch = globalThis.fetch;
 async function withNoFetch(fn) {
   let calls = 0;
   globalThis.fetch = async (url) => {
+    // The apply's English-echo check (#794) reads the English notes from
+    // Door43. That is not the bot, so it is not counted; it still fails, and
+    // the check fails open.
+    if (String(url).startsWith("https://git.door43.org/")) throw new Error(`Door43 is offline in this test`);
     calls++;
     throw new Error(`the internal runner must never call the bot (attempted ${String(url)})`);
   };
@@ -442,8 +452,8 @@ test("dispatchNext (#575): a queued translate job whose stored key can't be decr
   }
 });
 
-test("dispatchNext (#551 switch-off): a queued legacy generate/notes/tqs job fails as ai_needs_org_key, even with an org key, and nothing is posted", async () => {
-  for (const type of ["generate", "notes", "tqs"]) {
+test("dispatchNext (#726): a queued job of a retired type (generate/notes/tqs, or anything not translate) fails as pipeline_type_retired, even with an org key, and nothing is posted", async () => {
+  for (const type of ["generate", "notes", "tqs", "made-up"]) {
     for (const withKey of [false, true]) {
       const sqlite = freshSqlite();
       sqlite
@@ -467,12 +477,13 @@ test("dispatchNext (#551 switch-off): a queued legacy generate/notes/tqs job fai
       assert.equal(env.created.length, 0, `${tag}: no Workflow instance`);
       const row = jobRow(sqlite, "job-legacy");
       assert.equal(row.state, "failed", tag);
-      assert.equal(row.error_kind, "ai_needs_org_key", tag);
+      assert.equal(row.error_kind, "pipeline_type_retired", tag);
+      assert.match(row.error_message, new RegExp(`'${type}'`), `${tag}: the reason names the type`);
     }
   }
 });
 
-test("dispatchNext (#551 switch-off): legacy jobs queued ahead of a translate job are failed and the translate job dispatches in the same call", async () => {
+test("dispatchNext (#726): retired-type jobs queued ahead of a translate job are failed and the translate job dispatches in the same call", async () => {
   const sqlite = freshSqlite();
   for (const [jobId, type, created] of [["legacy-a", "notes", 10], ["legacy-b", "generate", 20]]) {
     sqlite
@@ -498,7 +509,7 @@ test("dispatchNext (#551 switch-off): legacy jobs queued ahead of a translate jo
   for (const id of ["legacy-a", "legacy-b"]) {
     const row = jobRow(sqlite, id);
     assert.equal(row.state, "failed", id);
-    assert.equal(row.error_kind, "ai_needs_org_key", id);
+    assert.equal(row.error_kind, "pipeline_type_retired", id);
   }
   assert.equal(jobRow(sqlite).state, "running", "the translate job was not left waiting for the next cron tick");
 });
@@ -601,7 +612,7 @@ test("POST /start (#551): translate with an org key gets past the key check and 
   );
 });
 
-test("POST /start (#551 switch-off): generate/notes/tqs are refused with 409 ai_needs_org_key, even with an org key; nothing is enqueued", async () => {
+test("POST /start (#726): generate/notes/tqs are retired and refused with 400, even with an org key; nothing is enqueued", async () => {
   for (const pipelineType of ["generate", "notes", "tqs"]) {
     for (const withKey of [false, true]) {
       const sqlite = freshSqlite();
@@ -620,8 +631,8 @@ test("POST /start (#551 switch-off): generate/notes/tqs are refused with 409 ai_
         return { res, fetchCount: count() };
       });
 
-      assert.equal(res.status, 409, tag);
-      assert.deepEqual(await res.json(), { error: "ai_needs_org_key" }, tag);
+      assert.equal(res.status, 400, tag);
+      assert.equal((await res.json()).error, "validation_failed", tag);
       assert.equal(fetchCount, 0, `${tag}: no fetch`);
       const jobs = sqlite.prepare(`SELECT COUNT(*) AS n FROM pipeline_jobs`).all()[0].n;
       assert.equal(jobs, 0, `${tag}: no pipeline_jobs row was enqueued`);
@@ -629,23 +640,100 @@ test("POST /start (#551 switch-off): generate/notes/tqs are refused with 409 ai_
   }
 });
 
-test("POST /start (#551 switch-off): a translate job whose followUpChain holds a legacy step is refused; nothing is enqueued", async () => {
+test("POST /start (#726): stale followUpOptions / followUpChain keys are ignored; the translate job starts with no follow-up", async () => {
   const sqlite = freshSqlite();
   await seedByoKey(sqlite);
   const env = freshEnv(sqlite, { JWT_SIGNING_KEY: ROUTE_SIGNING, JWT_ISSUER: ROUTE_ISSUER });
   const tok = await editorToken("1", env.WORKSPACE_SLUG);
-  const { res, fetchCount } = await withNoFetch(async (count) => {
-    const res = await routeApp().request(
-      "/api/pipelines/start",
-      postReq(tok, { ...START_TRANSLATE, followUpChain: [{ pipelineType: "notes" }] }),
-      env,
+  await withFetch(
+    async () => new Response(JSON.stringify({ jobId: "bot-stale", provider: "claude" }), { status: 200 }),
+    async () => {
+      const res = await routeApp().request(
+        "/api/pipelines/start",
+        postReq(tok, {
+          ...START_TRANSLATE,
+          options: { model: "opus" },
+          followUpOptions: { model: "opus" },
+          followUpChain: [{ pipelineType: "notes" }],
+        }),
+        env,
+      );
+      assert.equal(res.status, 200, await res.clone().text());
+    },
+  );
+  const rows = sqlite.prepare(`SELECT pipeline_type, follow_up_options, follow_up_chain FROM pipeline_jobs`).all();
+  assert.equal(rows.length, 1);
+  assert.deepEqual({ ...rows[0] }, { pipeline_type: "translate", follow_up_options: null, follow_up_chain: null });
+});
+
+test("pollAllNonTerminal (#726): a running job of a retired type that finishes upstream is failed at once, its output not imported", async () => {
+  const sqlite = freshSqlite();
+  sqlite
+    .prepare(
+      `INSERT INTO pipeline_jobs
+         (job_id, user_id, pipeline_type, book, start_chapter, end_chapter, session_key,
+          state, upstream_job_id, runner, created_at, updated_at)
+       VALUES ('legacy-run', 1, 'notes', 'OBA', 1, 1, 'sess-legacy-run', 'running', 'bot-legacy', NULL, unixepoch(), unixepoch())`,
+    )
+    .run();
+  const env = freshEnv(sqlite);
+  const status = {
+    jobId: "bot-legacy",
+    state: "done",
+    current: { chapter: 1, skill: "notes", status: "done" },
+    output: [{ type: "tn", repo: "unfoldingWord/en_tn", path: "tn_OBA.tsv", rawUrl: "https://git.door43.org/x/tn_OBA.tsv" }],
+  };
+  const urls = [];
+  await withFetch(
+    async (url) => {
+      urls.push(String(url));
+      if (String(url).endsWith("/api/pipeline/bot-legacy")) return new Response(JSON.stringify(status), { status: 200 });
+      throw new Error(`unexpected fetch ${url}`);
+    },
+    async () => pollAllNonTerminal(env),
+  );
+  const row = jobRow(sqlite, "legacy-run");
+  assert.equal(row.state, "failed", "terminal on the first poll, not held for an import retry");
+  assert.equal(row.error_kind, "pipeline_type_retired");
+  assert.equal(row.output_json, null, "the output is not recorded as imported");
+  assert.deepEqual(urls.filter((u) => !u.endsWith("/api/pipeline/bot-legacy")), [], "the output was never fetched");
+  assert.equal(sqlite.prepare(`SELECT COUNT(*) AS n FROM pending_imports`).all()[0].n, 0, "nothing staged");
+});
+
+test("pollAllNonTerminal (#726): a retired-type job that ends upstream with no output, or failed/cancelled, is still failed as pipeline_type_retired", async () => {
+  const cases = [
+    ["done, empty output", { state: "done", output: [] }],
+    ["done, no output field", { state: "done" }],
+    ["failed upstream", { state: "failed", current: { chapter: 1, skill: "tqs", status: "failed", errorKind: "sdk_error", error: "boom" } }],
+    ["cancelled upstream", { state: "cancelled" }],
+  ];
+  for (const [label, upstream] of cases) {
+    const sqlite = freshSqlite();
+    sqlite
+      .prepare(
+        `INSERT INTO pipeline_jobs
+           (job_id, user_id, pipeline_type, book, start_chapter, end_chapter, session_key,
+            state, upstream_job_id, runner, created_at, updated_at)
+         VALUES ('legacy-run', 1, 'tqs', 'OBA', 1, 1, 'sess-legacy-run', 'running', 'bot-legacy', NULL, unixepoch(), unixepoch())`,
+      )
+      .run();
+    const env = freshEnv(sqlite);
+    const status = { jobId: "bot-legacy", current: { chapter: 1, skill: "tqs", status: "done" }, ...upstream };
+    const urls = [];
+    await withFetch(
+      async (url) => {
+        urls.push(String(url));
+        if (String(url).endsWith("/api/pipeline/bot-legacy")) return new Response(JSON.stringify(status), { status: 200 });
+        throw new Error(`unexpected fetch ${url}`);
+      },
+      async () => pollAllNonTerminal(env),
     );
-    return { res, fetchCount: count() };
-  });
-  assert.equal(res.status, 409, await res.clone().text());
-  assert.deepEqual(await res.json(), { error: "ai_needs_org_key" });
-  assert.equal(fetchCount, 0);
-  assert.equal(sqlite.prepare(`SELECT COUNT(*) AS n FROM pipeline_jobs`).all()[0].n, 0);
+    const row = jobRow(sqlite, "legacy-run");
+    assert.equal(row.state, "failed", label);
+    assert.equal(row.error_kind, "pipeline_type_retired", label);
+    assert.equal(row.output_json, null, `${label}: nothing recorded as imported`);
+    assert.deepEqual(urls.filter((u) => !u.endsWith("/api/pipeline/bot-legacy")), [], `${label}: no output fetched`);
+  }
 });
 
 function sideRouteApp() {
@@ -1193,12 +1281,13 @@ function seedScopeTqRows(sqlite) {
 
 const TQ_MANIFEST = [{ delivery: "editor", type: "tq", repo: "BSOJ/ar_tq", path: "tq_OBA.tsv", file: "tq_OBA.tsv" }];
 
-async function runScopedImport(sqlite, { manifest, file, bytes, options }) {
+async function runScopedImport(sqlite, { manifest, file, bytes, options, fetchImpl }) {
   seedRunningInternalJob(sqlite, wf("done", { status: "done" }, manifest), { options });
   const env = freshEnv(sqlite);
   env.blobs.map.set(outKey(env.WORKSPACE_SLUG, "job-1", file), bytes);
   env.blobs.map.set(outKey(env.WORKSPACE_SLUG, "job-1", "translate-report-1-1.json"), "{}");
-  await withNoFetch(async () => pollAllNonTerminal(env));
+  if (fetchImpl) await withFetch(fetchImpl, async () => pollAllNonTerminal(env));
+  else await withNoFetch(async () => pollAllNonTerminal(env));
   assert.equal(jobRow(sqlite).state, "done", "the import completed");
 }
 
@@ -1273,14 +1362,302 @@ test("import (internal, #559): a verse-range tq job leaves rows outside the rang
   );
 });
 
-test("import (internal, #559): a whole-chapter job (no rowIds, no verse range) still applies every row", async () => {
+// ---------------------------------------------------------------------------
+// Whole-chapter runs keep approved rows; English echoes are not applied (#794)
+// ---------------------------------------------------------------------------
+//
+// Option B (decided 2026-11-12): a whole-chapter AI run (no rowIds, no verse
+// range) skips approved notes and questions and lists them as kept. A narrowed
+// run (one-note redo, verse range) still redrafts them. A note draft that is
+// word-for-word the English source note is not applied, and the run reports it.
+
+test("import (internal, #794): a whole-chapter tn job keeps an approved note as it is and reports it as kept", async () => {
   const sqlite = freshSqlite();
   seedScopeTnRows(sqlite);
   await runScopedImport(sqlite, { manifest: MANIFEST, file: "tn_OBA.tsv", bytes: SCOPE_TN_TSV, options: null });
 
-  assert.equal(tnRow(sqlite, "ab12").version, 2);
-  assert.equal(tnRow(sqlite, "cd34").version, 8, "whole-chapter scope is unchanged by the fix");
-  assert.equal(tnRow(sqlite, "cd34").translation_state, "ai_draft");
+  assert.equal(tnRow(sqlite, "ab12").version, 2, "the unapproved row is drafted");
+  assert.equal(tnRow(sqlite, "ab12").translation_state, "ai_draft");
+  assert.deepEqual(
+    tnRow(sqlite, "cd34"),
+    { note: "ملاحظة عربية معتمدة", translation_state: "validated", version: 7 },
+    "the approved row keeps its note, state and version",
+  );
+  const report = JSON.parse(jobRow(sqlite).apply_skipped_json);
+  assert.equal(report.tnApproved, 1);
+  assert.deepEqual(report.tnApprovedIds, ["cd34"]);
+  assert.equal(report.tnTouched, undefined, "kept-because-approved is not mixed into the changed-by-people keys");
+  // Door43 is unreachable here (withNoFetch), so the English check fails open
+  // and says so.
+  assert.match(report.tnEnglishCheckNotRun, /Could not read the English notes/);
+  const alerts = sqlite
+    .prepare(`SELECT message, link_url FROM system_alerts WHERE source = 'translate_tn_kept_approved:job-1'`)
+    .all();
+  assert.equal(alerts.length, 1, "the starter gets a kept-because-approved alert");
+  assert.match(alerts[0].message, /OBA 1:2/);
+  assert.equal(alerts[0].link_url, "#/OBA/1");
+});
+
+test("import (internal, #794): a whole-chapter tq job keeps an approved question as it is and reports it as kept", async () => {
+  const sqlite = freshSqlite();
+  seedScopeTqRows(sqlite);
+  await runScopedImport(sqlite, { manifest: TQ_MANIFEST, file: "tq_OBA.tsv", bytes: SCOPE_TQ_TSV, options: { resourceType: "tq" } });
+
+  assert.equal(tqRow(sqlite, "qa12").version, 2, "the unapproved question is drafted");
+  assert.deepEqual(
+    tqRow(sqlite, "qb34"),
+    { question: "سؤال عربي معتمد", response: "جواب عربي معتمد", translation_state: "validated", version: 4 },
+    "the approved question keeps its text, state and version",
+  );
+  const report = JSON.parse(jobRow(sqlite).apply_skipped_json);
+  assert.equal(report.tqApproved, 1);
+  assert.deepEqual(report.tqApprovedIds, ["qb34"]);
+  assert.equal(report.tnEnglishCheckNotRun, undefined, "the English check is for notes only");
+  const alerts = sqlite.prepare(`SELECT message FROM system_alerts WHERE source = 'translate_tq_kept_approved:job-1'`).all();
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0].message, /OBA 1:2/);
+});
+
+// cd34's proposal here is Arabic, so the redraft below is a real translation.
+const REDO_TN_TSV = [
+  "Reference\tID\tTags\tSupportReference\tQuote\tOccurrence\tNote",
+  "1:1\tab12\t\t\tחֲז֖וֹן\t1\tرؤيا عوبديا",
+  "1:2\tcd34\t\t\tקָטֹ֛ן\t1\tمسودة عربية جديدة",
+].join("\n");
+
+for (const [label, options] of [
+  ["a one-note redo (rowIds)", { resourceType: "tn", rowIds: ["cd34"] }],
+  ["a verse-range job", { resourceType: "tn", verseStart: 2, verseEnd: 2 }],
+]) {
+  test(`import (internal, #794): ${label} still redrafts an approved note`, async () => {
+    const sqlite = freshSqlite();
+    seedScopeTnRows(sqlite);
+    await runScopedImport(sqlite, { manifest: MANIFEST, file: "tn_OBA.tsv", bytes: REDO_TN_TSV, options });
+    assert.deepEqual(tnRow(sqlite, "cd34"), { note: "مسودة عربية جديدة", translation_state: "ai_draft", version: 8 });
+    const report = JSON.parse(jobRow(sqlite).apply_skipped_json ?? "{}");
+    assert.equal(report.tnApproved, undefined, "nothing was kept for being approved");
+  });
+}
+
+// The English source notes on Door43, as readBookSourceNotes fetches them.
+// ab12's English has straight quotes and a double space; the AI "draft" below
+// is the same text, which staging curls and collapses, so the compare must
+// normalize the English the same way to catch it. cd34's English is links
+// only, so a draft identical to it is a legitimate translation and is applied.
+const EN_TN_TSV = [
+  "Reference\tID\tTags\tSupportReference\tQuote\tOccurrence\tNote",
+  '1:1\tab12\t\t\tחֲז֖וֹן\t1\tThe "vision"  of Obadiah',
+  "1:2\tcd34\t\t\tקָטֹ֛ן\t1\t[[rc://*/ta/man/translate/figs-metaphor]]",
+].join("\n");
+const ECHO_TN_TSV = [
+  "Reference\tID\tTags\tSupportReference\tQuote\tOccurrence\tNote",
+  '1:1\tab12\t\t\tחֲז֖וֹן\t1\tThe "vision" of Obadiah ',
+  "1:2\tcd34\t\t\tקָטֹ֛ן\t1\t[[rc://*/ta/man/translate/figs-metaphor]]",
+].join("\n");
+
+function seedEchoTnRows(sqlite) {
+  seedTargetTnRow(sqlite);
+  sqlite
+    .prepare(
+      `INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, quote, occurrence, note, translation_state, version, updated_at)
+       VALUES ('cd34', 'OBA', 1, 2, '1:2', 'קָטֹ֛ן', 1, 'مسودة قديمة', 'ai_draft', 3, 100)`,
+    )
+    .run();
+}
+
+// Serves the English tN from "Door43"; any other URL (the bot) throws.
+function door43Fetch(tsv) {
+  return async (url) => {
+    if (/\/raw\/branch\/master\/tn_OBA\.tsv$/.test(String(url))) return new Response(tsv, { status: 200 });
+    throw new Error(`unexpected fetch ${String(url)}`);
+  };
+}
+
+test("import (internal, #794): a note draft that is the English source note is not applied and is reported", async () => {
+  const sqlite = freshSqlite();
+  seedEchoTnRows(sqlite);
+  clearSourceNotesCache();
+  await runScopedImport(sqlite, {
+    manifest: MANIFEST,
+    file: "tn_OBA.tsv",
+    bytes: ECHO_TN_TSV,
+    options: { resourceType: "tn" },
+    fetchImpl: door43Fetch(EN_TN_TSV),
+  });
+
+  assert.deepEqual(
+    tnRow(sqlite, "ab12"),
+    { note: "The vision of Obadiah", translation_state: null, version: 1 },
+    "the English echo did not land",
+  );
+  assert.deepEqual(
+    tnRow(sqlite, "cd34"),
+    { note: "[[rc://*/ta/man/translate/figs-metaphor]]", translation_state: "ai_draft", version: 4 },
+    "a links-only note identical to the English is applied",
+  );
+  const report = JSON.parse(jobRow(sqlite).apply_skipped_json);
+  assert.equal(report.tnSameAsEnglish, 1);
+  assert.deepEqual(report.tnSameAsEnglishIds, ["ab12"]);
+  assert.equal(report.tnEnglishCheckNotRun, undefined, "the English was read, so the check ran");
+  const alerts = sqlite.prepare(`SELECT message FROM system_alerts WHERE source = 'translate_tn_same_as_english:job-1'`).all();
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0].message, /OBA 1:1/);
+  const pending = sqlite.prepare(`SELECT accepted_at FROM pending_imports WHERE payload_json LIKE '%"ab12"%'`).all();
+  assert.equal(pending[0].accepted_at, null, "the echoed proposal is left unresolved");
+});
+
+test("isEnglishEcho (#794): the compare rules", () => {
+  // Staging curls quotes and collapses double spaces; NFC and trimming as well.
+  assert.equal(isEnglishEcho("The “vision” of Obadiah", 'The "vision"  of Obadiah '), true);
+  assert.equal(isEnglishEcho("é", "é"), true, "NFC on both sides");
+  assert.equal(isEnglishEcho("رؤيا عوبديا", "The vision of Obadiah"), false);
+  assert.equal(isEnglishEcho("", ""), false, "an empty English never counts");
+  assert.equal(isEnglishEcho("x", undefined), false, "no English for this id");
+  assert.equal(isEnglishEcho(null, "x"), false);
+  // Links only: legitimately the same in every language.
+  assert.equal(isEnglishEcho("[[rc://*/tw/dict/bible/kt/god]]", "[[rc://*/tw/dict/bible/kt/god]]"), false);
+  assert.equal(isEnglishEcho("https://example.org/a", "https://example.org/a"), false);
+  // A link with English words around it is still English.
+  assert.equal(isEnglishEcho("See: [[rc://*/tw/dict/bible/kt/god]]", "See: [[rc://*/tw/dict/bible/kt/god]]"), true);
+});
+
+// The job translated from a pinned English commit, and the English on master
+// has moved on since. The echo check must compare against the English the job
+// actually translated from (options_json.sourceRef), not master.
+const PINNED_SHA = "0123456789abcdef0123456789abcdef01234567";
+const EN_TN_MASTER_TSV = [
+  "Reference\tID\tTags\tSupportReference\tQuote\tOccurrence\tNote",
+  "1:1\tab12\t\t\tחֲז֖וֹן\t1\tA reworded English note on master",
+  "1:2\tcd34\t\t\tקָטֹ֛ן\t1\t[[rc://*/ta/man/translate/figs-metaphor]]",
+].join("\n");
+
+test("import (internal, #794): the English echo check reads the English at the job's pinned sourceRef", async () => {
+  const sqlite = freshSqlite();
+  seedEchoTnRows(sqlite);
+  clearSourceNotesCache();
+  const urls = [];
+  await runScopedImport(sqlite, {
+    manifest: MANIFEST,
+    file: "tn_OBA.tsv",
+    bytes: ECHO_TN_TSV,
+    options: { resourceType: "tn", sourceRef: `unfoldingWord/en_tn@${PINNED_SHA}` },
+    fetchImpl: async (url) => {
+      const u = String(url);
+      urls.push(u);
+      if (u.endsWith(`/unfoldingWord/en_tn/raw/commit/${PINNED_SHA}/tn_OBA.tsv`)) return new Response(EN_TN_TSV, { status: 200 });
+      if (u.endsWith("/raw/branch/master/tn_OBA.tsv")) return new Response(EN_TN_MASTER_TSV, { status: 200 });
+      throw new Error(`unexpected fetch ${u}`);
+    },
+  });
+
+  assert.deepEqual(
+    tnRow(sqlite, "ab12"),
+    { note: "The vision of Obadiah", translation_state: null, version: 1 },
+    "the draft equals the English at the pinned commit, so it is not applied",
+  );
+  const report = JSON.parse(jobRow(sqlite).apply_skipped_json);
+  assert.deepEqual(report.tnSameAsEnglishIds, ["ab12"]);
+  assert.equal(urls.length, 1, "one English read for the job");
+});
+
+test("import (internal, #794): an Approve landing between the row read and the write is reported as kept-approved", async () => {
+  const sqlite = freshSqlite();
+  seedScopeTnRows(sqlite);
+  sqlite.prepare(`UPDATE tn_rows SET translation_state = NULL WHERE id = 'cd34'`).run();
+  seedRunningInternalJob(sqlite, wf("done", { status: "done" }, MANIFEST), { options: { resourceType: "tn" } });
+  const env = freshEnv(sqlite);
+  env.blobs.map.set(outKey(env.WORKSPACE_SLUG, "job-1", "tn_OBA.tsv"), REDO_TN_TSV);
+  env.blobs.map.set(outKey(env.WORKSPACE_SLUG, "job-1", "translate-report-1-1.json"), "{}");
+  // A reviewer approves cd34 just before its guarded UPDATE runs. Approve does
+  // not bump the version, so only the state guard stops the write.
+  const batch = env.DB.batch.bind(env.DB);
+  let fired = 0;
+  env.DB.batch = async (stmts) => {
+    const s = stmts[0];
+    if (/UPDATE tn_rows\s+SET note/.test(s?.sql ?? "") && (s.args ?? []).includes("cd34")) {
+      fired++;
+      sqlite.prepare(`UPDATE tn_rows SET translation_state = 'validated' WHERE id = 'cd34'`).run();
+    }
+    return batch(stmts);
+  };
+  await withNoFetch(async () => pollAllNonTerminal(env));
+
+  assert.equal(fired, 1, "the approval landed inside the apply's window");
+  assert.deepEqual(tnRow(sqlite, "cd34"), { note: "ملاحظة عربية معتمدة", translation_state: "validated", version: 7 });
+  const report = JSON.parse(jobRow(sqlite).apply_skipped_json);
+  assert.deepEqual(report.tnApprovedIds, ["cd34"], "the late approval is listed as kept");
+});
+
+test("import (proxy, #794): the bot path keeps an approved note and drops an English echo too", async () => {
+  const sqlite = freshSqlite();
+  seedTargetTnRow(sqlite);
+  sqlite
+    .prepare(
+      `INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, quote, occurrence, note, translation_state, version, updated_at)
+       VALUES ('cd34', 'OBA', 1, 2, '1:2', 'קָטֹ֛ן', 1, 'ملاحظة عربية معتمدة', 'validated', 7, 100)`,
+    )
+    .run();
+  seedRunningProxyJob(sqlite, { jobId: "proxy-1", upstreamId: "bot-1" });
+  const env = freshEnv(sqlite);
+  clearSourceNotesCache();
+  const botOut = [
+    "Reference\tID\tTags\tSupportReference\tQuote\tOccurrence\tNote",
+    '1:1\tab12\t\t\tחֲז֖וֹן\t1\tThe "vision" of Obadiah',
+    "1:2\tcd34\t\t\tקָטֹ֛ן\t1\tThe English source note",
+  ].join("\n");
+  const status = {
+    jobId: "bot-1",
+    state: "done",
+    current: { chapter: 1, skill: "translate-tn", status: "done" },
+    output: [{ delivery: "editor", type: "tn", repo: "BSOJ/ar_tn", path: "tn_OBA.tsv", file: "tn_OBA.tsv" }],
+  };
+  const english = door43Fetch(EN_TN_TSV);
+  await withFetch(
+    async (url, init) => {
+      const u = String(url);
+      if (u.includes("/api/pipeline/bot-1/output")) return new Response(botOut, { status: 200 });
+      if (u.endsWith("/api/pipeline/bot-1")) return new Response(JSON.stringify(status), { status: 200 });
+      return english(url, init);
+    },
+    async () => pollAllNonTerminal(env),
+  );
+
+  assert.equal(jobRow(sqlite, "proxy-1").state, "done", "the import completed");
+  assert.deepEqual(tnRow(sqlite, "ab12"), { note: "The vision of Obadiah", translation_state: null, version: 1 });
+  assert.deepEqual(tnRow(sqlite, "cd34"), { note: "ملاحظة عربية معتمدة", translation_state: "validated", version: 7 });
+  const report = JSON.parse(jobRow(sqlite, "proxy-1").apply_skipped_json);
+  assert.deepEqual(report, { tnApproved: 1, tnApprovedIds: ["cd34"], tnSameAsEnglish: 1, tnSameAsEnglishIds: ["ab12"] });
+});
+
+test("POST /start (#794): a one-note redo of an approved note is not answered by a running whole-chapter job", async () => {
+  const sqlite = freshSqlite();
+  await seedByoKey(sqlite);
+  seedScopeTnRows(sqlite); // ab12 not approved, cd34 approved
+  // The covering job: a whole-chapter tn translate of OBA 1, in flight.
+  seedRunningProxyJob(sqlite, { jobId: "chapter-job", upstreamId: "bot-chapter" });
+  sqlite.prepare(`UPDATE pipeline_jobs SET options_json = ? WHERE job_id = 'chapter-job'`).run(JSON.stringify({ resourceType: "tn" }));
+  const env = freshEnv(sqlite, { JWT_SIGNING_KEY: ROUTE_SIGNING, JWT_ISSUER: ROUTE_ISSUER });
+  const app = routeApp();
+  const tok = await editorToken("1", env.WORKSPACE_SLUG);
+  const start = (rowIds) =>
+    withFetch(
+      async () => new Response(JSON.stringify({ jobId: "bot-new", provider: "claude" }), { status: 200 }),
+      async () => app.request("/api/pipelines/start", postReq(tok, { ...START_TRANSLATE, translate: { rowIds } }), env),
+    );
+
+  const draftRedo = await start(["ab12"]);
+  assert.equal(draftRedo.status, 200, await draftRedo.clone().text());
+  const draftBody = await draftRedo.json();
+  assert.equal(draftBody.status, "already_running", "a note the chapter job will redraft is covered by it");
+  assert.equal(draftBody.jobId, "chapter-job");
+
+  const approvedRedo = await start(["cd34"]);
+  assert.equal(approvedRedo.status, 200, await approvedRedo.clone().text());
+  const approvedBody = await approvedRedo.json();
+  assert.notEqual(approvedBody.status, "already_running", "the chapter job would keep the approved note, so the redo starts");
+  assert.notEqual(approvedBody.jobId, "chapter-job");
+  const started = sqlite.prepare(`SELECT options_json FROM pipeline_jobs WHERE job_id = ?`).all(approvedBody.jobId)[0];
+  assert.deepEqual(JSON.parse(started.options_json).rowIds, ["cd34"], "a new row-scoped job was enqueued");
 });
 
 // ── edit_log watermark (#601, migration 0076) ─────────────────────────────
@@ -1314,60 +1691,212 @@ test("POST /start stamps the job with the edit_log watermark", async () => {
   assert.equal(rows[0].edit_log_watermark, 3);
 });
 
-function seedParent(sqlite, watermark) {
+// ---------------------------------------------------------------------------
+// Whole-chapter runs leave approved rows out of the AI request (#895)
+// ---------------------------------------------------------------------------
+//
+// #794 keeps approved notes and questions at apply time, but the rows were still
+// sent to the AI first, so the org paid for drafts the apply then discarded. A
+// whole-chapter internal run now leaves them out of the request at dispatch
+// (guard-and-source); the apply still lists them as kept, so the banner does not
+// go silent. A narrowed run (rowIds or a verse range) still sends them.
+//
+// These drive the real chain: dispatchNext → the Workflow's step bodies with a
+// capturing provider transport → pollAllNonTerminal's import and apply.
+
+const EN_TN = fixture("tn_OBA.tsv");
+const EN_TQ = fixture("tq_OBA.tsv");
+const TQ_OPTIONS = { resourceType: "tq", sourceRef: "unfoldingWord/en_tq@master" };
+
+// DCS raw fake keyed by org/repo/path, so the target repo can 404 while the
+// English source serves.
+function dcsRawFetch(files) {
+  return async (url) => {
+    const m = /^https:\/\/git\.door43\.org\/([^/]+)\/([^/]+)\/raw\/(?:branch|commit)\/[^/]+\/(.+)$/.exec(String(url));
+    const body = m ? files[`${m[1]}/${m[2]}/${decodeURIComponent(m[3])}`] : null;
+    if (body != null) return { status: 200, ok: true, headers: null, text: async () => body, json: async () => JSON.parse(body) };
+    return { status: 404, ok: false, headers: null, text: async () => "" };
+  };
+}
+
+// Runs the Workflow's steps in order, as TranslateWorkflow.run does. The
+// transport records the row IDs of the SOURCE CONTENT block of every prompt
+// (not note text: an approved note can legitimately appear in the context pack
+// as an example) and answers with each row's translatable text prefixed.
+async function runInternalSteps(env, params, files) {
+  const sent = [];
+  let calls = 0;
+  const deps = {
+    db: env.DB,
+    blobs: env.blobs,
+    workspaceSlug: env.WORKSPACE_SLUG,
+    wrappingKey: WRAPPING_KEY,
+    startedAt: "2026-11-12T10:00:00.000Z",
+    fetchImpl: dcsRawFetch(files),
+    now: () => new Date("2026-11-12T10:05:00.000Z"),
+    transport: async (req) => {
+      calls++;
+      const block = /-----BEGIN SOURCE CONTENT-----\n([\s\S]*?)\n-----END SOURCE CONTENT-----/.exec(req.user);
+      assert.ok(block, "the prompt inlines the source TSV");
+      const lines = block[1].split("\n").filter(Boolean);
+      const header = lines[0].split("\t");
+      const out = [lines[0]];
+      for (const line of lines.slice(1)) {
+        const cells = line.split("\t");
+        sent.push(cells[header.indexOf("ID")]);
+        for (const col of ["Note", "Question", "Response"]) {
+          const i = header.indexOf(col);
+          if (i >= 0 && cells[i]) cells[i] = `ترجمة ${cells[i]}`;
+        }
+        out.push(cells.join("\t"));
+      }
+      return { text: `${BEGIN_OUTPUT}\n${out.join("\n")}\n${END_OUTPUT}\n`, usage: { inputTokens: 10, outputTokens: 10 }, stopReason: "end_turn" };
+    },
+  };
+  const src = await steps.guardAndSourceStep(deps, params);
+  const ctx = await steps.contextStep(deps, params, src.batchCount);
+  const results = [];
+  for (let i = 0; i < src.batchCount; i++) {
+    const translated = await steps.batchTranslateStep(deps, params, i, src.batchCount);
+    results.push(await steps.batchPersistStep(deps, params, translated));
+  }
+  await steps.mergeReportStep(deps, params, src, ctx, results);
+  return { sent, calls, src };
+}
+
+async function dispatchInternal(sqlite, options) {
+  seedQueuedTranslateJob(sqlite, { options });
+  await seedByoKey(sqlite);
+  const env = freshEnv(sqlite, { PIPELINE_MODE: "internal" });
+  await withNoFetch(async () => dispatchNext(env));
+  assert.equal(env.created.length, 1, "the job went to the internal runner");
+  return { env, params: env.created[0].params };
+}
+
+function seedOneTnRow(sqlite, id, verse, state) {
   sqlite
     .prepare(
-      `INSERT INTO pipeline_jobs (job_id, user_id, pipeline_type, book, start_chapter, end_chapter, session_key, state, created_at, updated_at, edit_log_watermark)
-       VALUES ('parent', 1, 'translate', 'OBA', 1, 1, 'sess-parent', 'done', 100, 100, ?)`,
+      `INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, note, translation_state, version, updated_at)
+       VALUES (?, 'OBA', 1, ?, ?, ?, ?, 3, 50)`,
     )
-    .run(watermark);
+    .run(id, verse, `1:${verse}`, state === "validated" ? "ملاحظة عربية معتمدة" : "Old note", state);
 }
 
-for (const [label, enqueue] of [
-  [
-    "follow-up",
-    (env) =>
-      enqueueFollowUp(env, {
-        parentJobId: "parent",
-        parentSessionKey: "sess-parent",
-        pipelineType: "translate",
-        book: "OBA",
-        startChapter: 1,
-        endChapter: 1,
-        followUpOptionsJson: JSON.stringify({ resourceType: "tq" }),
-        userId: 1,
-      }),
-  ],
-  [
-    "chain",
-    (env) =>
-      enqueueFollowUpFromChain(env, {
-        parentJobId: "parent",
-        parentSessionKey: "sess-parent",
-        book: "OBA",
-        startChapter: 1,
-        endChapter: 1,
-        chainJson: JSON.stringify([{ pipelineType: "translate", options: { resourceType: "tq" } }]),
-        userId: 1,
-      }),
-  ],
-]) {
-  test(`a ${label} child inherits its parent's edit_log watermark`, async () => {
-    const sqlite = freshSqlite();
-    seedParent(sqlite, 2);
-    seedEditLog(sqlite, 5); // edits between the parent's and the child's enqueue
-    await enqueue(freshEnv(sqlite));
-    const child = sqlite.prepare(`SELECT edit_log_watermark FROM pipeline_jobs WHERE job_id != 'parent'`).all();
-    assert.equal(child.length, 1);
-    assert.equal(child[0].edit_log_watermark, 2, "edits after the parent was queued still count for the child");
-  });
-
-  test(`a ${label} child of a pre-watermark parent gets the current watermark`, async () => {
-    const sqlite = freshSqlite();
-    seedParent(sqlite, null);
-    seedEditLog(sqlite, 4);
-    await enqueue(freshEnv(sqlite));
-    const child = sqlite.prepare(`SELECT edit_log_watermark FROM pipeline_jobs WHERE job_id != 'parent'`).all();
-    assert.equal(child[0].edit_log_watermark, 4);
-  });
+function seedOneTqRow(sqlite, id, verse, state) {
+  sqlite
+    .prepare(
+      `INSERT INTO tq_rows (id, book, chapter, verse, ref_raw, question, response, translation_state, version, updated_at)
+       VALUES (?, 'OBA', 1, ?, ?, ?, ?, ?, 3, 50)`,
+    )
+    .run(id, verse, `1:${verse}`, state === "validated" ? "سؤال معتمد" : "Old question", state === "validated" ? "جواب معتمد" : "Old response", state);
 }
+
+const fixtureIds = (tsv) => tsv.split("\n").slice(1).filter(Boolean).map((l) => l.split("\t")[1]);
+
+test("internal run (#895): a whole-chapter tn job leaves the approved note out of the AI request, and still reports it as kept", async () => {
+  const sqlite = freshSqlite();
+  seedOneTnRow(sqlite, "jdr1", 1, "validated");
+  seedOneTnRow(sqlite, "xm1w", 1, null);
+  const { env, params } = await dispatchInternal(sqlite, TRANSLATE_OPTIONS);
+
+  const { sent, src } = await runInternalSteps(env, params, { "unfoldingWord/en_tn/tn_OBA.tsv": EN_TN });
+  assert.ok(!sent.includes("jdr1"), "the approved note is not in any request to the AI");
+  assert.ok(sent.includes("xm1w"), "the unapproved note is sent");
+  assert.equal(sent.length, fixtureIds(EN_TN).length - 1, "every other row of the chapter is sent");
+  assert.equal(src.approvedLeftOut, 1);
+
+  await withNoFetch(async () => pollAllNonTerminal(env));
+  assert.equal(jobRow(sqlite).state, "done");
+  assert.equal(tnRow(sqlite, "xm1w").translation_state, "ai_draft", "the unapproved note was drafted");
+  assert.deepEqual(
+    tnRow(sqlite, "jdr1"),
+    { note: "ملاحظة عربية معتمدة", translation_state: "validated", version: 3 },
+    "the approved note keeps its note, state and version",
+  );
+  const staged = sqlite.prepare(`SELECT payload_json FROM pending_imports WHERE job_id = 'job-1'`).all().map((r) => JSON.parse(r.payload_json).id);
+  assert.ok(!staged.includes("jdr1"), "no proposal was staged for the left-out note");
+
+  const report = JSON.parse(jobRow(sqlite).apply_skipped_json);
+  assert.equal(report.tnApproved, 1);
+  assert.deepEqual(report.tnApprovedIds, ["jdr1"]);
+  const alerts = sqlite.prepare(`SELECT message, link_url FROM system_alerts WHERE source = 'translate_tn_kept_approved:job-1'`).all();
+  assert.equal(alerts.length, 1, "the kept-because-approved banner still fires");
+  assert.match(alerts[0].message, /OBA 1:1/);
+});
+
+test("internal run (#895): a row-scoped tn job still sends the approved note it names", async () => {
+  const sqlite = freshSqlite();
+  seedOneTnRow(sqlite, "jdr1", 1, "validated");
+  const { env, params } = await dispatchInternal(sqlite, { ...TRANSLATE_OPTIONS, rowIds: ["jdr1", "xm1w"] });
+
+  const { sent, src } = await runInternalSteps(env, params, {
+    "unfoldingWord/en_tn/tn_OBA.tsv": EN_TN,
+    "BSOJ/ar_tn/tn_OBA.tsv": EN_TN, // by-id needs an existing target book
+  });
+  assert.deepEqual(sent, ["xm1w", "jdr1"], "both named rows are sent, the approved one included, in source order");
+  assert.equal(src.approvedLeftOut, 0);
+});
+
+test("internal run (#895): a verse-range tn job still sends approved notes in the range", async () => {
+  const sqlite = freshSqlite();
+  seedOneTnRow(sqlite, "jdr1", 1, "validated");
+  const { env, params } = await dispatchInternal(sqlite, { ...TRANSLATE_OPTIONS, verseStart: 1, verseEnd: 1 });
+
+  const { sent } = await runInternalSteps(env, params, {
+    "unfoldingWord/en_tn/tn_OBA.tsv": EN_TN,
+    "BSOJ/ar_tn/tn_OBA.tsv": EN_TN,
+  });
+  assert.ok(sent.includes("jdr1"), "a narrowed run redrafts approved rows, as before");
+});
+
+test("internal run (#895): a whole-chapter tq job leaves the approved question out of the AI request, and still reports it as kept", async () => {
+  const sqlite = freshSqlite();
+  seedOneTqRow(sqlite, "jbuh", 1, "validated");
+  seedOneTqRow(sqlite, "en3z", 3, null);
+  const { env, params } = await dispatchInternal(sqlite, { ...TRANSLATE_OPTIONS, ...TQ_OPTIONS });
+
+  const { sent } = await runInternalSteps(env, params, { "unfoldingWord/en_tq/tq_OBA.tsv": EN_TQ });
+  assert.ok(!sent.includes("jbuh"), "the approved question is not in any request to the AI");
+  assert.ok(sent.includes("en3z"));
+  assert.equal(sent.length, fixtureIds(EN_TQ).length - 1);
+
+  await withNoFetch(async () => pollAllNonTerminal(env));
+  assert.equal(jobRow(sqlite).state, "done");
+  assert.equal(tqRow(sqlite, "en3z").translation_state, "ai_draft");
+  assert.deepEqual(
+    tqRow(sqlite, "jbuh"),
+    { question: "سؤال معتمد", response: "جواب معتمد", translation_state: "validated", version: 3 },
+  );
+  const report = JSON.parse(jobRow(sqlite).apply_skipped_json);
+  assert.equal(report.tqApproved, 1);
+  assert.deepEqual(report.tqApprovedIds, ["jbuh"]);
+  assert.equal(report.tnApproved, undefined, "a tq job lists no notes");
+  const alerts = sqlite.prepare(`SELECT message FROM system_alerts WHERE source = 'translate_tq_kept_approved:job-1'`).all();
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0].message, /OBA 1:1/);
+});
+
+test("internal run (#895): a whole-chapter job on a fully approved chapter calls the AI zero times, finishes done, and lists every row as kept", async () => {
+  const sqlite = freshSqlite();
+  const ids = fixtureIds(EN_TQ);
+  for (const line of EN_TQ.split("\n").slice(1).filter(Boolean)) {
+    const [ref, id] = line.split("\t");
+    seedOneTqRow(sqlite, id, Number(ref.split(":")[1]), "validated");
+  }
+  const { env, params } = await dispatchInternal(sqlite, { ...TRANSLATE_OPTIONS, ...TQ_OPTIONS });
+
+  const { sent, calls, src } = await runInternalSteps(env, params, { "unfoldingWord/en_tq/tq_OBA.tsv": EN_TQ });
+  assert.equal(calls, 0, "nothing was bought");
+  assert.deepEqual(sent, []);
+  assert.equal(src.batchCount, 0);
+  assert.equal(src.approvedLeftOut, ids.length);
+
+  await withNoFetch(async () => pollAllNonTerminal(env));
+  assert.equal(jobRow(sqlite).state, "done", "the run completes rather than failing for want of rows");
+  const report = JSON.parse(jobRow(sqlite).apply_skipped_json);
+  assert.equal(report.tqApproved, ids.length);
+  assert.deepEqual([...report.tqApprovedIds].sort(), [...ids].sort());
+  const versions = sqlite.prepare(`SELECT DISTINCT version, translation_state FROM tq_rows`).all();
+  assert.deepEqual(versions.map((r) => ({ ...r })), [{ version: 3, translation_state: "validated" }], "no question was written");
+});
+

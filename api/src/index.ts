@@ -29,7 +29,7 @@ import { books } from "./bookImport";
 import { populateReferencedArticles } from "./articlePopulate";
 import { templates } from "./templates";
 import { syncTemplates } from "./templateSync";
-import { attachAuth, chatConfirmMac, chatWriteEnv, requireAuth, requireCsrf, mintDevToken, startDcsAuth, callbackDcsAuth, authMe, authLogout, refreshToken, updateLastLocation, currentUserId } from "./auth";
+import { attachAuth, chatConfirmMac, type ChatConfirmPurpose, chatWriteEnv, requireAuth, requireCsrf, mintDevToken, startDcsAuth, callbackDcsAuth, authMe, authLogout, refreshToken, updateLastLocation, currentUserId } from "./auth";
 import { workspaceRoutes } from "./workspaceRoutes";
 import { handleMcp, isMcpPath } from "./mcp";
 import { adminSender } from "./mcpTools";
@@ -39,7 +39,9 @@ import { readPackageRefs } from "./packageRefs";
 import { readSourceNotes } from "./sourceNotes";
 import { blockViewerWrites } from "./viewerGuard";
 import { requestDailyContextExport, sweepContextExportQueue } from "./contextExportQueue";
+import { nightlyLessonsTick } from "./lessons";
 import { listWorkspaces, resolveWorkspaceFresh, workspaceEnv, parseWorkspaceCookie, requireWorkspaceMatch, primeWorkspaces } from "./workspaces";
+import { hideSwitchedOffKinds } from "./noteKindSwitch";
 
 export interface Env {
   DB: D1Database;
@@ -414,6 +416,10 @@ async function runScheduledTick(controller: ScheduledController, env: Env, _ctx:
       } catch (e) {
         console.error("nightly trash finalize failed", e instanceof Error ? e.message : String(e));
       }
+      // Hide notes of a switched-off kind (#924) that reached D1 since the last
+      // pass by any path (for example a note an editor wrote by hand), so the
+      // export below leaves them out. Never throws.
+      await hideSwitchedOffKinds(env.DB);
       // Auto-clean resolved pipeline jobs so failed/done runs don't pile up in
       // the AI-pipelines chip forever (the UI has a manual "mark as seen", this
       // is the safety net for runs nobody dismissed). Failed/cancelled get a
@@ -604,7 +610,7 @@ export default {
           // Read-only D1 exception to the route-handler rule; see packageRefs.ts.
           packageRefs: (book: string) => readPackageRefs(wsEnv, book),
           sourceNotes: (book: string, chapter: number) => readSourceNotes(wsEnv, book, chapter),
-          confirmMac: (data: string) => chatConfirmMac(env, data),
+          confirmMac: (data: string, purpose: ChatConfirmPurpose) => chatConfirmMac(env, data, purpose),
           isAdmin: () => chatIsAdmin(wsEnv, link.username),
           // Read-only D1 exception to the route-handler rule; see McpSession.
           jobResults: (jobId: string) => jobResultCounts(wsEnv, jobId),
@@ -643,7 +649,8 @@ export default {
     // With WORKSPACES unset this is exactly one iteration against DB, same
     // as before workspaces existed.
     await primeWorkspaces(env);
-    for (const ws of listWorkspaces(env)) {
+    const workspaces = listWorkspaces(env);
+    for (const ws of workspaces) {
       try {
         await runScheduledTick(controller, workspaceEnv(env, ws), ctx);
       } catch (e) {
@@ -652,6 +659,23 @@ export default {
           error: e instanceof Error ? e.message : String(e),
         });
       }
+    }
+    // Lessons (#817) only after every workspace's export has been requested,
+    // and all workspaces at once: one AI call can take up to 2 minutes, so
+    // running them one after another could push later workspaces past the
+    // scheduled invocation's wall-clock limit. Each is isolated.
+    if (controller.cron === CONTEXT_CRON || controller.cron === EXPORT_CRON) {
+      const results = await Promise.allSettled(
+        workspaces.map(async (ws) => nightlyLessonsTick(workspaceEnv(env, ws))),
+      );
+      results.forEach((r, i) => {
+        if (r.status === "rejected") {
+          console.error("nightly lessons failed for workspace", {
+            slug: workspaces[i].slug,
+            error: r.reason instanceof Error ? r.reason.message : String(r.reason),
+          });
+        }
+      });
     }
   },
 } satisfies ExportedHandler<Env>;

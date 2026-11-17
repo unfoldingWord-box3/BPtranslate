@@ -9,12 +9,14 @@
 // skips that row, and 401/403 stop the run (ReviewQueue.handleApproveAll).
 //
 // Decisions (see the PR for #829):
-// - Approve sends `bulk: true`. A checked range is not a one-at-a-time read of
-//   each note, so it keeps any admin_bulk_state stamp (api/src/rows.ts,
-//   HAND_APPROVAL_CLAUSE): a stamped row stays out of the AI examples until a
-//   person approves it on its own. The open note with an unsaved edit goes
-//   through the screen's handleApprove (save, then approve), which is a hand
-//   approval like Ctrl+Enter.
+// - Approve is a hand approval: it sends no `bulk` flag (issue #833, option B).
+//   Each checked note's text sits on screen beside the English note, so a
+//   checked range counts as read. The approval becomes an AI example and clears
+//   any admin_bulk_state stamp (api/src/rows.ts, HAND_APPROVAL_CLAUSE), the same
+//   as approving the note on its own. Only the Approve-all buttons (review queue,
+//   classic editor) send `bulk: true`, which stamps AI drafts nobody changed. The open note with an unsaved
+//   edit goes through the screen's handleApprove (save, then approve), which is
+//   a hand approval like Ctrl+Enter.
 // - Approve has no Undo: un-approving sets 'edited', not the state the note
 //   had before (validateNote(id, book, false)), so an "Undo" would not undo.
 // - Not needed has Undo: trash only sets trashed_at, and restore clears it.
@@ -34,14 +36,16 @@ import { isApprovableRow } from "../../lib/reviewApproval";
 import { isAiProviderNotConfigured } from "../../lib/aiProviderErrors";
 import { redoOutcome } from "../../lib/applySkipped";
 import { escapeNewlines, waitForOp } from "./translateShared";
+import { snapshotMismatch, statusesAfterEdit, stillAsProposed, type RapidSnapshot } from "./rapidAssistant";
 
 type CardStatus = "approved" | "skipped";
 
 // The server's cap on translate.rowIds (api/src/pipelines.ts TranslateOptions).
 const MAX_ROWS_PER_JOB = 50;
 
-type SkipReason = "unsaved" | "pending" | "changed" | "locked" | "noDraft" | "approved" | "notNeeded" | "failed";
-const REASONS: SkipReason[] = ["unsaved", "pending", "changed", "locked", "noDraft", "approved", "notNeeded", "failed"];
+// stateChanged: only the assistant's Apply counts it (the note changed since the proposal, #878, #883).
+type SkipReason = "unsaved" | "pending" | "changed" | "stateChanged" | "locked" | "noDraft" | "approved" | "notNeeded" | "failed";
+const REASONS: SkipReason[] = ["unsaved", "pending", "changed", "stateChanged", "locked", "noDraft", "approved", "notNeeded", "failed"];
 
 export interface RapidBulkResult {
   text: string;
@@ -56,6 +60,8 @@ interface RunOut {
   stopped: boolean;
   /** Another bulk action (or a save) was running: nothing was tried. */
   blocked?: boolean;
+  /** Edits sent to the outbox but not confirmed before the wait ran out: they may still save. */
+  unconfirmed?: number;
 }
 
 /** What the assistant's Apply sends (issue #858): edits carry the version the proposal was made against. */
@@ -65,6 +71,8 @@ export interface AssistantSelection {
   notNeeded: string[];
   /** Each note's version when the proposal was asked for. */
   versions: ReadonlyMap<string, number>;
+  /** Each note's translation_state then: approving does not bump the version. */
+  states: ReadonlyMap<string, string | null>;
 }
 
 export interface RapidBulkArgs {
@@ -105,7 +113,7 @@ export function useRapidBulk(a: RapidBulkArgs) {
   // bulk Redo they belong to. A selection over 50 notes is several jobs; the
   // result line reports once, when the last of them settles.
   const redoJobsRef = useRef(new Map<string, { batch: number; rowIds: string[] }>());
-  const redoBatchesRef = useRef(new Map<number, { open: number; drafted: number; kept: number; failed: string | null }>());
+  const redoBatchesRef = useRef(new Map<number, { open: number; drafted: number; kept: number; english: number; failed: string | null }>());
   const nextBatchRef = useRef(0);
 
   function summarize(lead: string, skipped: Record<SkipReason, number>, stopped: boolean): RapidBulkResult {
@@ -259,7 +267,6 @@ export function useRapidBulk(a: RapidBulkArgs) {
           // Approve exactly what is on screen: a peer's edit or set-aside
           // since then comes back 409 instead of being approved unseen.
           const updated = await api.validateNote(id, book, true, {
-            bulk: true,
             expectedVersion: r.version,
             expectedState: r.translation_state === "ai_draft" || r.translation_state === "edited" ? r.translation_state : undefined,
           });
@@ -396,9 +403,14 @@ export function useRapidBulk(a: RapidBulkArgs) {
    * aside, or a version that is no longer the one the proposal was made
    * against are skipped and counted. Each edit goes through the outbox like a
    * typed save and waits for its result (saveDraft's wait). The edited note
-   * ends up 'edited' on the server, so it still needs approval.
+   * ends up 'edited' on the server, so it still needs approval. With `snap`
+   * (the assistant's Apply), a note whose approval state changed since the
+   * proposal is skipped too: approving does not bump the version, so the
+   * edit would otherwise move a note approved since then back to Edited
+   * (#878). The edit also carries the snapshot's state to the server, which
+   * refuses it when the note has moved off it there (#880).
    */
-  async function runEdits(edits: AssistantSelection["edits"]): Promise<RunOut> {
+  async function runEdits(edits: AssistantSelection["edits"], snap?: RapidSnapshot): Promise<RunOut> {
     if (edits.length === 0) return { left: [], count: 0, skipped: emptySkips(), stopped: false };
     const ids = edits.map((e) => e.id);
     if (running || a.busy) return blockedRun(ids);
@@ -409,6 +421,7 @@ export function useRapidBulk(a: RapidBulkArgs) {
     const skipped = emptySkips();
     const left: string[] = [];
     let saved = 0;
+    let unconfirmed = 0;
     let refetchNeeded = false;
     let openChanged = false;
     try {
@@ -444,24 +457,36 @@ export function useRapidBulk(a: RapidBulkArgs) {
           left.push(e.id);
           continue;
         }
+        // The row on screen already shows the new state, so nothing reloads.
+        if (snap && snapshotMismatch(e.id, snap, r) === "stateChanged") {
+          skipped.stateChanged++;
+          left.push(e.id);
+          continue;
+        }
         const patch = { note: escapeNewlines(e.note) };
+        // The server re-checks the state (#880): an approval this tab has not
+        // seen yet, or one landing after the check above, refuses the edit.
+        const expectedState = snap?.states.has(e.id) ? (snap.states.get(e.id) ?? null) : undefined;
         try {
-          const op = await outbox.enqueueRow("tn", e.id, r.version, patch, { book, baseline: { note: r.note } });
+          const op = await outbox.enqueueRow("tn", e.id, r.version, patch, {
+            book,
+            baseline: { note: r.note },
+            ...(expectedState !== undefined ? { expectedState } : {}),
+          });
           const res = await waitForOp(op.id);
           if (res === null) {
-            // Still queued (or the lane is read-only): not confirmed, so not counted.
-            skipped.pending++;
+            // Still queued (or the lane is read-only): not confirmed, so not
+            // counted as edited. It is not a skip either, since the outbox may
+            // still send it, so it gets its own line (#860).
+            unconfirmed++;
             left.push(e.id);
           } else if (res.kind === "ok") {
             const u = res.updated as TnRow | null;
             a.applyLocalRowReplacement("tn", u && u.id === e.id && typeof u.version === "number" ? u : { ...r, ...patch });
-            // Like a typed save: an edit takes the note off Approved.
-            a.setStatuses((p) => {
-              if (p[e.id] === undefined) return p;
-              const next = { ...p };
-              delete next[e.id];
-              return next;
-            });
+            // Like a typed save, an edit takes the note off Approved, unless
+            // the returned row says otherwise: a no-op resend after a lost
+            // response returns the note as it is now (#883 review A1).
+            a.setStatuses((p) => statusesAfterEdit(p, e.id, u));
             saved++;
             if (e.id === a.currentId) openChanged = true;
           } else {
@@ -474,6 +499,16 @@ export function useRapidBulk(a: RapidBulkArgs) {
               if (e.id === a.currentId) openChanged = true;
             } else if (res.kind === "locked") {
               skipped.locked++;
+            } else if (res.kind === "fatal" && res.reason === "state_mismatch") {
+              // The note changed on the server since the proposal, unseen by
+              // this tab (its approval, a set-aside, or, after an auto-heal,
+              // another field's edit): count it as such and reload so the note
+              // shows it. The outbox already deleted the op (#883 item 4), and
+              // the screen's outbox listener sets its status circle (item 1).
+              skipped.stateChanged++;
+              refetchNeeded = true;
+              // The open note's editor reloads too, as for a version skip (review A3).
+              if (e.id === a.currentId) openChanged = true;
             } else {
               void outbox.drop(op.id, { onlyIfStatus: "failed" }).catch(() => undefined);
               skipped.failed++;
@@ -492,7 +527,7 @@ export function useRapidBulk(a: RapidBulkArgs) {
     // plain refetch would leave it showing the old text: reload re-seeds it.
     if (openChanged) a.reload();
     else if (refetchNeeded || saved > 0) void a.refetch();
-    return { left, count: saved, skipped, stopped: false };
+    return { left, count: saved, skipped, stopped: false, unconfirmed };
   }
 
   /**
@@ -507,42 +542,50 @@ export function useRapidBulk(a: RapidBulkArgs) {
     const skipped = emptySkips();
     const parts: string[] = [];
     let stopped = false;
+    const addSkips = (s: Record<SkipReason, number>) => {
+      for (const k of REASONS) skipped[k] += s[k];
+    };
     const merge = (r: RunOut) => {
-      for (const k of REASONS) skipped[k] += r.skipped[k];
+      addSkips(r.skipped);
       stopped = stopped || r.stopped;
     };
     // Approve and Not needed act on the note as it is now, so a note changed
-    // since the assistant read it is skipped, like an edit. The open note with
+    // since the assistant read it (its version, or its approval state, which
+    // approving does not version) is skipped, like an edit. A note no longer
+    // on the screen is a failure, as in the plain runners. The open note with
     // unsaved typing is skipped too: plain Approve would save and approve that
-    // typing, which the proposal never showed.
-    const unchanged = (ids: string[]) =>
-      ids.filter((id) => {
-        const v = sel.versions.get(id);
-        if (v === undefined || a.rowById.get(id)?.version !== v) {
-          skipped.changed++;
-          return false;
-        }
-        return true;
-      });
-    const approveIds = unchanged(sel.approve).filter((id) => {
+    // typing, which the proposal never showed. Each step's skips are counted
+    // into its own tally and reported only if the run reaches that step.
+    const unchanged = (ids: string[], into: Record<SkipReason, number>) => {
+      const r = stillAsProposed(ids, sel, a.rowById);
+      into.changed += r.changed;
+      into.stateChanged += r.stateChanged;
+      into.failed += r.missing;
+      return r.ids;
+    };
+    const approveSkips = emptySkips();
+    const approveIds = unchanged(sel.approve, approveSkips).filter((id) => {
       if (id === a.currentId && a.hasDiff) {
-        skipped.unsaved++;
+        approveSkips.unsaved++;
         return false;
       }
       return true;
     });
-    const notNeededIds = unchanged(sel.notNeeded);
+    const notNeededSkips = emptySkips();
+    const notNeededIds = unchanged(sel.notNeeded, notNeededSkips);
     const noRun: RunOut = { left: [], count: 0, skipped: emptySkips(), stopped: false };
-    const edits = await runEdits(sel.edits);
+    const edits = await runEdits(sel.edits, sel);
     if (edits.blocked) return { text: t("assistant.apply.busy"), severity: "warning", retryable: true };
     if (sel.edits.length > 0) {
       merge(edits);
       parts.push(t("assistant.apply.edited", { count: edits.count }));
+      if (edits.unconfirmed) parts.push(t("assistant.apply.stillSaving", { count: edits.unconfirmed }));
     }
     if (!stopped && sel.approve.length > 0) {
       // All of them skipped above: still report the count (0) with the reasons.
       const r = approveIds.length > 0 ? await runApprove(approveIds) : noRun;
       if (r.blocked) return { text: t("assistant.apply.busy"), severity: "warning" };
+      addSkips(approveSkips);
       merge(r);
       parts.push(t("flowTranslate.rapid.bulk.approved", { count: r.count }));
     }
@@ -550,10 +593,12 @@ export function useRapidBulk(a: RapidBulkArgs) {
       // All of them skipped above: still report the count (0) with the reasons.
       const r = notNeededIds.length > 0 ? await runNotNeeded(notNeededIds) : noRun;
       if (r.blocked) return { text: t("assistant.apply.busy"), severity: "warning" };
+      addSkips(notNeededSkips);
       merge(r);
       parts.push(t("flowTranslate.rapid.bulk.notNeededDone", { count: r.count }));
     }
     const out = summarize(parts.join(" "), skipped, stopped);
+    if (edits.unconfirmed) out.severity = "warning";
     show(out);
     return out;
   }
@@ -627,7 +672,7 @@ export function useRapidBulk(a: RapidBulkArgs) {
     let openChanged = false;
     const alreadyOver: Parameters<typeof settleRedo>[0][] = [];
     const batchId = ++nextBatchRef.current;
-    const batch = { open: 0, drafted: 0, kept: 0, failed: null as string | null };
+    const batch = { open: 0, drafted: 0, kept: 0, english: 0, failed: null as string | null };
     // Registered before the first start: a job can end before the next starts.
     redoBatchesRef.current.set(batchId, batch);
     try {
@@ -723,19 +768,27 @@ export function useRapidBulk(a: RapidBulkArgs) {
     batch.open--;
     if (job.state !== "done") batch.failed = job.error_message ?? job.state;
     else {
-      const kept = entry.rowIds.filter((id) => redoOutcome(job, id) === "kept").length;
+      const outcomes = entry.rowIds.map((id) => redoOutcome(job, id));
+      const kept = outcomes.filter((o) => o === "kept").length;
+      // #794: drafts that were the English note copied back were not applied.
+      const english = outcomes.filter((o) => o === "english").length;
       batch.kept += kept;
-      batch.drafted += entry.rowIds.length - kept;
+      batch.english += english;
+      batch.drafted += entry.rowIds.length - kept - english;
       a.reload();
     }
     if (batch.open > 0) return;
     redoBatchesRef.current.delete(entry.batch);
     const parts: string[] = [];
-    if (batch.drafted + batch.kept > 0) {
+    if (batch.drafted + batch.kept + batch.english > 0) {
       parts.push(t("flowTranslate.rapid.bulk.redoDone", { drafted: batch.drafted, kept: batch.kept }));
     }
+    if (batch.english > 0) parts.push(t("flowTranslate.rapid.bulk.redoSameAsEnglish", { count: batch.english }));
     if (batch.failed) parts.push(t("flowTranslate.rapid.bulk.redoFailed", { status: batch.failed }));
-    show({ text: parts.join(" "), severity: batch.failed ? "warning" : batch.kept > 0 ? "info" : "success" });
+    show({
+      text: parts.join(" "),
+      severity: batch.failed || batch.english > 0 ? "warning" : batch.kept > 0 ? "info" : "success",
+    });
   }
   // The store listeners below subscribe once; they call the latest render's
   // settleRedo through this ref.
@@ -772,7 +825,7 @@ export function useRapidBulk(a: RapidBulkArgs) {
       setUndoable(null);
     },
     approve,
-    applyEdits: runEdits,
+    applyEdits: (edits: AssistantSelection["edits"]) => runEdits(edits),
     applyAssistant,
     redo,
     notNeeded,

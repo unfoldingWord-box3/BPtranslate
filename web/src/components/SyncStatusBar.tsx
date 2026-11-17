@@ -17,8 +17,8 @@ import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import EditNoteIcon from "@mui/icons-material/EditNote";
 import { onOutboxResult, outbox, isOpPending, type OutboxOp, type OpTarget } from "../sync/outbox";
-import { drafts, type DraftRecord, type DraftMeta } from "../sync/drafts";
-import { draftFlowHash, formatDraftMeta } from "../lib/draftLocation";
+import { countsAsUnsaved, drafts, type DraftRecord, type DraftMeta } from "../sync/drafts";
+import { draftFlowHash, formatDraftMeta, PREFS_CLASSIC_SECTION } from "../lib/draftLocation";
 
 // If we believe we're online but haven't seen a successful save in this
 // long while pending ops exist, treat it as effectively offline —
@@ -145,11 +145,15 @@ export function useSyncSummary(): SyncSummary {
 
   // Draft count — unsaved typing the user hasn't clicked Save on yet.
   // Distinct from outbox "saving N": those are in-flight to the server;
-  // drafts haven't left the browser.
+  // drafts haven't left the browser. The drafts store is shared by every tab,
+  // so this count also follows changes other tabs make (`remote`, #896).
   const [draftList, setDraftList] = useState<DraftRecord[]>([]);
-  useEffect(() => drafts.subscribe(setDraftList), []);
-  const activeDrafts = draftList.filter((d) => !d.quarantined);
-  const quarantinedDrafts = draftList.filter((d) => !!d.quarantined);
+  useEffect(() => drafts.subscribe(setDraftList, { remote: true }), []);
+  // Style typing this user cannot save (another person's on a shared browser)
+  // is left out of the count, the jump menu and every discard here (#920).
+  const ownDrafts = draftList.filter(countsAsUnsaved);
+  const activeDrafts = ownDrafts.filter((d) => !d.quarantined);
+  const quarantinedDrafts = ownDrafts.filter((d) => !!d.quarantined);
   const draftCount = activeDrafts.length;
 
   // Track navigator.onLine + last successful drain so we can distinguish
@@ -449,15 +453,17 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
 
   const navigateToDraft = (m: DraftMeta) => {
     // On the flows screens every draft routes to its flows editor
-    // (draftFlowHash), so the jump stays in the new UI. In classic, article
-    // and template drafts have no scripture reference to navigate to, so they
-    // route to the classic article / template editors by id.
+    // (draftFlowHash), so the jump stays in the new UI. In classic, article,
+    // template and preferences drafts have no scripture reference to navigate
+    // to, so they route to the classic article / template / preferences editors.
     if (flowRouting) {
       location.assign(draftFlowHash(m));
     } else if (m.kind === "article") {
       location.assign(`#/articles/${m.resource}/${encodeURIComponent(m.articleId)}`);
     } else if (m.kind === "template") {
       location.assign(`#/templates/${encodeURIComponent(m.templateId)}`);
+    } else if (m.kind === "prefs") {
+      location.assign(`#/preferences/${PREFS_CLASSIC_SECTION[m.section]}`);
     } else {
       onNavigate?.(m.book, m.chapter, m.verse);
     }
@@ -497,7 +503,7 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
             variant="caption"
             sx={{ fontFamily: "monospace", display: "block" }}
           >
-            {formatDraftMeta(d.meta)}
+            {formatDraftMeta(d.meta, t)}
           </Typography>
         ))}
       </Stack>
@@ -542,7 +548,7 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
           {activeDrafts.map((d) => (
             <MenuItem key={d.key} onClick={() => navigateToDraft(d.meta)} dense>
               <ListItemText
-                primary={formatDraftMeta(d.meta)}
+                primary={formatDraftMeta(d.meta, t)}
                 secondary={draftPreviewLine(d)}
                 primaryTypographyProps={{ sx: { fontFamily: "monospace", fontSize: 13 } }}
                 secondaryTypographyProps={{
@@ -763,7 +769,7 @@ export function SyncStatusBar({ onNavigate, hideInlineChip, hideFloating, flowRo
                           fontFamily: "monospace",
                         }}
                       >
-                        {formatDraftMeta(d.meta)}
+                        {formatDraftMeta(d.meta, t)}
                       </Typography>
                       {d.quarantined && (
                         <Typography

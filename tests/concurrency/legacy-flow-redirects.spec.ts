@@ -1,5 +1,11 @@
 import { expect, test, type Page } from "@playwright/test";
 import { newUserContext } from "./helpers";
+import { APP_DEFAULT_CHAPTER, ZEC_CHAPTERS } from "./chapters";
+
+// R: a read-only chapter for screen landmarks. S: the shared chapter whose
+// seeded word links (6:3, 6:15) the ?twl= cases select.
+const R = ZEC_CHAPTERS.readOnly.chapter;
+const S = ZEC_CHAPTERS.shared.chapter;
 
 // Retired flows routes (#173).
 //
@@ -39,11 +45,11 @@ const redirects: [from: string, to: string, landmark: Landmark][] = [
   ["#/scripture", "#/books", BOOKS],
   ["#/align", "#/books", BOOKS],
   ["#/words", "#/books", BOOKS],
-  ["#/align/ZEC", "#/alignment/ZEC/1", h1("Alignment")],
-  ["#/align/ZEC/6/3", "#/alignment/ZEC/6/3", h1("Alignment")],
-  ["#/align/ZEC/6/3/", "#/alignment/ZEC/6/3", h1("Alignment")],
+  ["#/align/ZEC", `#/alignment/ZEC/${APP_DEFAULT_CHAPTER}`, h1("Alignment")],
+  [`#/align/ZEC/${S}/3`, `#/alignment/ZEC/${S}/3`, h1("Alignment")],
+  [`#/align/ZEC/${S}/3/`, `#/alignment/ZEC/${S}/3`, h1("Alignment")],
   // The old word-links editor → the classic editor at that verse.
-  ["#/words/ZEC/6", "#/ZEC/6/1", CLASSIC_NOTES],
+  [`#/words/ZEC/${S}`, `#/ZEC/${S}/1`, CLASSIC_NOTES],
   ["#/words/ZEC?row=x", "#/words/ZEC", { tag: "body", text: /Words & Articles/ }],
   // The desk More-tools screens moved under #/admin/* (#537).
   ["#/ai", "#/admin/ai", AI_STUDIO],
@@ -69,13 +75,13 @@ const kept: [hash: string, landmark: Landmark][] = [
   ["#/books", BOOKS],
   ["#/books/ZEC", BOOKS],
   ["#/package/ZEC", h1("Zechariah")],
-  ["#/scripture/ZEC/1", h1("Scripture")],
-  ["#/scripture/ZEC/6/3", h1("Scripture")],
-  ["#/notes/ZEC/1", h1("Translation Notes")],
-  ["#/questions/ZEC/1", h1("Translation Questions")],
-  ["#/alignment/ZEC/1", h1("Alignment")],
-  ["#/alignment/ZEC/1/1/dual", h1("Alignment")],
-  ["#/verse/ZEC/1/1", h1("Verse view")],
+  [`#/scripture/ZEC/${R}`, h1("Scripture")],
+  [`#/scripture/ZEC/${S}/3`, h1("Scripture")],
+  [`#/notes/ZEC/${R}`, h1("Translation Notes")],
+  [`#/questions/ZEC/${R}`, h1("Translation Questions")],
+  [`#/alignment/ZEC/${R}`, h1("Alignment")],
+  [`#/alignment/ZEC/${R}/1/dual`, h1("Alignment")],
+  [`#/verse/ZEC/${R}/1`, h1("Verse view")],
   ["#/words/ZEC", { tag: "body", text: /Words & Articles/ }],
   ["#/admin/progress", h1("Progress")],
   ["#/admin/workflow", h1("Workflow")],
@@ -91,8 +97,8 @@ const kept: [hash: string, landmark: Landmark][] = [
   ["#/articles/tw", h6("Articles")],
   ["#/templates", h6("Note Templates")],
   ["#/preferences", h6("Preferences & Memory")],
-  ["#/review/ZEC/1", { tag: "h2", text: "Approve all" }],
-  ["#/ZEC/1", CLASSIC_NOTES],
+  [`#/review/ZEC/${R}`, { tag: "h2", text: "Approve all" }],
+  [`#/ZEC/${R}`, CLASSIC_NOTES],
 ];
 
 async function expectLandmark(page: Page, { tag, text }: Landmark) {
@@ -101,11 +107,11 @@ async function expectLandmark(page: Page, { tag, text }: Landmark) {
 
 // The ids of the seeded ZEC 6:3 word-link rows (the fixture has two).
 async function zec63TwlIds(page: Page): Promise<string[]> {
-  const res = await page.request.get("/api/chapters/ZEC/6");
+  const res = await page.request.get(`/api/chapters/ZEC/${S}`);
   expect(res.ok()).toBe(true);
   const body = (await res.json()) as { twl: { id: string; verse: number }[] };
   const ids = body.twl.filter((r) => r.verse === 3).map((r) => r.id);
-  expect(ids.length, "seeded ZEC 6:3 has two word links").toBeGreaterThan(1);
+  expect(ids.length, `seeded ZEC ${S}:3 has two word links`).toBeGreaterThan(1);
   return ids;
 }
 const zec63TwlId = async (page: Page) => (await zec63TwlIds(page))[0];
@@ -162,10 +168,10 @@ test.describe("retired flows routes (#173)", () => {
     const errors: string[] = [];
     page.on("pageerror", (e) => errors.push(e.message));
     const id = await zec63TwlId(page);
-    await page.goto(`/#/words/ZEC/6/3?row=${encodeURIComponent(id)}`);
+    await page.goto(`/#/words/ZEC/${S}/3?row=${encodeURIComponent(id)}`);
     await expect
       .poll(() => new URL(page.url()).hash, { timeout: 15_000 })
-      .toBe(`#/ZEC/6/3?twl=${encodeURIComponent(id)}`);
+      .toBe(`#/ZEC/${S}/3?twl=${encodeURIComponent(id)}`);
     await expectWordsTabWithRow(page, id);
     expect(errors, errors.join("\n")).toEqual([]);
     await context.close();
@@ -177,12 +183,12 @@ test.describe("retired flows routes (#173)", () => {
     const errors: string[] = [];
     page.on("pageerror", (e) => errors.push(e.message));
     const [first, second] = await zec63TwlIds(page);
-    await page.goto(`/#/ZEC/6/3?twl=${encodeURIComponent(first)}`);
+    await page.goto(`/#/ZEC/${S}/3?twl=${encodeURIComponent(first)}`);
     await expectWordsTabWithRow(page, first);
     // Same book, same verse, only ?twl= changes: no remount, no reload.
-    await page.evaluate((id) => {
-      location.hash = `#/ZEC/6/3?twl=${encodeURIComponent(id)}`;
-    }, second);
+    await page.evaluate((hash) => {
+      location.hash = hash;
+    }, `#/ZEC/${S}/3?twl=${encodeURIComponent(second)}`);
     await expectWordsTabWithRow(page, second);
     await expectRowInactive(page, first);
     expect(errors, errors.join("\n")).toEqual([]);
@@ -201,12 +207,12 @@ test.describe("retired flows routes (#173)", () => {
     const page = await context.newPage();
     const errors: string[] = [];
     page.on("pageerror", (e) => errors.push(e.message));
-    const res = await page.request.get("/api/chapters/ZEC/6");
+    const res = await page.request.get(`/api/chapters/ZEC/${S}`);
     expect(res.ok()).toBe(true);
     const { twl } = (await res.json()) as { twl: { id: string; verse: number }[] };
     const id = twl.filter((r) => r.verse === 15).at(-1)?.id;
-    expect(id, "seeded ZEC 6:15 has word links").toBeTruthy();
-    await page.goto("/#/ZEC/6/15");
+    expect(id, `seeded ZEC ${S}:15 has word links`).toBeTruthy();
+    await page.goto(`/#/ZEC/${S}/15`);
     await expectLandmark(page, CLASSIC_NOTES);
     // Go to Words, then back to Notes, so the tab is a user choice, not the default.
     await page.getByRole("button", { name: /^TWLinks/ }).click();
@@ -218,9 +224,9 @@ test.describe("retired flows routes (#173)", () => {
     await expectLandmark(page, CLASSIC_NOTES);
     await expect(page.locator("h6").filter({ hasText: "TWLinks" })).toHaveCount(0);
     // Same book and verse, only ?twl= is added: no remount, no reload.
-    await page.evaluate((rowId) => {
-      location.hash = `#/ZEC/6/15?twl=${encodeURIComponent(rowId)}`;
-    }, id!);
+    await page.evaluate((hash) => {
+      location.hash = hash;
+    }, `#/ZEC/${S}/15?twl=${encodeURIComponent(id!)}`);
     await expectWordsTabWithRow(page, id!);
     await expect(row).toBeInViewport();
     expect(errors, errors.join("\n")).toEqual([]);
@@ -232,7 +238,7 @@ test.describe("retired flows routes (#173)", () => {
     const page = await context.newPage();
     const errors: string[] = [];
     page.on("pageerror", (e) => errors.push(e.message));
-    await page.goto("/#/ZEC/6/3?twl=%22%5D");
+    await page.goto(`/#/ZEC/${S}/3?twl=%22%5D`);
     await expectLandmark(page, h6("TWLinks"));
     await expect(page.locator("[data-word-id]").first()).toBeVisible();
     expect(errors, errors.join("\n")).toEqual([]);

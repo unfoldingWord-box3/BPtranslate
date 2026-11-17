@@ -12,6 +12,7 @@ import {
 } from "@playwright/test";
 import { closeTolerant, fetchChapter, mintToken, newUserContext } from "./helpers";
 import { RTL_FIXTURE } from "./global-setup";
+import { ZEC_CHAPTERS } from "./chapters";
 import { expectRtlPaint } from "./rtl-paint";
 
 // Honor BE_BASE_URL so the suite runs on a relocated port (mirrors s1/s8).
@@ -355,7 +356,7 @@ test.describe("RTL text direction on scripture surfaces (#293)", () => {
     const { context } = await newUserContext(browser, "rtl-classic");
     track(context);
     const page = await context.newPage();
-    await page.goto(`/#/${RTL_FIXTURE.book}/1`);
+    await page.goto(`/#/${RTL_FIXTURE.book}/${ZEC_CHAPTERS.readOnly.chapter}`);
 
     // The Hebrew original renders RTL by script (versionIsRtl("UHB") === true),
     // independent of the LTR project direction.
@@ -384,7 +385,7 @@ test.describe("RTL text direction on scripture surfaces (#293)", () => {
       }
     });
     const page = await context.newPage();
-    await page.goto(`/#/${RTL_FIXTURE.book}/1`);
+    await page.goto(`/#/${RTL_FIXTURE.book}/${ZEC_CHAPTERS.readOnly.chapter}`);
 
     // Assert on chapter 1 verse 1 — the top of the book, loaded immediately
     // (BookView lazy-loads later chapters via IntersectionObserver).

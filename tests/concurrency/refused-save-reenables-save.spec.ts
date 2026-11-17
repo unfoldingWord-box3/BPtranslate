@@ -1,5 +1,6 @@
 import { expect, test, request as apiRequest } from "@playwright/test";
 import { fetchChapter, gotoVerse, mintToken, newUserContext, noteTextarea } from "./helpers";
+import { ZEC_CHAPTERS } from "./chapters";
 
 // Honor BE_BASE_URL so the suite runs on a relocated port (mirrors s8).
 const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
@@ -14,7 +15,7 @@ const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
 // server; the second goes through to a ZEC 12 tN row on the local server
 // (globalSetup re-imports ZEC each run). ZEC 12 is used because no other spec
 // writes to it.
-const CHAPTER = 12;
+const CHAPTER = ZEC_CHAPTERS.reenablesSave.chapter;
 
 interface NoteRow {
   id: string;

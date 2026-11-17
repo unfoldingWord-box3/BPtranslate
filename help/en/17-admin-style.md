@@ -3,7 +3,7 @@ id: admin-style
 title: Teaching the AI your style (admin)
 routes: [style]
 roles: [admin]
-keywords: [style, house style, rules, closing period, brief, audience, register, instructions, common issues, terminology, glossary, term, examples, few-shot, context pack, qa rules, ai, prompt, export, history, restore, undo, who changed, chat]
+keywords: [style, house style, rules, lessons, learning, corrections, closing period, brief, audience, register, instructions, common issues, terminology, glossary, term, examples, few-shot, context pack, qa rules, ai, prompt, export, history, restore, undo, who changed, chat]
 screenshots:
   - admin-style-1 #/admin/style
 ---
@@ -15,13 +15,13 @@ screenshots:
 The bar at the top shows the state of the context pack, for example **Context pack ready**, with counts of terms and examples. **Export now** builds a new pack. The switch **Project mode** shows whether the project is in translation or authoring mode. The sections below apply to translation projects only. In other projects the page says so.
 
 ## Fill in the sections
-Use the list on the left to jump to a section. After you change a section, press **Save**.
+Use the list on the left to jump to a section. After you change a section, press **Save**. Until you do, the text you typed in **Brief**, **Instructions** or **Common issues** is kept in this browser, even if you reload the page, and is counted as unsaved at the top of the page.
 
 - **Brief:** fill in **Audience**, **Purpose**, **Register** and **Script / direction notes**. Register is how formal the drafts should be: **Default (auto)**, **Formal** or **Informal**.
 - **Instructions:** free text (Markdown) added to every AI drafting and checking request. Use **Preview** to see how it looks.
 - **Common issues:** free text about problems that reviewers flag again and again.
 - **Terminology:** your decisions about terms. You can give a preferred rendering, mark a term as forbidden with what to use instead, or mark it do-not-translate. This section can also import and export a CSV file. Deleting a term shows **Term deleted** with **Undo** for a few seconds; click **Undo** to bring the same term back. If the project has since gained the same term, or someone changed it, the term stays deleted and a message says why. If the server could not be reached, the message says **Try again** and **Undo** stays available.
-- **Examples:** notes and questions that were approved in the editor. The AI sees them as models of good work. Switch between **Notes** and **Questions**. Press **Revoke** to remove an example. Revoking returns the item to the edited state.
+- **Examples:** notes and questions that were approved in the editor one at a time, or checked and approved in **Rapid check**. The AI sees them as models of good work. AI drafts nobody changed that were approved with **Approve all notes** or **Approve all questions**, and items approved by an admin's review-state change, are not examples. Approvals made with Approve all before this change still count. Switch between **Notes** and **Questions**. Press **Revoke** to remove an example. Revoking returns the item to the edited state.
 - **QA rules** and **Templates:** QA rules are listed with **Coming soon**. **Templates** shows how many note templates are translated. Press **Open template curation →** to work on them (see [Note templates](#help:admin-templates)).
 
 ## House style: fixes made to AI drafts
@@ -37,6 +37,31 @@ Use the list on the left to jump to a section. After you change a section, press
 
 You cannot add or edit rules on this page. New rules are added by the development team, or by approving a card in the suggestion inbox.
 
+## Lessons: what the AI learns from editor corrections
+**Lessons** is a short list the AI is given with every new draft. Each night, the app reads what editors changed in the AI drafts they approved and writes the list from those changes. Each lesson says what to do, with one example (**AI wrote** and **Editor wrote**) and the number of notes it was seen in.
+
+Lessons are **Off** for every project until an admin turns them on. While they are off, the page says so: the AI is NOT learning from editor corrections, and new drafts get only the sections above. Turn lessons on when your editors have approved enough notes, for example after a few weeks of work.
+
+- On a night with new approvals, the app compares the AI draft with the approved note for the notes that count as examples (see **Examples** above), in the 2 most recently approved chapters, plus any chapter an earlier stopped run left waiting. If there are more notes than it can compare in one night, the next night finishes the same chapters first, even if editors have moved on to other chapters, and the newest chapters come after that.
+- The app calls your AI service once on a night that found corrections to learn from. Your project's AI account pays for it. The page shows the last run, what happened, and about what it cost. A night that finds no corrections makes no call. A night with no new approvals makes no call either, unless an earlier night failed or did not finish its notes: then the app tries again, and after a run that ran out of time that can still happen two nights later. If a run is cut off part-way, a later run the same night can start it again, which can cost a second call.
+- Lessons need Claude or Gemini in **AI service**. With another provider the page says **Not available with your AI provider**, and lessons cannot be turned on.
+- A lesson stays until editors start changing its words back, or until you delete it. A lesson that works makes its correction rarer, and that does not remove it.
+- A new lesson that only repeats a term, a template, the instructions or the common issues is left out. At most 25 lessons are kept.
+- In Arabic, writing or leaving out the vowel on a shadda (أنَّ or أنّ) is a choice, not an error, so it never becomes a lesson.
+- When a night changes the wording or examples of the lessons, the app exports the context pack again, and the AI gets the new lessons from then on. When you turn lessons off, the next export leaves them out. The list is kept.
+
+### Pin, delete, or move a lesson to Common issues
+Each lesson has three buttons. Each change is saved as a new version of the list, and the context pack is exported again so the AI gets the new list.
+
+- **Pin** keeps the lesson, word for word, every night. A night cannot reword it, remove it as reversed, or drop it to make room. **Unpin** lets nights change it again.
+- **Delete** removes the lesson. A night does not bring it back from the notes it was learned from. It comes back only if editors make the same correction again in notes approved after you deleted it.
+- **Move to Common issues** adds the lesson and its example to the end of **Common issues** (above) and removes it from the list. As with Delete, a night does not write it back from the same notes. The change to Common issues shows in its **History** like any other save. While Common issues has unsaved changes, this button waits until you save or undo them.
+
+If a night's run is in progress, or someone else changed the list after you opened the page, the page says so and shows the current list. Try again.
+
+### Restore an earlier list
+Under **Earlier versions of this list**, the 20 newest versions are shown, each with its date and number of lessons. A new version is saved each night the list is written and each time you change it here. Older versions are kept but not shown, so they cannot be restored from this page. **Restore** makes that version the current list again. The list you had stays in the history, so you can restore it too. A restored lesson is a current lesson again, even one you had deleted or moved to Common issues. A restore does not change Common issues: a line a lesson added there stays.
+
 ## See who changed the preferences, and undo a change
 Every save of **Brief**, **Instructions** and **Common issues** is kept, whether it was made here or by the chat assistant. Press **History** above the Brief section to see the list, newest first.
 - Each version shows who saved it and when, and whether it came from the **Web app** or the **Chat assistant**.
@@ -46,7 +71,7 @@ Every save of **Brief**, **Instructions** and **Common issues** is kept, whether
 To put an earlier version back:
 1. Press **History**.
 2. Find the version you want and press **Restore**.
-3. Read the message and press **Restore** again. Text you have typed on the page but not saved is replaced.
+3. Read the message and press **Restore** again. Text you have typed on the page but not saved stays in its box, still unsaved. If the restore changed that section, your first **Save** there says someone else saved first: press **Save** again to keep your text.
 
 The restore is saved as a new version, so you can undo it the same way. The list starts from the day this history was turned on. Saves made before then are not listed. If the preferences were already saved before that day, the end of the list (once you have loaded all of it) offers the version **As it was before the earliest recorded change**.
 

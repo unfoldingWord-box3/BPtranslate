@@ -9,6 +9,9 @@ import {
   noteTextarea,
   waitForServerNote,
 } from "./helpers";
+import { ZEC_CHAPTERS } from "./chapters";
+
+const CHAPTER = ZEC_CHAPTERS.shared.chapter;
 
 const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
 
@@ -73,9 +76,9 @@ test("an edit queued offline before the fallback flag lands still flushes after 
   test.setTimeout(90_000);
   const probe = await apiRequest.newContext({ baseURL: BASE });
   const probeAuth = await mintToken(probe, "probe");
-  const chapter = await fetchChapter(probe, probeAuth.token, "ZEC", 6);
+  const chapter = await fetchChapter(probe, probeAuth.token, "ZEC", CHAPTER);
   const target = chapter.tn.find((r) => r.verse === 2) ?? chapter.tn.find((r) => r.verse === 1);
-  expect(target, "expected a TN row on ZEC 6 in the seed").toBeTruthy();
+  expect(target, `expected a TN row on ZEC ${CHAPTER} in the seed`).toBeTruthy();
   await probe.dispose();
 
   const { context } = await newUserContext(browser, "alice");
@@ -98,7 +101,7 @@ test("an edit queued offline before the fallback flag lands still flushes after 
   // The server's fallback answer arrives AFTER the outbox already opened (on
   // main, boot then wrote the flag "1" that renamed the next session's outbox).
   const me = page1.waitForResponse((r) => r.url().includes("/api/auth/me") && r.ok());
-  await gotoVerse(page1, "ZEC", 6, target!.verse);
+  await gotoVerse(page1, "ZEC", CHAPTER, target!.verse);
   expect((await (await me).json()).workspaceIsFallback).toBe(true);
 
   await context.setOffline(true);
@@ -124,13 +127,13 @@ test("an edit queued offline before the fallback flag lands still flushes after 
 
   const side = await apiRequest.newContext({ baseURL: BASE });
   const sideAuth = await mintToken(side, "verifier");
-  const before = await fetchChapter(side, sideAuth.token, "ZEC", 6);
+  const before = await fetchChapter(side, sideAuth.token, "ZEC", CHAPTER);
   expect(before.tn.find((r) => r.id === target!.id)?.note ?? "").not.toBe(offlineText);
 
   // ── Session 2: flag is "1"; on main this session opened the unsuffixed
   // outbox and never saw the op. ──
   const page2 = await context.newPage();
-  await gotoVerse(page2, "ZEC", 6, target!.verse);
+  await gotoVerse(page2, "ZEC", CHAPTER, target!.verse);
 
   const final = await waitForServerNote(
     side,
@@ -215,9 +218,9 @@ for (const legacy of ["bible-editor-outbox"]) {
     test.setTimeout(90_000);
     const probe = await apiRequest.newContext({ baseURL: BASE });
     const probeAuth = await mintToken(probe, "probe");
-    const chapter = await fetchChapter(probe, probeAuth.token, "ZEC", 6);
+    const chapter = await fetchChapter(probe, probeAuth.token, "ZEC", CHAPTER);
     const target = chapter.tn.find((r) => r.verse === 3) ?? chapter.tn.find((r) => r.verse === 1);
-    expect(target, "expected a TN row on ZEC 6 in the seed").toBeTruthy();
+    expect(target, `expected a TN row on ZEC ${CHAPTER} in the seed`).toBeTruthy();
     await probe.dispose();
 
     const { context } = await newUserContext(browser, "alice");
@@ -232,7 +235,7 @@ for (const legacy of ["bible-editor-outbox"]) {
     // ── Session 1: queue offline, then move the op into the legacy DB, as
     // if an older build had queued it there. ──
     const page1 = await context.newPage();
-    await gotoVerse(page1, "ZEC", 6, target!.verse);
+    await gotoVerse(page1, "ZEC", CHAPTER, target!.verse);
     await context.setOffline(true);
     const offlineText = `LEGACY alice ${legacy} ${Date.now()}`;
     await noteTextarea(page1, target!.id).fill(offlineText);
@@ -252,7 +255,7 @@ for (const legacy of ["bible-editor-outbox"]) {
     // ── Session 2: /api/auth/me confirms bsoj is the fallback; adoption moves
     // the op into bible-editor-outbox-bsoj and the drain sends it. ──
     const page2 = await context.newPage();
-    await gotoVerse(page2, "ZEC", 6, target!.verse);
+    await gotoVerse(page2, "ZEC", CHAPTER, target!.verse);
     const final = await waitForServerNote(
       side,
       sideAuth.token,
@@ -387,9 +390,9 @@ for (const { name, holdMs, adoptedOnFirstBoot } of [
     test.setTimeout(90_000);
     const probe = await apiRequest.newContext({ baseURL: BASE });
     const probeAuth = await mintToken(probe, "probe");
-    const chapter = await fetchChapter(probe, probeAuth.token, "ZEC", 6);
+    const chapter = await fetchChapter(probe, probeAuth.token, "ZEC", CHAPTER);
     const row = chapter.tn.find((r) => r.verse === 4) ?? chapter.tn.find((r) => r.verse === 1);
-    expect(row, "expected a TN row on ZEC 6 in the seed").toBeTruthy();
+    expect(row, `expected a TN row on ZEC ${CHAPTER} in the seed`).toBeTruthy();
     await probe.dispose();
 
     const { context } = await newUserContext(browser, "alice");
@@ -411,7 +414,7 @@ for (const { name, holdMs, adoptedOnFirstBoot } of [
     await holdAdoptLock(holder, holdMs);
 
     const page = await context.newPage();
-    await gotoVerse(page, "ZEC", 6, row!.verse);
+    await gotoVerse(page, "ZEC", CHAPTER, row!.verse);
     const textarea = noteTextarea(page, row!.id);
 
     if (adoptedOnFirstBoot) {
@@ -450,9 +453,9 @@ test("legacy draft: a draft adoption would keep does not hold the boot (#579)", 
   test.setTimeout(90_000);
   const probe = await apiRequest.newContext({ baseURL: BASE });
   const probeAuth = await mintToken(probe, "probe");
-  const chapter = await fetchChapter(probe, probeAuth.token, "ZEC", 6);
+  const chapter = await fetchChapter(probe, probeAuth.token, "ZEC", CHAPTER);
   const row = chapter.tn.find((r) => r.verse === 4) ?? chapter.tn.find((r) => r.verse === 1);
-  expect(row, "expected a TN row on ZEC 6 in the seed").toBeTruthy();
+  expect(row, `expected a TN row on ZEC ${CHAPTER} in the seed`).toBeTruthy();
   await probe.dispose();
 
   const { context } = await newUserContext(browser, "alice");
@@ -489,7 +492,7 @@ test("legacy draft: a draft adoption would keep does not hold the boot (#579)", 
       await holder.waitForTimeout(100);
     }
   })();
-  await gotoVerse(page, "ZEC", 6, row!.verse);
+  await gotoVerse(page, "ZEC", CHAPTER, row!.verse);
   await expect(textarea).toHaveValue(liveText, { timeout: 15_000 });
   booted = true;
   await watch;

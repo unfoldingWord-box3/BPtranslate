@@ -32,12 +32,12 @@ import { useTranslation } from "react-i18next";
 import {
   api,
   ApiError,
+  currentUserId,
   isAdmin,
   isReadOnly,
   REGISTERS,
   type LanePublicState,
   type Register,
-  type TranslationPrefs,
   type ProjectConfig,
   type Role,
   type LaneReplacementJobResponse,
@@ -53,7 +53,18 @@ import {
   useExamples,
   useContextExportStatus,
 } from "../hooks/useTranslationMemory";
-import { currentPrefsFromConflict } from "../sync/prefsConflict";
+import { prefsConflictRow } from "../sync/prefsConflict";
+import {
+  briefFields,
+  commonIssuesFields,
+  instructionsFields,
+  prefsDraftKey,
+  prefsOwnDraftKey,
+  prefsRestorable,
+} from "../sync/prefsDraft";
+import { drafts } from "../sync/drafts";
+import { usePrefsDraft } from "../hooks/usePrefsDraft";
+import { useUnsavedGuard } from "../hooks/useUnsavedGuard";
 import { bookName } from "../lib/bookNames";
 import { MarkdownView } from "./MarkdownView";
 import { PrefsHistoryButton } from "./PrefsHistoryDialog";
@@ -63,6 +74,7 @@ import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 import { UserManagementSection } from "./UserManagementSection";
 import { AiServiceSection } from "./AiServiceSection";
 import { HouseStyleRulesSection } from "./HouseStyleRulesSection";
+import { LessonsSection } from "./LessonsSection";
 import { UiLanguageControl } from "./TopBar";
 import { LocalizationSection } from "./LocalizationSection";
 import { TerminologySection } from "./TerminologySection";
@@ -117,16 +129,17 @@ export type Section =
   | "localization"
   | "users"
   | "aiService"
-  | "houseStyle";
+  | "houseStyle"
+  | "lessons";
 // Memory sections shown in the rail when a translation project + memory are
-// available. "setup", "localization", "users", "aiService" and "houseStyle" are
+// available. "setup", "localization", "users", "aiService", "houseStyle" and "lessons" are
 // admin-only and gated separately (they must show regardless of project type /
 // memory), so they aren't listed.
 export const SECTIONS: Section[] = ["brief", "instructions", "commonIssues", "terminology", "examples"];
 // Every routable section (memory + the admin-only setup wizard, localization
-// editor, user management, AI service config and house-style rules) — used for
+// editor, user management, AI service config, house-style rules and lessons) — used for
 // hash-route validation in App.tsx.
-export const ALL_SECTIONS: Section[] = [...SECTIONS, "setup", "localization", "users", "aiService", "houseStyle"];
+export const ALL_SECTIONS: Section[] = [...SECTIONS, "setup", "localization", "users", "aiService", "houseStyle", "lessons"];
 
 // Memory is now one long scrollable page; the rail items and deep links jump to
 // a section by scrolling its wrapper (id `pref-sec-<key>`) into view rather than
@@ -155,8 +168,47 @@ export function PreferencesWorkspace({ onNavigate, onBack, section, role }: Prop
   // self-409s on its very next save.
   const prefsState = useTranslationPrefs(memoryAvailable);
   // Bumped by a restore from the preferences history (#788) to remount the
-  // seed-once prefs sections.
+  // prefs sections: one with nothing typed shows the restored text, one with
+  // typing gets its draft back (#909).
   const [prefsGen, setPrefsGen] = useState(0);
+  // Only an admin's prefs save is accepted, so only an admin's typing is kept
+  // as a draft (#909 gate review H2).
+  const canSavePrefs = role === "admin" && memoryAvailable;
+  // The prefs sections keep unsaved typing in the drafts store (#909). `false`:
+  // this page holds no unsaved state outside that store; the guard still warns
+  // before a reload or tab close while any draft is stored or still being
+  // written (useUnsavedGuard), like the desk Style page.
+  useUnsavedGuard(false);
+  // Lessons is its own view here, so the Common issues editor is not mounted
+  // next to it. A stored Common issues draft (one exists only while text is
+  // typed and unsaved, in any tab) blocks "Move to Common issues", as the desk
+  // page's mounted editor does: the move would otherwise come back under that
+  // draft and a "save again" would erase the moved line (gate review H6).
+  // Only this user's own (or an ownerless) draft, the one their editor would
+  // restore: another admin's typing on a shared browser is not shown to them
+  // (#928).
+  const [commonIssuesDraft, setCommonIssuesDraft] = useState(false);
+  useEffect(
+    () =>
+      drafts.subscribe(
+        (all) => {
+          const uid = currentUserId();
+          const at = (k: string) => all.find((d) => d.key === k);
+          const own = uid != null ? at(prefsOwnDraftKey("common_issues_md", uid)) : undefined;
+          const rec = prefsRestorable(own, at(prefsDraftKey("common_issues_md")), uid);
+          setCommonIssuesDraft(!!rec && !rec.quarantined);
+        },
+        { remote: true },
+      ),
+    [],
+  );
+  // The subscription above lands a moment after the store changes, so a move
+  // clicked straight after typing re-reads the store first (round 2, J3).
+  const commonIssuesDraftNow = async () => {
+    const uid = currentUserId();
+    const own = uid != null ? await drafts.get(prefsOwnDraftKey("common_issues_md", uid)) : undefined;
+    return !!prefsRestorable(own, await drafts.get(prefsDraftKey("common_issues_md")), uid);
+  };
 
   // Deep-link / rail-driven anchor scroll: when the routed section is a memory
   // section and the long page is available, scroll it into view. Runs on mount
@@ -322,6 +374,25 @@ export function PreferencesWorkspace({ onNavigate, onBack, section, role }: Prop
               </Typography>
             </Box>
           )}
+          {role === "admin" && (
+            <Box
+              onClick={() => onNavigate("lessons")}
+              sx={{
+                px: 1.5,
+                py: 0.9,
+                cursor: "pointer",
+                borderInlineStart: "3px solid",
+                borderColor: section === "lessons" ? "primary.main" : "transparent",
+                bgcolor:
+                  section === "lessons" ? (theme) => alpha(theme.palette.primary.main, 0.08) : "transparent",
+                "&:hover": { bgcolor: "action.hover" },
+              }}
+            >
+              <Typography variant="body2" sx={{ fontWeight: section === "lessons" ? 700 : 400 }}>
+                {t("preferences.section.lessons")}
+              </Typography>
+            </Box>
+          )}
         </Box>
       </Box>
 
@@ -348,6 +419,15 @@ export function PreferencesWorkspace({ onNavigate, onBack, section, role }: Prop
             <AiServiceSection />
           ) : section === "houseStyle" && role === "admin" ? (
             <HouseStyleRulesSection />
+          ) : section === "lessons" && role === "admin" ? (
+            <LessonsSection
+              promoteBlocked={commonIssuesDraft}
+              promoteBlockedNow={commonIssuesDraftNow}
+              onPrefsChanged={(p) => {
+                prefsState.apply(p);
+                setPrefsGen((g) => g + 1);
+              }}
+            />
           ) : cfg === null ? null : !isTranslation ? (
             <Alert severity="info" variant="outlined">
               {t("preferences.glOnly")}
@@ -377,13 +457,13 @@ export function PreferencesWorkspace({ onNavigate, onBack, section, role }: Prop
                 )}
                 {/* Keyed by prefsGen: these sections seed their text once, so a
                     restore remounts them to show (and save on top of) it. */}
-                <BriefSection key={`brief-${prefsGen}`} prefsState={prefsState} />
+                <BriefSection key={`brief-${prefsGen}`} prefsState={prefsState} canSave={canSavePrefs} />
               </Box>
               <Box id="pref-sec-instructions" sx={{ scrollMarginTop: "16px" }}>
-                <InstructionsSection key={`instructions-${prefsGen}`} prefsState={prefsState} />
+                <InstructionsSection key={`instructions-${prefsGen}`} prefsState={prefsState} canSave={canSavePrefs} />
               </Box>
               <Box id="pref-sec-commonIssues" sx={{ scrollMarginTop: "16px" }}>
-                <CommonIssuesSection key={`commonIssues-${prefsGen}`} prefsState={prefsState} />
+                <CommonIssuesSection key={`commonIssues-${prefsGen}`} prefsState={prefsState} canSave={canSavePrefs} />
               </Box>
               <Box id="pref-sec-terminology" sx={{ scrollMarginTop: "16px" }}>
                 <TerminologySection direction={cfg?.direction ?? "ltr"} />
@@ -1113,46 +1193,51 @@ function ContextPackStatusControls() {
 type PrefsState = ReturnType<typeof useTranslationPrefs>;
 
 // ── Brief ──────────────────────────────────────────────────────────────────
-function BriefSection({ prefsState }: { prefsState: PrefsState }) {
+function BriefSection({ prefsState, canSave }: { prefsState: PrefsState; canSave: boolean }) {
   const { t } = useTranslation();
-  const { prefs, loading, apply, refetch } = prefsState;
-  const [draft, setDraft] = useState<TranslationPrefs | null>(() => prefs);
+  const { prefs, loading, apply, applyConflict, refetch } = prefsState;
+  // Unsaved typing lives in the drafts store, shared with the desk Style
+  // page's Brief (#909): a remount (history restore) or reload restores it. A
+  // sibling section's save (the server partial-merges) does not touch it, and
+  // a save is refused with 409 when Brief's own fields changed on the server
+  // since the typing started (prefsDraft.ts).
+  const prefsDraft = usePrefsDraft("brief", prefs, briefFields, canSave);
+  const draft = prefsDraft.text;
+  const setDraft = prefsDraft.change;
   const save = useSaveState();
 
-  // Seed once: a sibling section's save PUTs only its own fields (the server
-  // partial-merges), so it can't change anything Brief owns. If this re-seeded
-  // on every `prefs` change, a sibling's save (which also updates `prefs` via
-  // apply()) would silently overwrite whatever the user is still typing here.
-  // Seeded during render once prefs arrive, when they weren't loaded at mount.
-  if (draft === null && prefs) setDraft(prefs);
-
   const onSave = async () => {
-    if (!draft || !prefs) return;
+    const plan = prefsDraft.toSave();
+    if (!plan) return;
+    // Typed boxes, and the server's value for the rest (prefsSavePayload).
+    const f = plan.fields;
     save.setSaving(true);
     try {
-      const res = await api.putTranslationPrefs(prefs.version, {
-        audience: draft.audience,
-        purpose: draft.purpose,
-        register: draft.register,
-        script_notes: draft.script_notes,
-        notes: draft.notes,
+      const res = await api.putTranslationPrefs(plan.version, {
+        audience: f.audience,
+        purpose: f.purpose,
+        register: f.register as Register,
+        script_notes: f.script_notes,
+        notes: f.notes,
         // brief section doesn't own instructions/assisted — omit so the server
         // merges the existing values.
       });
       apply(res.prefs);
+      prefsDraft.saved(res.prefs);
       save.setMsg(t("preferences.saved"));
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
         // Someone else saved first (another section, or another admin).
         // Adopt the server's fresh row directly from the 409 body so the
         // next save has the right If-Match; fall back to a refetch only if
-        // the body didn't carry one. Our draft is left untouched — seed-once
-        // means this can't clobber unsaved typing, and a re-save only ever
-        // sends Brief's own fields, so it overwrites at most the concurrent
-        // change to THOSE fields.
-        const current = currentPrefsFromConflict(e.body);
-        if (current) apply(current);
-        else refetch();
+        // the body didn't carry one. Typed text is kept and rebased on that
+        // row (prefsDraft.conflicted), so a re-save sends it; a re-save only
+        // ever sends Brief's own fields.
+        const current = await prefsConflictRow(e.body, () => api.getTranslationPrefs().then((r) => r.prefs));
+        if (current) {
+          applyConflict(current, plan.version);
+          prefsDraft.conflicted(current, plan.version);
+        } else refetch();
         save.setMsg(t("preferences.conflictKeptEdits"));
       } else if (e instanceof ApiError && e.status === 403) {
         save.setMsg(t("preferences.saveForbidden"));
@@ -1235,6 +1320,7 @@ function MarkdownPrefSection({
   placeholderKey,
   maxChars,
   prefsState,
+  canSave,
 }: {
   field: "instructions_md" | "common_issues_md";
   titleKey: string;
@@ -1242,41 +1328,48 @@ function MarkdownPrefSection({
   placeholderKey: string;
   maxChars: number;
   prefsState: PrefsState;
+  /** Admin in a translation project: only then are drafts kept (#909). */
+  canSave: boolean;
 }) {
   const { t } = useTranslation();
-  const { prefs, error, apply, refetch } = prefsState;
-  // null = not yet seeded from `prefs` (loading gate below); seeded once so a
-  // sibling section's save (which also updates `prefs` via apply()) can't
-  // reset text the user is mid-typing here.
-  const [value, setValue] = useState<string | null>(() => (prefs ? (prefs[field] ?? "") : null));
+  const { prefs, error, apply, applyConflict, refetch } = prefsState;
+  // Unsaved typing lives in the drafts store, shared with the desk Style
+  // page's editor for the same field (#909), so a remount or reload restores
+  // it and a sibling section's save cannot reset it. null = not yet read
+  // (loading gate below): never "" over saved content, or a Save from that
+  // state would silently null the field on the server.
+  const prefsDraft = usePrefsDraft(
+    field,
+    prefs,
+    field === "instructions_md" ? instructionsFields : commonIssuesFields,
+    canSave,
+  );
+  const value = prefsDraft.text ? (prefsDraft.text[field] ?? "") : null;
+  const setValue = (v: string) => prefsDraft.change({ [field]: v });
   const [preview, setPreview] = useState(false);
   const save = useSaveState();
-
-  // Seed ONLY once prefs actually loaded (during render when they weren't
-  // loaded at mount). Without the `prefs` gate this would coalesce the initial
-  // null prefs into "" on mount — the editor would render empty instead of the
-  // saved content, and a Save from that state would silently null the field
-  // on the server.
-  if (value === null && prefs) setValue(prefs[field] ?? "");
 
   const overLimit = (value ?? "").length > maxChars;
 
   const onSave = async () => {
-    if (!prefs || value === null) return;
+    const plan = prefsDraft.toSave();
+    if (!plan) return;
     save.setSaving(true);
     try {
-      const res = await api.putTranslationPrefs(prefs.version, { [field]: value || null });
+      const res = await api.putTranslationPrefs(plan.version, { [field]: plan.fields[field] || null });
       apply(res.prefs);
+      prefsDraft.saved(res.prefs);
       save.setMsg(t("preferences.saved"));
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
         // See BriefSection's onSave: adopt the server's fresh row from the
-        // conflict body rather than refetching, so this section's unsaved
-        // text (kept as-is; seed-once means it was never at risk) survives
-        // and the next save re-sends it against the right version.
-        const current = currentPrefsFromConflict(e.body);
-        if (current) apply(current);
-        else refetch();
+        // conflict body rather than refetching; typed text is kept and the
+        // next save re-sends it against that row's version.
+        const current = await prefsConflictRow(e.body, () => api.getTranslationPrefs().then((r) => r.prefs));
+        if (current) {
+          applyConflict(current, plan.version);
+          prefsDraft.conflicted(current, plan.version);
+        } else refetch();
         save.setMsg(t("preferences.conflictKeptEdits"));
       } else if (e instanceof ApiError && e.status === 403) {
         save.setMsg(t("preferences.saveForbidden"));
@@ -1346,7 +1439,7 @@ function MarkdownPrefSection({
   );
 }
 
-function InstructionsSection({ prefsState }: { prefsState: PrefsState }) {
+function InstructionsSection({ prefsState, canSave }: { prefsState: PrefsState; canSave: boolean }) {
   return (
     <MarkdownPrefSection
       field="instructions_md"
@@ -1355,11 +1448,12 @@ function InstructionsSection({ prefsState }: { prefsState: PrefsState }) {
       placeholderKey="preferences.instructionsPlaceholder"
       maxChars={20000}
       prefsState={prefsState}
+      canSave={canSave}
     />
   );
 }
 
-function CommonIssuesSection({ prefsState }: { prefsState: PrefsState }) {
+function CommonIssuesSection({ prefsState, canSave }: { prefsState: PrefsState; canSave: boolean }) {
   return (
     <MarkdownPrefSection
       field="common_issues_md"
@@ -1368,6 +1462,7 @@ function CommonIssuesSection({ prefsState }: { prefsState: PrefsState }) {
       placeholderKey="preferences.commonIssuesPlaceholder"
       maxChars={50000}
       prefsState={prefsState}
+      canSave={canSave}
     />
   );
 }

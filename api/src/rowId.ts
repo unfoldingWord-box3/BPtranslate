@@ -37,8 +37,8 @@ export function newRowId(): string {
 // collision with an existing id just means the insert's ON CONFLICT DO NOTHING
 // fires (the row isn't inserted this cycle) — never corruption or a duplicate.
 //
-// NOTE: this shares the low-bit-collapse defect described in deriveAltRowId
-// below — it too reaches only 96 distinct ids. Not fixed here on purpose:
+// NOTE: this has a low-bit-collapse defect (the FNV recurrence's low 5 bits
+// form a closed cycle) — it reaches only 96 distinct ids. Not fixed here on purpose:
 // coerceRowId's mapping must stay stable NIGHT TO NIGHT, so changing it would
 // remap every already-coerced id and make the reimport insert second copies.
 // Fixing it needs its own change with a migration story.
@@ -52,50 +52,6 @@ export function coerceRowId(id: string): string {
   for (let i = 0; i < 3; i++) {
     h = Math.imul(h, 16777619) >>> 0;
     out += ID_CHARS[h % ID_CHARS.length];
-  }
-  return out;
-}
-
-// Derive the Nth alternate id for a row whose preferred id is unavailable —
-// held by a tombstone (soft-deleted rows keep their `(book, id)` PK slot
-// forever) or by a live row belonging to a different chapter.
-//
-// Like coerceRowId and for the same reason, this MUST be pure + stable. When a
-// preferred id is unavailable it stays unavailable, so a re-run of the same
-// import walks the identical candidate chain, finds the row the previous run
-// created, and UPDATEs it. A random mint would instead insert a *second* copy
-// of the same row on every re-run — the AI-content duplication failure this
-// codebase has repeatedly had to clean up by hand.
-//
-// Same FNV-1a construction as coerceRowId, with the attempt folded into the
-// hash so successive attempts diverge. Unlike coerceRowId this is NOT a no-op
-// for a well-formed id: the caller has already established that the input id
-// cannot be used.
-export function deriveAltRowId(id: string, attempt: number): string {
-  let h = 2166136261 >>> 0;
-  for (let i = 0; i < id.length; i++) {
-    h = Math.imul(h ^ id.charCodeAt(i), 16777619) >>> 0;
-  }
-  h = Math.imul(h ^ (attempt + 1), 16777619) >>> 0;
-  // Each character is drawn from an AVALANCHED copy of the hash (xor-shift the
-  // high bits down before indexing), not from `h` directly. Bare
-  // `h = imul(h, PRIME); h % ID_CHARS.length` looks fine but collapses the
-  // output space: ID_CHARS.length is 32, and multiplication mod 2^32 leaves the
-  // low 5 bits a closed cycle (`low5 *= 19 mod 32`), so all three trailing
-  // characters would be a pure function of `h mod 32` — 96 reachable ids in
-  // total instead of 24*32^3. That is dense enough that two colliding
-  // proposals in one chapter can derive the SAME alternate id, at which point
-  // the second silently UPDATEs over the first. rowId.test.mjs asserts the
-  // reachable-output count so this can't regress unnoticed.
-  const mix = (x: number): number => {
-    x = Math.imul(x ^ (x >>> 15), 2246822507) >>> 0;
-    x = Math.imul(x ^ (x >>> 13), 3266489909) >>> 0;
-    return (x ^ (x >>> 16)) >>> 0;
-  };
-  let out = ID_LETTERS[mix(h) % ID_LETTERS.length];
-  for (let i = 0; i < 3; i++) {
-    h = Math.imul(h ^ (i + 1), 16777619) >>> 0;
-    out += ID_CHARS[mix(h) % ID_CHARS.length];
   }
   return out;
 }

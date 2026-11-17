@@ -1,5 +1,6 @@
 import { expect, test, type BrowserContext } from "@playwright/test";
 import { fetchChapter, newUserContext, type TnRow } from "./helpers";
+import { ZEC_CHAPTERS } from "./chapters";
 
 // Rapid check's room-making controls: hiding a scripture lane from its chip,
 // hiding the original-language quote column from its own header and bringing
@@ -14,7 +15,7 @@ import { fetchChapter, newUserContext, type TnRow } from "./helpers";
 // drafts store. So it opens ZEC 3 (the rapid check chapter) without writing.
 
 const BOOK = "ZEC";
-const CHAPTER = 3;
+const CHAPTER = ZEC_CHAPTERS.rapidCheck.chapter;
 
 test.describe.configure({ timeout: 120_000 });
 

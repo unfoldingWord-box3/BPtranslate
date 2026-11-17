@@ -200,8 +200,13 @@ export default function AdminReviewStateScreen({ role, me }: FlowScreenContext) 
   const errorText = (e: unknown) => {
     if (e instanceof ApiError) {
       if (e.status === 403) return t("adminPages.reviewState.errForbidden");
-      // An approve sweep over notes an AI translation is rewriting (issue #602).
-      if (isChapterLockedBody(e.body)) return t("adminPages.reviewState.errLockedByTranslate");
+      // An approve sweep over notes an AI translation is rewriting (issue #602),
+      // or over questions in a chapter an AI run holds (#752).
+      if (isChapterLockedBody(e.body)) {
+        return t(
+          resource === "tq" ? "adminPages.reviewState.errLockedQuestions" : "adminPages.reviewState.errLockedByTranslate",
+        );
+      }
       const code = (e.body as { error?: string } | undefined)?.error;
       return `${e.status} — ${code ?? t("adminPages.common.loadFailed")}`;
     }

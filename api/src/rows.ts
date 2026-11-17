@@ -509,6 +509,31 @@ rows.get("/:kind/:id/history", requireEditor, async (c) => {
   return c.json({ versions: displayVersions });
 });
 
+// The PATCH's refusal of a stale expected_state (#880): 409 with its own code,
+// so the client can tell it from version_mismatch, whose auto-heal would
+// resend the edit. Recorded in row_conflict_log like a version conflict.
+function stateMismatchResponse(
+  c: Context<{ Bindings: Env; Variables: { userId?: number } }>,
+  kind: RowKind,
+  id: string,
+  book: string,
+  expected: number,
+  fields: string[],
+  current: Record<string, unknown> & { version: number },
+) {
+  logRowConflict(c, {
+    kind,
+    rowId: id,
+    book,
+    action: "patch",
+    userId: currentUserId(c),
+    expectedVersion: expected,
+    fields,
+    current,
+  });
+  return c.json({ error: "state_mismatch", current }, 409);
+}
+
 // Single-row PATCH with optimistic concurrency. If-Match is mandatory and
 // the version check is enforced inside the UPDATE itself — a SELECT-then-
 // UPDATE pair would race between two concurrent writers, both seeing the
@@ -546,6 +571,31 @@ rows.patch("/:kind/:id", requireEditor, async (c) => {
     delete (body as Record<string, unknown>).restored_from_version;
   }
 
+  // expected_state (issue #880): the translation_state the caller saw. The
+  // edit lands only if the row is still in it; otherwise 409 state_mismatch.
+  // Approving does not bump `version`, so If-Match alone lets an edit demote a
+  // note approved since the caller looked. Absent = no check (typed edits);
+  // null = the row must still have no state. Only the Rapid check assistant's
+  // Apply sends it. tn/tq only (twl has no translation_state).
+  let statePin: { value: TranslationStatePin | null } | null = null;
+  if (body && typeof body === "object" && "expected_state" in body) {
+    const raw = (body as Record<string, unknown>).expected_state;
+    delete (body as Record<string, unknown>).expected_state;
+    if (kind === "twl" || (raw !== null && !(TRANSLATION_STATES as readonly unknown[]).includes(raw))) {
+      return c.json({ error: "invalid_body", message: "invalid expected_state" }, 400);
+    }
+    statePin = { value: raw as TranslationStatePin | null };
+  }
+  // A set-aside (trashed) tn note counts as moved too (#883 item 5): trashing
+  // does not bump the version either, and the content write below un-trashes
+  // the note, so a stale assistant edit would revive a note set aside since
+  // the proposal. The assistant is never sent set-aside notes, so a pin always
+  // means "not set aside". The UPDATE's WHERE carries the same check.
+  const stateMoved = (r: Record<string, unknown>) =>
+    statePin !== null &&
+    (((r.translation_state as string | null | undefined) ?? null) !== statePin.value ||
+      (kind === "tn" && r.trashed_at != null));
+
   const schema = PATCH_SCHEMA[kind];
   const parsed = schema.safeParse(body);
   if (!parsed.success) {
@@ -573,6 +623,14 @@ rows.patch("/:kind/:id", requireEditor, async (c) => {
       })
     | null;
   if (!current || current.deleted_at) return c.json({ error: "not_found" }, 404);
+
+  // A pinned state that no longer matches, at the version the caller saw. A
+  // moved version is left to the UPDATE below (version_mismatch, as before).
+  // Checked here too so the no-op and reorder paths below cannot return 200
+  // past it; the UPDATE's own clause covers an approval landing after this.
+  if (current.version === expected && stateMoved(current)) {
+    return stateMismatchResponse(c, kind, id, book, expected, Object.keys(patch), current);
+  }
 
   // Enforce the OL-quote occurrence invariant at the source. Only fires when
   // this patch actually touches the quote or occurrence — a reorder, note-only
@@ -847,6 +905,9 @@ rows.patch("/:kind/:id", requireEditor, async (c) => {
     id,
     expected,
     book,
+    // Bound only when the clause below references it (D1 rejects an
+    // unreferenced ?N). IS compares NULL as a value: a null pin means "no state".
+    ...(statePin ? [statePin.value] : []),
   ];
 
   // Atomic: the audit INSERT is conditional on the UPDATE matching, so a
@@ -864,7 +925,7 @@ rows.patch("/:kind/:id", requireEditor, async (c) => {
            SET ${setClauses.join(", ")}
          WHERE id = ?${baseParams + 4}
            AND version = ?${baseParams + 5}
-           AND deleted_at IS NULL${bookClause(baseParams + 6)}`,
+           AND deleted_at IS NULL${bookClause(baseParams + 6)}${statePin ? ` AND translation_state IS ?${baseParams + 7}${kind === "tn" ? " AND trashed_at IS NULL" : ""}` : ""}`,
       )
       .bind(...values),
     c.env.DB
@@ -885,6 +946,11 @@ rows.patch("/:kind/:id", requireEditor, async (c) => {
       .bind(id, book)
       .first<{ version: number; deleted_at: number | null }>();
     if (!fresh || fresh.deleted_at) return c.json({ error: "not_found" }, 404);
+    // The version held but the pinned state did not: an approval landed
+    // between the read above and this UPDATE.
+    if (fresh.version === expected && stateMoved(fresh)) {
+      return stateMismatchResponse(c, kind, id, book, expected, fields, fresh);
+    }
     logRowConflict(c, {
       kind,
       rowId: id,
@@ -1082,16 +1148,20 @@ function coerceBitValue(raw: 0 | 1 | boolean): 0 | 1 {
 // that put version and state back where they were (bpt_bulk_set_state, #670
 // part c). null = no check.
 // source: edit_log.source for the audit entry (editSource).
-// clearBulkStamp: an approval also ends a bulk approval (HAND_APPROVAL_CLAUSE).
-// The validate routes set it for a person approving one row; Approve-all loops
-// send `bulk: true` and the route leaves it off. Absent = false.
+// bulkStamp: what an approval does to admin_bulk_state (bulkStampClause).
+// "clear" for a person approving one row, "stamp" for an Approve-all loop
+// (`bulk: true`; stamps only an unchanged AI draft, see BULK_APPROVAL_CLAUSE),
+// "keep" when no person is on record. Absent = "keep".
+// An un-approve never touches the stamp.
 interface StateWriteOpts {
   expected: number | null;
   expectedState: TranslationStatePin | null;
   expectedUpdatedAt: number | null;
   source: "chat" | null;
-  clearBulkStamp?: boolean;
+  bulkStamp?: BulkStampMode;
 }
+
+type BulkStampMode = "stamp" | "clear" | "keep";
 
 const TRANSLATION_STATES = ["ai_draft", "edited", "validated"] as const;
 type TranslationStatePin = (typeof TRANSLATION_STATES)[number];
@@ -1128,16 +1198,40 @@ function statePins(opts: StateWriteOpts, first: number, trash: boolean): { sql: 
 // reimport without the stamp: isReimportableRow (reimportClassify.ts) never
 // lets the reimport overwrite a 'validated' row.
 //
-// Approve-all in the review UI is itself a bulk approver: it loops rows through
-// this route with `bulk: true`, which keeps any stamp. An approval with no
-// signed-in user also keeps it (no person is on record as having read the row).
+// Approve-all in the review queue and the classic editor is itself a bulk
+// approver (issue #833, option B: "if it seems pretty clear they've been seen,
+// go with it"). It loops rows through this route with `bulk: true`. An AI draft
+// nobody changed (state 'ai_draft' before the approval) was never clearly seen,
+// so the approval STAMPS it the way the admin sweep does (reviewState.ts
+// decision 3): the stamp holds the state the approval displaced ('ai_draft'),
+// and an existing stamp keeps its first value. An 'edited' row was changed by a
+// person, so it counts like a single approval and gets no new stamp; an
+// existing import/sweep stamp is left as it is, not cleared. A row that is
+// already 'validated' is left as it is too, so a stale Approve-all list cannot
+// turn a hand-approved example back into a bulk one.
+// Rapid check's checked-range Approve is a hand approval: each note sits on
+// screen beside its English source, and it sends no `bulk` flag. An approval
+// with no signed-in user keeps any stamp (no person is on record as having read
+// the row).
 const HAND_APPROVAL_CLAUSE = ", admin_bulk_state = NULL";
+const BULK_APPROVAL_CLAUSE =
+  ", admin_bulk_state = CASE WHEN translation_state = 'ai_draft'" +
+  " THEN COALESCE(admin_bulk_state, translation_state) ELSE admin_bulk_state END";
+
+// The admin_bulk_state SET clause for an approval. SQLite evaluates every SET
+// right-hand side against the row's ORIGINAL values, so translation_state here
+// is the state before the approval.
+function bulkStampClause(mode: BulkStampMode | undefined): string {
+  if (mode === "clear") return HAND_APPROVAL_CLAUSE;
+  if (mode === "stamp") return BULK_APPROVAL_CLAUSE;
+  return "";
+}
 
 // Set the translation_state on a target-language tN row (multilingual review
 // flow; PIPELINE-SPEC §4.1). Like setTnBit, this is a state flip, not a
 // content edit: it does NOT bump `version` (in-flight If-Match preconditions
 // stay valid) and leaves `updated_by` alone; a hand approval also clears a bulk
-// stamp (HAND_APPROVAL_CLAUSE). The audit action ('validate' |
+// stamp and an Approve-all approval sets one (bulkStampClause). The audit action ('validate' |
 // 'unvalidate') is written with source=NULL ('chat' when a chat reviewer
 // approved) — an explicit human approval is a human edit_log entry, which is
 // also what clears the 'ai_pipeline' chip. The
@@ -1163,7 +1257,7 @@ async function setTnTranslationState(
   // DCS as a legacy row. Un-approve leaves the snapshot in place (the once-
   // approved content keeps exporting — accepted, docs/plan Design 2).
   const snapshotClause = approve
-    ? ", pre_draft_json = json_object('note', note, 'tags', tags)" + (opts.clearBulkStamp ? HAND_APPROVAL_CLAUSE : "")
+    ? ", pre_draft_json = json_object('note', note, 'tags', tags)" + bulkStampClause(opts.bulkStamp)
     : "";
   // Only rows that are ALREADY translation drafts (state non-NULL) can be
   // validated/un-validated. Without this guard a validate on a row the
@@ -1200,7 +1294,7 @@ async function setTnTranslationState(
 
 // Set the translation_state on a target-language tQ row — the exact analogue of
 // setTnTranslationState (kind='tq'). State flip, not a content edit: does NOT
-// bump `version` and leaves `updated_by` alone; a hand approval clears a bulk stamp; audit source=NULL or 'chat'
+// bump `version` and leaves `updated_by` alone; a hand approval clears a bulk stamp and Approve-all sets one; audit source=NULL or 'chat'
 // (human approval, which also clears the 'ai_pipeline' chip). Guarded on
 // translation_state IS NOT NULL so a row the translate pipeline never touched
 // can't be validated.
@@ -1218,10 +1312,10 @@ async function setTqTranslationState(
   // tq_rows has no trashed_at: the state pin is the whole guard.
   const auditPins = statePins(opts, 6, false);
   const updatePins = statePins(opts, 5, false);
-  // Approval snapshots the now-published content and ends a bulk stamp — see
-  // setTnTranslationState.
+  // Approval snapshots the now-published content and clears or sets the bulk
+  // stamp — see setTnTranslationState.
   const snapshotClause = approve
-    ? ", pre_draft_json = json_object('question', question, 'response', response)" + (opts.clearBulkStamp ? HAND_APPROVAL_CLAUSE : "")
+    ? ", pre_draft_json = json_object('question', question, 'response', response)" + bulkStampClause(opts.bulkStamp)
     : "";
   // Audit INSERT first, so a state pin sees the row before the UPDATE changes
   // it — see setTnTranslationState.
@@ -1349,8 +1443,10 @@ rows.post("/tn/:id/preserve", requireEditor, async (c) => {
 });
 
 // POST /api/rows/tn/:id/hint — toggle the "queue as AI-pipeline hint" bit.
-// hint=1 rows are sent into the next /api/pipelines/start as options.hints
-// and are excluded from deleteUnkeptTns; AI expansion clears the bit.
+// hint=1 rows used to be sent into a notes run as options.hints and expanded by
+// its apply; the notes pipeline is retired (#726), so no AI run reads the bit
+// any more. The book reimport still treats hint=1 rows as kept (its hint = 0
+// guards in bookReimport.ts).
 rows.post("/tn/:id/hint", requireEditor, async (c) => {
   const id = c.req.param("id");
   const book = c.req.query("book");
@@ -1432,12 +1528,19 @@ async function stateWriteMiss(c: Context<{ Bindings: Env; Variables: { userId?: 
 // The validate body: TnBitBody plus the state (and updated_at) the reviewer
 // saw. Validate-only, so /preserve and /hint keep their exact shape.
 // bulk: sent by the web's Approve-all loops. Approve-all is itself a bulk
-// approver, so it keeps admin_bulk_state (#414); see HAND_APPROVAL_CLAUSE.
+// approver, so it stamps admin_bulk_state on an AI draft nobody changed (#833)
+// and keeps any existing stamp (#414); see BULK_APPROVAL_CLAUSE.
 const ValidateBody = TnBitBody.extend({
   expected_state: z.enum(TRANSLATION_STATES).optional(),
   expected_updated_at: z.number().int().nonnegative().optional(),
   bulk: z.boolean().optional(),
 });
+
+// What a validate request does to admin_bulk_state when it approves.
+function validateBulkStamp(bulk: boolean | undefined, userId: number | null): BulkStampMode {
+  if (bulk === true) return "stamp";
+  return userId != null ? "clear" : "keep";
+}
 
 // POST /api/rows/tn/:id/validate — the translation-mode "Approve" action.
 // Body: { value: 0 | 1 | boolean, expected_state? } (1 → validated, 0 → back
@@ -1478,7 +1581,7 @@ rows.post("/tn/:id/validate", requireEditor, async (c) => {
     expectedState: parsed.data.expected_state ?? null,
     expectedUpdatedAt: parsed.data.expected_updated_at ?? null,
     source: editSource(c),
-    clearBulkStamp: parsed.data.bulk !== true && userId != null,
+    bulkStamp: validateBulkStamp(parsed.data.bulk, userId),
   };
   // Only approving is refused during a translate run: the apply would undo it.
   // Un-approve ("Revoke example") is let through — the apply resets the row to
@@ -1495,10 +1598,27 @@ rows.post("/tn/:id/validate", requireEditor, async (c) => {
   return c.json(updated);
 });
 
+// The run, if any, holding this tq row's chapter: the same rule as PATCH
+// /tq/:id (activePipelineForChapter). Approve checks it (#752). An unknown row
+// returns null so the route still answers 404.
+async function chapterLockForTqId(env: Env, id: string, book: string) {
+  const row = await env.DB.prepare(
+    `SELECT book, chapter FROM tq_rows WHERE id = ?1 AND deleted_at IS NULL${bookClause(2)}`,
+  )
+    .bind(id, book)
+    .first<{ book: string; chapter: number }>();
+  if (!row) return null;
+  return activePipelineForChapter(env, row.book, row.chapter);
+}
+
 // POST /api/rows/tq/:id/validate — the translationQuestions "Approve" action,
 // the exact analogue of /tn/:id/validate. Body: { value: 0 | 1 | boolean,
 // expected_state?, expected_updated_at? } (1 → validated, 0 → back to edited);
-// If-Match, expected_state and expected_updated_at pin as there. Lock-exempt, non-version-bumping.
+// If-Match, expected_state and expected_updated_at pin as there. Non-version-
+// bumping. Approving (value=1) is refused (409 chapter_locked) while any AI run
+// holds the question's chapter (#752), since applyTranslateTqRow resets
+// translation_state to ai_draft and the version CAS cannot see an approve.
+// Un-approve stays allowed, as for notes.
 rows.post("/tq/:id/validate", requireEditor, async (c) => {
   const id = c.req.param("id");
   const book = c.req.query("book");
@@ -1523,8 +1643,12 @@ rows.post("/tq/:id/validate", requireEditor, async (c) => {
     expectedState: parsed.data.expected_state ?? null,
     expectedUpdatedAt: parsed.data.expected_updated_at ?? null,
     source: editSource(c),
-    clearBulkStamp: parsed.data.bulk !== true && userId != null,
+    bulkStamp: validateBulkStamp(parsed.data.bulk, userId),
   };
+  if (nextState === "validated") {
+    const lock = await chapterLockForTqId(c.env, id, book);
+    if (lock) return c.json(lockedResponseBody(lock), 409);
+  }
   const updated = await setTqTranslationState(c.env, id, book, userId, nextState, pins);
   if (!updated) return stateWriteMiss(c, "tq", id, book, pins);
   c.executionCtx.waitUntil(

@@ -492,12 +492,38 @@ export const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta
 
 export type GeminiThinkingConfig = { thinkingLevel: string } | { thinkingBudget: number };
 export type GeminiGenerationConfig = { maxOutputTokens: number; thinkingConfig?: GeminiThinkingConfig };
+export type GeminiSafetySetting = {
+  category:
+    | "HARM_CATEGORY_HARASSMENT"
+    | "HARM_CATEGORY_HATE_SPEECH"
+    | "HARM_CATEGORY_SEXUALLY_EXPLICIT"
+    | "HARM_CATEGORY_DANGEROUS_CONTENT";
+  threshold: "OFF";
+};
 /** The exact JSON POSTed to :generateContent. Pinned by a test. */
 export type GeminiRequestBody = {
   systemInstruction: { parts: { text: string }[] };
   contents: { role: string; parts: { text: string }[] }[];
   generationConfig: GeminiGenerationConfig;
+  safetySettings: GeminiSafetySetting[];
 };
+
+/**
+ * Content filter OFF for every adjustable category (issue #466, option B).
+ * Scripture and translation notes describe violence and sexual sin, and a
+ * blocked batch fails non-retryably. Google's default is already Off for
+ * Gemini 2.5 and later, so this pins today's behaviour against a change of
+ * default rather than loosening anything. Left out on purpose: JAILBREAK (not
+ * confirmed for every catalog model) and CIVIC_INTEGRITY (deprecated). Google's
+ * non-adjustable blocks (PROHIBITED_CONTENT and the like) still apply; no
+ * setting changes them. Top-level, beside generationConfig, not inside it.
+ */
+export const GEMINI_SAFETY_SETTINGS: readonly GeminiSafetySetting[] = [
+  { category: "HARM_CATEGORY_HARASSMENT", threshold: "OFF" },
+  { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "OFF" },
+  { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "OFF" },
+  { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "OFF" },
+];
 export type GeminiResponseBody = {
   candidates?: { content?: { parts?: { text?: string }[] }; finishReason?: string }[];
   // thoughtsTokenCount is billed as output but reported separately from
@@ -544,6 +570,7 @@ export function buildGeminiRequest(
     systemInstruction: { parts: [{ text: system }] },
     contents: [{ role: "user", parts: [{ text: user }] }],
     generationConfig,
+    safetySettings: GEMINI_SAFETY_SETTINGS.map((s) => ({ ...s })),
   };
 }
 

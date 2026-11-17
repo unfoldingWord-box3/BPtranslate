@@ -4,6 +4,10 @@
 // GET  /api/suggestion-inbox/:book          the cards for one book (admin only)
 // POST /api/suggestion-inbox/:book/approve  {key} → an enabled house-style rule
 // POST /api/suggestion-inbox/:book/reject   {key} → never suggested again
+// GET  /api/suggestion-inbox/not-needed-kinds and POST .../dismiss: note kinds
+//      marked Not needed (#158 part A), see api/src/notNeededKinds.ts.
+// POST /api/suggestion-inbox/not-needed-kinds/switch-off and .../switch-on:
+//      hide a whole note kind and bring it back (#924), api/src/noteKindSwitch.ts.
 //
 // The issue says "nightly". There is no cron: the inbox is computed when an
 // admin opens it, for ONE book per request (the bound), with no AI call. The
@@ -14,7 +18,8 @@
 //
 // The rules, exactly (the help and the page say them in plain words):
 //
-//   rows      validated tN rows of the book. draft = the note in the row's
+//   rows      validated tN rows of the book, hand approvals only (no
+//             admin_bulk_state stamp, #833). draft = the note in the row's
 //             latest ai_pipeline edit_log payload (the scorecard's lookup, with
 //             its book-matched COALESCE). Since #815 that is the text after
 //             house-style rules ran, i.e. what the editor saw. final = the
@@ -61,8 +66,9 @@
 //             or more); already a Common issues line: one line of that text is
 //             exactly the line the page copies ("- «before» → «after»", either
 //             arrow, ∅ for a deletion), or holds before and after (both with a
-//             word) as whole words; already a lesson: stubbed until lessons
-//             exist (#817), see coveredByLesson.
+//             word) as whole words; already a lesson (#908): a lesson the
+//             drafting AI is given now (switch on) has exactly this before and
+//             after as its example, see coveredByLesson.
 //   home      house_style ONLY for the three shapes candidateRule allows (the
 //             closing period after a final "]"; deleting a tag fully enclosed
 //             in () or []; one whole word whose only change is its combining
@@ -112,6 +118,9 @@ import type { Env } from "./index";
 import { currentUserId, requireAdmin } from "./auth.ts";
 import { BOOK_NUMBERS } from "./dcsSources.ts";
 import { SCORECARD_ROWS_SQL } from "./draftScorecard.ts";
+import { loadLessonsForRender } from "./lessonsRender.ts";
+import { computeNotNeededKinds, dismissNotNeededKind } from "./notNeededKinds.ts";
+import { isNoteKind, switchOffKind, switchOnKind } from "./noteKindSwitch.ts";
 import {
   boldRanges,
   compileRule,
@@ -241,6 +250,8 @@ export interface InboxContext {
   templates: string[];
   commonIssues: string;
   rejected: Set<string>;
+  /** The examples of the lessons the drafting AI is given now (#817/#908); none when lessons are off. */
+  lessons?: { before: string; after: string }[];
 }
 
 export interface InboxExcluded {
@@ -747,17 +758,22 @@ export function draftLine(draft: string, start: number, end: number): string {
   return draft.slice(from, to).trim();
 }
 
-// TODO(#817): lessons do not exist yet. When they do, return true when a
-// lesson already teaches this change (e.g. its before/after or an example of
-// it), and load the lessons into InboxContext.
-function coveredByLesson(_s: { before: string; after: string }): boolean {
-  return false;
+// A lesson the drafting AI is given already teaches this change: its example
+// is exactly this before -> after (compared like every cover: NFC, collapsed
+// spaces, case-folded). Only the current set while lessons are switched on,
+// since a lesson the AI is not given covers nothing. A lesson's wording is
+// free text, so it is not matched.
+export function coveredByLesson(s: { before: string; after: string }, lessons: { before: string; after: string }[]): boolean {
+  const before = norm(s.before);
+  const after = norm(s.after);
+  if (before === "" && after === "") return false;
+  return lessons.some((l) => norm(l.before) === before && norm(l.after) === after);
 }
 
 // A live term already gives the approved words: a term that is not deprecated or
 // forbidden whose target is them, or a forbidden term whose replacement (the
 // "use instead") is them. A forbidden term's own target is never a cover.
-function coveredByTerm(s: { after: string }, terms: InboxTerm[]): boolean {
+export function coveredByTerm(s: { after: string }, terms: InboxTerm[]): boolean {
   if (wordsOf(s.after).length === 0) return false;
   const after = norm(s.after);
   return terms.some((t) =>
@@ -765,7 +781,7 @@ function coveredByTerm(s: { after: string }, terms: InboxTerm[]): boolean {
   );
 }
 
-function coveredByTemplate(s: { after: string }, templates: string[]): boolean {
+export function coveredByTemplate(s: { after: string }, templates: string[]): boolean {
   if (wordsOf(s.after).length < 2) return false;
   const after = norm(s.after);
   return templates.some((t) => t.includes(after));
@@ -778,7 +794,7 @@ const hasWholeWord = (line: string, w: string) =>
 // One line of the Common issues text is either exactly the line the page copies
 // ("- «before» → «after»", either arrow, ∅ for a deletion), or holds before and
 // after (both with a word) as whole words. No bare substring matching.
-function coveredByCommonIssues(s: { before: string; after: string }, commonIssues: string): boolean {
+export function coveredByCommonIssues(s: { before: string; after: string }, commonIssues: string): boolean {
   const before = norm(s.before);
   const after = norm(s.after);
   const target = after === "" ? "∅" : `«${after}»`;
@@ -884,7 +900,7 @@ export function buildInbox(
       excluded.commonIssues++;
       continue;
     }
-    if (coveredByLesson(s)) {
+    if (coveredByLesson(s, ctx.lessons ?? [])) {
       excluded.lesson++;
       continue;
     }
@@ -978,7 +994,7 @@ export async function computeInbox(
   book: string,
   exampleNotes?: Map<string, ExampleNote[]>,
 ): Promise<SuggestionInboxResponse> {
-  const [rowRes, rules, terms, templates, prefs, rejected] = await Promise.all([
+  const [rowRes, rules, terms, templates, prefs, rejected, lessons] = await Promise.all([
     db.prepare(SCORECARD_ROWS_SQL).bind(book).all<{
       id: string;
       chapter: number;
@@ -1009,6 +1025,8 @@ export async function computeInbox(
       "translation_prefs",
     ),
     allOrEmpty<{ key: string }>(db, `SELECT key FROM suggestion_rejections`, "suggestion_rejections"),
+    // Missing lesson tables read as none.
+    loadLessonsForRender(db),
   ]);
   const rows: InboxRow[] = (rowRes.results ?? []).map((r) => ({
     id: r.id,
@@ -1024,6 +1042,7 @@ export async function computeInbox(
     templates: templates.rows.map((t) => t.target_md),
     commonIssues: prefs.rows[0]?.common_issues_md ?? "",
     rejected: new Set(rejected.rows.map((r) => r.key)),
+    lessons: lessons.map((l) => ({ before: l.before, after: l.after })),
   };
   return { book, ...buildInbox(rows, ctx, undefined, exampleNotes), notMigrated: rejected.missing };
 }
@@ -1039,6 +1058,59 @@ const bookParam = (raw: string | undefined) => {
   const book = (raw ?? "").toUpperCase();
   return BOOK_NUMBERS[book] ? book : null;
 };
+
+// Note kinds marked Not needed (#158 part A, api/src/notNeededKinds.ts). Not
+// per book. Registered before GET /:book, which would otherwise take
+// "not-needed-kinds" for a book code and answer 400.
+const notNeededOpts = { minNotes: MIN_HITS, minChapters: MIN_CHAPTERS };
+
+suggestionInbox.get("/not-needed-kinds", requireAdmin, async (c) => {
+  return c.json(await computeNotNeededKinds(c.env.DB, notNeededOpts));
+});
+
+const DismissBody = z.object({ kind: z.string().min(1) }).strict();
+
+// Only a kind listed now can be dismissed (else 404), like Reject.
+suggestionInbox.post("/not-needed-kinds/dismiss", requireAdmin, async (c) => {
+  const parsed = DismissBody.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json({ error: "bad_kind" }, 400);
+  const list = await computeNotNeededKinds(c.env.DB, notNeededOpts);
+  if (list.notMigrated) return c.json({ error: "not_migrated" }, 503);
+  if (!list.kinds.some((k) => k.kind === parsed.data.kind)) return c.json({ error: "kind_not_found" }, 404);
+  await dismissNotNeededKind(c.env.DB, parsed.data.kind, currentUserId(c));
+  return c.json({ ok: true });
+});
+
+// Switch a note kind off / back on (#924, api/src/noteKindSwitch.ts). Off takes
+// only a kind listed now (else 404), like Dismiss; On takes a kind switched off
+// now (else 404). Both are admin-only through requireAdmin, as above.
+suggestionInbox.post("/not-needed-kinds/switch-off", requireAdmin, async (c) => {
+  const parsed = DismissBody.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success || !isNoteKind(parsed.data.kind)) return c.json({ error: "bad_kind" }, 400);
+  const list = await computeNotNeededKinds(c.env.DB, notNeededOpts);
+  if (list.switchNotMigrated) return c.json({ error: "not_migrated" }, 503);
+  if (!list.kinds.some((k) => k.kind === parsed.data.kind)) return c.json({ error: "kind_not_found" }, 404);
+  try {
+    const res = await switchOffKind(c.env.DB, parsed.data.kind, currentUserId(c));
+    return c.json({ ok: true, hidden: res.hidden });
+  } catch (err) {
+    if (err instanceof Error && err.message === "not_migrated") return c.json({ error: "not_migrated" }, 503);
+    throw err;
+  }
+});
+
+suggestionInbox.post("/not-needed-kinds/switch-on", requireAdmin, async (c) => {
+  const parsed = DismissBody.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success || !isNoteKind(parsed.data.kind)) return c.json({ error: "bad_kind" }, 400);
+  try {
+    const res = await switchOnKind(c.env.DB, parsed.data.kind, currentUserId(c));
+    if (!res) return c.json({ error: "kind_not_found" }, 404);
+    return c.json({ ok: true, restored: res.restored });
+  } catch (err) {
+    if (err instanceof Error && err.message === "not_migrated") return c.json({ error: "not_migrated" }, 503);
+    throw err;
+  }
+});
 
 suggestionInbox.get("/:book", requireAdmin, async (c) => {
   const book = bookParam(c.req.param("book"));

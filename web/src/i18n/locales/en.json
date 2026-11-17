@@ -333,7 +333,8 @@
       "localization": "Localization",
       "users": "Users",
       "aiService": "AI service",
-      "houseStyle": "House style"
+      "houseStyle": "House style",
+      "lessons": "Lessons"
     },
     "aiService": {
       "title": "AI service",
@@ -616,6 +617,79 @@
       "saved": "Lane config saved."
     }
   },
+  "lessons": {
+    "title": "Lessons from editor corrections",
+    "intro": "Each night the app can read what editors changed in the AI drafts they approved and write a short list of lessons. The AI is given these lessons with every new draft.",
+    "switchOn": "On",
+    "switchOff": "Off",
+    "toggleAria": "Learn from editor corrections",
+    "statusOff": "Off. The AI is NOT learning from editor corrections. New drafts get only your brief, instructions, terms, templates and examples. Turn this on when your editors have approved enough notes, for example after a few weeks of work.",
+    "statusOn": "On. On a night with new approvals, the app reads the corrections in the 2 most recently approved chapters and updates the lessons below. AI drafts made after the next context pack export are given them. A night that failed or ran out of time is finished on the following nights.",
+    "unavailableProvider": "Not available with your AI provider ({{provider}}). Lessons need Claude or Gemini. The AI is NOT learning from editor corrections.",
+    "unavailableNoKey": "Cannot run: the AI service is not set up, or its key cannot be used. Check AI service. The AI is NOT learning from editor corrections.",
+    "unavailableNotTranslation": "Lessons are for translation projects only. The AI is NOT learning from editor corrections.",
+    "cost": "The app calls your AI service once on a night with corrections to learn from: on a night with new approvals, or on the nights after a run that failed or ran out of time, until its notes have all been compared (that can be two nights after a run that ran out of time, even with no new approvals). A night with nothing to learn from makes no call. Your project's AI account pays for each call.",
+    "run": {
+      "never": "Last run: not run yet.",
+      "summary": "Last run: {{when}}, {{status}}. {{cost}}",
+      "ok": "lessons updated",
+      "noChanges": "no corrections to learn from",
+      "failed": "failed ({{reason}}); the previous lessons were kept",
+      "running": "running",
+      "noCall": "No AI call was made.",
+      "cost": "Cost: about US${{cost}}.",
+      "costUnknown": "Cost: unknown for this model."
+    },
+    "listTitle": "Current lessons: {{n}} (at most {{max}})",
+    "empty": "No lessons yet. The first lessons are written on the first night after this is on and editors have approved notes.",
+    "meta": "Seen in {{n}} notes · since {{date}}",
+    "before": "AI wrote",
+    "after": "Editor wrote",
+    "storedNotUsed": "These lessons are kept, but the AI is not given them while this is off.",
+    "unavailableStillUsed": "No new lessons can be written: {{why}} The {{n}} lessons already saved are still given to the AI. Turn this off to stop giving them.",
+    "why": {
+      "provider": "your AI provider ({{provider}}) cannot write lessons; they need Claude or Gemini.",
+      "noKey": "the AI service is not set up, or its key cannot be used.",
+      "notTranslation": "lessons are for translation projects only."
+    },
+    "pinned": "Pinned: kept every night as it is",
+    "actions": {
+      "pin": "Pin",
+      "unpin": "Unpin",
+      "delete": "Delete",
+      "promote": "Move to Common issues"
+    },
+    "editHelp": "Pin a lesson to keep it, word for word, every night. Delete removes it; a night brings it back only if editors make the same correction again in notes approved later. Move to Common issues adds it to the end of Common issues and removes it from this list. Every change is saved as a new version of the list, so you can restore an earlier one below.",
+    "promoteBlocked": "Common issues has unsaved changes. Save them, or undo them, before you move a lesson there.",
+    "promoteUnchecked": "Could not check Common issues for unsaved changes, so the lesson was not moved. Try again, or reload the page.",
+    "promoted": "The lesson was added to the end of Common issues.",
+    "error": {
+      "stale": "The lessons changed since this page loaded (a night's run or another admin). The list is up to date now. Try again.",
+      "runInProgress": "Tonight's lessons run is in progress. Try again in a few minutes.",
+      "prefsChanged": "Common issues was just changed somewhere else. Try again.",
+      "commonIssuesFull": "Common issues is full (50,000 characters). Shorten it first.",
+      "failed": "Could not change the lessons. Try again."
+    },
+    "sets": {
+      "title": "Earlier versions of this list",
+      "intro": "Each night's lessons and each change made here is kept. Restore makes an earlier version the current list again; the list you have now stays in this history.",
+      "line": "{{when}} · {{label}} · {{n}} lessons",
+      "current": "Current",
+      "night": "written by the nightly run",
+      "delete": "after a lesson was deleted",
+      "pin": "after a lesson was pinned",
+      "unpin": "after a lesson was unpinned",
+      "promote": "after a lesson was moved to Common issues",
+      "restore": "an earlier version, restored",
+      "edit": "changed by an admin",
+      "restoreButton": "Restore",
+      "restoreAria": "Restore the list from {{when}}",
+      "restored": "The earlier list is the current list again."
+    },
+    "loadFailed": "Could not load the lessons. Reload the page to try again.",
+    "saveFailed": "Could not change the setting. Try again.",
+    "notMigrated": "Lessons are not available yet: the server database needs an update (migrations 0085 to 0088)."
+  },
   "houseStyle": {
     "title": "House style",
     "intro": "Fixes made automatically to AI translation drafts when they are imported, so editors do not have to make the same correction on every note. They apply to notes and to questions and their answers.",
@@ -666,7 +740,7 @@
     "loadFailed": "Could not load the history.",
     "restore": "Restore",
     "confirmTitle": "Restore version {{version}}?",
-    "confirmBody": "The brief, instructions and common issues go back to how they were at version {{version}}. This is saved as a new version. Any unsaved text in the editors on this page is replaced.",
+    "confirmBody": "The brief, instructions and common issues go back to how they were at version {{version}}. This is saved as a new version. Text you typed in the editors and have not saved stays in its box, still unsaved.",
     "restored": "Restored version {{version}}. It is saved as version {{newVersion}}.",
     "restoreStale": "Someone saved in the meantime. The list is refreshed: check it and try again.",
     "restoreGap": "This version can't be rebuilt: part of the history between it and now is missing.",
@@ -953,6 +1027,7 @@
     "couldntDeleteNote": "Couldn't delete note: {{message}}",
     "couldntRestoreNote": "Couldn't restore note: {{message}}",
     "noteLockedByTranslate": "An AI translation is writing this note. Try again after it finishes.",
+    "questionLockedByRun": "An AI run is working on this chapter, so its questions can't be approved yet. Try again after it finishes.",
     "couldntApproveNote": "Couldn't approve note: {{message}}",
     "couldntTranslateNote": "Couldn't start translation: {{message}}",
     "cantPreserveAlignment": "This edit can't preserve word alignment on words you didn't change, so it wasn't saved ({{ref}} {{bibleVersion}}{{affected}}). Please note this verse ({{ref}}) for your admin to file a bug-fix review, or re-align in the alignment panel.",
@@ -1622,10 +1697,6 @@
     "daysAgo_one": "{{count}} day(s) ago",
     "daysAgo_other": "{{count}} day(s) ago",
     "inLine": "#{{n}} in line",
-    "retryQueuedFor": "Retry queued for {{scope}}",
-    "retryUnavailable": "AI not configured — retry unavailable",
-    "alreadyRunningElsewhere": "Already running or queued elsewhere",
-    "retryFailed": "Could not retry — try again",
     "cancelTooLate": "Couldn't cancel — it already started running.",
     "cancelFailed": "Couldn't cancel — try again",
     "cantRetryTranslate": "Can't retry a translate run — the job row doesn't record which resource type (ULT/UST) it drafted",
@@ -1686,7 +1757,8 @@
       "merge_shrink_refused": "The AI's result was rejected because it would have removed existing content. The chapter was not changed.",
       "lane_fenced": "The project's source text changed or was locked after this run was queued, so it did not start. Nothing was changed — start a new run.",
       "pipeline_api_disabled": "The external AI service isn't set up on this server, so this run could not start. An admin needs to check the AI settings.",
-      "ai_needs_org_key": "This needs your organization's AI key, and it can't use one yet, so this run did not start. Nothing was changed."
+      "ai_needs_org_key": "This needs your organization's AI key, and it can't use one yet, so this run did not start. Nothing was changed.",
+      "pipeline_type_retired": "This kind of AI run has been retired, so the app did not use its result. Start a Translate run instead."
     }
   },
   "flowTranslate": {
@@ -1750,6 +1822,7 @@
     "redoStarted": "The AI is redrafting this note in the background — the new draft appears here when it lands.",
     "redoTimedOut": "The AI redraft is taking too long — try Redo again, or check the AI status panel.",
     "redoKeptYourEdit": "Your note was kept: it was changed after the AI job was queued, so the AI left it alone. Press Redo again if you still want a new draft.",
+    "redoSameAsEnglish": "The AI returned the English note unchanged, so its draft was not applied. Your note keeps its current text. Press Redo to try again.",
     "approveNeedsDraft": "Approve needs a draft first — this note hasn't been through the AI pipeline yet.",
     "approveFailed": "Approve failed ({{status}}).",
     "notNeededFailed": "Could not set this aside ({{status}}).",
@@ -1870,6 +1943,7 @@
         "restored": "Restored: {{count}}.",
         "redoStarted": "Redo with AI started. Notes in the job: {{count}}. They stay read-only until it finishes.",
         "redoDone": "Redo with AI finished. New drafts: {{drafted}}. Kept because someone changed them: {{kept}}.",
+        "redoSameAsEnglish": "Not applied because the AI returned the English note unchanged: {{count}}.",
         "redoFailed": "Redo with AI did not run ({{status}}).",
         "skipped": "Skipped: {{count}} ({{reasons}}).",
         "listSep": ", ",
@@ -1878,6 +1952,7 @@
           "unsaved": "unsaved typing: {{count}}",
           "pending": "a change still saving: {{count}}",
           "changed": "changed by someone else, reloaded: {{count}}",
+          "stateChanged": "changed since the proposal: {{count}}",
           "locked": "locked by an AI run: {{count}}",
           "noDraft": "nothing to approve: {{count}}",
           "approved": "approved, take approval off first: {{count}}",
@@ -1893,6 +1968,17 @@
         "picker": "Go to verse",
         "option": "{{ref}} ({{count}})",
         "keyVerse": "previous / next verse"
+      },
+      "statusFilter": {
+        "button": "Filter by status",
+        "showAll": "Show all",
+        "only": "Only",
+        "onlyAria": "Show only {{status}}",
+        "hint": "The open note stays in the list until you move to another note.",
+        "onlyShown": "Only: {{list}}",
+        "hidden": "Hidden: {{list}}",
+        "shown": "Showing {{shown}} of {{total}}",
+        "pager": "status filter"
       },
       "cols": {
         "hide": "Hide the {{name}} column",
@@ -2306,6 +2392,8 @@
       "sectionExamples": "Examples",
       "sectionHouseStyle": "House style",
       "houseStyleIntro": "Fixes made automatically to AI translation drafts when they are imported, so editors do not have to make the same correction on every note. They apply to notes and to questions and their answers.",
+      "sectionLessons": "Lessons",
+      "lessonsIntro": "Each night the app can read what editors changed in the AI drafts they approved and write a short list of lessons. The AI is given these lessons with every new draft.",
       "sectionQaRules": "QA rules",
       "sectionTemplates": "Templates",
       "sourceProjectOnly": "Translation preferences (brief, instructions, terminology, examples) apply to translation projects only — this workspace is a source project.",
@@ -2911,6 +2999,7 @@
       "applying": "Applying…",
       "errForbidden": "Only admins can change review state in bulk.",
       "errLockedByTranslate": "An AI translation is rewriting notes in this range, so they can't be approved yet. Try again after it finishes.",
+      "errLockedQuestions": "An AI run is working on a chapter in this range, so its questions can't be approved yet. Try again after it finishes.",
       "errMaybeApplied": "The change could not be confirmed ({{detail}}). It may have been partly or fully applied, so check the counts below before trying again."
     },
     "scorecard": {
@@ -3016,7 +3105,33 @@
       "howExcluded": "A change is not shown when a house-style rule already makes it (even a rule that is off), a term already gives the approved wording, a note template already contains it, or the Common issues text already lists it.",
       "howHome": "Suggested home: a house-style rule only for three kinds of change that are safe everywhere: the period after a final ], deleting a tag in parentheses or brackets such as (مُكيَّف), and changing only the marks (vowels, tanween) on one word. The rule is tried on every draft of this book: it must change at least 10 of them, and give exactly the approved text in at least 8 of every 10 it changes (9 of 10 for marks). The card shows these numbers. Otherwise a note template when the old words come from a template; a term for a change of one to three words; else a Common issues line.",
       "howApprove": "Approve on a house-style card asks you to confirm, then adds the rule, switched on, to Style: House style. It changes every AI draft that arrives from then on, in every book, for notes and for questions. On the other cards, Approve copies a line for you to paste into that editor, because those editors cannot be filled in from here. The card goes away once the term, template or Common issues text covers it; if it still shows after your edit, reject it.",
-      "howReject": "Reject hides the card for good, in every book."
+      "howReject": "Reject hides the card for good, in every book.",
+      "notNeededTitle": "Note kinds marked Not needed",
+      "notNeededIntro": "Kinds of translation notes that editors marked Not needed at least {{notes}} times, across at least {{chapters}} chapters, in the last {{days}} days, counting all books. Dismiss hides a kind from this list for good. Switch off hides every note of that kind, in every book, until you switch it back on.",
+      "notNeededLoading": "Counting notes marked Not needed…",
+      "notNeededNone": "No note kind was marked Not needed that often.",
+      "notNeededCount_one": "{{count}} note of this kind was marked Not needed in the last {{days}} days, in {{chapters}} chapters.",
+      "notNeededCount_other": "{{count}} notes of this kind were marked Not needed in the last {{days}} days, in {{chapters}} chapters.",
+      "notNeededBooks": "Books: {{books}}",
+      "notNeededDismiss": "Dismiss",
+      "notNeededDismissed": "Dismissed. This kind will not be listed again.",
+      "notNeededGone": "This kind is no longer listed.",
+      "notNeededNotMigrated": "The server's database is not up to date yet, so kinds cannot be dismissed.",
+      "switchOff": "Switch off",
+      "switchOffConfirmTitle": "Switch off this note kind?",
+      "switchOffConfirmBody": "Every note of this kind, in every book, will be hidden from editors and left out of the nightly publish. The notes are not deleted: you can switch the kind back on at any time to bring them back as they were. New notes of this kind that arrive later, for example from an import, are hidden too.",
+      "switchOffConfirm": "Switch off",
+      "switchOffCancel": "Cancel",
+      "switchOffDone_one": "Switched off. {{count}} note is hidden.",
+      "switchOffDone_other": "Switched off. {{count}} notes are hidden.",
+      "switchOnDone_one": "Switched back on. {{count}} note is back.",
+      "switchOnDone_other": "Switched back on. {{count}} notes are back.",
+      "switchedOffTitle": "Switched-off note kinds",
+      "switchedOffIntro": "Notes of these kinds are hidden from editors and from the publish. Switch back on brings back the notes the switch-off hid.",
+      "switchedOffCount_one": "{{count}} note hidden",
+      "switchedOffCount_other": "{{count}} notes hidden",
+      "switchOn": "Switch back on",
+      "switchNotMigrated": "The server's database is not up to date yet, so note kinds cannot be switched off."
     }
   },
   "widgets": {
@@ -3180,7 +3295,8 @@
       "occurrence": "Occurrence",
       "verse": "Verse",
       "refRaw": "Reference",
-      "sortOrder": "Order"
+      "sortOrder": "Order",
+      "supportReference": "Support reference"
     },
     "fieldLower": {
       "note": "note",
@@ -3190,7 +3306,8 @@
       "occurrence": "occurrence",
       "verse": "verse",
       "refRaw": "reference",
-      "sortOrder": "order"
+      "sortOrder": "order",
+      "supportReference": "support reference"
     },
     "lock": {
       "save": "Chapter is locked by an AI run — question edits are rejected until it finishes",
@@ -3363,7 +3480,9 @@
       "keepTheirs": "Keep theirs",
       "discardMine": "Discard my change",
       "noServerVersion": "No server version to re-send against",
-      "keepMine": "Keep mine"
+      "keepMine": "Keep mine",
+      "stillSending": "A save of this row is still being sent. Try again in a moment.",
+      "bodyFieldsCard": "Another editor changed this row while your change was waiting to save. For the fields below, choose which version to keep — the other is discarded."
     }
   },
   "dialogs": {
@@ -3673,6 +3792,12 @@
       "viewAria": "View",
       "modeRead": "Read",
       "modeAudit": "Audit",
+      "layoutAria": "One verse or the whole chapter",
+      "layoutSingle": "One verse",
+      "layoutSingleTitle": "Show one verse at a time; step with the arrows",
+      "layoutScroll": "Scroll",
+      "layoutScrollTitle": "Scroll through the whole chapter, verse after verse",
+      "continueToChapter": "Continue to chapter {{chapter}}",
       "readHint": "Read the verse three ways. Click any word to see what the other texts do with it.",
       "auditHint": "One row per original word: what the literal text made of it, and what the simplified text made of it.",
       "loadError": "{{book}} {{chapter}} could not be loaded{{details}}.",
@@ -4032,6 +4157,14 @@
     "truncated": "The request was too big for one answer. Ask about fewer notes.",
     "failed": "The assistant could not answer. Try again.",
     "limitReached": "This chat has reached its length limit. Start a new chat to continue.",
+    "omitted": {
+      "tooLong_one": "{{count}} note was too long to send to the assistant.",
+      "tooLong_other": "{{count}} notes were too long to send to the assistant.",
+      "tooMany_one": "{{count}} note was left out because there were too many for one request. Check only the notes you mean so they are sent first.",
+      "tooMany_other": "{{count}} notes were left out because there were too many for one request. Check only the notes you mean so they are sent first.",
+      "noNotes": "There are no notes on screen to send.",
+      "nothingSent": "Nothing was sent, so there is no charge."
+    },
     "proposal": {
       "title": "Proposed changes",
       "edits": "Edits: {{count}}",
@@ -4044,6 +4177,7 @@
     },
     "apply": {
       "edited": "Edited: {{count}} (they still need approval).",
+      "stillSaving": "Still saving: {{count}} (not confirmed yet, they may still save).",
       "busy": "Another action is still running. Try again in a moment.",
       "failed": "Applying the changes failed. Check the notes before trying again."
     }

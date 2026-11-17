@@ -14,20 +14,15 @@ export function isAiProviderNotConfigured(e: unknown): boolean {
 
 // #551 switch-off: these AI features still run on unfoldingWord's shared
 // account, because the bot can't take an organization's own key for them yet:
-//   - the older pipeline types generate / notes / tqs (Generate ULT and UST,
-//     Write translation notes, Write translation questions);
 //   - Draft with AI / Suggest / Redo on a single verse note (POST /api/tn-quick);
 //   - Draft with AI on note templates, one or many (POST /api/templates/unit/draft).
-// The server refuses all three with 409 { error: "ai_needs_org_key" }, and the
+// The server refuses both with 409 { error: "ai_needs_org_key" }, and the
 // buttons are disabled up front with the i18n message "ai.needsOrgKey".
+// (The older pipeline types generate / notes / tqs were refused the same way
+// until #726 retired them; their old failed jobs still carry this error kind.)
 // Intro/general-note Redo is not affected: it runs the translate pipeline on
 // the org's key.
 export const AI_NEEDS_ORG_KEY = "ai_needs_org_key";
-
-/** Pipeline types switched off until they can run on the org's own key. Their
- *  start actions were removed from the AI menu (#470); this set still gates
- *  Retry on old failed jobs of these types in the job history. */
-export const PIPELINE_TYPES_NEEDING_ORG_KEY: ReadonlySet<string> = new Set(["generate", "notes", "tqs"]);
 
 /** Note and template "Draft with AI" are switched off. Flip to false when a
  *  rebuild lets them run on the org's own key (and drop the server refusal in

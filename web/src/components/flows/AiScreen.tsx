@@ -48,11 +48,6 @@ import { AiServiceSection } from "../AiServiceSection";
 import { pipelineStore, type PipelineJob } from "../../sync/pipelineStore";
 import { useProjectConfig, isTranslationProject, projectType } from "../../hooks/useProjectConfig";
 import { aiStudioSubtitleKey, pipelineTrigger } from "../../lib/pipelineTrigger";
-import {
-  isAiNeedsOrgKey,
-  isAiProviderNotConfigured,
-  PIPELINE_TYPES_NEEDING_ORG_KEY,
-} from "../../lib/aiProviderErrors";
 import { errorCopy, orgKeyStatusCopyKey } from "../../lib/aiErrorCopy";
 import {
   api,
@@ -108,12 +103,6 @@ function scopeOf(job: PipelineJob, t: TFunction): string {
   return job.start_chapter === job.end_chapter
     ? `${job.book} ${job.start_chapter}`
     : `${job.book} ${job.start_chapter}–${job.end_chapter}`;
-}
-
-// A fresh session key per Retry click; the timestamp keeps it unique across
-// clicks and reloads. Only called from the Retry handler, never during render.
-function retrySessionKey(pipelineType: string): string {
-  return `retry-${pipelineType}-${Date.now()}`;
 }
 
 function timeAgo(unixSeconds: number | null | undefined, t: TFunction): string {
@@ -177,7 +166,6 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
   const [orgKeyCopy, setOrgKeyCopy] = useState<string | null>(null);
   const [pendingCount, setPendingCount] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
-  const [retrying, setRetrying] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState<string | null>(null);
 
   // Real book list — GET /api/books returns only books actually imported into
@@ -300,36 +288,6 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
   const dismissableJobs = jobs.filter(
     (j) => j.state === "done" || j.state === "failed" || j.state === "cancelled",
   );
-
-  async function handleRetry(job: PipelineJob) {
-    if (aiDisabled || retrying) return;
-    setRetrying(job.job_id);
-    const sessionKey = retrySessionKey(job.pipeline_type);
-    try {
-      await pipelineStore.start({
-        pipelineType: job.pipeline_type,
-        ...(job.book ? { book: job.book, startChapter: job.start_chapter, endChapter: job.end_chapter } : {}),
-        sessionKey,
-      });
-      setNotice(t("aiStudio.retryQueuedFor", { scope: scopeOf(job, t) }));
-    } catch (e) {
-      // Checked before the bare 409 below, which would misread it as "already running".
-      if (isAiProviderNotConfigured(e)) {
-        setNotice(t("pipeline.aiKeyNotConfigured"));
-      } else if (isAiNeedsOrgKey(e)) {
-        setNotice(t("ai.needsOrgKey"));
-      } else if (e instanceof ApiError && e.status === 503) {
-        setAiDisabled(true);
-        setNotice(t("aiStudio.retryUnavailable"));
-      } else if (e instanceof ApiError && e.status === 409) {
-        setNotice(t("aiStudio.alreadyRunningElsewhere"));
-      } else {
-        setNotice(t("aiStudio.retryFailed"));
-      }
-    } finally {
-      setRetrying(null);
-    }
-  }
 
   async function handleCancel(job: PipelineJob) {
     if (cancelling) return; // no double-submit while a cancel is in flight
@@ -556,9 +514,7 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
                     job={job}
                     me={me}
                     aiDisabled={aiDisabled}
-                    retrying={retrying === job.job_id}
                     cancelling={cancelling === job.job_id}
-                    onRetry={() => void handleRetry(job)}
                     onCancel={() => void handleCancel(job)}
                     onDismiss={() => handleDismiss(job)}
                   />
@@ -574,9 +530,7 @@ export default function AiScreen({ role, me, onNavigate }: AiScreenProps) {
                 job={job}
                 me={me}
                 aiDisabled={aiDisabled}
-                retrying={retrying === job.job_id}
                 cancelling={cancelling === job.job_id}
-                onRetry={() => void handleRetry(job)}
                 onCancel={() => void handleCancel(job)}
                 onDismiss={() => handleDismiss(job)}
               />
@@ -638,9 +592,7 @@ interface JobRowProps {
   job: PipelineJob;
   me: FlowScreenContext["me"];
   aiDisabled: boolean;
-  retrying: boolean;
   cancelling: boolean;
-  onRetry: () => void;
   onCancel: () => void;
   onDismiss: () => void;
 }
@@ -683,7 +635,7 @@ function ErrorMessageDetail({ message }: { message: string | null }) {
   );
 }
 
-function JobRow({ job, me, aiDisabled, retrying, cancelling, onRetry, onCancel, onDismiss }: JobRowProps) {
+function JobRow({ job, me, aiDisabled, cancelling, onCancel, onDismiss }: JobRowProps) {
   const { t } = useTranslation();
   const mine = isMine(job, me);
   return (
@@ -732,9 +684,7 @@ function JobRow({ job, me, aiDisabled, retrying, cancelling, onRetry, onCancel, 
           job={job}
           mine={mine}
           aiDisabled={aiDisabled}
-          retrying={retrying}
           cancelling={cancelling}
-          onRetry={onRetry}
           onCancel={onCancel}
           onDismiss={onDismiss}
         />
@@ -747,18 +697,14 @@ function JobRowActions({
   job,
   mine,
   aiDisabled,
-  retrying,
   cancelling,
-  onRetry,
   onCancel,
   onDismiss,
 }: {
   job: PipelineJob;
   mine: boolean;
   aiDisabled: boolean;
-  retrying: boolean;
   cancelling: boolean;
-  onRetry: () => void;
   onCancel: () => void;
   onDismiss: () => void;
 }) {
@@ -777,33 +723,18 @@ function JobRowActions({
       )}
       {job.state === "failed" && mine && (
         <>
-          <Tooltip
-            title={
-              aiDisabled
-                ? t("aiStudio.notConfiguredTitle")
-                : job.pipeline_type === "translate"
-                  ? t("aiStudio.cantRetryTranslate")
-                  : PIPELINE_TYPES_NEEDING_ORG_KEY.has(job.pipeline_type)
-                    ? t("ai.needsOrgKey")
-                    : ""
-            }
-          >
-            <span>
-              <Button
-                size="small"
-                onClick={onRetry}
-                disabled={
-                  aiDisabled ||
-                  retrying ||
-                  job.pipeline_type === "translate" ||
-                  PIPELINE_TYPES_NEEDING_ORG_KEY.has(job.pipeline_type)
-                }
-                startIcon={retrying ? <CircularProgress size={12} /> : undefined}
-              >
-                {t("common.retry")}
-              </Button>
-            </span>
-          </Tooltip>
+          {/* A failed translate run can't be retried from here (the row doesn't
+              record its resource type), so Retry shows disabled with the reason.
+              The retired types (generate/notes/tqs, #726) get no Retry at all. */}
+          {job.pipeline_type === "translate" && (
+            <Tooltip title={aiDisabled ? t("aiStudio.notConfiguredTitle") : t("aiStudio.cantRetryTranslate")}>
+              <span>
+                <Button size="small" disabled>
+                  {t("common.retry")}
+                </Button>
+              </span>
+            </Tooltip>
+          )}
           <Button size="small" color="inherit" onClick={onDismiss}>
             {t("pipeline.dismiss")}
           </Button>
@@ -818,7 +749,7 @@ function JobRowActions({
   );
 }
 
-function JobCard({ job, me, aiDisabled, retrying, cancelling, onRetry, onCancel, onDismiss }: JobRowProps) {
+function JobCard({ job, me, aiDisabled, cancelling, onCancel, onDismiss }: JobRowProps) {
   const { t } = useTranslation();
   const mine = isMine(job, me);
   return (
@@ -853,9 +784,7 @@ function JobCard({ job, me, aiDisabled, retrying, cancelling, onRetry, onCancel,
           job={job}
           mine={mine}
           aiDisabled={aiDisabled}
-          retrying={retrying}
           cancelling={cancelling}
-          onRetry={onRetry}
           onCancel={onCancel}
           onDismiss={onDismiss}
         />

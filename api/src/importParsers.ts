@@ -429,12 +429,12 @@ export function healReplacementChars(
 // client-side keystroke/paste interception (web/src/lib/curlyQuotes.ts) and
 // the tn/tq TSV export (tsvFormat.ts educateQuotes, left untouched — it stays
 // the export-time normalizer for human-typed content) — this closes the gap
-// for the AI-pipeline's OWN ingest of both verse text (curlifyVerseObjects,
-// called from pipelineImport.ts's applyVerseUpdate) and note/question/response
-// prose (curlifyText, called from tnPayload/tqPayload). The two calls share
-// this exact same contextual rule (curlifyChar/isOpeningQuoteContext) so an
-// AI-drafted note is never curled differently than AI-drafted verse text in
-// the same run — a real divergence existed here when note prose went through
+// for the AI-pipeline's OWN ingest of note/question/response prose (curlifyText,
+// called from tnPayload/tqPayload). Verse text from the retired generate
+// pipeline used to be curled with this same contextual rule
+// (curlifyChar/isOpeningQuoteContext; removed in #726), so an AI-drafted note
+// was never curled differently than AI-drafted verse text in the same run — a
+// real divergence existed here when note prose went through
 // tsvFormat.ts's educateQuotes instead (that function's opening-context class
 // omits `/`, curlifyChar's includes it, matching web/src/lib/curlyQuotes.ts).
 //
@@ -535,60 +535,11 @@ function curlifyTextWithContext(
 // Curl straight quotes in a standalone string with no surrounding tree — the
 // entry point for AI-drafted note/question/response PROSE (pipelineImport.ts
 // tnPayload/tqPayload). Starts with no incoming context (a note is its own
-// document, unlike a verse's tree walk), and shares curlifyChar/
-// isOpeningQuoteContext with curlifyVerseObjects below so the two ingest
-// paths can never disagree on how a given straight quote curls. No-op
-// (identity) on text with no straight quotes.
+// document, unlike a verse's tree walk), and uses curlifyChar/
+// isOpeningQuoteContext. No-op (identity) on text with no straight quotes.
 export function curlifyText(text: string): string {
   if (!text || !/['"]/.test(text)) return text;
   return curlifyTextWithContext(text, undefined, undefined).text;
-}
-
-// Mutates `verseObjects` in place (like healReplacementChars /
-// canonizeAlignmentSource); returns whether anything changed.
-//
-// Touches ONLY a node's own `.text` string, walked in document order across
-// the whole tree (target `\w` words, plain text, and a marker's own parked
-// leading text — see "usfm-js parks leading punctuation on the marker's
-// `text`" in STATE.md) — EXCEPT `\zaln-s` milestone nodes (type "milestone",
-// tag "zaln" — the file's standard test elsewhere, e.g. isZalnNode /
-// nodeIsMilestone in highlight.ts), whose own attributes (content/lemma/
-// morph/strong — the Hebrew/Greek surface form) are source-owned and never
-// touched, even defensively if one ever carried a `.text` key. Milestone
-// CHILDREN (the aligned target words) are walked normally. No node is added,
-// removed, reordered, or re-nested, no `\w` occurrence changes, and no
-// attribute is ever assigned — so this can never unalign a word, alter a word
-// count, or touch Hebrew/Greek. No-op (identity) on a verse with no straight
-// quotes, the common case.
-export function curlifyVerseObjects(verseObjects: unknown[]): boolean {
-  if (!Array.isArray(verseObjects)) return false;
-  let changed = false;
-  let prevCurled: string | undefined;
-  let prevRaw: string | undefined;
-  const walk = (nodes: unknown[]): void => {
-    for (const node of nodes) {
-      if (!node || typeof node !== "object") continue;
-      const o = node as Record<string, unknown>;
-      const isSourceMilestone = o["type"] === "milestone" && o["tag"] === "zaln";
-      const text = o["text"];
-      if (!isSourceMilestone && typeof text === "string" && text.length > 0) {
-        if (/['"]/.test(text)) {
-          const result = curlifyTextWithContext(text, prevCurled, prevRaw);
-          if (result.changed) {
-            o["text"] = result.text;
-            changed = true;
-          }
-          prevCurled = result.text[result.text.length - 1];
-        } else {
-          prevCurled = text[text.length - 1];
-        }
-        prevRaw = text[text.length - 1];
-      }
-      if (Array.isArray(o["children"])) walk(o["children"] as unknown[]);
-    }
-  };
-  walk(verseObjects);
-  return changed;
 }
 
 // ─── Reconcile source-owned `\zaln-s` attributes from master ─────────────────
@@ -843,74 +794,6 @@ export function stripOrphanAlignmentMarkers(verseObjects: unknown[]): unknown[] 
   return clean(verseObjects);
 }
 
-// ─── Collapse a doubled source token in one alignment compound ───────────────
-//
-// A DISTINCT AI/edit defect: a single `\zaln-s` compound whose nested chain wraps
-// the SAME source token twice — two milestones with identical (NFC x-content,
-// x-occurrence). A card can never legitimately reference one UHB/UGNT word twice,
-// so the pair is an artifact that renders the Hebrew doubled (JER 31:33 UST/ULT
-// `אֶת אֶת בֵּית`: a spurious outer `H0853 "אֶת"` over the real `H0854 "אֶת" › H1004b`).
-// When a milestone has, anywhere in its own subtree, a nested milestone with the
-// same key, DROP THE OUTER one (splice its children up a level) — the surviving
-// inner milestone is the more specific one (correct strong for the known shape).
-//
-// Keyed on x-content+x-occurrence, NOT x-strong: the spurious outer often carries
-// a wrong strong but the same surface, so a strong-inclusive key would miss it.
-// Genuine Hebrew repetition (שָׁלוֹם שָׁלוֹם) is untouched — those tokens carry
-// distinct x-occurrence → distinct keys. No-op (identity) on clean verses.
-// Mirrors the web reform (web/src/lib/alignment.ts dropDuplicateSourceMilestones);
-// absorb the defect at AI import so it never lands in D1, matching the
-// splitGluedAlignmentWords / stripOrphanAlignmentMarkers family.
-function zalnDedupKey(node: Record<string, unknown>): string | null {
-  const content = node["content"];
-  if (typeof content !== "string" || content === "") return null;
-  return `${content.normalize("NFC")}|${String(node["occurrence"] ?? "1")}`;
-}
-function isZalnNode(n: Record<string, unknown> | null): boolean {
-  return !!n && n["type"] === "milestone" && n["tag"] === "zaln";
-}
-function subtreeHasZalnKey(nodes: unknown[], key: string): boolean {
-  for (const n of nodes ?? []) {
-    const o = n as Record<string, unknown> | null;
-    if (!o || typeof o !== "object") continue;
-    if (isZalnNode(o) && zalnDedupKey(o) === key) return true;
-    if (Array.isArray(o["children"]) && subtreeHasZalnKey(o["children"] as unknown[], key)) return true;
-  }
-  return false;
-}
-export function dropDuplicateSourceMilestones(verseObjects: unknown[]): unknown[] {
-  if (!Array.isArray(verseObjects)) return verseObjects;
-  const transform = (nodes: unknown[]): unknown[] => {
-    let changed = false;
-    const out: unknown[] = [];
-    for (const node of nodes ?? []) {
-      const o = node as Record<string, unknown> | null;
-      if (o && isZalnNode(o)) {
-        const origKids = (o["children"] as unknown[] | undefined) ?? [];
-        const kids = transform(origKids);
-        const key = zalnDedupKey(o);
-        if (key !== null && subtreeHasZalnKey(kids, key)) {
-          out.push(...kids); // outer duplicate — unwrap, keep the inner subtree
-          changed = true;
-          continue;
-        }
-        if (kids !== origKids) { out.push({ ...o, children: kids }); changed = true; }
-        else out.push(node);
-        continue;
-      }
-      if (o && Array.isArray(o["children"])) {
-        const kids = transform(o["children"] as unknown[]);
-        if (kids !== o["children"]) { out.push({ ...o, children: kids }); changed = true; }
-        else out.push(node);
-        continue;
-      }
-      out.push(node);
-    }
-    return changed ? out : nodes;
-  };
-  return transform(verseObjects);
-}
-
 // ─── Collapse doubled leading poetry / paragraph markers ─────────────────────
 //
 // unfoldingWord ULT/UST USFM puts a verse's leading in-flow marker BEFORE its
@@ -1032,9 +915,9 @@ export function dropDoubledLeadingMarkers(prev: unknown[] | null, curr: unknown[
 //   { type: 'milestone', tag: 'zaln-s', children: [...] }
 //   { type: 'paragraph', tag: 'p' }
 //
-// Exported so pipelineImport.ts's applyVerseUpdate can RE-derive plain_text
-// from the FINAL, self-healed verseObjects tree (after curlifyVerseObjects
-// and the other AI-ingest heals run) instead of trusting the AI-supplied
+// Exported for tests. It was also how the retired generate apply (#726)
+// RE-derived plain_text from the FINAL, self-healed verseObjects tree (after
+// the AI-ingest heals ran) instead of trusting the AI-supplied
 // payload.plain_text verbatim — a mutation pass that rewrites `.text` (or
 // drops/rewrites a node) makes any UN-recomputed plain_text stale, which
 // breaks FindReplaceOverlay / source search (both match on plain_text) and,

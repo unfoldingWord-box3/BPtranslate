@@ -323,6 +323,17 @@ export function setIsAdmin(v: boolean) {
   adminRole = v;
 }
 
+// The signed-in user's id, set with the admin flag. The drafts store is per
+// workspace, not per user, so the prefs editors stamp their drafts with it and
+// a user who cannot save drops only their own (#913 item 5).
+let userId: number | null = null;
+export function currentUserId(): number | null {
+  return userId;
+}
+export function setCurrentUserId(v: number | null) {
+  userId = v;
+}
+
 // Surface to the UI that we tried to silently refresh a 401 and it failed.
 // App.tsx subscribes to render a "Session expired — sign in again" banner;
 // the outbox keeps queuing edits in the meantime so nothing is lost.
@@ -1083,6 +1094,38 @@ export interface SuggestionInboxResponse {
   notMigrated: boolean;
 }
 
+// Response of GET /api/suggestion-inbox/not-needed-kinds (api/src/notNeededKinds.ts,
+// issue #158 part A): tN note kinds editors keep marking Not needed.
+export interface NotNeededKind {
+  /** The bare tA id, e.g. "figs-yousingular". */
+  kind: string;
+  notes: number;
+  /** Distinct (book, chapter) pairs. */
+  chapters: number;
+  /** Book codes, in canon order. */
+  books: string[];
+}
+
+export interface NotNeededKindsResponse {
+  windowDays: number;
+  minNotes: number;
+  minChapters: number;
+  kinds: NotNeededKind[];
+  /** The server has not had migration 0089 yet: Dismiss is unavailable. */
+  notMigrated: boolean;
+  /** Kinds switched off now (#924, api/src/noteKindSwitch.ts). */
+  switchedOff: SwitchedOffKind[];
+  /** The server has not had migration 0090 yet: switching off is unavailable. */
+  switchNotMigrated: boolean;
+}
+
+export interface SwitchedOffKind {
+  kind: string;
+  /** Notes hidden by this switch-off now. */
+  hidden: number;
+  switchedOffAt: number;
+}
+
 // Responses of POST /api/books/:book/review-state (api/src/reviewState.ts).
 export interface ReviewSweepDryRunResponse {
   ok: true;
@@ -1167,6 +1210,9 @@ export interface TnQuickResponse {
 // Types mirror the bp-assistant client-side contract; both sides change
 // together if the contract is revised.
 
+// translate is the only type that can start (#726). generate/notes/tqs are
+// retired; they stay in this union because old job rows still carry them and
+// the job history labels them.
 export type PipelineType = "generate" | "notes" | "tqs" | "translate";
 
 // Translate-pipeline overrides (only meaningful when pipelineType ===
@@ -1240,6 +1286,64 @@ export interface HouseStyleRule {
   supported: boolean;
   updatedAt: number;
   updatedBy: string | null;
+}
+
+// Nightly lessons from editor corrections (issue #817, api/src/lessons.ts).
+export interface Lesson {
+  lesson: string;
+  before: string;
+  after: string;
+  evidence: number;
+  firstSeenAt: number;
+  /** Pinned by an admin (#908): every night keeps it as it is. */
+  pinned: boolean;
+}
+
+/** One stored lesson set, for the restore list (#908). */
+export interface LessonSetSummary {
+  id: number;
+  at: number | null;
+  /** "night" = written by a nightly run; "edit" = an admin change. */
+  kind: "night" | "edit";
+  /** For an edit: delete | pin | unpin | promote | restore. */
+  action: string | null;
+  count: number;
+}
+
+export type LessonEditAction = "delete" | "pin" | "unpin" | "promote";
+
+export interface LessonRun {
+  id: number;
+  night: string;
+  startedAt: number;
+  finishedAt: number | null;
+  status: "running" | "ok" | "no_changes" | "failed";
+  failureReason: string | null;
+  chapters: Array<{ book: string; chapter: number }>;
+  changes: number;
+  provider: string | null;
+  model: string | null;
+  calls: number;
+  inputTokens: number;
+  outputTokens: number;
+  /** null = no price known, or no call made. */
+  costUsd: number | null;
+}
+
+export interface LessonsState {
+  enabled: boolean;
+  notMigrated: boolean;
+  /** Whether a night's run could call the AI (only Claude and Gemini can). */
+  availability: { available: true; provider: string; model: string } | { available: false; reason: string; provider: string | null };
+  lessons: Lesson[];
+  /** The current set's id; an admin change names it (409 stale_set if it moved). */
+  setId: number | null;
+  setAt: number | null;
+  /** The last nightly run (admin changes are not runs). */
+  lastRun: LessonRun | null;
+  /** Recent sets, newest first; the first is the current one. */
+  sets: LessonSetSummary[];
+  maxLessons: number;
 }
 
 export interface TranslationPrefs {
@@ -1587,54 +1691,31 @@ export type PipelineErrorKind =
   | "merge_failed"
   | "merge_shrink_refused"
   // Dispatch-time failures written by api/src/pipelines.ts dispatchNext.
+  // lane_fenced came from the retired generate type's stamp check (#726); it
+  // is still on old failed rows.
   | "lane_fenced"
   | "pipeline_api_disabled"
-  // #551: a queued generate/notes/tqs job, which can't run on the org's own key yet.
-  | "ai_needs_org_key";
+  // #551: a queued generate/notes/tqs job, which couldn't run on the org's own
+  // key. Still on old failed rows.
+  | "ai_needs_org_key"
+  // #726: a queued or running job of a retired type (generate/notes/tqs).
+  | "pipeline_type_retired";
 // The union is hand-kept; the wire value is any string. Fields that carry an
 // errorKind from the server are typed `string`, and lib/aiErrorCopy.ts falls
 // back for a kind it doesn't know. lib/aiErrorCopy.test.mjs scans api/src and
 // fails when the server can write a kind that has no copy.
 
-// Mirrors the bp-assistant contract (docs/ai-pipeline-integration.md §3).
-// Server validates with .strict(); unknown keys are rejected. Per-pipeline-type
-// flag mixing (e.g. contentTypes on a "notes" run) is also rejected.
-export interface PipelineRequestOptions {
-  model?: "sonnet" | "opus";
-  /** Clear prior checkpoint + outputs. Useful for retrying a failed run. */
-  fresh?: boolean;
-
-  // -- generate-only --
-  /** Restrict to a subset of content types. Default is both. */
-  contentTypes?: ("ult" | "ust")[];
-  /** Skip alignment + repo-insert; USFM is NOT pushed to Door43. */
-  noAlign?: boolean;
-  /** Reuse already-generated USFM and only run alignment + repo-insert. */
-  alignOnly?: boolean;
-  /** Push the unaligned USFM to Door43 (no alignment performed). */
-  textOnly?: boolean;
-
-  // -- notes-only --
-  /** Skip the chapter intro generation step. */
-  noIntro?: boolean;
-  /** Pause before generating Alternate Translations so a human can review. */
-  pauseBeforeATs?: boolean;
-}
-
 export interface PipelineStartRequest {
-  pipelineType: PipelineType;
+  pipelineType: "translate";
   // Optional for article translate jobs (tw/ta), which are scoped by
-  // translate.articleId, not book/chapter. Row-keyed jobs (generate/notes/
-  // tqs and tn/tq translate) still pass both.
+  // translate.articleId, not book/chapter. tn/tq translate jobs pass both.
   book?: string;
   startChapter?: number;
   endChapter?: number;
   sessionKey: string;
-  options?: PipelineRequestOptions;
   /**
-   * Translate-pipeline overrides (only meaningful when pipelineType ===
-   * 'translate'; ignored otherwise). The server builds the full option set
-   * from the active project config and folds these in.
+   * Translate-pipeline overrides. The server builds the full option set from
+   * the active project config and folds these in.
    */
   translate?: TranslateRequestOptions;
 }
@@ -1682,7 +1763,13 @@ export interface PipelineStatusResponse {
    */
   queuePosition?: number;
   queueAhead?: number;
-  /** Notes (#601), questions (#725) or tW/tA articles (#734, by path) a translate apply left alone because a person changed them after the job was queued. */
+  /**
+   * What a translate apply left alone: notes (#601), questions (#725) or tW/tA
+   * articles (#734, by path) a person changed after the job was queued;
+   * approved notes and questions a whole-chapter run kept (#794); note drafts
+   * not applied because they were the English source note, and why that check
+   * could not run when it could not (#794).
+   */
   applySkipped?: {
     tnTouched?: number;
     tnTouchedIds?: string[];
@@ -1690,6 +1777,13 @@ export interface PipelineStatusResponse {
     tqTouchedIds?: string[];
     articleTouched?: number;
     articleTouchedPaths?: string[];
+    tnApproved?: number;
+    tnApprovedIds?: string[];
+    tqApproved?: number;
+    tqApprovedIds?: string[];
+    tnSameAsEnglish?: number;
+    tnSameAsEnglishIds?: string[];
+    tnEnglishCheckNotRun?: string;
   };
 }
 
@@ -2190,6 +2284,35 @@ export const api = {
       timeoutMs: 60_000,
     }),
 
+  // Note kinds marked Not needed (#158 part A), for all books, and the kinds
+  // switched off (#924). Dismiss takes only a kind listed now (else 404) and
+  // hides it from the list for good; it switches nothing off.
+  getNotNeededKinds: (signal?: AbortSignal) =>
+    request<NotNeededKindsResponse>(`/api/suggestion-inbox/not-needed-kinds`, { signal, timeoutMs: 60_000 }),
+  dismissNotNeededKind: (kind: string) =>
+    request<{ ok: true }>(`/api/suggestion-inbox/not-needed-kinds/dismiss`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind }),
+      timeoutMs: 60_000,
+    }),
+  // Switch a note kind off for the project (#924): hides every note of it, in
+  // every book, until it is switched back on. Off takes only a listed kind.
+  switchOffNoteKind: (kind: string) =>
+    request<{ ok: true; hidden: number }>(`/api/suggestion-inbox/not-needed-kinds/switch-off`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind }),
+      timeoutMs: 60_000,
+    }),
+  switchOnNoteKind: (kind: string) =>
+    request<{ ok: true; restored: number }>(`/api/suggestion-inbox/not-needed-kinds/switch-on`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind }),
+      timeoutMs: 60_000,
+    }),
+
   setVerseDone: (book: string, chapter: number, verse: number, done: boolean) =>
     request<VerseStatus>(
       `/api/chapters/${encodeURIComponent(book)}/${chapter}/${verse}/status`,
@@ -2235,16 +2358,19 @@ export const api = {
     id: string,
     expectedVersion: number,
     patch: Record<string, unknown>,
-    opts: { restoredFromVersion?: number | null; book: string; queuedAt?: number },
+    // expectedState (#880): the translation_state the edit was proposed
+    // against; the server refuses the edit (409 state_mismatch) if the row has
+    // moved off it. Undefined sends no pin (every typed edit).
+    opts: { restoredFromVersion?: number | null; expectedState?: string | null; book: string; queuedAt?: number },
   ) =>
     request<T>(`/api/rows/${kind}/${encodeURIComponent(id)}?book=${encodeURIComponent(opts.book)}`, {
       method: "PATCH",
       headers: { "If-Match": String(expectedVersion), ...rowWriteDiagnosticHeaders(opts.queuedAt) },
-      body: JSON.stringify(
-        typeof opts.restoredFromVersion === "number"
-          ? { ...patch, restored_from_version: opts.restoredFromVersion }
-          : patch,
-      ),
+      body: JSON.stringify({
+        ...patch,
+        ...(typeof opts.restoredFromVersion === "number" ? { restored_from_version: opts.restoredFromVersion } : {}),
+        ...(opts.expectedState !== undefined ? { expected_state: opts.expectedState } : {}),
+      }),
     }),
 
   deleteRow: (kind: RowKind, id: string, expectedVersion: number, book: string, queuedAt?: number) =>
@@ -2285,8 +2411,9 @@ export const api = {
   // bumping, mirrors setPreserveNote. Returns the updated row so the caller can
   // refresh local state (the collapsed/green treatment keys off the new state).
   // `bulk`: set by Approve-all loops. A one-at-a-time approval clears a bulk
-  // approval stamp (the row becomes an AI example again); Approve-all is itself
-  // a bulk approval and keeps it (#414).
+  // approval stamp (the row becomes an AI example again, #414); Approve-all is
+  // itself a bulk approval and stamps an AI draft nobody changed so it is not
+  // an AI example; an edited note counts like a single approval (#833).
   // expectedVersion / expectedState: approve only if the row is still at the
   // version and translation_state the caller showed (If-Match + expected_state;
   // 409 otherwise, and a trashed row is refused). Rapid check's circle sends
@@ -2317,7 +2444,9 @@ export const api = {
     }),
 
   // Translation-mode "Approve" for translationQuestions — the tQ analogue of
-  // validateNote. value=true → 'validated'; value=false → 'edited'.
+  // validateNote. value=true → 'validated'; value=false → 'edited'. Approving is
+  // refused (409 chapter_locked) while any AI run holds the question's chapter,
+  // the same rule as saving a question edit (#752).
   validateQuestion: (id: string, book: string, value: boolean, opts?: { bulk?: boolean }) =>
     request<TqRow>(`/api/rows/tq/${encodeURIComponent(id)}/validate?book=${encodeURIComponent(book)}`, {
       method: "POST",
@@ -2496,6 +2625,29 @@ export const api = {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ enabled }),
+    }),
+
+  // Nightly lessons from editor corrections (issue #817). Admin-only.
+  getLessons: () => request<LessonsState>(`/api/translation-memory/lessons`),
+  setLessonsEnabled: (enabled: boolean) =>
+    request<LessonsState>(`/api/translation-memory/lessons`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    }),
+  // Part 2 (#908): each change writes a new set. A promote also answers with
+  // the saved Translation preferences (Common issues gained a line).
+  editLesson: (setId: number, position: number, action: LessonEditAction) =>
+    request<LessonsState & { prefs?: TranslationPrefs }>(`/api/translation-memory/lessons/edit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ setId, position, action }),
+    }),
+  restoreLessonSet: (setId: number, currentSetId: number) =>
+    request<LessonsState>(`/api/translation-memory/lessons/restore`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ setId, currentSetId }),
     }),
 
   // ── Org-wide AI provider config (migration 0065) ──

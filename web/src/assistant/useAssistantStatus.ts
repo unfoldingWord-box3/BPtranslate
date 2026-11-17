@@ -1,5 +1,6 @@
 // The assistant's status for the signed-in person (GET /api/assistant/status).
-// Fetched on mount and again each time `open` turns true, so an admin's switch
+// Fetched on mount, on a language change, and again each time `open` turns
+// true (not when it turns false), so an admin's switch
 // or a spent budget shows up without a reload. A failed fetch keeps the last
 // known status (null before the first success, which hides the feature).
 
@@ -27,7 +28,14 @@ export function useAssistantStatus(lang: string, open: boolean) {
       });
   }, [lang]);
 
+  // On mount (the closed button needs the status to show at all), on a
+  // language change, and each time the panel opens; closing learns nothing
+  // new, so it does not fetch (#860). The ref also keeps a panel that mounts
+  // already open to one fetch.
+  const fetchedFor = useRef<typeof refresh | null>(null);
   useEffect(() => {
+    if (!open && fetchedFor.current === refresh) return;
+    fetchedFor.current = refresh;
     refresh();
   }, [refresh, open]);
 

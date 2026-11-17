@@ -1,5 +1,8 @@
 import { expect, test } from "@playwright/test";
 import { newUserContext } from "./helpers";
+import { ZEC_CHAPTERS } from "./chapters";
+
+const CHAPTER = ZEC_CHAPTERS.readOnly.chapter;
 
 // Verse view chrome + layout guard (issue #477).
 //
@@ -14,7 +17,7 @@ test.describe("verse view layout (#477)", () => {
     const { context } = await newUserContext(browser, "verse-layout");
     const page = await context.newPage();
     await page.setViewportSize({ width: 1280, height: 900 });
-    await page.goto("/#/verse/ZEC/1/1");
+    await page.goto(`/#/verse/ZEC/${CHAPTER}/1`);
 
     // One header band with a real page heading, like #/notes and #/package.
     await expect(page.locator("h1")).toHaveCount(1, { timeout: 15_000 });
@@ -29,7 +32,7 @@ test.describe("verse view layout (#477)", () => {
     const xs = await texts.evaluateAll((els) =>
       els.map((el) => Math.round((el as HTMLElement).getBoundingClientRect().left)),
     );
-    expect(xs.length, "expected several resource rows for ZEC 1:1").toBeGreaterThan(1);
+    expect(xs.length, `expected several resource rows for ZEC ${CHAPTER}:1`).toBeGreaterThan(1);
     expect(new Set(xs).size, `text columns start at ${xs.join(", ")}`).toBe(1);
 
     await context.close();

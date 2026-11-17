@@ -417,6 +417,11 @@ export function buildScorecard(
 // ── D1 loader ───────────────────────────────────────────────────────────────
 
 // The latest ai_pipeline audit row per validated, live tN row of the book.
+// Hand approvals only: a bulk approval (admin_bulk_state set by the admin
+// sweep, the Aquifer import, or Approve-all on an unchanged AI draft, #833) was never read one at a time,
+// so it says nothing about how good the draft was. Same rule as
+// VALIDATED_TN_EXAMPLES_SQL (contextExport.ts). The suggestion inbox reads
+// these rows too.
 // Book-scoped on edit_log.book. A pre-0017 audit row has a NULL book, so it is
 // used only when the row has no book-matched one: the COALESCE tries this
 // book's latest row first, so another book's NULL-book row for a shared id can
@@ -438,7 +443,7 @@ export const SCORECARD_ROWS_SQL = `
         ORDER BY e.id DESC LIMIT 1)
     )
    WHERE t.book = ?1 AND t.deleted_at IS NULL AND t.trashed_at IS NULL
-     AND t.translation_state = 'validated'
+     AND t.translation_state = 'validated' AND t.admin_bulk_state IS NULL
    ORDER BY t.chapter, t.id`;
 
 export const SCORECARD_JOBS_SQL = `

@@ -12,7 +12,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Alert, IconButton, Stack, Button, Box, Typography } from "@mui/material";
 import CloseIcon from "@mui/icons-material/Close";
-import { drafts, type DraftMeta, type DraftRecord } from "../sync/drafts";
+import { countsAsUnsaved, drafts, type DraftMeta, type DraftRecord } from "../sync/drafts";
 import { formatDraftMeta } from "../lib/draftLocation";
 import { outbox, type OutboxOp } from "../sync/outbox";
 import { rowDraftHasActiveSave, verseDraftHasActiveSave } from "../sync/draftSaveState";
@@ -126,6 +126,8 @@ export function UnsavedToasts({ book, onSaveVerseDraft, onJumpTo, onGoTo }: Prop
     return draftList.filter(
       (d) =>
         !d.quarantined &&
+        // Not Style typing this user cannot save (another person's, #920).
+        countsAsUnsaved(d) &&
         (onGoTo
           ? !isDraftEditorShown(d.key)
           : d.meta.kind === "verse" && d.meta.book === book) &&
@@ -212,7 +214,7 @@ export function UnsavedToasts({ book, onSaveVerseDraft, onJumpTo, onGoTo }: Prop
           );
           if (onGoTo) {
             const meta = d.meta;
-            const ref = formatDraftMeta(meta);
+            const ref = formatDraftMeta(meta, t);
             // The ref is Latin ("TN ZEC 6:11"); isolate it in <bdi> so it
             // keeps its own order inside an Arabic sentence.
             const [before, after = ""] = t("widgets.toasts.unsavedDraftRef", { ref: REF_SLOT }).split(REF_SLOT);

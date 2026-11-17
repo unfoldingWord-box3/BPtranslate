@@ -3,7 +3,7 @@ id: admin-progress
 title: Progress, review state, draft scorecard and suggestion inbox (admin)
 routes: [admin/progress, admin/review, admin/scorecard, admin/suggestions]
 roles: [admin]
-keywords: [progress, review state, approve, approved, validated, bulk, sweep, reopen, needs review, chapter, book, notes, questions, dashboard, percent, scorecard, draft quality, AI draft, unchanged, similarity, context pack, closing period, suggestion inbox, suggestions, repeated corrections, house style, rule, reject]
+keywords: [progress, review state, approve, approved, validated, bulk, sweep, reopen, needs review, chapter, book, notes, questions, dashboard, percent, scorecard, draft quality, AI draft, unchanged, similarity, context pack, closing period, suggestion inbox, suggestions, repeated corrections, house style, rule, reject, not needed, note kinds, support reference, dismiss, switch off, switch back on, hide note kind]
 screenshots:
   - admin-progress-1 #/admin/progress
   - admin-progress-2 #/admin/review
@@ -48,7 +48,7 @@ Good to know:
 1. Open **Draft scorecard** in the admin menu.
 2. Choose the **Book**. The table shows one row per chapter, and **Whole book** at the bottom.
 3. Read the columns:
-   - **Approved notes**: approved translation notes in the chapter.
+   - **Approved notes**: approved translation notes in the chapter. AI drafts nobody changed that were approved with **Approve all notes**, and notes approved by a review-state change, are left out, because nobody read them one by one. Approvals made with Approve all before this change are still counted.
    - **No draft logged**: notes with no AI draft on record. Edit history older than 180 days can be cleared.
    - **Draft was English**: the AI draft was the English note, not translated. These notes are left out of the columns to the right. A note that is the same as the English for a good reason, such as one that holds only links, is counted here too.
    - **Compared**: the notes the other columns are about.
@@ -63,7 +63,7 @@ If the English notes cannot be read for some chapters, a message names those cha
 **Suggestion inbox** finds corrections editors made again and again to the AI's translation-note drafts, so you can fix them once. For example, editors may add a period after the final ] of almost every note, or delete a tag the AI keeps adding.
 
 1. Open **Suggestion inbox** in the admin menu.
-2. Choose the **Book**. The app works the cards out now, from that book's approved notes. There is no nightly run, so a large book can take a few seconds.
+2. Choose the **Book**. The app works the cards out now, from that book's approved notes (the same notes as **Draft scorecard**). There is no nightly run, so a large book can take a few seconds.
 3. Each card shows:
    - the change: the AI's words, then the approved words (**deleted** when the editors removed them). **at the end of the note** means the change was made only at the very end.
    - **Made in X of Y drafts that had it**: X notes had this change made. Y drafts contained the words it changes, including those X.
@@ -76,3 +76,17 @@ If the English notes cannot be read for some chapters, a message names those cha
    - **Reject** hides the card for good, in every book.
 
 A card appears only when the same change was made in at least 10 notes across at least 3 chapters. Spaces and line breaks are ignored, and changes inside a bold Scripture quote and rewrites longer than a few words are left out. A change is not shown when a house-style rule already makes it (even a rule that is switched off), a term already gives the approved words, a template already contains them, or the Common issues text already lists them. A card you sent to another editor goes away once that editor's text covers it. If it still shows after your edit, reject it.
+
+## See which note kinds are marked Not needed
+Below the cards, **Note kinds marked Not needed** lists the kinds of translation notes (the translationAcademy article a note points to, such as figs-yousingular) that editors keep marking **Not needed**. It counts all books, not only the one you chose.
+
+- A kind is listed when at least 10 of its notes, in at least 3 chapters, were marked **Not needed** in the last 30 days. A note still counts after the nightly export removes it for good. A note that was restored does not count.
+- Each card shows the kind, how many notes were marked, in how many chapters, and which books.
+- **Dismiss** hides the kind from this list for good. It does not change any note.
+- **Switch off** hides every note of that kind, in every book, after you confirm. Editors no longer see those notes, and the nightly publish leaves them out. Notes already marked **Not needed** keep their own path. Notes of the kind that arrive later, from an import, a re-import or an AI run, are hidden too.
+
+## Switch a note kind back on
+Switched-off kinds are listed under **Switched-off note kinds**, with how many notes each one hides. **Switch back on** brings back exactly the notes the switch-off hid, as they were, even weeks later. A note that was deleted another way stays deleted.
+
+- Every note hidden or brought back is recorded in the app's edit log.
+- Before each nightly publish, the app checks that it is not about to remove many of a book's notes at once (more than 25, and more than 5% of that book's notes), and refuses to publish that book's notes if it is. Notes you switched off do not count toward that limit, so switching off even a large kind does not block publishing. Any other large drop is still refused.

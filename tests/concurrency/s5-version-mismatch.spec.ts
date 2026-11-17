@@ -1,5 +1,8 @@
 import { expect, test, request as apiRequest } from "@playwright/test";
 import { authedRequest, csrfToken, fetchChapter, mintToken } from "./helpers";
+import { ZEC_CHAPTERS } from "./chapters";
+
+const CHAPTER = ZEC_CHAPTERS.shared.chapter;
 
 // Honor BE_BASE_URL so the suite runs on a relocated port (mirrors s8).
 const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
@@ -20,7 +23,7 @@ test("two PATCHes with the same If-Match: one wins, the other 409s", async () =>
   // Pick the first TN row on ZEC 6. The exact row doesn't matter — the test
   // only cares about the version contract — but reading once gives us a real
   // id + version pair.
-  const chapter = await fetchChapter(ctx, alice.token, "ZEC", 6);
+  const chapter = await fetchChapter(ctx, alice.token, "ZEC", CHAPTER);
   expect(chapter.tn.length).toBeGreaterThan(0);
   const target = chapter.tn[0];
   const startingVersion = target.version;
@@ -61,7 +64,7 @@ test("two PATCHes with the same If-Match: one wins, the other 409s", async () =>
   expect(typeof loserBody.current.note).toBe("string");
 
   // Server state matches the winner. The loser's text is NOT present.
-  const after = await fetchChapter(ctx, alice.token, "ZEC", 6);
+  const after = await fetchChapter(ctx, alice.token, "ZEC", CHAPTER);
   const finalRow = after.tn.find((r) => r.id === target.id)!;
   expect(finalRow.note).toBe(winnerBody.note);
   const loserAttemptedText =
@@ -77,7 +80,7 @@ test("loser can retry with fresh If-Match and succeed", async () => {
   const ctx = await apiRequest.newContext({ baseURL: BASE });
 
   const alice = await mintToken(ctx, "alice");
-  const chapter = await fetchChapter(ctx, alice.token, "ZEC", 6);
+  const chapter = await fetchChapter(ctx, alice.token, "ZEC", CHAPTER);
   // Use a different row so this test is order-independent vs the one above.
   const target = chapter.tn[1] ?? chapter.tn[0];
   const startingVersion = target.version;

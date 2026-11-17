@@ -1,12 +1,34 @@
 import type { DraftMeta } from "../sync/drafts";
+import type { PrefsDraftSection } from "../sync/prefsDraft";
+
+const PREFS_SECTION_NAMES: Record<PrefsDraftSection, string> = {
+  brief: "Brief",
+  instructions_md: "Instructions",
+  common_issues_md: "Common issues",
+};
+// The same names as the Style page shows them, in the UI language (#913 item 7).
+const PREFS_SECTION_KEYS: Record<PrefsDraftSection, string> = {
+  brief: "moreTools.style.sectionBrief",
+  instructions_md: "moreTools.style.sectionInstructions",
+  common_issues_md: "moreTools.style.sectionCommonIssues",
+};
+
+// The classic Preferences section that holds a translation-preferences draft.
+export const PREFS_CLASSIC_SECTION: Record<PrefsDraftSection, string> = {
+  brief: "brief",
+  instructions_md: "instructions",
+  common_issues_md: "commonIssues",
+};
 
 // Where an unsaved draft lives on the flows screens. Shared by the flows "N
 // unsaved" jump menu (SyncStatusBar) and the flows unsaved-drafts toast
 // (UnsavedToasts, #372), so the two always land in the same place. Whether a
 // draft's editor is showing right now is sync/draftEditors.ts, not the route.
 
-// One-line name for a draft, e.g. "ULT ZEC 6:1" or "TN ZEC 6:11".
-export function formatDraftMeta(m: DraftMeta): string {
+// One-line name for a draft, e.g. "ULT ZEC 6:1" or "TN ZEC 6:11". `t`, the
+// UI's translator, translates the names of a prefs draft's page and box;
+// without it they are English.
+export function formatDraftMeta(m: DraftMeta, t?: (key: string) => string): string {
   if (m.kind === "verse") return `${m.bibleVersion} ${m.book} ${m.chapter}:${m.verse}`;
   if (m.kind === "article") {
     // tA parts split into title / sub-title / body; name the part so two drafts
@@ -17,6 +39,12 @@ export function formatDraftMeta(m: DraftMeta): string {
   // translator recognises them by, so lead with it and keep the id for
   // disambiguation (several templates can share a support_ref).
   if (m.kind === "template") return `${m.supportRef} · ${m.templateId}`;
+  // Translation preferences (#909) have no reference: name the editor.
+  if (m.kind === "prefs") {
+    return t
+      ? `${t("moreTools.style.title")} · ${t(PREFS_SECTION_KEYS[m.section])}`
+      : `Style · ${PREFS_SECTION_NAMES[m.section]}`;
+  }
   return `${m.rowKind.toUpperCase()} ${m.book} ${m.chapter}:${m.verse}`;
 }
 
@@ -28,6 +56,7 @@ export function formatDraftMeta(m: DraftMeta): string {
 export function draftFlowHash(m: DraftMeta): string {
   if (m.kind === "article") return `#/articles/${m.resource}/${encodeURIComponent(m.articleId)}`;
   if (m.kind === "template") return `#/admin/curate/${encodeURIComponent(m.templateId)}`;
+  if (m.kind === "prefs") return "#/admin/style";
   // 3-segment #/scripture/B/C/V: App.tsx's `ts` route accepts the optional
   // verse segment and TranslateScriptureScreen seeds its cursor from it on
   // mount, so this lands the translator on the exact drafted verse, not just

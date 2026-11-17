@@ -20,11 +20,19 @@
 // refused or discarded, may put a missing row back, and only from a fresh
 // read (rowRebuildAction's `mayInsert`, review A1/A2).
 //
-// Only this tab hears the outbox's results (the tab that drains), so another
-// open tab keeps showing its own optimistic value (#637 item 3, out of scope).
+// Across tabs (#637 item 3): only the tab that drains hears the outbox's
+// results, so a fatal or "locked" refusal rebuilds the row there alone (a
+// rebuild in the typing tab, whose editor never heard the refusal and so holds
+// nothing, would take the refused text off its screen). A drop (Discard, keep
+// theirs) reaches every other open tab through rowDropChannel.ts, and each
+// rebuilds the row as the dropping tab does: a field still showing the
+// thrown-away text goes back to the server's, newer typing stays. Known and
+// accepted limit (option A on #637): while a save is still on its way, another
+// tab whose cached row is rebuilt from the shared outbox (rowWithLivePatches)
+// shows it as saved already; that lasts until it lands, normally a moment.
 
 import { api, ApiError, type TnRow, type TqRow, type TwlRow } from "./api";
-import { onOutboxDrop, onOutboxResult, outbox, type OutboxOp, type RowTarget } from "./outbox";
+import { onOutboxDrop, onOutboxResult, onRemoteRowDrop, outbox, type OutboxOp, type RowTarget } from "./outbox";
 import { RowGenerations, bumpsRowGeneration, rebuildsAfterResult, targetKey } from "./outboxTargeting";
 
 export type AnyRow = TnRow | TqRow | TwlRow;
@@ -67,7 +75,7 @@ function isServerRow(v: unknown, target: RowTarget): v is AnyRow {
 // another rebuild for the row) is dropped instead of overwriting it.
 const generations = new RowGenerations();
 
-async function rebuild(op: OutboxOp, cause: RebuildCause) {
+async function rebuild(op: Pick<OutboxOp, "target" | "action" | "conflictCurrent">, cause: RebuildCause) {
   if (op.target.kind !== "row" || listeners.size === 0) return;
   const target = op.target;
   const key = targetKey(target);
@@ -119,4 +127,10 @@ onOutboxDrop((op) => {
   if (op.target.kind !== "row") return;
   generations.bump(targetKey(op.target));
   void rebuild(op, "drop");
+});
+
+// The same for a row op another tab dropped (rowDropChannel.ts).
+onRemoteRowDrop((drop) => {
+  generations.bump(targetKey(drop.target));
+  void rebuild(drop, "drop");
 });

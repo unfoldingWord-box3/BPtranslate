@@ -73,6 +73,13 @@ function fresh() {
   ins.run("c1v5", BOOK, 1, 5, "1:5", null);
   ins.run("c1tr", BOOK, 1, 7, "1:7", 500); // already trashed, for /restore
   ins.run("c2v1", BOOK, 2, 1, "2:1", null);
+  // Questions (issue #752): one AI-drafted question per chapter, for /tq/:id/validate.
+  const insQ = sqlite.prepare(
+    `INSERT INTO tq_rows (id, book, chapter, verse, ref_raw, question, response, sort_order, version, updated_by, translation_state)
+     VALUES (?, ?, ?, ?, ?, 'old question', 'old response', 10, 3, 9, 'ai_draft')`,
+  );
+  insQ.run("q1v1", BOOK, 1, 1, "1:1");
+  insQ.run("q2v1", BOOK, 2, 1, "2:1");
 
   const app = new Hono();
   app.use("*", async (c, next) => {
@@ -116,7 +123,15 @@ function fresh() {
       env,
       ctx,
     );
-  return { post, job, row, sweep, sqlite };
+  const qrow = (id) => sqlite.prepare(`SELECT translation_state FROM tq_rows WHERE id = ?`).get(id);
+  const validateQ = (id, value) =>
+    app.request(
+      `/api/rows/tq/${id}/validate?book=${BOOK}`,
+      { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ value }) },
+      env,
+      ctx,
+    );
+  return { post, job, row, sweep, sqlite, qrow, validateQ };
 }
 
 const approve = (post, id) => post(id, "validate", { value: 1 });
@@ -265,4 +280,110 @@ test("a whole-book approve sweep is refused when a redraft of the book intro is 
   job("translate", 1, 1, "running", { resourceType: "tn", rowIds: ["in01"] });
   assert.equal((await sweep({ resource: "tn", state: "approved", allChapters: true })).status, 409);
   assert.equal((await sweep({ resource: "tn", state: "approved", chapter: 1 })).status, 200, "chapter 1 holds no selected row");
+});
+
+// Issue #752 (decision A, 2026-11-12): approving a QUESTION while an AI run
+// holds its chapter is refused too. The rule is the tq edit lock
+// (activePipelineForChapter, as PATCH /rows/tq/:id uses): any non-terminal job
+// covering the question's chapter. applyTranslateTqRow resets
+// translation_state to ai_draft and /validate bumps no version, so an approve
+// landing between the touched-ids read and the apply was silently undone.
+test("#752: during a running questions translate, approving a question is refused and its state is unchanged", async () => {
+  const { job, qrow, validateQ } = fresh();
+  job("translate", 1, 1, "running", { resourceType: "tq" });
+
+  const a = await validateQ("q1v1", 1);
+  assert.equal(a.status, 409, "Approve is refused");
+  const body = await a.json();
+  assert.equal(body.error, "chapter_locked");
+  assert.equal(body.pipelineType, "translate", "same body shape as the tq PATCH refusal");
+  assert.equal(typeof body.jobId, "string");
+  assert.equal(typeof body.startedAt, "number");
+  assert.equal(qrow("q1v1").translation_state, "ai_draft", "the question was not approved");
+
+  const b = await validateQ("q2v1", 1);
+  assert.equal(b.status, 200, "a chapter outside the run stays open");
+  assert.equal(qrow("q2v1").translation_state, "validated");
+});
+
+test("#752: un-approving a question (value=0) is let through during a running questions translate", async () => {
+  const { job, qrow, validateQ } = fresh();
+  job("translate", 1, 1, "running", { resourceType: "tq" });
+  const r = await validateQ("q1v1", 0);
+  assert.equal(r.status, 200);
+  assert.equal(qrow("q1v1").translation_state, "edited");
+});
+
+test("#752: with no job, or only a finished or queued one, approving a question succeeds", async () => {
+  const { qrow, validateQ } = fresh();
+  assert.equal((await validateQ("q1v1", 1)).status, 200);
+  assert.equal(qrow("q1v1").translation_state, "validated");
+
+  const second = fresh();
+  second.job("translate", 1, 1, "done", { resourceType: "tq" });
+  second.job("translate", 1, 1, "queued", { resourceType: "tq" });
+  assert.equal((await second.validateQ("q1v1", 1)).status, 200);
+  assert.equal(second.qrow("q1v1").translation_state, "validated");
+});
+
+test("#752: approving a question follows the tq edit lock, so any running job on its chapter refuses it", async () => {
+  const { job, qrow, validateQ } = fresh();
+  job("notes", 1, 1);
+  assert.equal((await validateQ("q1v1", 1)).status, 409, "a non-translate run on the chapter locks questions, as for PATCH");
+  assert.equal(qrow("q1v1").translation_state, "ai_draft");
+});
+
+// #752 review: the admin approve sweep over questions sets them to validated
+// with no version bump, the same lost approval as a single Approve. It is
+// refused as a whole (dry run included) when any running job holds a chapter
+// with live questions in its range: the tq edit lock, as for the single route.
+test("#752: a tq approve sweep over a chapter an AI run holds is refused with 409 chapter_locked", async () => {
+  const { sweep, job, qrow } = fresh();
+  job("translate", 1, 1, "running", { resourceType: "tq" });
+
+  const r = await sweep({ resource: "tq", state: "approved", chapter: 1 });
+  assert.equal(r.status, 409);
+  const body = await r.json();
+  assert.equal(body.error, "chapter_locked");
+  assert.equal(body.pipelineType, "translate");
+  assert.equal(qrow("q1v1").translation_state, "ai_draft", "nothing was swept");
+
+  assert.equal((await sweep({ resource: "tq", state: "approved", allChapters: true })).status, 409, "a whole-book sweep too");
+  assert.equal((await sweep({ resource: "tq", state: "approved", chapter: 1 }, "?dryRun=1")).status, 409, "the dry run says so up front");
+  assert.equal(qrow("q2v1").translation_state, "ai_draft", "the refused whole-book sweep wrote nothing");
+
+  const ok = await sweep({ resource: "tq", state: "approved", chapter: 2 });
+  assert.equal(ok.status, 200, "a chapter outside the run can be swept");
+  assert.equal(qrow("q2v1").translation_state, "validated");
+
+  assert.equal((await sweep({ resource: "tq", state: "needs_review", chapter: 1 })).status, 200, "a needs_review sweep is let through");
+});
+
+test("#752: a tq approve sweep with no job, or a finished or queued one, succeeds; any running job on the chapter refuses it", async () => {
+  const a = fresh();
+  assert.equal((await a.sweep({ resource: "tq", state: "approved", allChapters: true })).status, 200);
+  assert.equal(a.qrow("q1v1").translation_state, "validated");
+
+  const b = fresh();
+  b.job("translate", 1, 1, "done", { resourceType: "tq" });
+  b.job("translate", 1, 1, "queued", { resourceType: "tq" });
+  assert.equal((await b.sweep({ resource: "tq", state: "approved", chapter: 1 })).status, 200);
+
+  const c = fresh();
+  c.job("notes", 1, 1);
+  assert.equal((await c.sweep({ resource: "tq", state: "approved", chapter: 1 })).status, 409, "the tq edit lock: any running job");
+
+  const d = fresh();
+  d.job("translate", 5, 5, "running", { resourceType: "tq" });
+  assert.equal(
+    (await d.sweep({ resource: "tq", state: "approved", allChapters: true })).status,
+    200,
+    "a run on a chapter holding no questions does not block the sweep",
+  );
+});
+
+test("#752: an unknown question is still a 404, not a lock refusal", async () => {
+  const { job, validateQ } = fresh();
+  job("translate", 1, 1, "running", { resourceType: "tq" });
+  assert.equal((await validateQ("nope", 1)).status, 404);
 });

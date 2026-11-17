@@ -41,7 +41,7 @@ import { getSessionKey, pipelineStore, type PipelineJob } from "../sync/pipeline
 import { currentPipelineUserId } from "../sync/pipelineSession";
 import { parseChapterRange } from "../lib/refParser";
 import { unpublishedWarning, type UnpublishedCheck } from "../lib/unpublishedScriptureWarning";
-import { isAiNeedsOrgKey, isAiProviderNotConfigured } from "../lib/aiProviderErrors";
+import { isAiProviderNotConfigured } from "../lib/aiProviderErrors";
 import { useTranslation } from "react-i18next";
 import { useProjectConfig, isTranslationProject, projectType } from "../hooks/useProjectConfig";
 import { pipelineTrigger } from "../lib/pipelineTrigger";
@@ -72,7 +72,7 @@ interface Props {
 
 interface PipelineOption {
   key: string;
-  type: PipelineType;
+  type: "translate";
   label: string;
   description: string;
   approxDuration: string;
@@ -267,9 +267,6 @@ export function PipelineMenu({ book, chapter, onMessage, onImported, renderTrigg
           }
         } else if (isAiProviderNotConfigured(e)) {
           onMessage?.(t("pipeline.aiKeyNotConfigured"));
-          setConfirm(null);
-        } else if (isAiNeedsOrgKey(e)) {
-          onMessage?.(t("ai.needsOrgKey"));
           setConfirm(null);
         } else if (e.status === 401) {
           onMessage?.(t("pipeline.signInToStart"));

@@ -3,7 +3,7 @@ id: verse-view
 title: Verse view
 routes: [verse]
 roles: [editor, admin, viewer]
-keywords: [verse view, original, hebrew, greek, literal, simplified, audit, read, check, morphology, lexicon, notes, word links, fidelity]
+keywords: [verse view, scroll, whole chapter, original, hebrew, greek, literal, simplified, audit, read, check, morphology, lexicon, notes, word links, fidelity]
 screenshots:
   - verse-view-1 #/verse/OBA/1/1
 ---
@@ -22,6 +22,17 @@ The back arrow returns to the package.
 - Select **Previous verse** or **Next verse**. The arrow keys (← →) do the same.
 - Use **Go to verse** to jump to a verse in the same chapter.
 - The count, for example **Verse 1 of 21**, shows where you are.
+
+## Scroll through the chapter
+Choose **Scroll** at the top (next to **One verse**) to see the whole chapter as one list, verse after verse. Scroll with the mouse wheel, the trackpad or your finger.
+
+- Each verse keeps everything it has in **One verse**: the three texts, its checks, and its notes, word links and questions.
+- The count, **Go to verse** and the arrows follow the verse at the top of the list. The arrows and **Go to verse** move the list to the verse you pick.
+- Select a word in any verse. On a wide screen the detail panel shows it. On a narrow screen the detail appears under that verse's text.
+- The address in the browser follows the verse you are reading, so a reload or a bookmark opens at that verse.
+- After the last verse, select **Continue to chapter** to go on to the next chapter, still in **Scroll**. The book's last chapter has no such button.
+
+Your choice is remembered on this device. Choose **One verse** to go back to one verse at a time, at the verse you were reading.
 
 ## Read mode and Audit mode
 At the top, choose **Read** or **Audit**.

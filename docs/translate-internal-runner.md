@@ -98,7 +98,10 @@ Steps:
 1. `guard-and-source`: assert `pipeline_jobs.state IN ('running','dispatching')`;
    `fetchResourceFile` → parse → `sliceChapterRows` → `selectRows` → `buildBatches`
    (15 rows / 7000 chars). Put `work/batch-NN.tsv` per batch. Return
-   `{batchCount, rowCount}`.
+   `{batchCount, rowCount}`. A whole-chapter job (no rowIds, no verse range)
+   leaves the rows approved in D1 out of the batches (#895); the merge's shrink
+   guard counts them as kept, and the apply lists them as kept because approved.
+   A fully approved chapter runs zero batches and finishes done.
 2. `context`: `loadContextPack(contextRef, {allowEmpty: !explicit})` +
    `buildScripturePack`; render every `renderBatchPack` and task JSON; put
    `work/batch-NN-pack.md`, `work/batch-NN-task.json`. Return

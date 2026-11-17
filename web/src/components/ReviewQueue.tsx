@@ -17,7 +17,10 @@
 //            tq/twl are locked.
 //   DELETE — locked for EVERY kind, tn included ("no carve-out for tn here").
 //   POST /api/rows — locked (a run will rearrange the row set when it lands).
-//   /validate /preserve /hint /trash /restore — no lock check at all.
+//   /validate (approve only) — tn: refused while a translate run will write
+//            the note (#602); tq: refused while any run holds the chapter (#752).
+//   /trash /restore — tn: refused while a translate run will write the note (#602).
+//   /preserve /hint — no lock check at all.
 // The card disables exactly what the server would actually reject — no more.
 // Disabling note editing during a run would block writes the server accepts.
 //
@@ -61,6 +64,7 @@ import { versionLabel } from "../lib/versionLabels";
 import { ReviewSourceStrip } from "./flows/ReviewSourceStrip";
 import { ReviewHistoryDialog } from "./flows/ReviewHistoryDialog";
 import { ReviewConflictDialog } from "./flows/ReviewConflictDialog";
+import { displayFieldValue, fieldLabel, fieldLabelLower, unescapeNewlines } from "./ConflictCompare";
 import { ReviewQuestionsGrid } from "./flows/ReviewQuestionsGrid";
 import { useChapter } from "../hooks/useChapter";
 import { useLayoutBand } from "../hooks/useLayoutBand";
@@ -102,39 +106,6 @@ export interface ReviewQueueProps {
   onNavigate: (book: string, chapter: number, verse?: number) => void;
 }
 
-// TnRow.note / TqRow.response come across with literal "\n" escape sequences
-// (see the source TSV format) rather than real newlines.
-function unescapeNewlines(text: string | null | undefined): string {
-  return (text ?? "").replace(/\\n/g, "\n");
-}
-
-// i18n keys for the row fields this screen can patch — the map stores KEY
-// NAMES, not display text, so it stays language-independent at module scope.
-// Anything unmapped falls back to the raw column name rather than being
-// silently prettified into something that might not match what the API
-// actually changed. `lower` is the sentence-inline form, supplied as its own
-// key rather than produced by lower-casing a translated string.
-const FIELD_LABEL_KEYS: Record<string, { label: string; lower: string }> = {
-  note: { label: "flowReview.field.note", lower: "flowReview.fieldLower.note" },
-  question: { label: "flowReview.field.question", lower: "flowReview.fieldLower.question" },
-  response: { label: "flowReview.field.response", lower: "flowReview.fieldLower.response" },
-  quote: { label: "flowReview.field.quote", lower: "flowReview.fieldLower.quote" },
-  occurrence: { label: "flowReview.field.occurrence", lower: "flowReview.fieldLower.occurrence" },
-  verse: { label: "flowReview.field.verse", lower: "flowReview.fieldLower.verse" },
-  ref_raw: { label: "flowReview.field.refRaw", lower: "flowReview.fieldLower.refRaw" },
-  sort_order: { label: "flowReview.field.sortOrder", lower: "flowReview.fieldLower.sortOrder" },
-};
-
-function fieldLabel(t: TFunction, field: string): string {
-  const entry = FIELD_LABEL_KEYS[field];
-  return entry ? t(entry.label) : field;
-}
-
-function fieldLabelLower(t: TFunction, field: string): string {
-  const entry = FIELD_LABEL_KEYS[field];
-  return entry ? t(entry.lower) : field;
-}
-
 // "quote", "quote and occurrence" — names what conflicted, nothing more.
 function joinFieldLabels(t: TFunction, labels: string[]): string {
   if (labels.length === 0) return t("flowReview.common.queuedFallback");
@@ -143,13 +114,6 @@ function joinFieldLabels(t: TFunction, labels: string[]): string {
     list: labels.slice(0, -1).join(t("flowReview.common.listSeparator")),
     last: labels[labels.length - 1],
   });
-}
-
-// Render any patch/row value as display text. Absent stays "" so the dialog can
-// show an explicit "(empty)" rather than a blank box.
-function displayFieldValue(value: unknown): string {
-  if (value == null) return "";
-  return typeof value === "string" ? unescapeNewlines(value) : String(value);
 }
 
 function refFor(book: string, row: QueueRow): string {
@@ -242,10 +206,10 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
   const [quoteKeys, setQuoteKeys] = useState<Set<HighlightKey>>(() => new Set());
   const [retargetOpen, setRetargetOpen] = useState(false);
   const [retargetValue, setRetargetValue] = useState("");
-  // The 409 body carries ONLY { version, deleted_at } (api/src/rows.ts) — no
-  // content, no updated_at. `serverVersion` is everything we learn from it;
-  // the row itself has to be re-read (conflictRow) before we can show or adopt
-  // "theirs".
+  // The 409 body carries the server's whole row (api/src/rows.ts; the outbox
+  // keeps it as op.conflictCurrent), but this screen only takes `serverVersion`
+  // from it and re-reads the row (conflictRow) before showing or adopting
+  // "theirs", so a write that landed after the 409 is not missed.
   const [conflict, setConflict] = useState<{ op: OutboxOp; serverVersion: number | null } | null>(null);
   const [conflictRow, setConflictRow] = useState<TnRow | TqRow | null>(null);
   const [conflictLoading, setConflictLoading] = useState(false);
@@ -754,9 +718,10 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
       if (err instanceof ApiError && err.status === 404) {
         say(t("flowReview.queue.approveNeedsDraft"), "warning");
       } else if (err instanceof ApiError && isChapterLockedBody(err.body)) {
-        // An AI translation will write this note; the server refuses the
-        // approval until it finishes (issue #602).
-        say(t("shell.noteLockedByTranslate"), "warning");
+        // An AI translation will write this note (issue #602), or an AI run
+        // holds this question's chapter (#752); the server refuses the
+        // approval until it finishes.
+        say(t(activeKind === "tn" ? "shell.noteLockedByTranslate" : "shell.questionLockedByRun"), "warning");
       } else {
         say(t("flowReview.queue.approveFailed", { status: statusOf(err) }), "warning");
       }
@@ -814,14 +779,15 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
     setApproveAllProgress(null);
     if (firstFailure) {
       const st = firstFailure.status;
-      // A 409 is either workspace_mismatch (which reloads the page) or, for a
-      // note, chapter_locked: an AI translation will write it, so the server
-      // refuses the approval until the run finishes (issue #602).
+      // A 409 is either workspace_mismatch (which reloads the page) or
+      // chapter_locked: an AI translation will write the note (issue #602), or
+      // an AI run holds the question's chapter (#752), so the server refuses
+      // the approval until the run finishes.
       const extra =
         st === 404
           ? t("flowReview.queue.approveAllExtraNoDraft")
           : firstFailure.locked
-            ? ` ${t("shell.noteLockedByTranslate")}`
+            ? ` ${t(kind === "tn" ? "shell.noteLockedByTranslate" : "shell.questionLockedByRun")}`
             : "";
       setApproveAllError(
         t("flowReview.queue.approveAllPartial", {
@@ -1116,8 +1082,7 @@ export function ReviewQueue({ book, chapter, onNavigate }: ReviewQueueProps) {
 
   // ── 409 merge resolution ──────────────────────────────────────────────────
   // "Mine" comes from our own outbox op. "Theirs" comes from the RE-READ row
-  // (conflictRow) — never from the 409 body, which carries only version +
-  // deleted_at.
+  // (conflictRow), the newest copy, rather than the 409's row.
   //
   // A row 409 can arrive for ANY patch this screen enqueues, not just the note
   // text: {quote, occurrence}, {verse, ref_raw} and {sort_order} all go through

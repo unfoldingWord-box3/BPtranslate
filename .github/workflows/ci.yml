@@ -30,7 +30,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # tsc --noEmit across both api/ and web/ workspaces.
+      # tsc --noEmit across the api/ and web/ workspaces and the Playwright
+      # specs under tests/ (tests/tsconfig.json).
       - name: Typecheck
         run: npm run typecheck
 

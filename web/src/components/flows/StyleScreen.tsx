@@ -39,9 +39,11 @@ import {
   REGISTERS,
   type ContextExportStatus,
   type Register,
-  type TranslationPrefs,
 } from "../../sync/api";
-import { currentPrefsFromConflict } from "../../sync/prefsConflict";
+import { prefsConflictRow } from "../../sync/prefsConflict";
+import { briefFields, commonIssuesFields, instructionsFields } from "../../sync/prefsDraft";
+import { usePrefsDraft } from "../../hooks/usePrefsDraft";
+import { useUnsavedGuard } from "../../hooks/useUnsavedGuard";
 import { setProjectMode, useProjectConfig, isTranslationProject } from "../../hooks/useProjectConfig";
 import {
   useContextExportStatus,
@@ -52,6 +54,7 @@ import { MarkdownView } from "../MarkdownView";
 import { PrefsHistoryButton } from "../PrefsHistoryDialog";
 import { TerminologySection } from "../TerminologySection";
 import { HouseStyleRulesSection } from "../HouseStyleRulesSection";
+import { LessonsSection } from "../LessonsSection";
 import { bookName } from "../../lib/bookNames";
 import { formatNumber } from "../../lib/formatDate";
 
@@ -64,6 +67,7 @@ type SectionKey =
   | "terminology"
   | "examples"
   | "houseStyle"
+  | "lessons"
   | "qa"
   | "templates";
 
@@ -74,6 +78,7 @@ const MEMORY_SECTION_LABELS: Array<{ key: SectionKey; labelKey: string }> = [
   { key: "terminology", labelKey: "moreTools.style.sectionTerminology" },
   { key: "examples", labelKey: "moreTools.style.sectionExamples" },
   { key: "houseStyle", labelKey: "moreTools.style.sectionHouseStyle" },
+  { key: "lessons", labelKey: "moreTools.style.sectionLessons" },
 ];
 
 const ALWAYS_SECTION_LABELS: Array<{ key: SectionKey; labelKey: string }> = [
@@ -175,42 +180,47 @@ function Panel({
 }
 
 // ── Brief ───────────────────────────────────────────────────────────────────
-// Faithful re-presentation of BriefSection (PreferencesWorkspace.tsx:1376-1488):
-// same fields, same seed-once draft, same PUT field set (audience / purpose /
+// Faithful re-presentation of BriefSection (PreferencesWorkspace.tsx):
+// same fields, same drafts-store draft (#909), same PUT field set (audience / purpose /
 // register / script_notes / notes — instructions/assisted omitted so the
 // server merges them), same 409/403 handling.
 function BriefPanel({ prefsState }: { prefsState: PrefsState }) {
   const { t } = useTranslation();
-  const { prefs, loading, apply, refetch } = prefsState;
-  const [draft, setDraft] = useState<TranslationPrefs | null>(() => prefs);
+  const { prefs, loading, apply, applyConflict, refetch } = prefsState;
+  // Unsaved typing lives in the drafts store (#909): restored after a remount
+  // (history restore) or a reload, and a save is refused with 409 when the
+  // Brief fields changed on the server since the typing started.
+  const prefsDraft = usePrefsDraft("brief", prefs, briefFields, true);
+  const draft = prefsDraft.text;
+  const setDraft = prefsDraft.change;
   const save = useSaveState();
 
-  // Seed once — a sibling section's save PUTs only its own fields, so it can't
-  // change anything Brief owns; re-seeding on every prefs change would clobber
-  // in-progress typing (see PreferencesWorkspace.tsx BriefSection). Seeded
-  // during render once prefs arrive, when they weren't loaded at mount.
-  if (draft === null && prefs) setDraft(prefs);
-
   const onSave = async () => {
-    if (!draft || !prefs) return;
+    const plan = prefsDraft.toSave();
+    if (!plan) return;
+    // Typed boxes, and the server's value for the rest (prefsSavePayload).
+    const f = plan.fields;
     save.setSaving(true);
     try {
-      const res = await api.putTranslationPrefs(prefs.version, {
-        audience: draft.audience,
-        purpose: draft.purpose,
-        register: draft.register,
-        script_notes: draft.script_notes,
-        notes: draft.notes,
+      const res = await api.putTranslationPrefs(plan.version, {
+        audience: f.audience,
+        purpose: f.purpose,
+        register: f.register as Register,
+        script_notes: f.script_notes,
+        notes: f.notes,
       });
       apply(res.prefs);
+      prefsDraft.saved(res.prefs);
       save.setMsg(t("moreTools.style.saved"));
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
         // Someone else saved first. Adopt the fresh row from the 409 body so
-        // the next save carries the right If-Match; the local draft is kept.
-        const current = currentPrefsFromConflict(e.body);
-        if (current) apply(current);
-        else refetch();
+        // the next save carries the right If-Match; typed text is kept.
+        const current = await prefsConflictRow(e.body, () => api.getTranslationPrefs().then((r) => r.prefs));
+        if (current) {
+          applyConflict(current, plan.version);
+          prefsDraft.conflicted(current, plan.version);
+        } else refetch();
         save.setMsg(t("moreTools.style.saveConflict"));
       } else if (e instanceof ApiError && e.status === 403) {
         save.setMsg(t("moreTools.style.saveAdminOnly"));
@@ -309,6 +319,7 @@ function MarkdownPrefPanel({
   placeholder,
   maxChars,
   prefsState,
+  onDirtyChange,
 }: {
   id: SectionKey;
   field: "instructions_md" | "common_issues_md";
@@ -317,34 +328,51 @@ function MarkdownPrefPanel({
   placeholder: string;
   maxChars: number;
   prefsState: PrefsState;
+  /** Told whether the text differs from the saved text (the Lessons panel needs it, #908). */
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const { t } = useTranslation();
-  const { prefs, error, apply, refetch } = prefsState;
-  // null = not yet seeded (loading gate below). Seed ONLY once prefs actually
-  // loaded — coalescing null prefs into "" would render empty over saved
-  // content, and a Save from that state would null the field on the server
-  // (see PreferencesWorkspace.tsx:1517-1523).
-  const [value, setValue] = useState<string | null>(() => (prefs ? (prefs[field] ?? "") : null));
+  const { prefs, error, apply, applyConflict, refetch } = prefsState;
+  // Unsaved typing lives in the drafts store (#909), so a remount (history
+  // restore, a lesson moved into Common issues) or a reload restores it. null
+  // = not yet read (loading gate below): never "" over saved content, or a
+  // Save from that state would null the field on the server.
+  const prefsDraft = usePrefsDraft(
+    field,
+    prefs,
+    field === "instructions_md" ? instructionsFields : commonIssuesFields,
+    true,
+  );
+  const value = prefsDraft.text ? (prefsDraft.text[field] ?? "") : null;
+  const setValue = (v: string) => prefsDraft.change({ [field]: v });
   const [preview, setPreview] = useState(false);
   const save = useSaveState();
 
-  // Seeded during render once prefs arrive, when they weren't loaded at mount.
-  if (value === null && prefs) setValue(prefs[field] ?? "");
-
   const overLimit = (value ?? "").length > maxChars;
+  // Typed and not saved. Not "differs from the server": a change made
+  // elsewhere would turn that on with nothing typed here.
+  const dirty = prefsDraft.dirty;
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
 
   const onSave = async () => {
-    if (!prefs || value === null) return;
+    const plan = prefsDraft.toSave();
+    if (!plan) return;
     save.setSaving(true);
     try {
-      const res = await api.putTranslationPrefs(prefs.version, { [field]: value || null });
+      const res = await api.putTranslationPrefs(plan.version, { [field]: plan.fields[field] || null });
       apply(res.prefs);
+      prefsDraft.saved(res.prefs);
       save.setMsg(t("moreTools.style.saved"));
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
-        const current = currentPrefsFromConflict(e.body);
-        if (current) apply(current);
-        else refetch();
+        const current = await prefsConflictRow(e.body, () => api.getTranslationPrefs().then((r) => r.prefs));
+        if (current) {
+          applyConflict(current, plan.version);
+          prefsDraft.conflicted(current, plan.version);
+        } else refetch();
         save.setMsg(t("moreTools.style.saveConflict"));
       } else if (e instanceof ApiError && e.status === 403) {
         save.setMsg(t("moreTools.style.saveAdminOnly"));
@@ -584,9 +612,19 @@ export default function StyleScreen({ role, me }: StyleScreenProps) {
   const exportStatusState = useContextExportStatus(role !== "viewer" || memoryAvailable);
 
   const [current, setCurrent] = useState<SectionKey>("qa");
+  // The prefs editors keep unsaved typing in the drafts store (#909); warn
+  // before a reload or tab close like the other draft-keeping screens.
+  // `false`: this page holds no unsaved state outside that store; the guard
+  // itself checks the store (stored drafts, and a write still in flight).
+  useUnsavedGuard(false);
   // Bumped by a restore from the preferences history (#788) to remount the
-  // seed-once prefs editors.
+  // prefs editors: one with nothing typed shows the restored text, one with
+  // typing gets its draft back (#909).
   const [prefsGen, setPrefsGen] = useState(0);
+  // Common issues alone remounts after a lesson is moved there (#908), and the
+  // Lessons panel refuses that move while Common issues has unsaved text.
+  const [commonIssuesGen, setCommonIssuesGen] = useState(0);
+  const [commonIssuesDirty, setCommonIssuesDirty] = useState(false);
 
   const sectionLabels: Array<{ key: SectionKey; labelKey: string }> = [
     ...(memoryAvailable ? MEMORY_SECTION_LABELS : []),
@@ -714,9 +752,10 @@ export default function StyleScreen({ role, me }: StyleScreenProps) {
                   prefsState={prefsState}
                 />
                 <MarkdownPrefPanel
-                  key={`commonIssues-${prefsGen}`}
+                  key={`commonIssues-${prefsGen}-${commonIssuesGen}`}
                   id="commonIssues"
                   field="common_issues_md"
+                  onDirtyChange={setCommonIssuesDirty}
                   title={t("moreTools.style.sectionCommonIssues")}
                   sub={t("moreTools.style.commonIssuesSub")}
                   placeholder={t("moreTools.style.commonIssuesPlaceholder")}
@@ -740,6 +779,20 @@ export default function StyleScreen({ role, me }: StyleScreenProps) {
                   intro={t("moreTools.style.houseStyleIntro")}
                 >
                   <HouseStyleRulesSection heading={false} />
+                </Panel>
+                {/* #817: admin-only like the house-style panel above. */}
+                <Panel id="lessons" title={t("moreTools.style.sectionLessons")} intro={t("moreTools.style.lessonsIntro")}>
+                  {/* A promote changes only Common issues: only that editor
+                      remounts (to show the new line), and only while it holds
+                      no unsaved text, so no typing on this page is lost (#908). */}
+                  <LessonsSection
+                    heading={false}
+                    promoteBlocked={commonIssuesDirty}
+                    onPrefsChanged={(p) => {
+                      prefsState.apply(p);
+                      setCommonIssuesGen((g) => g + 1);
+                    }}
+                  />
                 </Panel>
               </>
             )}

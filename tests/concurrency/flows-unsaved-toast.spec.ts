@@ -3,6 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import { newUserContext } from "./helpers";
+import { ZEC_CHAPTERS } from "./chapters";
 
 // Flows unsaved-drafts toast (#372, option A). Typing in a flows editor
 // without saving leaves a draft in IndexedDB. While that draft's own editor is
@@ -24,7 +25,7 @@ function ui(dict: Dict, key: string, vars: Record<string, string> = {}): string 
 }
 
 const BOOK = "ZEC";
-const CHAPTER = 6;
+const CHAPTER = ZEC_CHAPTERS.shared.chapter;
 const VERSE = 11;
 const ROW = "f66i";
 const REF = `TN ${BOOK} ${CHAPTER}:${VERSE}`;

@@ -57,6 +57,7 @@ export const ERROR_COPY_KEY: Record<PipelineErrorKind, string> = {
   lane_fenced: "aiStudio.errors.lane_fenced",
   pipeline_api_disabled: "aiStudio.errors.pipeline_api_disabled",
   ai_needs_org_key: "aiStudio.errors.ai_needs_org_key",
+  pipeline_type_retired: "aiStudio.errors.pipeline_type_retired",
 };
 
 // i18n key for the AI-studio banner, from GET /api/ai-provider/status's

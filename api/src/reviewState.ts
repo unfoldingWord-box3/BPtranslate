@@ -66,7 +66,7 @@ import type { Env } from "./index";
 import { currentUserId } from "./auth.ts";
 import { BOOK_NUMBERS } from "./dcsSources.ts";
 import { broadcastChapter } from "./wsEvents.ts";
-import { lockedResponseBody, translateLockForTnRows } from "./chapterLock.ts";
+import { activePipelineForTqRows, lockedResponseBody, translateLockForTnRows } from "./chapterLock.ts";
 
 /** edit_log.source tag for a bulk sweep, and the value stamped on the rows. */
 export const ADMIN_BULK_SOURCE = "admin_bulk_state";
@@ -364,6 +364,12 @@ export async function bulkReviewState(c: Context<{ Bindings: Env; Variables: { u
       .bind(...(range ? [book, range.start, range.end] : [book]))
       .all<{ id: string; chapter: number; verse: number; ref_raw: string | null }>();
     const lock = await translateLockForTnRows(c.env, book, rs.results ?? []);
+    if (lock) return c.json(lockedResponseBody(lock), 409);
+  }
+  // The same for questions (#752), with the per-row tq Approve's rule: any
+  // running job on a chapter holding questions the sweep would reach.
+  if (resource === "tq" && target === "approved") {
+    const lock = await activePipelineForTqRows(c.env, book, range);
     if (lock) return c.json(lockedResponseBody(lock), 409);
   }
 

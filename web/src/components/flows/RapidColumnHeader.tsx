@@ -45,6 +45,8 @@ export interface RapidColumnHeaderProps {
   placementKey?: boolean;
   /** A cell ahead of the others: the bulk select-all checkbox (#829). */
   leadingCell?: ReactNode;
+  /** The status filter's menu button, beside the "Status · type" label. */
+  statusFilter?: ReactNode;
 }
 
 const headSx = {
@@ -78,6 +80,7 @@ export function RapidColumnHeader({
   quoteKey = false,
   placementKey = false,
   leadingCell,
+  statusFilter,
 }: RapidColumnHeaderProps) {
   const { t } = useTranslation();
   // Popover origins are physical; open toward the inline end in both directions.
@@ -210,7 +213,10 @@ export function RapidColumnHeader({
           </Box>
         </Popover>
       </Box>
-      <Box component="span" sx={headSx}>{t("flowTranslate.rapid.colNote")}</Box>
+      <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, minWidth: 0 }}>
+        <Box component="span" sx={headSx}>{t("flowTranslate.rapid.colNote")}</Box>
+        {statusFilter}
+      </Box>
       {showQuote && (
         <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, minWidth: 0 }}>
           <Box component="span" sx={headSx}>{sourceLabel}</Box>

@@ -1,5 +1,6 @@
 import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 import { fetchChapter, newUserContext, type TnRow } from "./helpers";
+import { ZEC_CHAPTERS } from "./chapters";
 
 // Rapid check follow-ups (#831): the quote picker on the open row (pencil and
 // Q), taking an approval back by clicking an approved circle, and the compact
@@ -9,7 +10,7 @@ import { fetchChapter, newUserContext, type TnRow } from "./helpers";
 // spec opens. global-setup seeds its notes as ai_draft so they can be approved.
 
 const BOOK = "ZEC";
-const CHAPTER = 13;
+const CHAPTER = ZEC_CHAPTERS.rapidLanes.chapter;
 
 test.describe.configure({ timeout: 120_000 });
 

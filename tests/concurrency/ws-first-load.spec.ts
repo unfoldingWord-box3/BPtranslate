@@ -1,6 +1,7 @@
 import { expect, test, type Request } from "@playwright/test";
 import { closeTolerant, newUserContext } from "./helpers";
 import { RTL_FIXTURE } from "./global-setup";
+import { ZEC_CHAPTERS } from "./chapters";
 
 // Issue #749: on a first load in a fresh browser, the editors must not send
 // API calls under the wrong workspace.
@@ -41,7 +42,7 @@ const unchecked = (path: string) => path.startsWith("/api/auth/") || path.starts
 
 for (const [name, hash] of [
   ["verse screen", `/#/verse/${RTL_FIXTURE.book}/${RTL_FIXTURE.chapter}/${RTL_FIXTURE.verse}`],
-  ["classic chapter view", `/#/${RTL_FIXTURE.book}/1`],
+  ["classic chapter view", `/#/${RTL_FIXTURE.book}/${ZEC_CHAPTERS.readOnly.chapter}`],
 ] as const) {
   test(`#749: fresh-context first load of the ${name} claims the right workspace`, async ({ browser }) => {
     const { context } = await newUserContext(browser, "ws-first-load");

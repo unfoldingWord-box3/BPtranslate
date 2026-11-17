@@ -2,6 +2,10 @@
 
 ## Status
 
+**Retired (2026-11, #726).** This contract fed the `notes` pipeline, which is
+retired: `/api/pipelines/start` no longer gathers hint stubs into
+`options.hints`, and the hint-expansion apply is removed. Kept as a record.
+
 **Final agreed design.** Bible-editor side is pre-staged on branch
 `claude/note-hints-preservation-LrRj7` (Ship 1 + Ship 2). bp-assistant ships
 the corresponding `tn-writer` update on their side. End-to-end activates as

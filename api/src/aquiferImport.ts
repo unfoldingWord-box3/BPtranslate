@@ -30,6 +30,7 @@ import { convertAquiferBook, nfc, type EnRow } from "./aquiferConvert.ts";
 import { loadEnglishLinks } from "./aquiferLinks.ts";
 import { parseChapterScope, chapterInScope } from "./aquiferScope.ts";
 import { planAquiferMerge } from "./aquiferMerge.ts";
+import { hideSwitchedOffKinds } from "./noteKindSwitch.ts";
 
 export const AQUIFER_SOURCE = "aquifer"; // edit_log.source tag (keeps the AI chip off)
 const CHUNK = 40;
@@ -276,6 +277,8 @@ export async function aquiferDrafts(c: Context<{ Bindings: Env; Variables: { use
     for (let i = 0; i < stmts.length; i += CHUNK) {
       await env.DB.batch(stmts.slice(i, i + CHUNK));
     }
+    // Aquifer notes of a switched-off kind (#924): hide and mark them.
+    await hideSwitchedOffKinds(env.DB, { book });
 
     return c.json({
       ok: true,

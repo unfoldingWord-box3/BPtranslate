@@ -1,0 +1,392 @@
+// Switch a tN note kind off for this project, and back on (issue #924, the
+// second part of #158; migration 0090). Benjamin chose "undo any time".
+//
+// The routes live in suggestionInbox.ts, next to the part A list:
+//   POST /api/suggestion-inbox/not-needed-kinds/switch-off  {kind}  (admin only)
+//   POST /api/suggestion-inbox/not-needed-kinds/switch-on   {kind}  (admin only)
+//   GET  /api/suggestion-inbox/not-needed-kinds lists the kinds switched off.
+//
+// The rules, exactly (the help and the page say them in plain words):
+//
+//   kind     a bare tA id ("figs-yousingular"). A note is of that kind when
+//            shortSupport(support_reference) equals it: the trimmed value is
+//            the id, or ends in "/" + the id (the rc:// link form).
+//   hide     every note of the kind, in every book, that is live: not deleted
+//            and not in the trash (a trashed note keeps its own path, and the
+//            nightly finalize deletes it as usual). Hiding sets deleted_at, so
+//            every read, count and the export already leave it out, and the
+//            nightly finalize (which reads trashed_at only) never touches it;
+//            switched_off_kind marks which switch-off hid it. Each hidden note
+//            gets one edit_log row, action 'switch_off'.
+//   restore  Switch back on clears deleted_at on exactly the notes whose mark
+//            names the kind, and logs 'switch_on' for each. A note deleted
+//            before the switch-off, or by someone else, has no mark and stays
+//            deleted. switch_restored_at keeps the reimport's prune off a
+//            restored note until master carries it again (see bookReimport.ts
+//            softDeleteRemovedTsvRows).
+//   new notes  while a kind is switched off, each import, reimport, AI
+//            pipeline apply and the nightly tick hide new live notes of it
+//            (hideSwitchedOffKinds), so a reimport cannot bring the kind back.
+//            Notes are marked, not skipped, so Switch back on restores them too.
+//
+// Neither hide nor restore changes version, updated_by or updated_at: like
+// trash, it is a reversible state flip, not an edit of the note. A stale tab
+// cannot write to a hidden note, because every by-id write in rows.ts refuses
+// a row with deleted_at set.
+//
+// Both statements of each change run in one D1 batch (one transaction), the
+// audit INSERT first so it reads the rows before the UPDATE changes them, as the
+// nightly finalize does (api/src/index.ts). Set-based, so a kind with thousands
+// of notes is still two statements.
+
+import type { Env } from "./index";
+import { exportTsvShrinkRefused } from "./export.ts";
+
+type Db = Env["DB"];
+
+export const SWITCH_SOURCE = "note_kind_switch";
+
+/** A bare tA id: no spaces or slashes. */
+export function isNoteKind(kind: string): boolean {
+  return kind.length > 0 && kind.length <= 100 && /^[^\s/]+$/.test(kind);
+}
+
+// shortSupport(support_reference) = kind, in SQL. ?1 is the kind.
+const KIND_MATCH = `(TRIM(support_reference) = ?1 OR substr(TRIM(support_reference), -(length(?1) + 1)) = '/' || ?1)`;
+const LIVE = `deleted_at IS NULL AND trashed_at IS NULL`;
+
+const tableMissing = (err: unknown) =>
+  err instanceof Error && /no such (table|column):\s*(note_kinds_switched_off|switched_off_kind|switch_restored_at)/i.test(err.message);
+
+export interface SwitchedOffKind {
+  kind: string;
+  /** Notes hidden by this switch-off now. */
+  hidden: number;
+  switchedOffAt: number;
+}
+
+/** The kinds switched off now, or null when migration 0090 is missing. */
+export async function listSwitchedOffKinds(db: Db): Promise<SwitchedOffKind[] | null> {
+  try {
+    const rs = await db
+      .prepare(
+        `SELECT k.kind, k.switched_off_at,
+                (SELECT COUNT(*) FROM tn_rows t
+                  WHERE t.switched_off_kind = k.kind AND t.deleted_at IS NOT NULL) AS hidden
+           FROM note_kinds_switched_off k
+          ORDER BY k.kind`,
+      )
+      .all<{ kind: string; switched_off_at: number; hidden: number }>();
+    return (rs.results ?? []).map((r) => ({ kind: r.kind, hidden: Number(r.hidden), switchedOffAt: Number(r.switched_off_at) }));
+  } catch (err) {
+    if (tableMissing(err)) return null;
+    throw err;
+  }
+}
+
+// The two statements that hide the live notes of one kind (optionally in one
+// book). ?1 kind, ?2 now, ?3 book (when given), ?4 user id (audit only).
+function hideStatements(db: Db, kind: string, now: number, userId: number | null, book: string | null) {
+  // Still switched off when the statement runs: a kind switched back on after
+  // hideSwitchedOffKinds read the list must not be hidden again with a mark
+  // whose registry row is gone (nothing could then offer Switch back on).
+  const where = `${KIND_MATCH} AND ${LIVE}${book ? " AND book = ?3" : ""}
+    AND EXISTS (SELECT 1 FROM note_kinds_switched_off WHERE kind = ?1)`;
+  return [
+    db
+      .prepare(
+        `INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action, source, payload_json)
+         SELECT 'tn', id, book, ?4, version, version, 'switch_off', '${SWITCH_SOURCE}', json_object('kind', ?1, 'at', ?2)
+           FROM tn_rows WHERE ${where}`,
+      )
+      .bind(kind, now, book, userId),
+    db
+      .prepare(`UPDATE tn_rows SET deleted_at = ?2, switched_off_kind = ?1, switch_restored_at = NULL WHERE ${where}`)
+      .bind(...(book ? [kind, now, book] : [kind, now])),
+  ];
+}
+
+/**
+ * Switch a kind off: record it, hide its live notes in every book.
+ * Returns how many notes were hidden. Throws "not_migrated" without 0090.
+ */
+export async function switchOffKind(db: Db, kind: string, userId: number | null, now = Math.floor(Date.now() / 1000)): Promise<{ hidden: number }> {
+  try {
+    const [, , update] = await db.batch([
+      db
+        .prepare(`INSERT OR IGNORE INTO note_kinds_switched_off (kind, switched_off_at, switched_off_by) VALUES (?1, ?2, ?3)`)
+        .bind(kind, now, userId),
+      ...hideStatements(db, kind, now, userId, null),
+    ]);
+    return { hidden: Number(update?.meta?.changes ?? 0) };
+  } catch (err) {
+    if (tableMissing(err)) throw new Error("not_migrated");
+    throw err;
+  }
+}
+
+/**
+ * Switch a kind back on: forget it, restore exactly the notes its switch-off
+ * hid. Returns how many were restored, or null when the kind is not switched
+ * off and no note carries its mark. Throws "not_migrated" without 0090.
+ */
+export async function switchOnKind(db: Db, kind: string, userId: number | null, now = Math.floor(Date.now() / 1000)): Promise<{ restored: number } | null> {
+  const where = `switched_off_kind = ?1 AND deleted_at IS NOT NULL`;
+  try {
+    const known = await db
+      .prepare(
+        `SELECT (SELECT COUNT(*) FROM note_kinds_switched_off WHERE kind = ?1)
+              + (SELECT COUNT(*) FROM tn_rows WHERE ${where}) AS n`,
+      )
+      .bind(kind)
+      .first<{ n: number }>();
+    if (!known || Number(known.n) === 0) return null;
+    const [, update] = await db.batch([
+      db
+        .prepare(
+          `INSERT INTO edit_log (kind, row_key, book, user_id, prev_version, new_version, action, source, payload_json)
+           SELECT 'tn', id, book, ?3, version, version, 'switch_on', '${SWITCH_SOURCE}', json_object('kind', ?1, 'at', ?2)
+             FROM tn_rows WHERE ${where}`,
+        )
+        .bind(kind, now, userId),
+      db
+        .prepare(`UPDATE tn_rows SET deleted_at = NULL, switched_off_kind = NULL, switch_restored_at = ?2 WHERE ${where}`)
+        .bind(kind, now),
+      db.prepare(`DELETE FROM note_kinds_switched_off WHERE kind = ?1`).bind(kind),
+    ]);
+    return { restored: Number(update?.meta?.changes ?? 0) };
+  } catch (err) {
+    if (tableMissing(err)) throw new Error("not_migrated");
+    throw err;
+  }
+}
+
+// The fresh book import's tN wipe (bookImport.ts) keeps two kinds of note
+// that master may not carry: notes a switch-off hid (so Switch back on can
+// still restore them), and notes Switch back on restored that no export has
+// put back on master yet (switch_restored_at), while they are still live (one
+// since trashed or deleted is not kept). Every other note goes.
+const KEPT = `(switched_off_kind IS NOT NULL OR (switch_restored_at IS NOT NULL AND ${LIVE}))`;
+export const TN_WIPE_SQL = `DELETE FROM tn_rows WHERE book = ?1 AND NOT ${KEPT}`;
+
+export interface KeptNote {
+  chapter: number;
+  verse: number;
+  /** The kind the note is of: its switch-off mark, else its own SupportReference's tA id. */
+  kind: string;
+  /** Kept only because Switch back on restored it (no switch-off mark): master wins for it. */
+  restoredOnly: boolean;
+}
+
+/** One book's notes TN_WIPE_SQL keeps, by id. */
+export async function keptSwitchedOffNotes(db: Db, book: string): Promise<Map<string, KeptNote>> {
+  const rs = await db
+    .prepare(
+      `SELECT id, chapter, verse, switched_off_kind, support_reference FROM tn_rows
+        WHERE book = ?1 AND ${KEPT}`,
+    )
+    .bind(book)
+    .all<{ id: string; chapter: number; verse: number; switched_off_kind: string | null; support_reference: string | null }>();
+  return new Map(
+    (rs.results ?? []).map((r) => {
+      const sr = (r.support_reference ?? "").trim();
+      const kind = r.switched_off_kind ?? sr.slice(sr.lastIndexOf("/") + 1);
+      return [r.id, { chapter: Number(r.chapter), verse: Number(r.verse), kind, restoredOnly: r.switched_off_kind == null }];
+    }),
+  );
+}
+
+/**
+ * Whether master's incoming row is the same note a kept note stands for (same
+ * id, chapter, verse and kind): the import then skips it. A different note
+ * that only shares the id is imported under a new id instead.
+ */
+export function keptNoteHoldsRow(
+  kept: KeptNote | undefined,
+  incoming: { chapter: number; verse: number; supportReference: string | null | undefined },
+): boolean {
+  return (
+    kept != null &&
+    kept.kind !== "" &&
+    kept.chapter === incoming.chapter &&
+    kept.verse === incoming.verse &&
+    isOfKind(incoming.supportReference ?? "", kept.kind)
+  );
+}
+
+/**
+ * The restored-only kept notes master carries as the same note (first row per
+ * id wins, as in the import): master's row replaces each of them, so a stale
+ * restored copy never outlives the note's return to master. Hidden
+ * (switched-off) kept notes stay as they are until switched back on.
+ */
+export function restoredKeptNotesMasterCarries(
+  kept: ReadonlyMap<string, KeptNote>,
+  incoming: Iterable<{ id: string; chapter: number; verse: number; supportReference: string | null | undefined }>,
+): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const row of incoming) {
+    if (seen.has(row.id)) continue;
+    seen.add(row.id);
+    const k = kept.get(row.id);
+    if (k?.restoredOnly && keptNoteHoldsRow(k, row)) out.push(row.id);
+  }
+  return out;
+}
+
+/** Delete these restored-only kept notes of one book (never a hidden one), set-based. */
+export async function dropRestoredKeptNotes(db: Db, book: string, ids: readonly string[]): Promise<void> {
+  await runIdChunks(db, book, ids, (marks) =>
+    `DELETE FROM tn_rows WHERE book = ?1 AND switched_off_kind IS NULL AND switch_restored_at IS NOT NULL AND id IN (${marks})`,
+  );
+}
+
+const KINDS_PER_BATCH = 45; // 90 statements, under D1's 100 per batch
+
+// D1 binds at most 100 parameters per statement: ids per UPDATE (plus the book).
+const IDS_PER_STATEMENT = 90;
+// Statements per db.batch, under D1's 100.
+const STATEMENTS_PER_BATCH = 90;
+
+/**
+ * Clear the Switch back on wait (switch_restored_at) on these notes of one
+ * book: the reimport calls it once master carries them again. Set-based, so
+ * the pre-export sync (bound by Cloudflare's subrequest cap) spends one D1 call
+ * per 8,100 notes, not one per note.
+ */
+export async function clearSwitchRestored(db: Db, book: string, ids: readonly string[]): Promise<void> {
+  await runIdChunks(db, book, ids, (marks) =>
+    `UPDATE tn_rows SET switch_restored_at = NULL WHERE book = ?1 AND switch_restored_at IS NOT NULL AND id IN (${marks})`,
+  );
+}
+
+// One statement per IDS_PER_STATEMENT ids (?1 is the book), STATEMENTS_PER_BATCH
+// statements per db.batch. No D1 call when ids is empty.
+async function runIdChunks(db: Db, book: string, ids: readonly string[], sql: (marks: string) => string): Promise<void> {
+  const stmts = [];
+  for (let i = 0; i < ids.length; i += IDS_PER_STATEMENT) {
+    const chunk = ids.slice(i, i + IDS_PER_STATEMENT);
+    stmts.push(db.prepare(sql(chunk.map((_, j) => `?${j + 2}`).join(", "))).bind(book, ...chunk));
+  }
+  for (let i = 0; i < stmts.length; i += STATEMENTS_PER_BATCH) await db.batch(stmts.slice(i, i + STATEMENTS_PER_BATCH));
+}
+
+/**
+ * Hide new live notes of every switched-off kind, in one book or all books.
+ * Called after imports, reimports, AI pipeline applies and by the nightly tick
+ * (before the export), so no path brings a switched-off kind back. Returns the
+ * number hidden. By default it never throws: a failure here must not fail the
+ * import that called it (the nightly tick retries), so it logs and returns 0.
+ * throwOnError is for the export Workflow's pre-export step: there a swallowed
+ * error would be memoized as success and the same run would publish the
+ * notes, so the step must fail and be retried instead.
+ */
+export async function hideSwitchedOffKinds(db: Db, opts: { book?: string; throwOnError?: boolean } = {}): Promise<number> {
+  try {
+    const rs = await db.prepare(`SELECT kind FROM note_kinds_switched_off`).all<{ kind: string }>();
+    const kinds = (rs.results ?? []).map((r) => r.kind);
+    if (kinds.length === 0) return 0;
+    const now = Math.floor(Date.now() / 1000);
+    // D1 allows at most 100 statements in one batch: KINDS_PER_BATCH kinds (two
+    // statements each, the INSERT/UPDATE pair kept together) per batch. Each
+    // pair is idempotent, so a later batch failing leaves earlier kinds hidden.
+    let hidden = 0;
+    for (let i = 0; i < kinds.length; i += KINDS_PER_BATCH) {
+      const chunk = kinds.slice(i, i + KINDS_PER_BATCH);
+      const results = await db.batch(chunk.flatMap((k) => hideStatements(db, k, now, null, opts.book ?? null)));
+      for (let j = 1; j < results.length; j += 2) hidden += Number(results[j]?.meta?.changes ?? 0);
+    }
+    if (hidden > 0) console.log("switched-off note kinds: hid new notes", { book: opts.book ?? "*", hidden });
+    return hidden;
+  } catch (err) {
+    if (!tableMissing(err)) {
+      console.error("switched-off note kinds: hiding new notes failed", err instanceof Error ? err.message : String(err));
+      if (opts.throwOnError) throw err;
+    }
+    return 0;
+  }
+}
+
+// ── The nightly export's shrink guard and switched-off notes (#924, option A) ──
+// The whole-book guard (export.ts exportTsvShrinkRefused) refuses a tN render
+// that drops more than 25 rows and more than 5% of master's rows. A switch-off
+// of a common kind looks exactly like that, so the guard ignores rows switched
+// off on purpose, and only those. A row is exempt only when ALL of these hold:
+//   - it is a data row on master (the file the commit would replace);
+//   - its ID is absent from the render;
+//   - D1 holds that exact (book, id) hidden by a switch-off (switched_off_kind
+//     set, deleted_at set);
+//   - master's own SupportReference for that row is of the kind D1 names.
+// Identity, never kind or count: a truncated load that is missing rows of a
+// switched-off kind has no marks for them, so they stay unexplained, and
+// switched-off notes that never reached master add no headroom.
+// The limit is then applied as if master never had the exempt rows:
+// exportTsvShrinkRefused(rendered, master - exempt). Removing them from the
+// denominator too makes this the stricter reading for what remains.
+// Fails closed: any D1 error, or a master or render header without ID or
+// SupportReference, gives exempt = 0 (the guard as it was before #924).
+
+export interface TnShrinkCheck {
+  refused: boolean;
+  masterRows: number;
+  renderedRows: number;
+  /** Master rows left out of the render because they were switched off. */
+  exempt: number;
+}
+
+function tsvBody(text: string): { header: string[]; rows: string[][] } {
+  const lines = (text.charCodeAt(0) === 0xfeff ? text.slice(1) : text).split(/\r?\n/).filter((l) => l.length > 0);
+  return { header: (lines[0] ?? "").split("\t"), rows: lines.slice(1).map((l) => l.split("\t")) };
+}
+
+const isOfKind = (supportReference: string, kind: string) => {
+  const s = supportReference.trim();
+  return s === kind || s.endsWith("/" + kind);
+};
+
+/** (id -> kind) for the notes of one book hidden by a switch-off now. */
+async function switchedOffInBook(db: Db, book: string): Promise<Map<string, string>> {
+  const rs = await db
+    .prepare(`SELECT id, switched_off_kind FROM tn_rows WHERE book = ?1 AND switched_off_kind IS NOT NULL AND deleted_at IS NOT NULL`)
+    .bind(book)
+    .all<{ id: string; switched_off_kind: string }>();
+  return new Map((rs.results ?? []).map((r) => [r.id, r.switched_off_kind]));
+}
+
+/** The whole-book tN shrink guard, with switched-off rows exempt (see above). */
+export async function tnShrinkCheck(db: Db, book: string, masterTsv: string, renderedTsv: string): Promise<TnShrinkCheck> {
+  const master = tsvBody(masterTsv);
+  const rendered = tsvBody(renderedTsv);
+  const masterRows = master.rows.length;
+  const renderedRows = rendered.rows.length;
+  let exempt = 0;
+  const idCol = master.header.indexOf("ID");
+  const refCol = master.header.indexOf("SupportReference");
+  const renderedIdCol = rendered.header.indexOf("ID");
+  if (idCol >= 0 && refCol >= 0 && renderedIdCol >= 0) {
+    try {
+      const marked = await switchedOffInBook(db, book);
+      if (marked.size > 0) {
+        const renderedIds = new Set(rendered.rows.map((r) => r[renderedIdCol] ?? ""));
+        const counted = new Set<string>();
+        for (const row of master.rows) {
+          const id = row[idCol] ?? "";
+          const kind = marked.get(id);
+          if (kind && !counted.has(id) && !renderedIds.has(id) && isOfKind(row[refCol] ?? "", kind)) {
+            counted.add(id); // each marked note at most once, even if master repeats its id
+            exempt++;
+          }
+        }
+      }
+    } catch (err) {
+      // Without 0090 there are no marks; anything else is logged. Either way
+      // no exemption: the guard behaves as it did before #924.
+      if (!tableMissing(err)) {
+        console.error("shrink guard: reading switched-off notes failed", err instanceof Error ? err.message : String(err));
+      }
+      exempt = 0;
+    }
+  }
+  return { refused: exportTsvShrinkRefused(renderedRows, masterRows - exempt), masterRows, renderedRows, exempt };
+}

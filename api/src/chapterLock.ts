@@ -84,6 +84,41 @@ export async function activePipelineForChapter(
   };
 }
 
+// The first non-terminal job holding a chapter that has live questions in
+// `range` (the whole book when null), or null. The tq edit lock
+// (activePipelineForChapter) over a set of chapters in one query, for the admin
+// tq approve sweep (#752). The chapter-0 clause there only matches tn
+// translates, which never write questions, so it is left out here.
+export async function activePipelineForTqRows(
+  env: Env,
+  book: string,
+  range: { start: number; end: number } | null,
+): Promise<ActiveLock | null> {
+  const statePlaceholders = NON_TERMINAL.map((_, i) => `?${i + 4}`).join(", ");
+  const row = await env.DB.prepare(
+    `SELECT j.job_id, j.pipeline_type, j.user_id, j.created_at
+       FROM pipeline_jobs j
+      WHERE j.book = ?1
+        AND j.state IN (${statePlaceholders})
+        AND EXISTS (
+          SELECT 1 FROM tq_rows q
+           WHERE q.book = ?1 AND q.deleted_at IS NULL
+             AND q.chapter BETWEEN j.start_chapter AND j.end_chapter
+             AND q.chapter BETWEEN ?2 AND ?3)
+      ORDER BY j.created_at ASC
+      LIMIT 1`,
+  )
+    .bind(book.toUpperCase(), range?.start ?? 0, range?.end ?? 1_000_000, ...NON_TERMINAL)
+    .first<{ job_id: string; pipeline_type: string; user_id: number; created_at: number }>();
+  if (!row) return null;
+  return {
+    jobId: row.job_id,
+    pipelineType: row.pipeline_type,
+    userId: row.user_id,
+    startedAt: row.created_at,
+  };
+}
+
 // What a translate job will write, read from its options_json the same way
 // pipelineImport.ts translateSelection does: no rowIds / verseStart means the
 // whole chapter range; rowIds means those rows; a verse range means the rows

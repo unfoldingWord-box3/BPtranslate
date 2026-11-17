@@ -328,8 +328,12 @@ export async function startQueuedContextExport(env: Pick<Env, "EXPORT_WORKFLOW" 
 // directly and records nothing pending (that flag would never be cleared).
 // The catch swallows everything (D1 or binding failures) — a sync hiccup must
 // never fail the save; the nightly export is the backstop.
+//
+// Returns the (already caught, never rejecting) work so a caller that must not
+// answer before the export is marked pending can await it (the lessons switch,
+// #817); the other callers leave it to waitUntil.
 export type QueueContext = { env: Env; executionCtx: { waitUntil(p: Promise<unknown>): void } };
-export function queueContextExport(c: QueueContext): void {
+export function queueContextExport(c: QueueContext): Promise<void> {
   const key = c.env.WORKSPACE_SLUG ?? "default";
   const p = (async () => {
     if (!c.env.DCS_SERVICE_TOKEN || (await markContextExportPending(c.env.DB, key))) await startQueuedContextExport(c.env);
@@ -341,4 +345,5 @@ export function queueContextExport(c: QueueContext): void {
   } catch (e) {
     console.log("context export queue unavailable", key, e instanceof Error ? e.message : String(e));
   }
+  return p;
 }

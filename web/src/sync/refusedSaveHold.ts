@@ -124,9 +124,12 @@ export function holdOnResult(state: HoldState, op: ResultOp, result: OutboxResul
 // changes.
 export function holdOnDrop(
   state: HoldState,
-  op: ResultOp,
+  op: ResultOp & { twinQueued?: boolean },
   target: HoldTarget,
 ): { state: HoldState; released: Fields | null } {
+  // Another tab dropped its op while one with the same row and patch is still
+  // queued (hasQueuedTwin): that one is this editor's save, so nothing ends.
+  if (op.twinQueued) return { state, released: null };
   const s = state.sent.findIndex((x) => isPendingRowSave(x.patch, op, target));
   const h = state.held.findIndex((x) => isPendingRowSave(x.patch, op, target));
   if (s < 0 && h < 0) return { state, released: null };

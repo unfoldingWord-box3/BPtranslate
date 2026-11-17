@@ -97,6 +97,14 @@ export const ADMIN_SURFACES: AdminSurfaceEntry[] = [
       "#815. Both sides mount the shared HouseStyleRulesSection (components/HouseStyleRulesSection.tsx); admin-only, like GET/PATCH /api/translation-memory/house-style-rules. Rules arrive by migration; there is no add/edit form.",
   },
   {
+    id: "lessons",
+    label: "Lessons from editor corrections (nightly AI-written lessons in instructions.md; on/off switch, per-lesson pin / delete / move to Common issues, restore an earlier set, last run and cost)",
+    classic: { section: "lessons", file: PREFS },
+    desk: { page: "style", file: STYLE, anchor: "<LessonsSection" },
+    notes:
+      "#817 part 1, #908 part 2. Both sides mount the shared LessonsSection (components/LessonsSection.tsx) with onPrefsChanged, so a lesson moved to Common issues shows in that editor at once; admin-only, like /api/translation-memory/lessons (GET, PUT, POST /edit, POST /restore). Off by default for every workspace.",
+  },
+  {
     id: "setupWizard",
     label: "Setup wizard (org / sources / lanes)",
     classic: { section: "setup", file: PREFS },
@@ -181,7 +189,7 @@ export const ADMIN_SURFACES: AdminSurfaceEntry[] = [
       anchor: "function AdminSuggestionInboxScreen",
     },
     notes:
-      "Desk-only by design (#819), like the scorecard: classic #/preferences is slated to retire (#173). Calls GET /api/suggestion-inbox/:book, POST /api/suggestion-inbox/:book/approve (creates an enabled house_style_rules row) and POST /api/suggestion-inbox/:book/reject (only a card currently shown for that book).",
+      "Desk-only by design (#819), like the scorecard: classic #/preferences is slated to retire (#173). Calls GET /api/suggestion-inbox/:book, POST /api/suggestion-inbox/:book/approve (creates an enabled house_style_rules row) and POST /api/suggestion-inbox/:book/reject (only a card currently shown for that book). The same page lists note kinds marked Not needed for all books (#158 part A) and the kinds switched off (#924): GET /api/suggestion-inbox/not-needed-kinds, POST /api/suggestion-inbox/not-needed-kinds/dismiss (only a kind listed now), POST .../switch-off (only a kind listed now; hides every note of it) and POST .../switch-on (restores the notes the switch-off hid).",
   },
   {
     id: "aiPipelines",

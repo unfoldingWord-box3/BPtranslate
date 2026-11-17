@@ -1,5 +1,6 @@
 import { expect, test, request as apiRequest, type Page } from "@playwright/test";
 import { authedRequest, fetchChapter, gotoVerse, mintToken, newUserContext, noteTextarea, saveNote } from "./helpers";
+import { ZEC_CHAPTERS } from "./chapters";
 
 // Honor BE_BASE_URL so the suite runs on a relocated port (mirrors s8).
 const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
@@ -16,7 +17,9 @@ const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
 // save, the superseding save) do write to a ZEC 9 tQ row on the local server;
 // globalSetup re-imports ZEC each run. ZEC 9 is used because no other spec
 // writes to it.
-const CHAPTER = 9;
+const CHAPTER = ZEC_CHAPTERS.keepsText.chapter;
+// Where a case goes to unmount CHAPTER; only visited, never edited.
+const AWAY_CHAPTER = ZEC_CHAPTERS.keepsTextAway.chapter;
 
 interface TqRow {
   id: string;
@@ -154,14 +157,14 @@ for (const refusal of refusals) {
     await expectOneUnsaved(page, refusal.status === 422);
 
     // A remount without a reload (chapter away and back) must not clear it.
-    await page.evaluate(() => {
-      location.hash = "#/ZEC/8/2";
-    });
+    await page.evaluate((hash) => {
+      location.hash = hash;
+    }, `#/ZEC/${AWAY_CHAPTER}/2`);
     await page.locator(`[data-question-id="${tq.id}"]`).waitFor({ state: "detached", timeout: 10_000 });
     await page.waitForTimeout(500);
-    await page.evaluate((v) => {
-      location.hash = `#/ZEC/9/${v}`;
-    }, tq.verse);
+    await page.evaluate((hash) => {
+      location.hash = hash;
+    }, `#/ZEC/${CHAPTER}/${tq.verse}`);
     await expect(questionField(page, tq.id)).toHaveValue(typed);
     expect(await readDraftPatch(page, key)).toEqual(expect.objectContaining({ question: typed }));
 

@@ -5,7 +5,7 @@
 // the matching ALGORITHM (the valuable part) and drops the file I/O — it works
 // on the in-memory shapes bible-editor already has: usfm-js `verseObjects` for
 // ULT/UST alignment, and a plain quote string for TN/TWL rows. The UHB is read
-// from D1 by the caller (see collectSourceWords / loadUhbSourceWords) and passed
+// from D1 by the caller (see collectSourceWords) and passed
 // in as SourceWord[], so this module is pure and unit-testable.
 //
 // WHY. The UHB stores combining marks in traditional Tanakh order (dagesh before
@@ -80,8 +80,6 @@ interface UhbEntry {
   found: boolean;
 }
 
-const SEP = " "; // key separator that can't occur inside a Hebrew word
-
 function firstUnused(entries: UhbEntry[] | undefined): UhbEntry | null {
   if (!entries) return null;
   for (const e of entries) if (!e.found) return e;
@@ -94,8 +92,8 @@ function push(map: Map<string, UhbEntry[]>, key: string, entry: UhbEntry): void 
   else map.set(key, [entry]);
 }
 
-// A three-tier lookup keyed by the same fold family. Alignment keys include
-// lemma + morph; quotes key on the surface alone (see the two builders below).
+// A three-tier lookup keyed by the same fold family. Quotes key on the surface
+// alone (see buildShortLookup below).
 interface TieredLookup {
   exact: Map<string, UhbEntry[]>;
   stripped: Map<string, UhbEntry[]>;
@@ -104,25 +102,6 @@ interface TieredLookup {
 
 function emptyLookup(): TieredLookup {
   return { exact: new Map(), stripped: new Map(), joiner: new Map() };
-}
-
-// Key an alignment milestone to its UHB word by Strong's number + surface form
-// (folded), NOT lemma/morph. This codebase's source identity is Strong-based
-// (see milestoneSourceKey / healReplacementChars in importParsers.ts), and valid
-// `\zaln-s` milestones may omit x-lemma / x-morph while always carrying x-strong
-// + x-content — keying on lemma/morph would silently skip those rows and leave
-// their bad byte order. Strong narrows homographs; the fold tiers + the
-// fail-closed ambiguity guard (pickCanonical) cover the rest. The original's
-// (lemma, form, morph) key was for a file-based script without Strong's to hand.
-function buildFullLookup(words: SourceWord[]): TieredLookup {
-  const lk = emptyLookup();
-  for (const w of words) {
-    const e: UhbEntry = { form: w.text, lemma: w.lemma, found: false };
-    push(lk.exact, w.strong + SEP + canonicalHebrew(w.text), e);
-    push(lk.stripped, w.strong + SEP + stripHebrewMarks(w.text), e);
-    push(lk.joiner, w.strong + SEP + wordJoinerFold(w.text), e);
-  }
-  return lk;
 }
 
 // TSV quotes have no lemma/morph, so they key on the surface form alone
@@ -140,80 +119,6 @@ function buildShortLookup(words: SourceWord[]): TieredLookup {
 }
 
 // ── Public API ──────────────────────────────────────────────────────────────
-
-// Rewrite each `\zaln-s` milestone's x-content (and x-lemma) to the exact UHB
-// bytes. Mutates `verseObjects` in place (like healReplacementChars) — it only
-// reassigns string attributes on existing milestone nodes, so it can never
-// unalign a word. Returns the number of milestones actually changed (0 = no-op).
-// Adopt a fold bucket's canonical (form, lemma) ONLY when every UHB word matching
-// that fold key is byte-identical. Returns `undefined` when the tier has no
-// match (try the next tier), `null` when the match is AMBIGUOUS (fail closed —
-// leave the milestone untouched), or the value to adopt.
-//
-// Why fail closed: target-alignment order can differ from source order, so a
-// walk-order "take the next unused entry" scheme can hand a milestone the WRONG
-// source word — e.g. a verse with בֹא (occ 1) and בָא (occ 2), both stripping to
-// the skeleton בא, whose English reorders occ 2 before occ 1: consuming by walk
-// order writes occ 1's pointing onto occ 2 (silent corruption of `x-content`).
-// We can't disambiguate two same-skeleton words from a bare surface without
-// trusting occurrence (unreliable here — see project_source_words_no_occurrence),
-// so we don't guess. The EXACT tier keeps pointing, so distinct-pointing words
-// land in distinct buckets and still canonize; only under-pointed surfaces over
-// an ambiguous skeleton fall through to a fail-closed no-op.
-function pickCanonical(bucket: UhbEntry[] | undefined): { form: string; lemma: string } | null | undefined {
-  if (!bucket || bucket.length === 0) return undefined;
-  const first = bucket[0];
-  for (const e of bucket) {
-    if (e.form !== first.form || e.lemma !== first.lemma) return null;
-  }
-  return { form: first.form, lemma: first.lemma };
-}
-
-export function canonizeAlignmentSource(verseObjects: unknown[], uhbWords: SourceWord[]): number {
-  if (!Array.isArray(verseObjects) || uhbWords.length === 0) return 0;
-  const lk = buildFullLookup(uhbWords);
-  let changed = 0;
-  const walk = (nodes: unknown[]): void => {
-    for (const node of nodes) {
-      const o = node as Record<string, unknown> | null;
-      if (!o || typeof o !== "object") continue;
-      if (o["type"] === "milestone" && o["tag"] === "zaln" && typeof o["content"] === "string") {
-        const form = o["content"] as string;
-        const lemma = typeof o["lemma"] === "string" ? (o["lemma"] as string) : "";
-        const strong = typeof o["strong"] === "string" ? (o["strong"] as string) : "";
-        // Fall through tiers only on "no match" (undefined); an AMBIGUOUS tier
-        // (null) stops the search and fails closed — a looser tier can only be
-        // more ambiguous. Buckets are read statelessly, so a source word aligned
-        // to non-contiguous target words (repeated milestones, e.g. אָמַר split
-        // around "Moses" in "And Moses said") resolves the same for every repeat.
-        let adopt = pickCanonical(lk.exact.get(strong + SEP + canonicalHebrew(form)));
-        if (adopt === undefined) {
-          adopt = pickCanonical(lk.stripped.get(strong + SEP + stripHebrewMarks(form)));
-        }
-        if (adopt === undefined) {
-          adopt = pickCanonical(lk.joiner.get(strong + SEP + wordJoinerFold(form)));
-        }
-        if (adopt) {
-          let hit = false;
-          if (o["content"] !== adopt.form) {
-            o["content"] = adopt.form;
-            hit = true;
-          }
-          // Only adopt the UHB lemma when the milestone already carries one and
-          // it differs — never invent a lemma on a milestone that lacks it.
-          if (lemma !== "" && adopt.lemma !== "" && o["lemma"] !== adopt.lemma) {
-            o["lemma"] = adopt.lemma;
-            hit = true;
-          }
-          if (hit) changed += 1;
-        }
-      }
-      if (Array.isArray(o["children"])) walk(o["children"] as unknown[]);
-    }
-  };
-  walk(verseObjects);
-  return changed;
-}
 
 // Rewrite each word of a TN/TWL quote to the exact UHB bytes, preserving the
 // original separators (space / maqaf). Returns the canonicalized quote, or the

@@ -97,6 +97,7 @@ import {
   sameQueuedContextInputs,
 } from "./contextExport.ts";
 import { contextShrinkRefused, shrinkDetailCode, hasSemanticContent } from "./contextExportLib.ts";
+import { tnShrinkCheck } from "./noteKindSwitch.ts";
 import { fetchEnSourceMaps } from "./contextSourceFetch.ts";
 import { commitContextPackToMaster, getBranchTipSha, repoExists } from "./contextExportDcs.ts";
 import { exportContextPackUnderLease } from "./contextExportQueue.ts";
@@ -647,7 +648,7 @@ export class ExportWorkflow extends WorkflowEntrypoint<Env, ExportParams> {
     const maxAttempts = 3;
     let lastReason: string | null = null;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      const { prefs, terms, tnRows, tqRows, templates } = inputs;
+      const { prefs, terms, tnRows, tqRows, templates, lessons } = inputs;
       const rendered = renderContextPack({
         cfg,
         prefs,
@@ -656,6 +657,7 @@ export class ExportWorkflow extends WorkflowEntrypoint<Env, ExportParams> {
         tqRows,
         sources: sourceFetch.sources,
         templates,
+        lessons,
         skipped: sourceFetch.skipped,
       });
       if (!rendered.ok) {
@@ -1544,7 +1546,7 @@ export class ExportWorkflow extends WorkflowEntrypoint<Env, ExportParams> {
     // file) — skip the whole-file comparison here for that path.
     if (dcsAllowed && !chapters && (resource === "tn" || resource === "tq" || resource === "twl")) {
       const guard = await this.checkTsvShrink(
-        book, resource, built.rowCount, dcsOwner, dcsRepo, "master",
+        book, resource, built.rowCount, built.content, dcsOwner, dcsRepo, "master",
       );
       if (!guard.ok) {
         await this.recordShrinkSkipAlert(book, resource, built.rowCount, guard.masterRows, guard.detail);
@@ -2877,6 +2879,7 @@ export class ExportWorkflow extends WorkflowEntrypoint<Env, ExportParams> {
     book: string,
     resource: Resource,
     renderedRows: number,
+    renderedContent: string,
     destOwner: string,
     destRepo: string,
     baseRef = "master",
@@ -2894,6 +2897,22 @@ export class ExportWorkflow extends WorkflowEntrypoint<Env, ExportParams> {
     }
     if (gate.kind === "unreadable") return { ok: false, detail: "master_unreadable", masterRows: null };
     const masterRows = this.countTsvDataRows(gate.text);
+    // tN: notes an admin switched off on purpose (#924) are not counted as
+    // lost, matched row by row against D1's marks (noteKindSwitch.ts
+    // tnShrinkCheck); every other drop is held to the same limit as before.
+    if (resource === "tn") {
+      const check = await tnShrinkCheck(this.env.DB, book, gate.text, renderedContent);
+      if (check.exempt > 0) {
+        console.log("shrink guard: switched-off notes left out of the count", { book, resource, exempt: check.exempt, masterRows });
+      }
+      if (check.refused) {
+        const lost = check.masterRows - check.exempt - check.renderedRows;
+        const of = check.masterRows - check.exempt;
+        const tail = check.exempt > 0 ? `_plus_${check.exempt}_switched_off` : "";
+        return { ok: false, detail: `shrink_${lost}_of_${of}${tail}`, masterRows };
+      }
+      return { ok: true, detail: "ok", masterRows };
+    }
     if (exportTsvShrinkRefused(renderedRows, masterRows)) {
       return { ok: false, detail: `shrink_${masterRows - renderedRows}_of_${masterRows}`, masterRows };
     }

@@ -27,3 +27,12 @@ export function realChapterNumbers(summary: BookSummary | null | undefined): num
     .map((c) => c.chapter)
     .sort((a, b) => a - b);
 }
+
+/**
+ * The first real chapter after `chapter`, or null when there is none: the
+ * book's last chapter, or a summary not loaded (or failed), so a caller never
+ * offers a chapter it can't confirm exists.
+ */
+export function nextRealChapter(summary: BookSummary | null | undefined, chapter: number): number | null {
+  return realChapterNumbers(summary).find((c) => c > chapter) ?? null;
+}

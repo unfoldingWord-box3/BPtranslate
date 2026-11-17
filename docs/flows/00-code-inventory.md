@@ -210,7 +210,7 @@ Translation-mode-only (GL projects, `isTranslationProject(projectConfig)`; hidde
 | `translate` | "Translate chapter" | "AI-translate this chapter's notes from the source language." |
 | `translate-tq` | "Translate questions" | "AI-translate this chapter's questions from the source language." |
 
-**Finding:** no 6th "chain macro" menu item is actually wired in today — `followUpChain` is scaffolded in types/plumbing (comment "Currently used by the 'Generate everything' macro") but no `OPTIONS`/`TRANSLATE_OPTION` entry sets it. **Today's menu is 5 items in translation-mode projects, 3 in root/English projects — not 6.**
+**Finding:** no 6th "chain macro" menu item is actually wired in today — `followUpChain` was scaffolded in types/plumbing (comment "Currently used by the 'Generate everything' macro") but no `OPTIONS`/`TRANSLATE_OPTION` entry set it. (#726 removed `followUpChain` and `followUpOptions` entirely.) **Today's menu is 5 items in translation-mode projects, 3 in root/English projects — not 6.**
 
 Item `secondary` text becomes "Already running ({{state}})" and disables the item when *this user's* own job covers the chapter; a different user's in-flight run does not disable the item — it opens the confirm dialog and hits the 409 conflict path instead (`PipelineMenu.tsx:261-279,450-469`).
 

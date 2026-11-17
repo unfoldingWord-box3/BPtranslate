@@ -21,3 +21,21 @@ export function currentPrefsFromConflict(body: unknown): TranslationPrefs | null
   if (typeof c.version !== "number") return null;
   return current as TranslationPrefs;
 }
+
+// The server's row after a prefs PUT's 409: the body's `current`, else
+// fetched with `fetchCurrent`, so the editor can rebase its draft either way
+// (a body without `current` used to leave the draft on its old base, and
+// every later Save 409ed again; #909 gate review H3). null when the fetch
+// fails too.
+export async function prefsConflictRow(
+  body: unknown,
+  fetchCurrent: () => Promise<TranslationPrefs>,
+): Promise<TranslationPrefs | null> {
+  const current = currentPrefsFromConflict(body);
+  if (current) return current;
+  try {
+    return await fetchCurrent();
+  } catch {
+    return null;
+  }
+}

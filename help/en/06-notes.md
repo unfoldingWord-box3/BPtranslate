@@ -46,6 +46,8 @@ On a screen at least 1200 pixels wide, such as most laptops, the **Rapid check**
 
 The verse stays at the top while you scroll, one short line per scripture text. Below it, each note of the verse is one row: its status, its tA type, the original-language quote, the **English note**, and your note. Choose a type under **All types**, on the verse's top line, to list every note of that type in the chapter instead, grouped by verse.
 
+To hide notes by status, press **Filter by status** (the funnel beside **Status · type** in the column header). Untick a status to hide it, for example **Approved**, or press **Only** beside one status to see just those notes. The list then shows every matching note in the chapter, grouped by verse, and a line above the columns says what is hidden; **Show all** brings everything back. The note you have open stays in the list while it is open, so approving it does not make it jump away; it leaves the list when you move on. If a new choice hides the open note, the next shown note opens instead. The filter works together with a type filter and stays on when you change chapters.
+
 **Verse: Top | Inline**, on the same line, chooses where the scripture lines show. With **Top** (the usual setting), the open note's verse stays at the top, as described above. With **Inline**, the top keeps only its buttons, and each verse's scripture lines sit right above that verse's notes and scroll with them. With a type filter, every verse group starts with its own scripture lines, with the quotes of the listed notes highlighted. The app remembers your choice in this browser, and **V** switches between the two. A text you hide with its short name is hidden in either place.
 
 - Click your note in any row to edit it. Select **Save** to keep it, or **Save & Approve** at the bottom to save and approve it. Click anywhere else in a row to make it the current note without editing.
@@ -85,9 +87,10 @@ Nothing changes until you press **Apply**:
 - The assistant answers, and may add a list of proposed changes. Each edit is shown as the note with the changed words marked. Words it would remove are struck through and words it would add are highlighted.
 - Every proposed edit, approval and **Not needed** has a checkbox. Untick any you do not want, then press **Apply** with the number of changes left.
 - Edited notes become **Edited** and still need your approval. The assistant can also propose approving or setting aside notes, but a note it edits is never approved in the same step.
-- The app skips a note, and tells you how many it skipped and why, when it has unsaved typing, a change still saving, or someone else changed it since the assistant looked. Skipped notes are not changed.
+- The app skips a note, and tells you how many it skipped and why, when it has unsaved typing, a change still saving, or the note changed since the assistant looked. A proposed edit, approval or **Not needed** is also skipped when the note was approved or un-approved since then, and a proposed edit is skipped when the note was set aside or changed in another way that this screen had not shown yet. For these the result gives the reason as changed since the proposal. Skipped notes are not changed.
+- An edit that has not finished saving when the result appears is reported as **Still saving**. It may still save, so check the note before you ask for the change again.
 
-Each person can use the assistant up to a daily dollar amount, shown under the box. When it is used up, it comes back the next day. A chat has a length limit, so start a **New chat** when it is full or you change topic. If the assistant says the request was too big, ask about fewer notes. The Assistant button appears only when an admin has turned it on under **AI service**, and only for editors and admins.
+Each person can use the assistant up to a daily dollar amount, shown under the box. When it is used up, it comes back the next day. A chat has a length limit, so start a **New chat** when it is full or you change topic. If the assistant says the request was too big, ask about fewer notes. A line under the reply says how many notes were not sent, either because they are too long or because the chapter has too many for one request; in the second case, check only the notes you mean so they are sent first. The Assistant button appears only when an admin has turned it on under **AI service**, and only for editors and admins.
 
 ## When you finish a chapter
 You see **OBA 1 notes complete** with a count of approved, edited and not-needed notes. Select **Continue to chapter 2** or **Review again**.
@@ -103,6 +106,8 @@ In a translation project it is a sparkle icon, **Start an AI run**. It opens a m
 - **Re-source notes from English** (admins only): re-downloads the whole book from Door43: the scripture from your project's own Bible text (or from the English source if your project has none for this book), and the notes, questions and word links from the English source. Local edits to the book are lost. Press **Re-source** to confirm. If the book has local edits, a second window counts them and asks again: **Discard and re-source**.
 
 After **Translate chapter** or **Translate questions**, a confirm window opens: type a chapter or a range under **Chapter or range** and press **Start**.
+
+A **Translate chapter** run does not redraft notes that are already approved. It keeps them as they are, and when the run ends a banner lists them. To get a new AI draft for an approved note, use **Redo** on that note. If the AI returns a note unchanged from the English, that draft is not applied: the note keeps its text, and a banner lists it.
 
 In a source project, one that does not translate from another language (such as unfoldingWord's English), the icon is a download icon, **Import from Door43**. It opens the import window straight away, with no menu.
 

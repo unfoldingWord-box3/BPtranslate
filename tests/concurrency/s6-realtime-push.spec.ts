@@ -1,5 +1,8 @@
 import { expect, test, request as apiRequest } from "@playwright/test";
 import { authedRequest, fetchChapter, gotoVerse, mintToken, newUserContext, noteTextarea } from "./helpers";
+import { ZEC_CHAPTERS } from "./chapters";
+
+const CHAPTER = ZEC_CHAPTERS.shared.chapter;
 
 // Honor BE_BASE_URL so the suite runs on a relocated port (mirrors s8).
 const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
@@ -18,17 +21,17 @@ const BASE = process.env.BE_BASE_URL ?? "http://localhost:5173";
 test("alice's PATCH appears in bob's open view", async ({ browser }) => {
   const probe = await apiRequest.newContext({ baseURL: BASE });
   const probeAuth = await mintToken(probe, "probe");
-  const chapter = await fetchChapter(probe, probeAuth.token, "ZEC", 6);
+  const chapter = await fetchChapter(probe, probeAuth.token, "ZEC", CHAPTER);
   // Pick a row on a verse with at least two notes so Bob's "active" card is
   // a different row from the one Alice will edit.
   const v1Notes = chapter.tn.filter((r) => r.verse === 1);
-  expect(v1Notes.length, "expected ≥2 TN rows on ZEC 6:1").toBeGreaterThanOrEqual(2);
+  expect(v1Notes.length, `expected ≥2 TN rows on ZEC ${CHAPTER}:1`).toBeGreaterThanOrEqual(2);
   const target = v1Notes[1];
   await probe.dispose();
 
   const { context: bobCtx } = await newUserContext(browser, "bob");
   const bob = await bobCtx.newPage();
-  await gotoVerse(bob, "ZEC", 6, target.verse);
+  await gotoVerse(bob, "ZEC", CHAPTER, target.verse);
 
   const bobNote = noteTextarea(bob, target.id);
   await bobNote.waitFor({ timeout: 10_000 });
@@ -56,15 +59,15 @@ test("alice's PATCH appears in bob's open view", async ({ browser }) => {
 test("alice's POST appears in bob's open view", async ({ browser }) => {
   const probe = await apiRequest.newContext({ baseURL: BASE });
   const probeAuth = await mintToken(probe, "probe");
-  const chapter = await fetchChapter(probe, probeAuth.token, "ZEC", 6);
+  const chapter = await fetchChapter(probe, probeAuth.token, "ZEC", CHAPTER);
   // Anchor: an existing row on v1 we can wait on for the page being ready.
   const anchor = chapter.tn.find((r) => r.verse === 1);
-  expect(anchor, "expected at least one TN on ZEC 6:1").toBeDefined();
+  expect(anchor, `expected at least one TN on ZEC ${CHAPTER}:1`).toBeDefined();
   await probe.dispose();
 
   const { context: bobCtx } = await newUserContext(browser, "bob");
   const bob = await bobCtx.newPage();
-  await gotoVerse(bob, "ZEC", 6, anchor!.verse);
+  await gotoVerse(bob, "ZEC", CHAPTER, anchor!.verse);
   await noteTextarea(bob, anchor!.id).waitFor({ timeout: 10_000 });
   await bob.waitForTimeout(500);
 
@@ -78,9 +81,9 @@ test("alice's POST appears in bob's open view", async ({ browser }) => {
     },
     data: {
       book: "ZEC",
-      chapter: 6,
+      chapter: CHAPTER,
       verse: anchor!.verse,
-      ref_raw: `${6}:${anchor!.verse}`,
+      ref_raw: `${CHAPTER}:${anchor!.verse}`,
       note: `LIVE CREATE ${Date.now()}`,
     },
   });
@@ -108,9 +111,9 @@ test("alice's DELETE removes the row from bob's open view", async ({ browser }) 
     },
     data: {
       book: "ZEC",
-      chapter: 6,
+      chapter: CHAPTER,
       verse: 1,
-      ref_raw: "6:1",
+      ref_raw: `${CHAPTER}:1`,
       note: `to-be-deleted ${Date.now()}`,
     },
   });
@@ -120,7 +123,7 @@ test("alice's DELETE removes the row from bob's open view", async ({ browser }) 
 
   const { context: bobCtx } = await newUserContext(browser, "bob");
   const bob = await bobCtx.newPage();
-  await gotoVerse(bob, "ZEC", 6, 1);
+  await gotoVerse(bob, "ZEC", CHAPTER, 1);
   await bob.locator(`[data-note-id="${created.id}"]`).waitFor({ timeout: 10_000 });
   await bob.waitForTimeout(500);
 

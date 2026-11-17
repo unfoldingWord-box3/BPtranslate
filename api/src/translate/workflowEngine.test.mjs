@@ -676,3 +676,54 @@ test("engine: the decrypted key appears in nothing the runtime persists, even wh
     assert.ok(!blob.includes(SCRUB_KEY), "the engine persisted the decrypted key to disk");
   }
 });
+
+// ---------------------------------------------------------------------------
+// Proof 6 — a whole-chapter run does not buy approved rows (#895)
+// ---------------------------------------------------------------------------
+
+const SOURCE_IDS = fixture("tn_OBA.tsv").split("\n").slice(1).filter(Boolean).map((l) => l.split("\t")[1]);
+
+async function approveInD1(engine, ids) {
+  const d1 = await engine.d1("DB");
+  for (const id of ids) {
+    await d1.prepare(
+      `INSERT INTO tn_rows (id, book, chapter, verse, ref_raw, note, translation_state, version, updated_at)
+       VALUES (?1, 'OBA', 1, 1, '1:1', 'معتمدة', 'validated', 1, 0)`,
+    ).bind(id).run();
+  }
+}
+
+test("engine (#895): approved rows are never in a prompt, and the merge is not refused for leaving them out", async (t) => {
+  const prompted = [];
+  const s = await scenario({ reply: ({ user }) => {
+    prompted.push(...promptRowIds(user));
+    return anthropicStreamResponse({ text: recordedReply(user), model: MODEL });
+  } });
+  t.after(() => s.engine.dispose());
+  // 30 approved rows: past the shrink policy's floor against the 153-row base.
+  const approved = SOURCE_IDS.slice(1, 31);
+  await approveInD1(s.engine, approved);
+
+  const status = await s.engine.run(`translate-bsoj-${JOB}`, PARAMS);
+  assert.equal(status.status, "complete", `instance errored: ${JSON.stringify(status.error)}`);
+  assert.equal(status.output.rowCount, SOURCE_IDS.length - 30);
+  assert.deepEqual(prompted.filter((id) => approved.includes(id)), [], "no approved row reached the provider");
+  assert.equal(prompted.length, SOURCE_IDS.length - 30, "every other row did");
+  assert.equal((await wfStatus(s.engine, "DB")).state, "done");
+});
+
+test("engine (#895): a fully approved chapter makes zero model calls and finishes done", async (t) => {
+  const s = await scenario({ reply: () => { throw new Error("the provider must not be called"); } });
+  t.after(() => s.engine.dispose());
+  await approveInD1(s.engine, SOURCE_IDS);
+
+  const status = await s.engine.run(`translate-bsoj-${JOB}`, PARAMS);
+  assert.equal(status.status, "complete", `instance errored: ${JSON.stringify(status.error)}`);
+  assert.equal(s.state.modelCalls, 0);
+  assert.equal(status.output.batchCount, 0);
+  assert.equal(status.output.rowCount, 0);
+  assert.deepEqual(s.state.blocked, [], "no fetch left the harness");
+  const wf = await wfStatus(s.engine, "DB");
+  assert.equal(wf.state, "done");
+  assert.equal(wf.output.length, 2, "the out/ book and report are delivered, so the import runs and lists the kept rows");
+});
