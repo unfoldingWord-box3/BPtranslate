@@ -12,7 +12,7 @@ import { useRefusedSaveHold } from "../hooks/useRefusedSaveHold";
 import { useRowConflict } from "../hooks/useRowConflict";
 import { outbox } from "../sync/outbox";
 import { RowConflictPanel } from "./ConflictCompare";
-import { newestTheirs } from "../sync/rowConflictView";
+import { editorAddsToMine } from "../sync/rowConflictView";
 import { useTranslation } from "react-i18next";
 
 interface Props {
@@ -148,7 +148,11 @@ const Row = memo(function Row({
     setRefRaw((v) => pick("ref_raw", prev.refRaw, next.refRaw, v));
     setQuestion((q) => pick("question", prev.question, next.question, q));
     setResponse((r) => pick("response", prev.response, next.response, r));
-  }, [row.ref_raw, row.question, row.response, row.version, rowChanged, decide]);
+    // `row` itself too (#892 review R1): after Keep theirs the baseline is
+    // their row, and the server's re-read can replace the cached row with the
+    // same values and version it already held (a newer save that reached the
+    // cache first); the fields must still follow it.
+  }, [row, row.ref_raw, row.question, row.response, row.version, rowChanged, decide]);
 
   const draftKey = useMemo(() => rowKey("tq", row.book, row.id), [row.book, row.id]);
 
@@ -168,15 +172,22 @@ const Row = memo(function Row({
       if (typeof patch.response === "string") setResponse(patch.response);
     });
   }, [draftKey]);
-  // Their row after Keep theirs (#892 review K4), the baseline until the cached
-  // row reaches its version: until rowRebuild has re-read the row, the cache
-  // still holds this browser's refused text, and diffing against it would
-  // show their text as unsaved and write it to the drafts store.
-  const [adopted, setAdopted] = useState<{ version: number; ref_raw: string; question: string; response: string } | null>(
-    null,
-  );
-  if (adopted && row.version >= adopted.version) setAdopted(null);
-  const base = adopted && row.version < adopted.version ? adopted : null;
+  // Their row after Keep theirs (#892 review K4), the baseline until the cache
+  // replaces the row it held at the click (`stale`) with one at least at their
+  // version: until rowRebuild has re-read the row, the cache can still hold
+  // this browser's refused text, at any version (review R1), and diffing
+  // against it would show their text as unsaved and write it to the drafts
+  // store.
+  const [adopted, setAdopted] = useState<{
+    version: number;
+    ref_raw: string;
+    question: string;
+    response: string;
+    stale: TqRow;
+  } | null>(null);
+  const adoptedHolds = adopted !== null && (row === adopted.stale || row.version < adopted.version);
+  if (adopted && !adoptedHolds) setAdopted(null);
+  const base = adoptedHolds ? adopted : null;
   const diff = useMemo<Partial<TqRow>>(() => {
     const out: Partial<TqRow> = {};
     if (refRaw !== (base ? base.ref_raw : (row.ref_raw ?? ""))) out.ref_raw = refRaw;
@@ -223,23 +234,30 @@ const Row = memo(function Row({
   useEffect(() => {
     latestRowRef.current = row;
   }, [row]);
-  const keepMine = () => {
-    if (conflict?.theirsVersion == null) return;
-    void outbox.resolveConflict(conflict.opId, conflict.theirsVersion);
+  // Keep mine saves exactly what Mine shows (review M1): typing after the
+  // refused save goes out as one more save, behind the re-armed ones.
+  const conflictEditor = { ref_raw: refRaw, question, response };
+  const conflictDirty = Object.keys(diff);
+  const keepMine = async () => {
+    if (!conflict || conflict.theirsVersion == null) return;
+    const more = editorAddsToMine(conflict, conflictEditor, conflictDirty);
+    await outbox.resolveConflict(conflict.opId, conflict.theirsVersion);
+    if (more) handleSave();
   };
   const keepTheirs = async () => {
     const theirs = conflict?.theirs;
     if (!conflict || !theirs || conflict.theirsVersion == null) return;
     const theirsVersion = conflict.theirsVersion;
     if ((await outbox.dropRowForKeepTheirs(conflict.opId)) === 0) return;
-    // The newest copy known (review L1): the cached row if a later save
-    // already reached it, else the row from the 409.
-    const newest = newestTheirs(theirs, theirsVersion, latestRowRef.current);
+    // Always the row from the 409: the cached row can hold this browser's own
+    // saved text at any version (review R1). A newer server copy arrives with
+    // the re-read the drop starts (rowRebuild.ts), and the fields follow it.
     const next = {
-      version: newest.version,
-      ref_raw: (newest.row.ref_raw as string | null | undefined) ?? "",
-      question: (newest.row.question as string | null | undefined) ?? "",
-      response: (newest.row.response as string | null | undefined) ?? "",
+      version: theirsVersion,
+      ref_raw: (theirs.ref_raw as string | null | undefined) ?? "",
+      question: (theirs.question as string | null | undefined) ?? "",
+      response: (theirs.response as string | null | undefined) ?? "",
+      stale: latestRowRef.current,
     };
     // These values are the baseline the next row update reconciles from, so
     // a field left as loaded follows a newer copy (the re-read row, a third
@@ -361,9 +379,9 @@ const Row = memo(function Row({
           <RowConflictPanel
             kind="tq"
             view={conflict}
-            editor={{ ref_raw: refRaw, question, response }}
-            dirty={Object.keys(diff)}
-            onKeepMine={keepMine}
+            editor={conflictEditor}
+            dirty={conflictDirty}
+            onKeepMine={() => void keepMine()}
             onKeepTheirs={() => void keepTheirs()}
           />
         </Box>

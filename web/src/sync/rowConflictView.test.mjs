@@ -2,7 +2,7 @@
 // editor shows for a refused save, and the ops "Keep theirs" drops.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { canKeepTheirs, newestTheirs, opsDroppedByKeepTheirs, rowConflictView, withEditorValues } from "./rowConflictView.ts";
+import { canKeepTheirs, editorAddsToMine, opsDroppedByKeepTheirs, rowConflictView, withEditorValues } from "./rowConflictView.ts";
 
 const target = { kind: "row", rowKind: "tn", id: "abcd", book: "ZEC" };
 const other = { kind: "row", rowKind: "tn", id: "wxyz", book: "ZEC" };
@@ -131,18 +131,22 @@ test("Keep theirs is available only with their row known and nothing of the row 
   assert.equal(canKeepTheirs(noRow), false);
 });
 
-test("Keep theirs loads the cached row when it is already at their version or newer (review L1)", () => {
-  const cachedNewer = { ...theirs, version: 5, note: "Carol's note" };
-  assert.deepEqual(newestTheirs(theirs, 4, cachedNewer), { row: cachedNewer, version: 5 });
-  const cachedSame = { ...theirs, note: "Bob's note" };
-  assert.equal(newestTheirs(theirs, 4, cachedSame).row, cachedSame);
-  const cachedOlder = { ...theirs, version: 3, note: "Alice's refused note" };
-  assert.deepEqual(newestTheirs(theirs, 4, cachedOlder), { row: theirs, version: 4 });
-});
-
 test("Keep theirs on an op that is no longer a conflict drops nothing", () => {
   const rearmed = op({ status: "pending" });
   const sibling = op({});
   assert.deepEqual(opsDroppedByKeepTheirs([rearmed, sibling], rearmed.id), []);
   assert.deepEqual(opsDroppedByKeepTheirs([sibling], "gone"), []);
+});
+
+test("Keep mine queues the editor's text only when it adds to the queued saves (review M1)", () => {
+  const c = op({ status: "conflict", patch: { note: "a\\nb" }, conflictCurrent: theirs });
+  const v = rowConflictView([c], target);
+  // Same text as queued (display form): nothing more to save.
+  assert.equal(editorAddsToMine(v, { note: "a\nb" }, ["note"]), false);
+  // Typed more after the refused save.
+  assert.equal(editorAddsToMine(v, { note: "a\nb and more" }, ["note"]), true);
+  // A field typed in that no queued save carries.
+  assert.equal(editorAddsToMine(v, { note: "a\nb", quote: "new quote" }, ["note", "quote"]), true);
+  // An unchanged field the editor shows differently is not the user's typing.
+  assert.equal(editorAddsToMine(v, { note: "Bob's note" }, []), false);
 });

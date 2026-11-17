@@ -37,21 +37,6 @@ export function canKeepTheirs(view: Pick<RowConflictView, "theirs" | "sending">)
   return view.theirs != null && !view.sending;
 }
 
-/**
- * The text Keep theirs loads (review L1): the cached row when it is already at
- * their version or newer (a third writer's save may have reached the cache
- * after the 409 that brought `theirs`), else the row from the 409.
- */
-export function newestTheirs<R extends { version: number }>(
-  theirs: Record<string, unknown>,
-  theirsVersion: number,
-  cached: R,
-): { row: Record<string, unknown>; version: number } {
-  return cached.version >= theirsVersion
-    ? { row: cached as unknown as Record<string, unknown>, version: cached.version }
-    : { row: theirs, version: theirsVersion };
-}
-
 function inQueueOrder<T extends Pick<OutboxOp, "queuedAt" | "seq">>(ops: T[]): T[] {
   return [...ops].sort((a, b) => a.queuedAt - b.queuedAt || (a.seq ?? 0) - (b.seq ?? 0));
 }
@@ -124,6 +109,20 @@ export function withEditorValues(
   const theirs = view.theirs;
   const differ = theirs ? keys.filter((k) => shown(mine[k]) !== shown(theirs[k])) : keys;
   return { ...view, mine, fields: differ.length > 0 ? differ : view.fields };
+}
+
+/**
+ * Whether "Mine" as shown (withEditorValues) holds text the queued saves do
+ * not (review M1): typing after the refused save. Keep mine then queues the
+ * editor's values as one more save behind the re-armed ones, so it saves
+ * exactly what Mine shows; that save lands last.
+ */
+export function editorAddsToMine(
+  view: RowConflictView,
+  editor: Record<string, unknown>,
+  dirty: readonly string[],
+): boolean {
+  return dirty.some((k) => k in editor && shown(editor[k]) !== shown(view.mine[k]));
 }
 
 /**

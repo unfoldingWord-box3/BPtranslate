@@ -265,6 +265,70 @@ for (const cacheHasV3 of [false, true]) {
   });
 }
 
+// Review R1: Bob's V2 reaches Alice's cache by live update, then Alice types
+// more, in the quote too, which the card writes into the cached row at V2.
+// Keep theirs must load Bob's row from the 409, not that cached copy.
+test("tN card: Keep theirs ignores Alice's typing that sits in the cached row", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const row = await pickRow("tn", 6);
+  const before = await serverRow("tn", row.id);
+  const { context } = await newUserContext(browser, "alice-892-r1");
+  const page = await context.newPage();
+  const alice = `ALICE r1 ${Date.now()}`;
+  const bob = `BOB r1 ${Date.now()}`;
+  const bobRow = await makeNoteConflict(page, context, row, alice, bob);
+  // The version chip shows Bob's version once his save reaches the cache.
+  await expect(noteCard(page, row.id)).toContainText(`v${bobRow.version}`, { timeout: 15_000 });
+
+  const quoteField = noteCard(page, row.id).locator('textarea:not([aria-hidden="true"])').first();
+  const originalQuote = await quoteField.inputValue();
+  await quoteField.fill(`${originalQuote} ALICE QUOTE`);
+  await noteTextarea(page, row.id).fill(`${alice} and more`);
+  // The quote reaches the cached row after a short debounce.
+  await page.waitForTimeout(600);
+
+  await notePanel(page, row.id).getByRole("button", { name: "Keep theirs" }).click();
+  await expect(notePanel(page, row.id)).toHaveCount(0);
+  await expect(noteTextarea(page, row.id)).toHaveValue(bob);
+  await expect(quoteField).toHaveValue(originalQuote);
+  await expect.poll(() => queuedOps(page, row.id).then((o) => o.length)).toBe(0);
+  await expect.poll(() => draftPatch(page, `row:tn:ZEC:${row.id}`)).toBeNull();
+  await expectNoUnsaved(page);
+  await expect(saveButton(page, row.id)).toHaveCount(0);
+  await page.waitForTimeout(2_000);
+  const server = await serverRow("tn", row.id);
+  expect(server?.note).toBe(bob);
+  expect(server?.version).toBe(bobRow.version);
+  expect((server as { quote?: string | null })?.quote ?? null).toBe(
+    (before as { quote?: string | null })?.quote ?? null,
+  );
+  await context.close();
+});
+
+// Review M1: Keep mine saves what Mine shows, typing after the refusal included.
+test("tN card: Keep mine saves the typing made after the refused save too", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const row = await pickRow("tn", 7);
+  const { context } = await newUserContext(browser, "alice-892-m1");
+  const page = await context.newPage();
+  const alice = `ALICE m1 ${Date.now()}`;
+  const bob = `BOB m1 ${Date.now()}`;
+  await makeNoteConflict(page, context, row, alice, bob);
+  const full = `${alice} and more typed after the refusal`;
+  await noteTextarea(page, row.id).fill(full);
+  await expect(notePanel(page, row.id)).toContainText(full);
+
+  await notePanel(page, row.id).getByRole("button", { name: "Keep mine" }).click();
+  await expect(notePanel(page, row.id)).toHaveCount(0);
+  await expect.poll(() => serverRow("tn", row.id).then((r) => r?.note), { timeout: 15_000 }).toBe(full);
+  await expect(noteTextarea(page, row.id)).toHaveValue(full);
+  await expect.poll(() => queuedOps(page, row.id).then((o) => o.length)).toBe(0);
+  await expect.poll(() => draftPatch(page, `row:tn:ZEC:${row.id}`)).toBeNull();
+  await expectNoUnsaved(page);
+  await expect(saveButton(page, row.id)).toHaveCount(0);
+  await context.close();
+});
+
 test("tN card: Keep mine re-sends Alice's note over Bob's at the newer version", async ({ browser }) => {
   test.setTimeout(90_000);
   const row = await pickRow("tn", 1);

@@ -21,7 +21,7 @@ const listeners = new Set<() => void>();
 const views = new Map<string, { sig: string; view: RowConflictView | null }>();
 
 function signature(v: RowConflictView | null): string {
-  return v ? JSON.stringify([v.opId, v.theirsVersion, v.mine, v.fields, v.sending]) : "";
+  return v ? JSON.stringify([v.opId, v.theirsVersion, v.theirsUpdatedAt, v.theirs, v.mine, v.fields, v.sending]) : "";
 }
 
 function viewFor(target: RowTarget): RowConflictView | null {
