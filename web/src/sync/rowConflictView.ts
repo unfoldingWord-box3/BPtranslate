@@ -28,6 +28,28 @@ export interface RowConflictView {
   theirsUpdatedAt: number | null;
   /** Fields to compare: those in `mine` that differ from `theirs` (all of them if none do). */
   fields: string[];
+  /** A save of the row is on the wire (review L2): Keep theirs waits for it to settle. */
+  sending: boolean;
+}
+
+/** Whether Keep theirs can run now: their row is known and no save of the row is on the wire. */
+export function canKeepTheirs(view: Pick<RowConflictView, "theirs" | "sending">): boolean {
+  return view.theirs != null && !view.sending;
+}
+
+/**
+ * The text Keep theirs loads (review L1): the cached row when it is already at
+ * their version or newer (a third writer's save may have reached the cache
+ * after the 409 that brought `theirs`), else the row from the 409.
+ */
+export function newestTheirs<R extends { version: number }>(
+  theirs: Record<string, unknown>,
+  theirsVersion: number,
+  cached: R,
+): { row: Record<string, unknown>; version: number } {
+  return cached.version >= theirsVersion
+    ? { row: cached as unknown as Record<string, unknown>, version: cached.version }
+    : { row: theirs, version: theirsVersion };
 }
 
 function inQueueOrder<T extends Pick<OutboxOp, "queuedAt" | "seq">>(ops: T[]): T[] {
@@ -62,6 +84,7 @@ export function rowConflictView(ops: readonly ViewOp[], target: RowTarget): RowC
     theirsVersion: theirs ? (theirs.version as number) : null,
     theirsUpdatedAt: theirs && typeof theirs.updated_at === "number" ? theirs.updated_at : null,
     fields: differ.length > 0 ? differ : keys,
+    sending: forRow.some((o) => o.status === "in_flight"),
   };
 }
 
@@ -108,10 +131,11 @@ export function withEditorValues(
  * and the patches of the same row queued behind it. Those wait with stale
  * versions (drainPass blocks the target), so dropping only the refused one
  * would let the next of them overwrite the row the user just chose to keep.
- * Left alone: an op on the wire (as outbox.drop does), a failed op (its text
- * is not in the compare; the failed-save recovery UI owns it) and a delete
- * (review K2, K3). Empty when `opId` is no longer a conflict (another tab
- * resolved it), so a stale click drops nothing.
+ * Left alone: a failed op (its text is not in the compare; the failed-save
+ * recovery UI owns it) and a delete (review K2, K3). Empty when `opId` is no
+ * longer a conflict (another tab resolved it), so a stale click drops
+ * nothing, and empty while any op of the row is on the wire (review L2): it
+ * could land over theirs, so Keep theirs waits for it to settle.
  */
 export function opsDroppedByKeepTheirs<T extends Pick<OutboxOp, "id" | "target" | "status" | "action">>(
   ops: readonly T[],
@@ -120,6 +144,7 @@ export function opsDroppedByKeepTheirs<T extends Pick<OutboxOp, "id" | "target" 
   const op = ops.find((o) => o.id === opId);
   if (!op || op.status !== "conflict" || op.target.kind !== "row") return [];
   const key = targetKey(op.target);
+  if (ops.some((o) => targetKey(o.target) === key && o.status === "in_flight")) return [];
   return ops.filter(
     (o) =>
       targetKey(o.target) === key &&

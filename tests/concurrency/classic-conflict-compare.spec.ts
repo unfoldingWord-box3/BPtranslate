@@ -226,6 +226,45 @@ test("tN card: typing after the refused save shows under Mine, and Keep theirs r
   await context.close();
 });
 
+// Review L1: a third writer. Alice's save is refused on Bob's V2; Carol then
+// saves V3. Keep theirs must end on Carol's text, clean, and never send Bob's
+// older text back over hers.
+for (const cacheHasV3 of [false, true]) {
+  test(`tN card: Keep theirs after a third save ends on the newest text (${
+    cacheHasV3 ? "cache already holds it" : "live updates blocked"
+  })`, async ({ browser }) => {
+    test.setTimeout(90_000);
+    const row = await pickRow("tn", cacheHasV3 ? 5 : 4);
+    const { context } = await newUserContext(browser, `alice-892-third-${cacheHasV3}`);
+    // With live updates blocked, Carol's save reaches Alice's cache only
+    // through the re-read Keep theirs triggers (rowRebuild).
+    if (!cacheHasV3) await context.routeWebSocket((url) => url.protocol.startsWith("ws"), () => {});
+    const page = await context.newPage();
+    const alice = `ALICE third ${Date.now()}`;
+    const bob = `BOB third ${Date.now()}`;
+    const carol = `CAROL third ${Date.now()}`;
+    await makeNoteConflict(page, context, row, alice, bob);
+    const carolRow = await bobSaves("tn", row.id, { note: carol });
+    if (cacheHasV3) {
+      // The version chip shows the cached row's version once Carol's save arrives.
+      await expect(noteCard(page, row.id)).toContainText(`v${carolRow.version}`, { timeout: 15_000 });
+    }
+
+    await notePanel(page, row.id).getByRole("button", { name: "Keep theirs" }).click();
+    await expect(notePanel(page, row.id)).toHaveCount(0);
+    await expect(noteTextarea(page, row.id)).toHaveValue(carol, { timeout: 15_000 });
+    await expect.poll(() => queuedOps(page, row.id).then((o) => o.length)).toBe(0);
+    await expect.poll(() => draftPatch(page, `row:tn:ZEC:${row.id}`)).toBeNull();
+    await expectNoUnsaved(page);
+    await expect(saveButton(page, row.id)).toHaveCount(0);
+    await page.waitForTimeout(2_000);
+    const server = await serverRow("tn", row.id);
+    expect(server?.note).toBe(carol);
+    expect(server?.version).toBe(carolRow.version);
+    await context.close();
+  });
+}
+
 test("tN card: Keep mine re-sends Alice's note over Bob's at the newer version", async ({ browser }) => {
   test.setTimeout(90_000);
   const row = await pickRow("tn", 1);
@@ -338,5 +377,44 @@ test("tQ table: Keep theirs puts Bob's question back for good", async ({ browser
   await expect(questionField).toHaveValue(after);
   await expect(panel).toHaveCount(0);
   await expectNoUnsaved(page);
+  await context.close();
+});
+
+test("tQ table: Keep theirs after a third save ends on the newest question (live updates blocked)", async ({
+  browser,
+}) => {
+  test.setTimeout(90_000);
+  const row = await pickRow("tq", 1);
+  const { context } = await newUserContext(browser, "alice-892-tq-third");
+  await context.routeWebSocket((url) => url.protocol.startsWith("ws"), () => {});
+  const page = await context.newPage();
+  const alice = `ALICE q third ${Date.now()}`;
+  const bob = `BOB q third ${Date.now()}`;
+  const carol = `CAROL q third ${Date.now()}`;
+  const questionRow = page.locator(`[data-question-id="${row.id}"]`);
+  const questionField = questionRow.locator('textarea:not([aria-hidden="true"])').first();
+  const panel = questionRow.locator('[data-row-conflict="true"]');
+
+  const hold = await holdFirstPatch(context, page, "tq", row.id);
+  await gotoVerse(page, "ZEC", CHAPTER, row.verse);
+  await page.getByRole("button", { name: /^Questions/ }).click();
+  await questionField.fill(alice);
+  await questionRow.locator('button:has([data-testid="SaveIcon"])').click();
+  await expect.poll(hold.count, { message: "Alice's PATCH should reach the route" }).toBe(1);
+  await bobSaves("tq", row.id, { question: bob });
+  hold.release();
+  await expect(panel).toBeVisible({ timeout: 15_000 });
+  const carolRow = await bobSaves("tq", row.id, { question: carol });
+
+  await panel.getByRole("button", { name: "Keep theirs" }).click();
+  await expect(panel).toHaveCount(0);
+  await expect(questionField).toHaveValue(carol, { timeout: 15_000 });
+  await expect(questionRow.locator('button:has([data-testid="SaveIcon"])')).toHaveCount(0);
+  await expect.poll(() => draftPatch(page, `row:tq:ZEC:${row.id}`)).toBeNull();
+  await expectNoUnsaved(page);
+  await page.waitForTimeout(2_000);
+  const server = await serverRow("tq", row.id);
+  expect(server?.question).toBe(carol);
+  expect(server?.version).toBe(carolRow.version);
   await context.close();
 });

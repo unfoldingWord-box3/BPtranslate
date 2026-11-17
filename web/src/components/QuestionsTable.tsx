@@ -12,6 +12,7 @@ import { useRefusedSaveHold } from "../hooks/useRefusedSaveHold";
 import { useRowConflict } from "../hooks/useRowConflict";
 import { outbox } from "../sync/outbox";
 import { RowConflictPanel } from "./ConflictCompare";
+import { newestTheirs } from "../sync/rowConflictView";
 import { useTranslation } from "react-i18next";
 
 interface Props {
@@ -218,6 +219,10 @@ const Row = memo(function Row({
   // overwrite theirs) and puts their text in the fields, which are then the
   // baseline (`adopted`) until the cached row catches up.
   const conflict = useRowConflict("tq", row.id, row.book);
+  const latestRowRef = useRef(row);
+  useEffect(() => {
+    latestRowRef.current = row;
+  }, [row]);
   const keepMine = () => {
     if (conflict?.theirsVersion == null) return;
     void outbox.resolveConflict(conflict.opId, conflict.theirsVersion);
@@ -225,14 +230,21 @@ const Row = memo(function Row({
   const keepTheirs = async () => {
     const theirs = conflict?.theirs;
     if (!conflict || !theirs || conflict.theirsVersion == null) return;
-    const version = conflict.theirsVersion;
+    const theirsVersion = conflict.theirsVersion;
     if ((await outbox.dropRowForKeepTheirs(conflict.opId)) === 0) return;
+    // The newest copy known (review L1): the cached row if a later save
+    // already reached it, else the row from the 409.
+    const newest = newestTheirs(theirs, theirsVersion, latestRowRef.current);
     const next = {
-      version,
-      ref_raw: (theirs.ref_raw as string | null | undefined) ?? "",
-      question: (theirs.question as string | null | undefined) ?? "",
-      response: (theirs.response as string | null | undefined) ?? "",
+      version: newest.version,
+      ref_raw: (newest.row.ref_raw as string | null | undefined) ?? "",
+      question: (newest.row.question as string | null | undefined) ?? "",
+      response: (newest.row.response as string | null | undefined) ?? "",
     };
+    // These values are the baseline the next row update reconciles from, so
+    // a field left as loaded follows a newer copy (the re-read row, a third
+    // person's save) instead of being kept as if the user had typed it.
+    baselineRef.current = { refRaw: next.ref_raw, question: next.question, response: next.response };
     setAdopted(next);
     setRefRaw(next.ref_raw);
     setQuestion(next.question);

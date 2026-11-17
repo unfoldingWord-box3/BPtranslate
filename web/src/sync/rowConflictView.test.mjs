@@ -2,7 +2,7 @@
 // editor shows for a refused save, and the ops "Keep theirs" drops.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { opsDroppedByKeepTheirs, rowConflictView, withEditorValues } from "./rowConflictView.ts";
+import { canKeepTheirs, newestTheirs, opsDroppedByKeepTheirs, rowConflictView, withEditorValues } from "./rowConflictView.ts";
 
 const target = { kind: "row", rowKind: "tn", id: "abcd", book: "ZEC" };
 const other = { kind: "row", rowKind: "tn", id: "wxyz", book: "ZEC" };
@@ -109,10 +109,35 @@ test("Mine compares newlines in display form", () => {
   assert.deepEqual(v.fields, ["note"]);
 });
 
-test("Keep theirs leaves an op on the wire alone", () => {
+test("Keep theirs drops nothing while a save of the row is on the wire (review L2)", () => {
   const c = op({ status: "conflict" });
   const flying = op({ status: "in_flight" });
-  assert.deepEqual(opsDroppedByKeepTheirs([c, flying], c.id).map((o) => o.id), [c.id]);
+  const p = op({});
+  assert.deepEqual(opsDroppedByKeepTheirs([c, flying, p], c.id), []);
+  // An op of another row on the wire does not hold this one up.
+  const elsewhere = op({ target: other, status: "in_flight" });
+  assert.deepEqual(opsDroppedByKeepTheirs([c, elsewhere], c.id).map((o) => o.id), [c.id]);
+});
+
+test("Keep theirs is available only with their row known and nothing of the row on the wire", () => {
+  const c = op({ status: "conflict", patch: { note: "a" }, conflictCurrent: theirs });
+  const v = rowConflictView([c], target);
+  assert.equal(v.sending, false);
+  assert.equal(canKeepTheirs(v), true);
+  const sending = rowConflictView([c, op({ status: "in_flight", patch: { note: "b" } })], target);
+  assert.equal(sending.sending, true);
+  assert.equal(canKeepTheirs(sending), false);
+  const noRow = rowConflictView([op({ status: "conflict", patch: { note: "a" } })], target);
+  assert.equal(canKeepTheirs(noRow), false);
+});
+
+test("Keep theirs loads the cached row when it is already at their version or newer (review L1)", () => {
+  const cachedNewer = { ...theirs, version: 5, note: "Carol's note" };
+  assert.deepEqual(newestTheirs(theirs, 4, cachedNewer), { row: cachedNewer, version: 5 });
+  const cachedSame = { ...theirs, note: "Bob's note" };
+  assert.equal(newestTheirs(theirs, 4, cachedSame).row, cachedSame);
+  const cachedOlder = { ...theirs, version: 3, note: "Alice's refused note" };
+  assert.deepEqual(newestTheirs(theirs, 4, cachedOlder), { row: theirs, version: 4 });
 });
 
 test("Keep theirs on an op that is no longer a conflict drops nothing", () => {

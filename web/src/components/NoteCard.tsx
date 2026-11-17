@@ -67,6 +67,7 @@ import { onOpDropped, onOutboxResult, outbox, type DroppedOp, type OutboxOp } fr
 import { useRefusedSaveHold } from "../hooks/useRefusedSaveHold";
 import { useRowConflict } from "../hooks/useRowConflict";
 import { RowConflictPanel } from "./ConflictCompare";
+import { newestTheirs } from "../sync/rowConflictView";
 import { isAquiferDraftRow } from "./flows/translateShared";
 import { noteLockedReadOnly } from "../lib/chapterLock";
 
@@ -251,6 +252,15 @@ function detectQuoteScript(text: string): QuoteScript {
   if (RTL_CHAR.test(text)) return "rtl";
   if (LTR_CHAR.test(text)) return "ltr";
   return "empty";
+}
+
+// The fields Keep theirs loaded (#892), in display form; undefined once the
+// user has typed in that field. `key` names the cached row last followed.
+interface AdoptedFields {
+  key: string;
+  quote: string | undefined;
+  note: string | undefined;
+  support_reference: string | null | undefined;
 }
 
 interface SessionSnapshot {
@@ -603,6 +613,40 @@ function NoteCardInner({
   if (savePendingVersion !== null && row.version > savePendingVersion) {
     setSavePendingVersion(null);
   }
+  // After Keep theirs (#892 review L1) the fields hold the row the user chose
+  // to keep. A field not typed in since follows later copies of the row (a
+  // third person's save, the server's re-read replacing the cached copy),
+  // even with a session open, where the field effects below stand aside; one
+  // typed in keeps its text. `key` is the cached row last followed.
+  const [adopted, setAdopted] = useState<AdoptedFields | null>(null);
+  const rowFieldsKey = `${row.version}\u0000${row.quote}\u0000${row.note}\u0000${row.support_reference}`;
+  if (adopted && adopted.key !== rowFieldsKey) {
+    const next = {
+      quote: tsvToDisplay(row.quote),
+      note: tsvToDisplay(row.note),
+      support_reference: row.support_reference,
+    };
+    const followQuote = adopted.quote !== undefined && quote === adopted.quote;
+    const followNote = adopted.note !== undefined && note === adopted.note;
+    const followRef = adopted.support_reference !== undefined && supportRef === adopted.support_reference;
+    if (followQuote) setQuote(next.quote);
+    if (followNote) setNote(next.note);
+    if (followRef) setSupportRef(next.support_reference);
+    setAdopted(
+      followQuote || followNote || followRef
+        ? {
+            key: rowFieldsKey,
+            quote: followQuote ? next.quote : undefined,
+            note: followNote ? next.note : undefined,
+            support_reference: followRef ? next.support_reference : undefined,
+          }
+        : null,
+    );
+  }
+  const latestRowRef = useRef(row);
+  useLayoutEffect(() => {
+    latestRowRef.current = row;
+  }, [row]);
 
   // Session model: when this card becomes active, snapshot the current
   // committed values so undo can revert to "what it was when I started
@@ -1196,22 +1240,34 @@ function NoteCardInner({
   // overwrite theirs) and puts their text in the editor, with no draft left.
   const keepTheirs = async () => {
     const theirs = conflict?.theirs;
-    if (!conflict || !theirs) return;
+    if (!conflict || !theirs || conflict.theirsVersion == null) return;
+    const theirsVersion = conflict.theirsVersion;
     if ((await outbox.dropRowForKeepTheirs(conflict.opId)) === 0) return;
+    // The newest copy known: the cached row if a later save already reached
+    // it, else the row from the 409 (review L1).
+    const newest = newestTheirs(theirs, theirsVersion, latestRowRef.current);
     const next = {
-      quote: (theirs.quote as string | null | undefined) ?? null,
-      note: (theirs.note as string | null | undefined) ?? null,
-      support_reference: (theirs.support_reference as string | null | undefined) ?? null,
+      quote: (newest.row.quote as string | null | undefined) ?? null,
+      note: (newest.row.note as string | null | undefined) ?? null,
+      support_reference: (newest.row.support_reference as string | null | undefined) ?? null,
     };
-    // The cached row keeps this browser's refused text until rowRebuild has
-    // re-read the row. Put their values in it now and rebase the baseline on
-    // their row and its version (review K5). If the cached row is still at an
+    // The cached row may keep this browser's refused text until rowRebuild has
+    // re-read the row. Put these values in it now and rebase the baseline on
+    // them and their version (review K5). If the cached row is still at an
     // older version, the rebase rule above takes the cached row instead, which
-    // onChange below has just given their values, so the card shows no unsaved
-    // change in the meantime either way.
+    // onChange below has just given these values, so the card shows no unsaved
+    // change in the meantime either way. `adopted` makes the fields follow the
+    // re-read row, or any newer one, when it arrives.
     pendingRef.current = {};
     sentRef.current = null;
-    const nextSaved = { ...next, version: conflict.theirsVersion ?? row.version };
+    const nextSaved = { ...next, version: newest.version };
+    setAdopted({
+      // The cached row once onChange below has given it these values.
+      key: `${latestRowRef.current.version}\u0000${next.quote}\u0000${next.note}\u0000${next.support_reference}`,
+      quote: tsvToDisplay(next.quote),
+      note: tsvToDisplay(next.note),
+      support_reference: next.support_reference,
+    });
     savedRef.current = nextSaved;
     setSaved(nextSaved);
     setQuote(tsvToDisplay(next.quote));

@@ -26,6 +26,7 @@ import { useRefusedSaveHold } from "../hooks/useRefusedSaveHold";
 import { useRowConflict } from "../hooks/useRowConflict";
 import { outbox } from "../sync/outbox";
 import { RowConflictPanel } from "./ConflictCompare";
+import { newestTheirs } from "../sync/rowConflictView";
 
 // Translation-review card for translationQuestions — the tQ analogue of
 // NoteCard's translation mode. Only rendered in a gateway-language project
@@ -187,6 +188,10 @@ function QuestionCardInner({
   // A refused save of this question (#892), as in QuestionsTable: both
   // versions show on the card until the user picks one.
   const conflict = useRowConflict("tq", row.id, row.book);
+  const latestRowRef = useRef(row);
+  useEffect(() => {
+    latestRowRef.current = row;
+  }, [row]);
   const keepMine = () => {
     if (conflict?.theirsVersion == null) return;
     void outbox.resolveConflict(conflict.opId, conflict.theirsVersion);
@@ -194,13 +199,17 @@ function QuestionCardInner({
   const keepTheirs = async () => {
     const theirs = conflict?.theirs;
     if (!conflict || !theirs || conflict.theirsVersion == null) return;
-    const version = conflict.theirsVersion;
+    const theirsVersion = conflict.theirsVersion;
     if ((await outbox.dropRowForKeepTheirs(conflict.opId)) === 0) return;
+    // Newest copy known, and the baseline the next row update reconciles
+    // from (review L1), as in QuestionsTable.
+    const newest = newestTheirs(theirs, theirsVersion, latestRowRef.current);
     const next = {
-      version,
-      question: tsvToDisplay((theirs.question as string | null | undefined) ?? null),
-      response: tsvToDisplay((theirs.response as string | null | undefined) ?? null),
+      version: newest.version,
+      question: tsvToDisplay((newest.row.question as string | null | undefined) ?? null),
+      response: tsvToDisplay((newest.row.response as string | null | undefined) ?? null),
     };
+    baselineRef.current = { question: next.question, response: next.response };
     setAdopted(next);
     setQuestion(next.question);
     setResponse(next.response);

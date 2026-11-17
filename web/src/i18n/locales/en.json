@@ -3480,7 +3480,8 @@
       "keepTheirs": "Keep theirs",
       "discardMine": "Discard my change",
       "noServerVersion": "No server version to re-send against",
-      "keepMine": "Keep mine"
+      "keepMine": "Keep mine",
+      "stillSending": "A save of this row is still being sent. Try again in a moment."
     }
   },
   "dialogs": {

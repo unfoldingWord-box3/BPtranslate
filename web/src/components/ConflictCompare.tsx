@@ -25,7 +25,7 @@ import CircularProgress from "@mui/material/CircularProgress";
 import Stack from "@mui/material/Stack";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
-import { withEditorValues, type RowConflictView } from "../sync/rowConflictView";
+import { canKeepTheirs, withEditorValues, type RowConflictView } from "../sync/rowConflictView";
 
 /** One field the conflicting op patched, with both sides' values. */
 export interface ConflictFieldView {
@@ -353,7 +353,12 @@ export function RowConflictPanel({
     theirs: view.theirs ? displayFieldValue(view.theirs[field]) : null,
   }));
   const textual = fields.length === 1 && fields[0].field === textField;
-  const canKeepTheirs = view.theirs != null;
+  const keepTheirsOk = canKeepTheirs(view);
+  const keepTheirsReason = keepTheirsOk
+    ? ""
+    : view.theirs == null
+      ? t("flowReview.conflict.theirsUnreadable")
+      : t("flowReview.conflict.stillSending");
   return (
     <Box
       role="region"
@@ -385,8 +390,8 @@ export function RowConflictPanel({
       />
       <Stack direction="row" spacing={1} justifyContent="flex-end" sx={{ mt: 1 }}>
         <ConflictActions
-          canKeepTheirs={canKeepTheirs}
-          keepTheirsReason={canKeepTheirs ? "" : t("flowReview.conflict.theirsUnreadable")}
+          canKeepTheirs={keepTheirsOk}
+          keepTheirsReason={keepTheirsReason}
           keepTheirsLabel={t("flowReview.conflict.keepTheirs")}
           theirsVersion={view.theirsVersion}
           onKeepMine={onKeepMine}
