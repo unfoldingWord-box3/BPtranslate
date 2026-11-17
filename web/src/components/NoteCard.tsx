@@ -68,7 +68,7 @@ import { useRefusedSaveHold } from "../hooks/useRefusedSaveHold";
 import { useRowConflict } from "../hooks/useRowConflict";
 import { RowConflictPanel } from "./ConflictCompare";
 import { onRowRebuild } from "../sync/rowRebuild";
-import { editorAddsToMine } from "../sync/rowConflictView";
+import { editorAddsToMine, keepTheirsPlan } from "../sync/rowConflictView";
 import { isAquiferDraftRow } from "./flows/translateShared";
 import { noteLockedReadOnly } from "../lib/chapterLock";
 
@@ -682,6 +682,11 @@ function NoteCardInner({
   useLayoutEffect(() => {
     latestRowRef.current = row;
   }, [row]);
+  // The fields as last rendered, for Keep theirs after its await (review P1).
+  const editorNowRef = useRef({ quote, note, support_reference: supportRef });
+  useLayoutEffect(() => {
+    editorNowRef.current = { quote, note, support_reference: supportRef };
+  }, [quote, note, supportRef]);
 
   // Session model: when this card becomes active, snapshot the current
   // committed values so undo can revert to "what it was when I started
@@ -1286,7 +1291,12 @@ function NoteCardInner({
     const theirs = conflict?.theirs;
     if (!conflict || !theirs || conflict.theirsVersion == null) return;
     const theirsVersion = conflict.theirsVersion;
+    // The fields at the click (review P1): typing during the drop below is
+    // kept, and so is the draft that holds it.
+    const atClick = { ...editorNowRef.current };
     if ((await outbox.dropRowForKeepTheirs(conflict.opId)) === 0) return;
+    const plan = keepTheirsPlan(atClick, editorNowRef.current);
+    const take = new Set<string>(plan.overwrite);
     // Always the row from the 409, never the cached row: the cache can hold
     // this browser's own typing at any version (stashEdit), so it is not a
     // server copy (review R1). A newer server copy (a third person's save)
@@ -1308,20 +1318,26 @@ function NoteCardInner({
     pendingRef.current = {};
     sentRef.current = null;
     const nextSaved = { ...next, version: theirsVersion };
+    // A field typed in since the click keeps its text (and is not followed);
+    // with their row as the baseline it shows as unsaved, and its draft stays.
+    const now = editorNowRef.current;
+    const shownQuote = take.has("quote") ? tsvToDisplay(next.quote) : now.quote;
+    const shownNote = take.has("note") ? tsvToDisplay(next.note) : now.note;
+    const shownRef = take.has("support_reference") ? next.support_reference : now.support_reference;
     setAdopted({
       // Followed from the first cached row after `stale`: the one onChange
       // below gives their values, or the server's re-read.
       key: "",
-      quote: tsvToDisplay(next.quote),
-      note: tsvToDisplay(next.note),
-      support_reference: next.support_reference,
+      quote: take.has("quote") ? shownQuote : undefined,
+      note: take.has("note") ? shownNote : undefined,
+      support_reference: take.has("support_reference") ? shownRef : undefined,
       stale: latestRowRef.current,
     });
     savedRef.current = nextSaved;
     setSaved(nextSaved);
-    setQuote(tsvToDisplay(next.quote));
-    setNote(tsvToDisplay(next.note));
-    setSupportRef(next.support_reference);
+    if (take.has("quote")) setQuote(shownQuote);
+    if (take.has("note")) setNote(shownNote);
+    if (take.has("support_reference")) setSupportRef(shownRef);
     if (sessionSnapshotRef.current !== null) {
       setSessionSnapshot({
         quote: tsvToDisplay(next.quote),
@@ -1330,8 +1346,14 @@ function NoteCardInner({
       });
     }
     setSavePendingVersion(null);
-    if (cacheTakesTheirs) onChange(next);
-    await drafts.clear(draftKey);
+    if (cacheTakesTheirs) {
+      const patch: Partial<TnRow> = {};
+      if (take.has("quote")) patch.quote = next.quote;
+      if (take.has("note")) patch.note = next.note;
+      if (take.has("support_reference")) patch.support_reference = next.support_reference;
+      onChange(patch);
+    }
+    if (plan.clearDraft) await drafts.clear(draftKey);
   };
 
   useEffect(() => {

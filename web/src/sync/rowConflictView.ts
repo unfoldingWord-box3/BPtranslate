@@ -112,6 +112,21 @@ export function withEditorValues(
 }
 
 /**
+ * What Keep theirs may touch once its outbox drop has finished (review P1).
+ * The drop is awaited, and the user can type meanwhile: only fields still
+ * showing what they showed at the click take their text, and the draft is
+ * cleared only when no field changed since the click.
+ */
+export function keepTheirsPlan<K extends string>(
+  atClick: Record<K, unknown>,
+  now: Record<K, unknown>,
+): { overwrite: K[]; clearDraft: boolean } {
+  const keys = Object.keys(atClick) as K[];
+  const overwrite = keys.filter((k) => now[k] === atClick[k]);
+  return { overwrite, clearDraft: overwrite.length === keys.length };
+}
+
+/**
  * Whether "Mine" as shown (withEditorValues) holds text the queued saves do
  * not (review M1): typing after the refused save. Keep mine then queues the
  * editor's values as one more save behind the re-armed ones, so it saves

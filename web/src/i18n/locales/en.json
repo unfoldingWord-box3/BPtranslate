@@ -3481,7 +3481,8 @@
       "discardMine": "Discard my change",
       "noServerVersion": "No server version to re-send against",
       "keepMine": "Keep mine",
-      "stillSending": "A save of this row is still being sent. Try again in a moment."
+      "stillSending": "A save of this row is still being sent. Try again in a moment.",
+      "bodyFieldsCard": "Another editor changed this row while your change was waiting to save. For the fields below, choose which version to keep — the other is discarded."
     }
   },
   "dialogs": {

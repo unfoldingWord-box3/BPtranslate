@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   Box,
   Button,
@@ -26,7 +26,7 @@ import { useRefusedSaveHold } from "../hooks/useRefusedSaveHold";
 import { useRowConflict } from "../hooks/useRowConflict";
 import { outbox } from "../sync/outbox";
 import { RowConflictPanel } from "./ConflictCompare";
-import { editorAddsToMine } from "../sync/rowConflictView";
+import { editorAddsToMine, keepTheirsPlan } from "../sync/rowConflictView";
 
 // Translation-review card for translationQuestions — the tQ analogue of
 // NoteCard's translation mode. Only rendered in a gateway-language project
@@ -197,6 +197,11 @@ function QuestionCardInner({
   useEffect(() => {
     latestRowRef.current = row;
   }, [row]);
+  // The fields as last rendered, for Keep theirs after its await (review P1).
+  const editorNowRef = useRef({ question, response });
+  useLayoutEffect(() => {
+    editorNowRef.current = { question, response };
+  }, [question, response]);
   // Keep mine saves exactly what Mine shows (review M1), as in QuestionsTable.
   const conflictEditor = { question, response };
   const conflictDirty = Object.keys(diff);
@@ -210,7 +215,11 @@ function QuestionCardInner({
     const theirs = conflict?.theirs;
     if (!conflict || !theirs || conflict.theirsVersion == null) return;
     const theirsVersion = conflict.theirsVersion;
+    // The fields at the click (review P1): typing during the drop is kept.
+    const atClick = { ...editorNowRef.current };
     if ((await outbox.dropRowForKeepTheirs(conflict.opId)) === 0) return;
+    const plan = keepTheirsPlan(atClick, editorNowRef.current);
+    const take = new Set<string>(plan.overwrite);
     // Always the row from the 409, and the baseline the next row update
     // reconciles from (review L1, R1), as in QuestionsTable.
     const next = {
@@ -221,9 +230,9 @@ function QuestionCardInner({
     };
     baselineRef.current = { question: next.question, response: next.response };
     setAdopted(next);
-    setQuestion(next.question);
-    setResponse(next.response);
-    await drafts.clear(draftKey);
+    if (take.has("question")) setQuestion(next.question);
+    if (take.has("response")) setResponse(next.response);
+    if (plan.clearDraft) await drafts.clear(draftKey);
   };
 
   const draftRtl = isRtl(question) || isRtl(response);

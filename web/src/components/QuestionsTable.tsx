@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Box, Paper, Stack, TextField, IconButton, Typography, Tooltip } from "@mui/material";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
@@ -12,7 +12,7 @@ import { useRefusedSaveHold } from "../hooks/useRefusedSaveHold";
 import { useRowConflict } from "../hooks/useRowConflict";
 import { outbox } from "../sync/outbox";
 import { RowConflictPanel } from "./ConflictCompare";
-import { editorAddsToMine } from "../sync/rowConflictView";
+import { editorAddsToMine, keepTheirsPlan } from "../sync/rowConflictView";
 import { useTranslation } from "react-i18next";
 
 interface Props {
@@ -234,6 +234,11 @@ const Row = memo(function Row({
   useEffect(() => {
     latestRowRef.current = row;
   }, [row]);
+  // The fields as last rendered, for Keep theirs after its await (review P1).
+  const editorNowRef = useRef({ ref_raw: refRaw, question, response });
+  useLayoutEffect(() => {
+    editorNowRef.current = { ref_raw: refRaw, question, response };
+  }, [refRaw, question, response]);
   // Keep mine saves exactly what Mine shows (review M1): typing after the
   // refused save goes out as one more save, behind the re-armed ones.
   const conflictEditor = { ref_raw: refRaw, question, response };
@@ -248,7 +253,11 @@ const Row = memo(function Row({
     const theirs = conflict?.theirs;
     if (!conflict || !theirs || conflict.theirsVersion == null) return;
     const theirsVersion = conflict.theirsVersion;
+    // The fields at the click (review P1): typing during the drop is kept.
+    const atClick = { ...editorNowRef.current };
     if ((await outbox.dropRowForKeepTheirs(conflict.opId)) === 0) return;
+    const plan = keepTheirsPlan(atClick, editorNowRef.current);
+    const take = new Set<string>(plan.overwrite);
     // Always the row from the 409: the cached row can hold this browser's own
     // saved text at any version (review R1). A newer server copy arrives with
     // the re-read the drop starts (rowRebuild.ts), and the fields follow it.
@@ -264,10 +273,10 @@ const Row = memo(function Row({
     // person's save) instead of being kept as if the user had typed it.
     baselineRef.current = { refRaw: next.ref_raw, question: next.question, response: next.response };
     setAdopted(next);
-    setRefRaw(next.ref_raw);
-    setQuestion(next.question);
-    setResponse(next.response);
-    await drafts.clear(draftKey);
+    if (take.has("ref_raw")) setRefRaw(next.ref_raw);
+    if (take.has("question")) setQuestion(next.question);
+    if (take.has("response")) setResponse(next.response);
+    if (plan.clearDraft) await drafts.clear(draftKey);
   };
 
   return (

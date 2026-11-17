@@ -379,7 +379,9 @@ export function RowConflictPanel({
         {kind === "tn" ? t("flowReview.conflict.titleNote") : t("flowReview.conflict.titleQuestion")}
       </Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 1, textAlign: "start" }}>
-        {t("flowReview.conflict.bodyTextual")}
+        {/* Not bodyFields (review P2): it promises that unsaved typing stays,
+            and here Keep theirs replaces the editor's text. */}
+        {textual ? t("flowReview.conflict.bodyTextual") : t("flowReview.conflict.bodyFieldsCard")}
       </Typography>
       <ConflictColumns
         fields={fields}

@@ -2,7 +2,7 @@
 // editor shows for a refused save, and the ops "Keep theirs" drops.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { canKeepTheirs, editorAddsToMine, opsDroppedByKeepTheirs, rowConflictView, withEditorValues } from "./rowConflictView.ts";
+import { canKeepTheirs, editorAddsToMine, keepTheirsPlan, opsDroppedByKeepTheirs, rowConflictView, withEditorValues } from "./rowConflictView.ts";
 
 const target = { kind: "row", rowKind: "tn", id: "abcd", book: "ZEC" };
 const other = { kind: "row", rowKind: "tn", id: "wxyz", book: "ZEC" };
@@ -149,4 +149,16 @@ test("Keep mine queues the editor's text only when it adds to the queued saves (
   assert.equal(editorAddsToMine(v, { note: "a\nb", quote: "new quote" }, ["note", "quote"]), true);
   // An unchanged field the editor shows differently is not the user's typing.
   assert.equal(editorAddsToMine(v, { note: "Bob's note" }, []), false);
+});
+
+test("Keep theirs leaves a field typed in during its drop alone, and the draft too (review P1)", () => {
+  const atClick = { quote: "q", note: "Alice", support_reference: null };
+  assert.deepEqual(keepTheirsPlan(atClick, { ...atClick }), {
+    overwrite: ["quote", "note", "support_reference"],
+    clearDraft: true,
+  });
+  assert.deepEqual(keepTheirsPlan(atClick, { ...atClick, note: "Alice, typing on" }), {
+    overwrite: ["quote", "support_reference"],
+    clearDraft: false,
+  });
 });
