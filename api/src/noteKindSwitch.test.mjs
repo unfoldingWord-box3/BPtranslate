@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 
 import { suggestionInbox } from "./suggestionInbox.ts";
-import { hideSwitchedOffKinds } from "./noteKindSwitch.ts";
+import { hideSwitchedOffKinds, tnShrinkCheck } from "./noteKindSwitch.ts";
 import { applyTsvRows, changedTsvChapters, softDeleteRemovedTsvRows } from "./bookReimport.ts";
 import { buildTnTsv, exportTsvShrinkRefused } from "./export.ts";
 
@@ -306,12 +306,123 @@ test("the nightly pass hides notes of a switched-off kind written since, in ever
   assert.equal(await hideSwitchedOffKinds(h.env.DB), 0, "nothing left to hide");
 });
 
-test("known limit: hiding many notes of one book trips the export's whole-file shrink guard", () => {
-  // checkTsvShrink (exportWorkflow.ts) refuses a whole-book tN commit that
-  // drops more than 25 rows and more than 5% of master's rows, with no override.
-  // So switching off a kind with that many notes in a book holds that book's
-  // export until someone decides how the guard should treat a switch-off.
-  assert.equal(exportTsvShrinkRefused(940, 1000), true, "60 of 1000 hidden: refused");
-  assert.equal(exportTsvShrinkRefused(960, 1000), false, "40 of 1000 hidden: allowed");
-  assert.equal(exportTsvShrinkRefused(170, 200), true, "30 of 200 hidden: refused");
+// ── The nightly export's shrink guard ignores notes switched off on purpose ──
+// (Benjamin's option A on #924.) tnShrinkCheck is what exportWorkflow.ts
+// checkTsvShrink runs for tN: a row missing from the render is exempt only when
+// D1 marks that exact (book, id) as switched off AND master's row is of that
+// kind. The >25-and->5% limit then applies to master without the exempt rows.
+
+// A ZEC book on master: `other` notes of OTHER and `you` notes of YOU, all
+// live in D1. Returns the IDs and master's TSV (rendered from D1 now).
+function seedBook(h, { other, you }) {
+  const otherIds = Array.from({ length: other }, (_, i) => h.note({ chapter: (i % 9) + 1, verse: (i % 7) + 1, kind: OTHER }));
+  const youIds = Array.from({ length: you }, (_, i) => h.note({ chapter: (i % 9) + 1, verse: (i % 7) + 1 }));
+  return { otherIds, youIds, master: buildTnTsv(h.exportRows("ZEC")) };
+}
+// Delete notes the ordinary way (no switch-off mark): an unexplained drop.
+const plainDelete = (h, ids) => {
+  for (const id of ids) h.sqlite.prepare(`UPDATE tn_rows SET deleted_at = ? WHERE id = ? AND book = 'ZEC'`).run(NOW, id);
+};
+const render = (h) => buildTnTsv(h.exportRows("ZEC"));
+const switchOffYou = async (h) => {
+  h.listYou(); // trashed notes only: never live, never on master
+  const r = await h.call("POST", "/not-needed-kinds/switch-off", { kind: YOU_ID });
+  assert.equal(r.status, 200);
+};
+
+test("shrink guard: a switched-off kind larger than the limit still publishes", async () => {
+  const h = fixture();
+  const { master } = seedBook(h, { other: 200, you: 40 });
+  await switchOffYou(h);
+  // Without the exemption this is 40 of 240 (17%): refused.
+  assert.equal(exportTsvShrinkRefused(200, 240), true, "the plain count would refuse");
+  const r = await tnShrinkCheck(h.env.DB, "ZEC", master, render(h));
+  assert.deepEqual(r, { refused: false, masterRows: 240, renderedRows: 200, exempt: 40 });
+});
+
+test("shrink guard: an unexplained drop of the same size is still refused", async () => {
+  const h = fixture();
+  const { master, youIds } = seedBook(h, { other: 200, you: 40 });
+  plainDelete(h, youIds); // same rows, same kind, but no switch-off mark
+  const r = await tnShrinkCheck(h.env.DB, "ZEC", master, render(h));
+  assert.deepEqual(r, { refused: true, masterRows: 240, renderedRows: 200, exempt: 0 });
+});
+
+test("shrink guard: switched-off plus unexplained drops are decided on the unexplained part alone", async () => {
+  // Refused: 40 switched off (exempt) + 30 unexplained of the remaining 200 (15%).
+  {
+    const h = fixture();
+    const { master, otherIds } = seedBook(h, { other: 200, you: 40 });
+    await switchOffYou(h);
+    plainDelete(h, otherIds.slice(0, 30));
+    const r = await tnShrinkCheck(h.env.DB, "ZEC", master, render(h));
+    assert.deepEqual(r, { refused: true, masterRows: 240, renderedRows: 170, exempt: 40 });
+  }
+  // Allowed: 40 switched off + 20 unexplained = 60 together (over the limit),
+  // but 20 alone is under the 25-row floor.
+  {
+    const h = fixture();
+    const { master, otherIds } = seedBook(h, { other: 200, you: 40 });
+    await switchOffYou(h);
+    plainDelete(h, otherIds.slice(0, 20));
+    assert.equal(exportTsvShrinkRefused(180, 240), true, "the plain count would refuse");
+    const r = await tnShrinkCheck(h.env.DB, "ZEC", master, render(h));
+    assert.deepEqual(r, { refused: false, masterRows: 240, renderedRows: 180, exempt: 40 });
+  }
+});
+
+test("shrink guard: rows of a switched-off kind that D1 never marked are not exempt (partial load)", async () => {
+  // The kind is switched off, and master carries 40 notes of it that D1 does
+  // not hold at all (a truncated load): the kind matches, the identity does not.
+  const h = fixture();
+  await switchOffYou(h);
+  seedBook(h, { other: 200, you: 0 });
+  const lines = render(h).trimEnd().split("\n");
+  for (let i = 0; i < 40; i++) lines.push(["1:1", `m${String(i).padStart(3, "0")}`, "", YOU, "", "0", "lost"].join("\t"));
+  const master = lines.join("\n") + "\n";
+  const r = await tnShrinkCheck(h.env.DB, "ZEC", master, render(h));
+  assert.deepEqual(r, { refused: true, masterRows: 240, renderedRows: 200, exempt: 0 });
+});
+
+test("shrink guard: switched-off notes that were never on master give no headroom", async () => {
+  const h = fixture();
+  const { otherIds } = seedBook(h, { other: 200, you: 0 });
+  const master = render(h); // 200 rows, none of them YOU
+  h.note({ chapter: 2 }); // 40 YOU notes land after master was written ...
+  for (let i = 1; i < 40; i++) h.note({ chapter: 3 });
+  await switchOffYou(h); // ... and are switched off before any export
+  plainDelete(h, otherIds.slice(0, 30)); // 30 of 200 (15%) dropped unexplained
+  const r = await tnShrinkCheck(h.env.DB, "ZEC", master, render(h));
+  assert.deepEqual(r, { refused: true, masterRows: 200, renderedRows: 170, exempt: 0 });
+});
+
+test("shrink guard: a marked ID whose master row is another kind is not exempt", async () => {
+  const h = fixture();
+  const { master, youIds } = seedBook(h, { other: 200, you: 40 });
+  await switchOffYou(h);
+  // Master's copy of those IDs says OTHER, not the kind D1 hid them for.
+  const swapped = master.split(YOU).join(OTHER);
+  assert.ok(youIds.length === 40);
+  const r = await tnShrinkCheck(h.env.DB, "ZEC", swapped, render(h));
+  assert.deepEqual(r, { refused: true, masterRows: 240, renderedRows: 200, exempt: 0 });
+});
+
+test("shrink guard: only marks in this book count", async () => {
+  const h = fixture();
+  const { master } = seedBook(h, { other: 200, you: 40 });
+  await switchOffYou(h);
+  // Move the marks to another book: the same IDs in ZEC are no longer marked.
+  h.sqlite.exec(`UPDATE tn_rows SET book = 'MAL' WHERE book = 'ZEC' AND switched_off_kind IS NOT NULL`);
+  const r = await tnShrinkCheck(h.env.DB, "ZEC", master, render(h));
+  assert.deepEqual(r, { refused: true, masterRows: 240, renderedRows: 200, exempt: 0 });
+});
+
+test("shrink guard: a master file without ID or SupportReference columns gets no exemption", async () => {
+  const h = fixture();
+  const { master } = seedBook(h, { other: 200, you: 40 });
+  await switchOffYou(h);
+  const noHeader = master.replace(/^Reference\tID\t/, "Reference\tRowId\t");
+  const r = await tnShrinkCheck(h.env.DB, "ZEC", noHeader, render(h));
+  assert.equal(r.refused, true);
+  assert.equal(r.exempt, 0);
 });
