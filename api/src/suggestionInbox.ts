@@ -1090,8 +1090,13 @@ suggestionInbox.post("/not-needed-kinds/switch-off", requireAdmin, async (c) => 
   const list = await computeNotNeededKinds(c.env.DB, notNeededOpts);
   if (list.switchNotMigrated) return c.json({ error: "not_migrated" }, 503);
   if (!list.kinds.some((k) => k.kind === parsed.data.kind)) return c.json({ error: "kind_not_found" }, 404);
-  const res = await switchOffKind(c.env.DB, parsed.data.kind, currentUserId(c));
-  return c.json({ ok: true, hidden: res.hidden });
+  try {
+    const res = await switchOffKind(c.env.DB, parsed.data.kind, currentUserId(c));
+    return c.json({ ok: true, hidden: res.hidden });
+  } catch (err) {
+    if (err instanceof Error && err.message === "not_migrated") return c.json({ error: "not_migrated" }, 503);
+    throw err;
+  }
 });
 
 suggestionInbox.post("/not-needed-kinds/switch-on", requireAdmin, async (c) => {

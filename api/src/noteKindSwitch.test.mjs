@@ -509,8 +509,15 @@ test("a fresh book import's wipe keeps switched-off notes and restored-not-yet-e
   // An earlier Switch back on restored this note; no export has run since.
   const restored = otherIds[0];
   h.sqlite.prepare(`UPDATE tn_rows SET switch_restored_at = ? WHERE id = ? AND book = 'ZEC'`).run(NOW, restored);
+  // Two more restored notes that are no longer live: one marked Not needed
+  // (trashed), one finalized since (deleted). Neither is kept.
+  const [trashedRestored, deletedRestored] = [h.note({ chapter: 6, kind: OTHER }), h.note({ chapter: 6, kind: OTHER })];
+  h.sqlite.prepare(`UPDATE tn_rows SET switch_restored_at = ?1, trashed_at = ?1 WHERE id = ?2 AND book = 'ZEC'`).run(NOW, trashedRestored);
+  h.sqlite.prepare(`UPDATE tn_rows SET switch_restored_at = ?1, deleted_at = ?1 WHERE id = ?2 AND book = 'ZEC'`).run(NOW, deletedRestored);
   h.sqlite.prepare(TN_WIPE_SQL).run("ZEC");
   for (const id of otherIds.slice(1)) assert.equal(h.row(id), undefined, `${id} wiped`);
+  assert.equal(h.row(trashedRestored), undefined, "a restored note since trashed is wiped");
+  assert.equal(h.row(deletedRestored), undefined, "a restored note since deleted is wiped");
   assert.ok(h.row(restored), "a restored note master lacks survives the wipe");
   for (const id of youIds) assert.equal(h.row(id).switched_off_kind, YOU_ID, `${id} kept, hidden and marked`);
   const kept = await keptSwitchedOffNotes(h.env.DB, "ZEC");
@@ -613,4 +620,31 @@ test("hideSwitchedOffKinds: never throws by default; throwOnError fails the Work
   // A database without migration 0090 is not an error in either mode.
   const old = { prepare: () => ({ all: async () => { throw new Error("no such table: note_kinds_switched_off"); } }) };
   assert.equal(await hideSwitchedOffKinds(old, { throwOnError: true }), 0);
+});
+
+test("switch-off answers 503 not_migrated when the switch-off itself finds no migration 0090", async () => {
+  const h = fixture();
+  h.listYou();
+  const batch = h.env.DB.batch;
+  h.env.DB.batch = async () => {
+    throw new Error("no such table: note_kinds_switched_off");
+  };
+  try {
+    const r = await h.call("POST", "/not-needed-kinds/switch-off", { kind: YOU_ID });
+    assert.equal(r.status, 503);
+    assert.deepEqual(r.body, { error: "not_migrated" });
+  } finally {
+    h.env.DB.batch = batch;
+  }
+});
+
+test("kept notes and master rows compare chapter/verse as numbers, front:intro as 0:0", async () => {
+  const h = fixture();
+  const intro = h.note({ chapter: 0, verse: 0 });
+  h.sqlite.prepare(`UPDATE tn_rows SET ref_raw = 'front:intro' WHERE id = ? AND book = 'ZEC'`).run(intro);
+  await switchOffYou(h);
+  const kept = await keptSwitchedOffNotes(h.env.DB, "ZEC");
+  assert.deepEqual({ chapter: kept.get(intro).chapter, verse: kept.get(intro).verse }, { chapter: 0, verse: 0 });
+  // bookImport.ts refParts("front:intro") returns [0, 0] (numbers).
+  assert.equal(keptNoteHoldsRow(kept.get(intro), { chapter: 0, verse: 0, supportReference: YOU }), true);
 });

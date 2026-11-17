@@ -164,8 +164,10 @@ export async function switchOnKind(db: Db, kind: string, userId: number | null, 
 // The fresh book import's tN wipe (bookImport.ts) keeps two kinds of note
 // that master may not carry: notes a switch-off hid (so Switch back on can
 // still restore them), and notes Switch back on restored that no export has
-// put back on master yet (switch_restored_at). Every other note goes.
-export const TN_WIPE_SQL = `DELETE FROM tn_rows WHERE book = ?1 AND switched_off_kind IS NULL AND switch_restored_at IS NULL`;
+// put back on master yet (switch_restored_at), while they are still live (one
+// since trashed or deleted is not kept). Every other note goes.
+const KEPT = `(switched_off_kind IS NOT NULL OR (switch_restored_at IS NOT NULL AND ${LIVE}))`;
+export const TN_WIPE_SQL = `DELETE FROM tn_rows WHERE book = ?1 AND NOT ${KEPT}`;
 
 export interface KeptNote {
   chapter: number;
@@ -181,7 +183,7 @@ export async function keptSwitchedOffNotes(db: Db, book: string): Promise<Map<st
   const rs = await db
     .prepare(
       `SELECT id, chapter, verse, switched_off_kind, support_reference FROM tn_rows
-        WHERE book = ?1 AND (switched_off_kind IS NOT NULL OR switch_restored_at IS NOT NULL)`,
+        WHERE book = ?1 AND ${KEPT}`,
     )
     .bind(book)
     .all<{ id: string; chapter: number; verse: number; switched_off_kind: string | null; support_reference: string | null }>();
