@@ -1113,6 +1113,17 @@ export interface NotNeededKindsResponse {
   kinds: NotNeededKind[];
   /** The server has not had migration 0089 yet: Dismiss is unavailable. */
   notMigrated: boolean;
+  /** Kinds switched off now (#924, api/src/noteKindSwitch.ts). */
+  switchedOff: SwitchedOffKind[];
+  /** The server has not had migration 0090 yet: switching off is unavailable. */
+  switchNotMigrated: boolean;
+}
+
+export interface SwitchedOffKind {
+  kind: string;
+  /** Notes hidden by this switch-off now. */
+  hidden: number;
+  switchedOffAt: number;
 }
 
 // Responses of POST /api/books/:book/review-state (api/src/reviewState.ts).
@@ -2273,12 +2284,29 @@ export const api = {
       timeoutMs: 60_000,
     }),
 
-  // Note kinds marked Not needed (#158 part A), for all books. Dismiss takes
-  // only a kind listed now (else 404) and hides it for good; nothing is switched off.
+  // Note kinds marked Not needed (#158 part A), for all books, and the kinds
+  // switched off (#924). Dismiss takes only a kind listed now (else 404) and
+  // hides it from the list for good; it switches nothing off.
   getNotNeededKinds: (signal?: AbortSignal) =>
     request<NotNeededKindsResponse>(`/api/suggestion-inbox/not-needed-kinds`, { signal, timeoutMs: 60_000 }),
   dismissNotNeededKind: (kind: string) =>
     request<{ ok: true }>(`/api/suggestion-inbox/not-needed-kinds/dismiss`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind }),
+      timeoutMs: 60_000,
+    }),
+  // Switch a note kind off for the project (#924): hides every note of it, in
+  // every book, until it is switched back on. Off takes only a listed kind.
+  switchOffNoteKind: (kind: string) =>
+    request<{ ok: true; hidden: number }>(`/api/suggestion-inbox/not-needed-kinds/switch-off`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind }),
+      timeoutMs: 60_000,
+    }),
+  switchOnNoteKind: (kind: string) =>
+    request<{ ok: true; restored: number }>(`/api/suggestion-inbox/not-needed-kinds/switch-on`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ kind }),

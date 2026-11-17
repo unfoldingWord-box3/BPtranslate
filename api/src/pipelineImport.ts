@@ -26,6 +26,7 @@ import { HUMAN_TOUCH_ACTIONS, HUMAN_TOUCH_SOURCES } from "./pipelineDedupSql.ts"
 import { houseStyleForProposal, loadEnabledHouseStyleRules, type HouseStyleRule } from "./houseStyle.ts";
 import { readBookSourceNotes, readPinnedSourceNotes, type SourceNotes } from "./sourceNotes.ts";
 import { isTranslationConfig } from "./workflowLayouts.ts";
+import { hideSwitchedOffKinds } from "./noteKindSwitch.ts";
 
 interface OutputEntry {
   type?: string;
@@ -469,6 +470,8 @@ export async function importJobOutput(
   try {
     const stageResult = await stageJobOutput(env, job, outputs);
     const applyResult = await applyJobOutput(env, job);
+    // AI notes of a switched-off kind (#924): hide and mark them. Never throws.
+    await hideSwitchedOffKinds(env.DB, { book: job.book });
     return { ...stageResult, applied: applyResult };
   } catch (err) {
     // Release the slot so the caller's one-retry path (pollPipelineJob holds

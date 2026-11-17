@@ -6,6 +6,8 @@
 // POST /api/suggestion-inbox/:book/reject   {key} → never suggested again
 // GET  /api/suggestion-inbox/not-needed-kinds and POST .../dismiss: note kinds
 //      marked Not needed (#158 part A), see api/src/notNeededKinds.ts.
+// POST /api/suggestion-inbox/not-needed-kinds/switch-off and .../switch-on:
+//      hide a whole note kind and bring it back (#924), api/src/noteKindSwitch.ts.
 //
 // The issue says "nightly". There is no cron: the inbox is computed when an
 // admin opens it, for ONE book per request (the bound), with no AI call. The
@@ -118,6 +120,7 @@ import { BOOK_NUMBERS } from "./dcsSources.ts";
 import { SCORECARD_ROWS_SQL } from "./draftScorecard.ts";
 import { loadLessonsForRender } from "./lessonsRender.ts";
 import { computeNotNeededKinds, dismissNotNeededKind } from "./notNeededKinds.ts";
+import { isNoteKind, switchOffKind, switchOnKind } from "./noteKindSwitch.ts";
 import {
   boldRanges,
   compileRule,
@@ -1076,6 +1079,37 @@ suggestionInbox.post("/not-needed-kinds/dismiss", requireAdmin, async (c) => {
   if (!list.kinds.some((k) => k.kind === parsed.data.kind)) return c.json({ error: "kind_not_found" }, 404);
   await dismissNotNeededKind(c.env.DB, parsed.data.kind, currentUserId(c));
   return c.json({ ok: true });
+});
+
+// Switch a note kind off / back on (#924, api/src/noteKindSwitch.ts). Off takes
+// only a kind listed now (else 404), like Dismiss; On takes a kind switched off
+// now (else 404). Both are admin-only through requireAdmin, as above.
+suggestionInbox.post("/not-needed-kinds/switch-off", requireAdmin, async (c) => {
+  const parsed = DismissBody.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success || !isNoteKind(parsed.data.kind)) return c.json({ error: "bad_kind" }, 400);
+  const list = await computeNotNeededKinds(c.env.DB, notNeededOpts);
+  if (list.switchNotMigrated) return c.json({ error: "not_migrated" }, 503);
+  if (!list.kinds.some((k) => k.kind === parsed.data.kind)) return c.json({ error: "kind_not_found" }, 404);
+  try {
+    const res = await switchOffKind(c.env.DB, parsed.data.kind, currentUserId(c));
+    return c.json({ ok: true, hidden: res.hidden });
+  } catch (err) {
+    if (err instanceof Error && err.message === "not_migrated") return c.json({ error: "not_migrated" }, 503);
+    throw err;
+  }
+});
+
+suggestionInbox.post("/not-needed-kinds/switch-on", requireAdmin, async (c) => {
+  const parsed = DismissBody.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success || !isNoteKind(parsed.data.kind)) return c.json({ error: "bad_kind" }, 400);
+  try {
+    const res = await switchOnKind(c.env.DB, parsed.data.kind, currentUserId(c));
+    if (!res) return c.json({ error: "kind_not_found" }, 404);
+    return c.json({ ok: true, restored: res.restored });
+  } catch (err) {
+    if (err instanceof Error && err.message === "not_migrated") return c.json({ error: "not_migrated" }, 503);
+    throw err;
+  }
 });
 
 suggestionInbox.get("/:book", requireAdmin, async (c) => {

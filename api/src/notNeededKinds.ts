@@ -1,7 +1,8 @@
 // Note kinds marked Not needed (issue #158 part A): on the suggestion inbox
 // page, the tN note kinds (tn_rows.support_reference) editors keep marking
 // Not needed, so an admin can see which kinds might not matter for this
-// language. It only informs; nothing is switched off (that is #924).
+// language. A listed kind can be switched off from here (#924,
+// api/src/noteKindSwitch.ts); the response also lists the kinds switched off.
 //
 // The routes live in suggestionInbox.ts, registered before GET /:book:
 //   GET  /api/suggestion-inbox/not-needed-kinds          the list (admin only)
@@ -23,12 +24,14 @@
 //            rc:// link and a bare id are one kind. Empty kinds are skipped.
 //   chapters distinct (book, chapter) pairs, since the list spans all books.
 //   shown    notes ≥ minNotes in ≥ minChapters chapters (the suggestion
-//            inbox's MIN_HITS / MIN_CHAPTERS), and not dismissed (0089).
+//            inbox's MIN_HITS / MIN_CHAPTERS), not dismissed (0089), and
+//            not switched off (0090, listed under switchedOff instead).
 //   order    most notes first, then by kind.
 
 import type { Env } from "./index";
 import { BOOK_NUMBERS } from "./dcsSources.ts";
 import { shortSupport } from "./packageRefs.ts";
+import { listSwitchedOffKinds, type SwitchedOffKind } from "./noteKindSwitch.ts";
 
 export const NOT_NEEDED_WINDOW_DAYS = 30;
 
@@ -49,6 +52,10 @@ export interface NotNeededKindsResponse {
   kinds: NotNeededKind[];
   /** The server has not had migration 0089 yet: Dismiss is unavailable. */
   notMigrated: boolean;
+  /** Kinds switched off now (#924), by kind. */
+  switchedOff: SwitchedOffKind[];
+  /** The server has not had migration 0090 yet: switching off is unavailable. */
+  switchNotMigrated: boolean;
 }
 
 type Db = Env["DB"];
@@ -91,10 +98,12 @@ export async function computeNotNeededKinds(
 ): Promise<NotNeededKindsResponse> {
   const now = opts.now ?? Math.floor(Date.now() / 1000);
   const since = now - NOT_NEEDED_WINDOW_DAYS * 86_400;
-  const [rows, dismissed] = await Promise.all([
+  const [rows, dismissed, switchedOff] = await Promise.all([
     db.prepare(MARKED_ROWS_SQL).bind(since).all<{ book: string; chapter: number; support_reference: string }>(),
     dismissedKinds(db),
+    listSwitchedOffKinds(db),
   ]);
+  const off = new Set((switchedOff ?? []).map((k) => k.kind));
   const groups = new Map<string, { notes: number; chapters: Set<string>; books: Set<string> }>();
   for (const r of rows.results ?? []) {
     const kind = shortSupport(r.support_reference);
@@ -107,7 +116,7 @@ export async function computeNotNeededKinds(
   }
   const canon = (b: string) => BOOK_NUMBERS[b] ?? "99";
   const kinds: NotNeededKind[] = [...groups]
-    .filter(([kind, g]) => g.notes >= opts.minNotes && g.chapters.size >= opts.minChapters && !dismissed.kinds.has(kind))
+    .filter(([kind, g]) => g.notes >= opts.minNotes && g.chapters.size >= opts.minChapters && !dismissed.kinds.has(kind) && !off.has(kind))
     .map(([kind, g]) => ({
       kind,
       notes: g.notes,
@@ -121,6 +130,8 @@ export async function computeNotNeededKinds(
     minChapters: opts.minChapters,
     kinds,
     notMigrated: dismissed.missing,
+    switchedOff: switchedOff ?? [],
+    switchNotMigrated: switchedOff === null,
   };
 }
 
