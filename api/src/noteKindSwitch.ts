@@ -161,13 +161,6 @@ export async function switchOnKind(db: Db, kind: string, userId: number | null, 
   }
 }
 
-/**
- * Hide new live notes of every switched-off kind, in one book or all books.
- * Called after imports, reimports, AI pipeline applies and by the nightly tick
- * (before the export), so no path brings a switched-off kind back. Returns the
- * number hidden. Never throws: a failure here must not fail the import that
- * called it (the nightly tick retries), so it logs and returns 0.
- */
 // The fresh book import's tN wipe (bookImport.ts) keeps two kinds of note
 // that master may not carry: notes a switch-off hid (so Switch back on can
 // still restore them), and notes Switch back on restored that no export has
@@ -179,6 +172,8 @@ export interface KeptNote {
   verse: number;
   /** The kind the note is of: its switch-off mark, else its own SupportReference's tA id. */
   kind: string;
+  /** Kept only because Switch back on restored it (no switch-off mark): master wins for it. */
+  restoredOnly: boolean;
 }
 
 /** One book's notes TN_WIPE_SQL keeps, by id. */
@@ -194,7 +189,7 @@ export async function keptSwitchedOffNotes(db: Db, book: string): Promise<Map<st
     (rs.results ?? []).map((r) => {
       const sr = (r.support_reference ?? "").trim();
       const kind = r.switched_off_kind ?? sr.slice(sr.lastIndexOf("/") + 1);
-      return [r.id, { chapter: Number(r.chapter), verse: Number(r.verse), kind }];
+      return [r.id, { chapter: Number(r.chapter), verse: Number(r.verse), kind, restoredOnly: r.switched_off_kind == null }];
     }),
   );
 }
@@ -217,6 +212,34 @@ export function keptNoteHoldsRow(
   );
 }
 
+/**
+ * The restored-only kept notes master carries as the same note (first row per
+ * id wins, as in the import): master's row replaces each of them, so a stale
+ * restored copy never outlives the note's return to master. Hidden
+ * (switched-off) kept notes stay as they are until switched back on.
+ */
+export function restoredKeptNotesMasterCarries(
+  kept: ReadonlyMap<string, KeptNote>,
+  incoming: Iterable<{ id: string; chapter: number; verse: number; supportReference: string | null | undefined }>,
+): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const row of incoming) {
+    if (seen.has(row.id)) continue;
+    seen.add(row.id);
+    const k = kept.get(row.id);
+    if (k?.restoredOnly && keptNoteHoldsRow(k, row)) out.push(row.id);
+  }
+  return out;
+}
+
+/** Delete these restored-only kept notes of one book (never a hidden one), set-based. */
+export async function dropRestoredKeptNotes(db: Db, book: string, ids: readonly string[]): Promise<void> {
+  await runIdChunks(db, book, ids, (marks) =>
+    `DELETE FROM tn_rows WHERE book = ?1 AND switched_off_kind IS NULL AND switch_restored_at IS NOT NULL AND id IN (${marks})`,
+  );
+}
+
 const KINDS_PER_BATCH = 45; // 90 statements, under D1's 100 per batch
 
 // D1 binds at most 100 parameters per statement: ids per UPDATE (plus the book).
@@ -231,20 +254,33 @@ const STATEMENTS_PER_BATCH = 90;
  * per 8,100 notes, not one per note.
  */
 export async function clearSwitchRestored(db: Db, book: string, ids: readonly string[]): Promise<void> {
+  await runIdChunks(db, book, ids, (marks) =>
+    `UPDATE tn_rows SET switch_restored_at = NULL WHERE book = ?1 AND switch_restored_at IS NOT NULL AND id IN (${marks})`,
+  );
+}
+
+// One statement per IDS_PER_STATEMENT ids (?1 is the book), STATEMENTS_PER_BATCH
+// statements per db.batch. No D1 call when ids is empty.
+async function runIdChunks(db: Db, book: string, ids: readonly string[], sql: (marks: string) => string): Promise<void> {
   const stmts = [];
   for (let i = 0; i < ids.length; i += IDS_PER_STATEMENT) {
     const chunk = ids.slice(i, i + IDS_PER_STATEMENT);
-    const marks = chunk.map((_, j) => `?${j + 2}`).join(", ");
-    stmts.push(
-      db
-        .prepare(`UPDATE tn_rows SET switch_restored_at = NULL WHERE book = ?1 AND switch_restored_at IS NOT NULL AND id IN (${marks})`)
-        .bind(book, ...chunk),
-    );
+    stmts.push(db.prepare(sql(chunk.map((_, j) => `?${j + 2}`).join(", "))).bind(book, ...chunk));
   }
   for (let i = 0; i < stmts.length; i += STATEMENTS_PER_BATCH) await db.batch(stmts.slice(i, i + STATEMENTS_PER_BATCH));
 }
 
-export async function hideSwitchedOffKinds(db: Db, opts: { book?: string } = {}): Promise<number> {
+/**
+ * Hide new live notes of every switched-off kind, in one book or all books.
+ * Called after imports, reimports, AI pipeline applies and by the nightly tick
+ * (before the export), so no path brings a switched-off kind back. Returns the
+ * number hidden. By default it never throws: a failure here must not fail the
+ * import that called it (the nightly tick retries), so it logs and returns 0.
+ * throwOnError is for the export Workflow's pre-export step: there a swallowed
+ * error would be memoized as success and the same run would publish the
+ * notes, so the step must fail and be retried instead.
+ */
+export async function hideSwitchedOffKinds(db: Db, opts: { book?: string; throwOnError?: boolean } = {}): Promise<number> {
   try {
     const rs = await db.prepare(`SELECT kind FROM note_kinds_switched_off`).all<{ kind: string }>();
     const kinds = (rs.results ?? []).map((r) => r.kind);
@@ -264,6 +300,7 @@ export async function hideSwitchedOffKinds(db: Db, opts: { book?: string } = {})
   } catch (err) {
     if (!tableMissing(err)) {
       console.error("switched-off note kinds: hiding new notes failed", err instanceof Error ? err.message : String(err));
+      if (opts.throwOnError) throw err;
     }
     return 0;
   }

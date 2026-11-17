@@ -18,7 +18,15 @@ import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 
 import { suggestionInbox } from "./suggestionInbox.ts";
-import { hideSwitchedOffKinds, keptNoteHoldsRow, keptSwitchedOffNotes, tnShrinkCheck, TN_WIPE_SQL } from "./noteKindSwitch.ts";
+import {
+  dropRestoredKeptNotes,
+  hideSwitchedOffKinds,
+  keptNoteHoldsRow,
+  keptSwitchedOffNotes,
+  restoredKeptNotesMasterCarries,
+  tnShrinkCheck,
+  TN_WIPE_SQL,
+} from "./noteKindSwitch.ts";
 import { applyTsvRows, changedTsvChapters, softDeleteRemovedTsvRows } from "./bookReimport.ts";
 import { buildTnTsv, exportTsvShrinkRefused } from "./export.ts";
 
@@ -557,4 +565,52 @@ test("shrink guard: a duplicated master id counts its switched-off note once", a
   assert.equal(r.exempt, 20, "each marked note once");
   assert.equal(r.masterRows, 260);
   assert.equal(r.refused, true, "the 40 repeated lines are unexplained");
+});
+
+test("fresh import: master's row replaces a restored-only kept note it carries; hidden notes stay", async () => {
+  const h = fixture();
+  const { youIds, otherIds } = seedBook(h, { other: 3, you: 1 });
+  await switchOffYou(h);
+  const [restored, restoredGone] = otherIds; // both restored by an earlier switch-on
+  h.sqlite.prepare(`UPDATE tn_rows SET switch_restored_at = ? WHERE book = 'ZEC' AND id IN (?, ?)`).run(NOW, restored, restoredGone);
+  const rowOf = (id) => ({ id, chapter: h.row(id).chapter, verse: h.row(id).verse, supportReference: h.row(id).support_reference });
+  h.sqlite.prepare(TN_WIPE_SQL).run("ZEC");
+  const kept = await keptSwitchedOffNotes(h.env.DB, "ZEC");
+  assert.equal(kept.get(restored).restoredOnly, true);
+  assert.equal(kept.get(youIds[0]).restoredOnly, false);
+  // Master carries `restored` and the hidden note as the same notes (twice for
+  // `restored`: first row wins, listed once), but not `restoredGone`, and
+  // carries `restoredGone`'s id at another verse (a different note).
+  const incoming = [
+    rowOf(restored),
+    rowOf(restored),
+    rowOf(youIds[0]),
+    { ...rowOf(restoredGone), verse: rowOf(restoredGone).verse + 1 },
+  ];
+  const replaced = restoredKeptNotesMasterCarries(kept, incoming);
+  assert.deepEqual(replaced, [restored], "only the restored note master carries as the same note");
+  await dropRestoredKeptNotes(h.env.DB, "ZEC", [...replaced, youIds[0]]);
+  assert.equal(h.row(restored), undefined, "dropped: master's row is inserted in its place");
+  assert.ok(h.row(youIds[0]), "a hidden note is never dropped, even if asked");
+  assert.ok(h.row(restoredGone), "a restored note master lacks stays");
+  const c = counted(h.env.DB);
+  await dropRestoredKeptNotes(c.db, "ZEC", []);
+  assert.equal(c.stats.calls, 0, "no D1 call for nothing");
+});
+
+test("hideSwitchedOffKinds: never throws by default; throwOnError fails the Workflow step instead", async () => {
+  const h = fixture();
+  await switchOffYou(h);
+  h.note({ chapter: 8 });
+  const failing = {
+    prepare: (sql) => h.env.DB.prepare(sql),
+    async batch() {
+      throw new Error("D1_ERROR: network connection lost");
+    },
+  };
+  assert.equal(await hideSwitchedOffKinds(failing, { book: "ZEC" }), 0, "default: logs and returns 0");
+  await assert.rejects(hideSwitchedOffKinds(failing, { book: "ZEC", throwOnError: true }), /network connection lost/);
+  // A database without migration 0090 is not an error in either mode.
+  const old = { prepare: () => ({ all: async () => { throw new Error("no such table: note_kinds_switched_off"); } }) };
+  assert.equal(await hideSwitchedOffKinds(old, { throwOnError: true }), 0);
 });

@@ -3269,7 +3269,11 @@ export async function runChunkedReimport(
 
   // Notes of a switched-off kind (#924) this run inserted or reclaimed: hide and
   // mark them before the export that follows renders the book.
-  await step.do(`reimport-switched-off-${book}`, async () => ({ hidden: await hideSwitchedOffKinds(env.DB, { book }) }));
+  // throwOnError: a D1 error fails (and retries) this step instead of being
+  // memoized as "0 hidden" and letting this run's export publish the notes.
+  await step.do(`reimport-switched-off-${book}`, async () => ({
+    hidden: await hideSwitchedOffKinds(env.DB, { book, throwOnError: true }),
+  }));
 
   const totals = zeroCounts();
   for (const r of ALL_RESOURCES) addCounts(totals, perResource[r]);

@@ -61,7 +61,14 @@ import { reimportBookFromDcs, recordResourceSync, resourceSourceRef, type Resour
 import { lintTnRows, lintUsfmVerses } from "./lint";
 import type { TnRow, VerseRow } from "./types";
 import { ensureLaneState, requireLaneState, origSourceGeneration, activeLaneConfig } from "./scriptureLane";
-import { hideSwitchedOffKinds, keptNoteHoldsRow, keptSwitchedOffNotes, TN_WIPE_SQL } from "./noteKindSwitch.ts";
+import {
+  dropRestoredKeptNotes,
+  hideSwitchedOffKinds,
+  keptNoteHoldsRow,
+  keptSwitchedOffNotes,
+  restoredKeptNotesMasterCarries,
+  TN_WIPE_SQL,
+} from "./noteKindSwitch.ts";
 import {
   acquireExportLease,
   releaseExportLease,
@@ -1355,7 +1362,27 @@ async function insertTnRows(
   // Notes the wipe kept (#924, TN_WIPE_SQL): master's row for the same note
   // is skipped (the kept note stands for it); a different note that only
   // shares a kept id is re-minted, so no id ever lands on a kept note.
+  // A note kept only because Switch back on restored it, which master now
+  // carries as the same note, is replaced by master's row (master wins once
+  // the note is back there; restoredKeptNotesMasterCarries). Hidden notes stay.
   const kept = await keptSwitchedOffNotes(env.DB, book);
+  const replaced = restoredKeptNotesMasterCarries(
+    kept,
+    rows.flatMap((r) => {
+      const rowId = r["ID"];
+      if (!rowId) return [];
+      const [chapter, verse] = refParts(r["Reference"] ?? "");
+      if (chapterFilter && !chapterFilter(chapter)) return [];
+      return [{ id: rowId, chapter, verse, supportReference: r["SupportReference"] }];
+    }),
+  );
+  if (replaced.length > 0) {
+    await dropRestoredKeptNotes(env.DB, book, replaced);
+    for (const rid of replaced) {
+      kept.delete(rid);
+      usedIds?.delete(rid); // reserved by an earlier file's call; master's row takes it now
+    }
+  }
   const idSet = usedIds ?? (kept.size > 0 ? new Set<string>() : undefined);
   for (const id of kept.keys()) idSet?.add(id);
 
