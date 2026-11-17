@@ -32,6 +32,7 @@ If your sign-in expires, a message says **Your session expired — sign in to ke
 ## When two people edit the same thing
 If someone else saved the same note or question before you, the server refuses your edit, so you do not overwrite their work.
 - On the [Notes](#help:notes) and [Questions](#help:questions) screens, a banner says that your version was not saved. Select **Reload note** (or **Reload question**) to load their version, then redo your change.
+- In the classic editor, the note or question itself shows **Someone else saved this note first** (or **this question**), with your text under **Mine** and theirs under **Theirs**. Select **Keep mine** to save your text over theirs, or **Keep theirs** to drop your change and load their text. Keep theirs also drops any later saves of that note that were waiting.
 - In the top bar, a conflict shows as **N conflicts**. A panel in the bottom corner has **resolve N conflict(s)**. It sends your edit again on top of the current server version, so your edit wins. Use it only when you are sure.
 - In the [Review queue](#help:review-queue), a window **Someone else saved this note first** lets you choose **Keep mine** or **Keep theirs**.
 

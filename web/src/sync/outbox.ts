@@ -23,6 +23,7 @@ import { isSortOrderOnlyPatch, wouldAutoHeal } from "./rowConflict";
 import { deletesOnFatal, healSettlesAsSaved, rearmOnKeepMine, resultFor409 } from "./conflict409.ts";
 import { isLaneFrozen, laneFreezeReason } from "./laneFreeze";
 import { ROW_DROP_CHANNEL_BASE, hasQueuedTwin, openRowDropChannel, type RowDrop } from "./rowDropChannel.ts";
+import { opsDroppedByKeepTheirs } from "./rowConflictView.ts";
 import {
   MAX_ATTEMPTS_SENTINEL,
   eligibleForVersionThread,
@@ -602,19 +603,27 @@ export const outbox = {
     }
     await tx.store.delete(opId);
     await tx.done;
-    // A throwing listener must not stop this drop's notify/drain.
-    if (op) {
-      for (const l of dropListeners) {
-        try {
-          l(op);
-        } catch (e) {
-          console.warn("outbox drop listener failed", e);
-        }
-      }
-      rowDropChannel.announce(op);
-    }
+    if (op) announceDropped(op);
     void notify();
     void drain();
+  },
+
+  // "Keep theirs" on a refused row save (#892): drop the refused op and every
+  // later save of the same row still waiting behind it (opsDroppedByKeepTheirs),
+  // in one readwrite tx so the drain cannot re-arm one in between. Each dropped
+  // op goes through the same listeners as drop(). Returns how many it dropped:
+  // 0 when the op is no longer a conflict (another tab resolved it).
+  async dropRowForKeepTheirs(opId: string): Promise<number> {
+    const idb = await db();
+    const tx = idb.transaction(STORE, "readwrite");
+    const all = (await tx.store.getAll()) as OutboxOp[];
+    const dropped = opsDroppedByKeepTheirs(all, opId);
+    for (const o of dropped) await tx.store.delete(o.id);
+    await tx.done;
+    for (const o of dropped) announceDropped(o);
+    void notify();
+    void drain();
+    return dropped.length;
   },
 
   // User-driven recovery for a `failed` op (typically one that hit
@@ -762,6 +771,18 @@ const dropListeners = new Set<DropListener>();
 export function onOutboxDrop(fn: DropListener): () => void {
   dropListeners.add(fn);
   return () => dropListeners.delete(fn);
+}
+
+// A throwing listener must not stop a drop's notify/drain.
+function announceDropped(op: OutboxOp) {
+  for (const l of dropListeners) {
+    try {
+      l(op);
+    } catch (e) {
+      console.warn("outbox drop listener failed", e);
+    }
+  }
+  rowDropChannel.announce(op);
 }
 
 // A row op another tab dropped (#637 item 3, rowDropChannel.ts). The drop

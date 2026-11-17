@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   Box,
   Button,
@@ -23,6 +23,10 @@ import { drafts, rowKey, draftDirtyBorderSx } from "../sync/drafts";
 import { tqCardBaseline, tsvToDisplay } from "../lib/tqRowFields";
 import { reconcileField } from "../lib/twlRowFields";
 import { useRefusedSaveHold } from "../hooks/useRefusedSaveHold";
+import { useRowConflict } from "../hooks/useRowConflict";
+import { outbox } from "../sync/outbox";
+import { RowConflictPanel } from "./ConflictCompare";
+import { editorAddsToMine, keepTheirsPlan } from "../sync/rowConflictView";
 
 // Translation-review card for translationQuestions — the tQ analogue of
 // NoteCard's translation mode. Only rendered in a gateway-language project
@@ -98,7 +102,8 @@ function QuestionCardInner({
     };
     setQuestion((q) => pick("question", prev.question, next.question, q));
     setResponse((r) => pick("response", prev.response, next.response, r));
-  }, [row.question, row.response, row.version, rowChanged, decide]);
+    // `row` itself too, as in QuestionsTable (#892 review R1).
+  }, [row, row.question, row.response, row.version, rowChanged, decide]);
 
   const draftKey = useMemo(() => rowKey("tq", row.book, row.id), [row.book, row.id]);
 
@@ -116,12 +121,21 @@ function QuestionCardInner({
     });
   }, [draftKey]);
 
+  // Their row after Keep theirs (#892 review K4, R1), the baseline until the
+  // cache replaces the row it held at the click with one at least at their
+  // version (as in QuestionsTable).
+  const [adopted, setAdopted] = useState<{ version: number; question: string; response: string; stale: TqRow } | null>(
+    null,
+  );
+  const adoptedHolds = adopted !== null && (row === adopted.stale || row.version < adopted.version);
+  if (adopted && !adoptedHolds) setAdopted(null);
+  const base = adoptedHolds ? adopted : null;
   const diff = useMemo<Partial<TqRow>>(() => {
     const out: Partial<TqRow> = {};
-    if (question !== tsvToDisplay(row.question)) out.question = question;
-    if (response !== tsvToDisplay(row.response)) out.response = response;
+    if (question !== (base ? base.question : tsvToDisplay(row.question))) out.question = question;
+    if (response !== (base ? base.response : tsvToDisplay(row.response))) out.response = response;
     return out;
-  }, [question, response, row.question, row.response]);
+  }, [question, response, row.question, row.response, base]);
   const isDirty = Object.keys(diff).length > 0;
 
   useEffect(() => {
@@ -174,6 +188,51 @@ function QuestionCardInner({
     if (!isDirty) return;
     noteSave(diff, row.version);
     onSave(diff);
+  };
+
+  // A refused save of this question (#892), as in QuestionsTable: both
+  // versions show on the card until the user picks one.
+  const conflict = useRowConflict("tq", row.id, row.book);
+  const latestRowRef = useRef(row);
+  useEffect(() => {
+    latestRowRef.current = row;
+  }, [row]);
+  // The fields as last rendered, for Keep theirs after its await (review P1).
+  const editorNowRef = useRef({ question, response });
+  useLayoutEffect(() => {
+    editorNowRef.current = { question, response };
+  }, [question, response]);
+  // Keep mine saves exactly what Mine shows (review M1), as in QuestionsTable.
+  const conflictEditor = { question, response };
+  const conflictDirty = Object.keys(diff);
+  const keepMine = async () => {
+    if (!conflict || conflict.theirsVersion == null) return;
+    const more = editorAddsToMine(conflict, conflictEditor, conflictDirty);
+    await outbox.resolveConflict(conflict.opId, conflict.theirsVersion);
+    if (more) handleSave();
+  };
+  const keepTheirs = async () => {
+    const theirs = conflict?.theirs;
+    if (!conflict || !theirs || conflict.theirsVersion == null) return;
+    const theirsVersion = conflict.theirsVersion;
+    // The fields at the click (review P1): typing during the drop is kept.
+    const atClick = { ...editorNowRef.current };
+    if ((await outbox.dropRowForKeepTheirs(conflict.opId)) === 0) return;
+    const plan = keepTheirsPlan(atClick, editorNowRef.current);
+    const take = new Set<string>(plan.overwrite);
+    // Always the row from the 409, and the baseline the next row update
+    // reconciles from (review L1, R1), as in QuestionsTable.
+    const next = {
+      version: theirsVersion,
+      question: tsvToDisplay((theirs.question as string | null | undefined) ?? null),
+      response: tsvToDisplay((theirs.response as string | null | undefined) ?? null),
+      stale: latestRowRef.current,
+    };
+    baselineRef.current = { question: next.question, response: next.response };
+    setAdopted(next);
+    if (take.has("question")) setQuestion(next.question);
+    if (take.has("response")) setResponse(next.response);
+    if (plan.clearDraft) await drafts.clear(draftKey);
   };
 
   const draftRtl = isRtl(question) || isRtl(response);
@@ -248,6 +307,17 @@ function QuestionCardInner({
           </IconButton>
         )}
       </Stack>
+
+      {conflict && (
+        <RowConflictPanel
+          kind="tq"
+          view={conflict}
+          editor={conflictEditor}
+          dirty={conflictDirty}
+          onKeepMine={() => void keepMine()}
+          onKeepTheirs={() => void keepTheirs()}
+        />
+      )}
 
       {collapsedValidated ? (
         /* Validated → collapsed one-line preview (green). Click to expand. */
