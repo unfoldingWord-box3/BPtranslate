@@ -132,10 +132,16 @@ async function saveBrief(page: Page) {
 }
 
 let setup: { context: BrowserContext; csrf: string } | null = null;
+// The "dev" user every page here signs in as. Since #928 a prefs draft is
+// stored under its typist's own key, prefs:<section>:<userId>.
+let devUserId: number | null = null;
+const devKey = (section: "brief" | "instructions_md" | "common_issues_md") => `prefs:${section}:${devUserId}`;
 test.beforeAll(async ({ browser }) => {
   const context = await browser.newContext({ baseURL: BASE });
   const res = await context.request.post("/api/auth/dev", { data: { username: "dev" } });
   expect(res.ok()).toBeTruthy();
+  devUserId = ((await res.json()) as { userId: number }).userId;
+  expect(typeof devUserId).toBe("number");
   const csrf = (await context.request.storageState()).cookies.find((c) => c.name === "be_csrf")?.value ?? "";
   setup = { context, csrf };
   await setMode(context.request, csrf, "translation");
@@ -352,7 +358,7 @@ test("H1: after a reload, only the typed Brief box comes back from the draft", a
   await briefBox(page).click();
   await page.keyboard.press("End");
   await page.keyboard.type(" A-TYPED");
-  await expect.poll(() => prefsDrafts(page)).toHaveProperty("prefs:brief");
+  await expect.poll(() => prefsDrafts(page)).toHaveProperty(devKey("brief"));
 
   await putPrefs(setup!.context.request, setup!.csrf, { purpose: `h1r purpose from B ${stamp}` });
   await page.reload();
@@ -379,7 +385,7 @@ test("J1: undoing a restored draft in one step clears it", async ({ browser }) =
   await commonBox(page).click();
   await page.keyboard.press("End");
   await page.keyboard.type(" TYPED");
-  await expect.poll(() => prefsDrafts(page)).toHaveProperty("prefs:common_issues_md");
+  await expect.poll(() => prefsDrafts(page)).toHaveProperty(devKey("common_issues_md"));
   await page.reload();
   await expect(commonBox(page)).toHaveValue(`${original} TYPED`, { timeout: 20_000 });
   await commonBox(page).fill(original);
@@ -435,7 +441,7 @@ test("H2: a non-admin on classic Preferences keeps no prefs drafts", async ({ br
   await box.click();
   await page.keyboard.press("End");
   await page.keyboard.type(" ADMIN-TYPED");
-  await expect.poll(() => prefsDrafts(page)).toHaveProperty("prefs:common_issues_md");
+  await expect.poll(() => prefsDrafts(page)).toHaveProperty(devKey("common_issues_md"));
 
   // Now the app sees an editor: the old draft is dropped, typing keeps none.
   const asEditor = async (route: import("@playwright/test").Route) => {
@@ -504,13 +510,13 @@ test("H5: one tab's save does not clear another tab's newer draft", async ({ bro
   await pageB.keyboard.type(" B-NEWER");
   await expect
     .poll(() => prefsDrafts(pageA))
-    .toEqual({ "prefs:common_issues_md": JSON.stringify({ common_issues_md: `h5 common ${stamp} B-NEWER` }) });
+    .toEqual({ [devKey("common_issues_md")]: JSON.stringify({ common_issues_md: `h5 common ${stamp} B-NEWER` }) });
 
   await pageA.bringToFront();
   expect(await clickSave(pageA, "commonIssues")).toBe(200);
   await pageA.waitForTimeout(500);
   expect(await prefsDrafts(pageA)).toEqual({
-    "prefs:common_issues_md": JSON.stringify({ common_issues_md: `h5 common ${stamp} B-NEWER` }),
+    [devKey("common_issues_md")]: JSON.stringify({ common_issues_md: `h5 common ${stamp} B-NEWER` }),
   });
 });
 
@@ -556,7 +562,7 @@ for (const how of ["undo", "save"] as const) {
     await pageB.keyboard.type(" B-TYPED");
     await expect
       .poll(() => prefsDrafts(pageB))
-      .toEqual({ "prefs:common_issues_md": JSON.stringify({ common_issues_md: typedB }) });
+      .toEqual({ [devKey("common_issues_md")]: JSON.stringify({ common_issues_md: typedB }) });
 
     // Tab A opens the page and restores B's typing.
     const pageA = await context.newPage();
@@ -575,7 +581,7 @@ for (const how of ["undo", "save"] as const) {
     await expect(commonBox(pageB)).toHaveValue(typedB);
     await expect
       .poll(() => prefsDrafts(pageB), { timeout: 5_000 })
-      .toEqual({ "prefs:common_issues_md": JSON.stringify({ common_issues_md: typedB }) });
+      .toEqual({ [devKey("common_issues_md")]: JSON.stringify({ common_issues_md: typedB }) });
     await expect(pageB.getByText("1 unsaved").first()).toBeVisible();
   });
 }
@@ -594,7 +600,7 @@ test("913 item 2: a discard while the save is in flight settles on the saved tex
   await commonBox(page).click();
   await page.keyboard.press("End");
   await page.keyboard.type(" A1");
-  await expect.poll(() => prefsDrafts(page)).toHaveProperty("prefs:common_issues_md");
+  await expect.poll(() => prefsDrafts(page)).toHaveProperty(devKey("common_issues_md"));
 
   // Hold the PUT until the discard is done.
   let release = () => {};
@@ -619,7 +625,8 @@ test("913 item 2: a discard while the save is in flight settles on the saved tex
   expect(await prefsDrafts(page)).toEqual({});
 });
 
-// Item 5: drafts are per workspace, not per user. On a shared browser, another
+// Item 5: drafts are per workspace (and, since #928, keyed per user within
+// it). On a shared browser, another
 // user who cannot save opens classic Preferences: the admin's stored draft is
 // left alone (H2 still drops a draft the same user typed before losing admin).
 test("913 item 5: a user who cannot save does not delete another user's prefs draft", async ({ browser }) => {
@@ -635,7 +642,7 @@ test("913 item 5: a user who cannot save does not delete another user's prefs dr
   await box.click();
   await page.keyboard.press("End");
   await page.keyboard.type(" ADMIN-TYPED");
-  const adminDraft = { "prefs:common_issues_md": JSON.stringify({ common_issues_md: `913-5 common ${stamp} ADMIN-TYPED` }) };
+  const adminDraft = { [devKey("common_issues_md")]: JSON.stringify({ common_issues_md: `913-5 common ${stamp} ADMIN-TYPED` }) };
   await expect.poll(() => prefsDrafts(page)).toEqual(adminDraft);
 
   // Another user, an editor, on the same browser.
@@ -669,7 +676,7 @@ test("913 item 6: a discard before the editor finished loading is not restored",
   await commonBox(page).click();
   await page.keyboard.press("End");
   await page.keyboard.type(" THROWN-AWAY");
-  await expect.poll(() => prefsDrafts(page)).toHaveProperty("prefs:common_issues_md");
+  await expect.poll(() => prefsDrafts(page)).toHaveProperty(devKey("common_issues_md"));
 
   // Hold the prefs row on the reload until the discard is done.
   let release = () => {};
@@ -705,7 +712,7 @@ test("913 A1: a discard in one tab resets the other tab showing the same draft",
   await commonBox(pageB).click();
   await pageB.keyboard.press("End");
   await pageB.keyboard.type(" B-TYPED");
-  await expect.poll(() => prefsDrafts(pageB)).toHaveProperty("prefs:common_issues_md");
+  await expect.poll(() => prefsDrafts(pageB)).toHaveProperty(devKey("common_issues_md"));
   const pageA = await context.newPage();
   await openStyle(pageA, `${original} B-TYPED`);
 
@@ -738,7 +745,7 @@ test("913 A2: a save of this tab's exact text in another tab leaves both tabs cl
   await commonBox(pageB).click();
   await pageB.keyboard.press("End");
   await pageB.keyboard.type(" B-TYPED");
-  await expect.poll(() => prefsDrafts(pageB)).toHaveProperty("prefs:common_issues_md");
+  await expect.poll(() => prefsDrafts(pageB)).toHaveProperty(devKey("common_issues_md"));
   const pageA = await context.newPage();
   await openStyle(pageA, typedB);
   expect(await clickSave(pageA, "commonIssues")).toBe(200);
@@ -773,7 +780,7 @@ test("913 B2: a tab made clean by another tab's save closes without a prompt", a
   await commonBox(pageB).click();
   await pageB.keyboard.press("End");
   await pageB.keyboard.type(" B-TYPED");
-  await expect.poll(() => prefsDrafts(pageB)).toHaveProperty("prefs:common_issues_md");
+  await expect.poll(() => prefsDrafts(pageB)).toHaveProperty(devKey("common_issues_md"));
   const pageA = await context.newPage();
   await openStyle(pageA, `${original} B-TYPED`);
   expect(await clickSave(pageA, "commonIssues")).toBe(200);
@@ -808,7 +815,7 @@ for (const edit of ["audience", "script notes"] as const) {
     await expect
       .poll(() => prefsDrafts(pageB))
       .toEqual({
-        "prefs:brief": expect.stringContaining(`b1 purpose ${stamp} B2`),
+        [devKey("brief")]: expect.stringContaining(`b1 purpose ${stamp} B2`),
       });
 
     // A restores both boxes and saves them (T differs from the start in two).
@@ -853,7 +860,7 @@ test("913 B3: a discard of one tab's text leaves another tab's different typing"
   await pageB.keyboard.type(" Y");
   await expect
     .poll(() => prefsDrafts(pageB))
-    .toEqual({ "prefs:common_issues_md": JSON.stringify({ common_issues_md: y }) });
+    .toEqual({ [devKey("common_issues_md")]: JSON.stringify({ common_issues_md: y }) });
   const pageC = await context.newPage();
   await openStyle(pageC, y);
   await commonBox(pageC).click();
@@ -861,7 +868,7 @@ test("913 B3: a discard of one tab's text leaves another tab's different typing"
   await pageC.keyboard.type(" X");
   await expect
     .poll(() => prefsDrafts(pageC))
-    .toEqual({ "prefs:common_issues_md": JSON.stringify({ common_issues_md: `${y} X` }) });
+    .toEqual({ [devKey("common_issues_md")]: JSON.stringify({ common_issues_md: `${y} X` }) });
 
   await pageC.getByText("1 unsaved").first().click();
   await pageC.getByRole("presentation").getByText("1 unsaved").click();
@@ -873,7 +880,7 @@ test("913 B3: a discard of one tab's text leaves another tab's different typing"
   await expect(commonBox(pageB)).toHaveValue(y);
   await expect
     .poll(() => prefsDrafts(pageB), { timeout: 5_000 })
-    .toEqual({ "prefs:common_issues_md": JSON.stringify({ common_issues_md: y }) });
+    .toEqual({ [devKey("common_issues_md")]: JSON.stringify({ common_issues_md: y }) });
 });
 
 // Review B4: the item 1 rewrite never replaces a record another tab wrote in
@@ -1081,7 +1088,7 @@ for (const how of ["save", "discard"] as const) {
     await commonBox(pageB).click();
     await pageB.keyboard.press("End");
     await pageB.keyboard.type(" B-TYPED");
-    await expect.poll(() => prefsDrafts(pageB)).toHaveProperty("prefs:common_issues_md");
+    await expect.poll(() => prefsDrafts(pageB)).toHaveProperty(devKey("common_issues_md"));
     await pageB.goto(`${BASE}/#/admin/curate`);
     await expect(commonBox(pageB)).toHaveCount(0);
     await pageB.waitForTimeout(500);

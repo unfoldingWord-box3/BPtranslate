@@ -3,6 +3,7 @@ import {
   afterPrefsConflict,
   afterPrefsSave,
   afterPrefsSavedElsewhere,
+  draftCountsAsUnsaved,
   newestPrefs,
   prefsAfterConflict,
   prefsDiscardMatches,
@@ -11,6 +12,8 @@ import {
   prefsDraftDroppable,
   prefsDraftKey,
   prefsDraftLost,
+  prefsOwnDraftKey,
+  prefsRestorable,
   prefsSavePayload,
   prefsVersionToSend,
   sameFields,
@@ -243,6 +246,93 @@ assert.ok(!prefsDraftDroppable({ text: typed, base: start, owner: 7 }, 8));
 assert.ok(!prefsDraftDroppable({ text: typed, base: start }, 7));
 assert.ok(!prefsDraftDroppable({ text: typed, base: start, owner: 7 }, null));
 assert.ok(!prefsDraftDroppable(null, 7));
+
+// ── draftCountsAsUnsaved (#920) ────────────────────────────────────────────
+// The "N unsaved" count, the reminder toast and the leave-page prompt skip a
+// Style draft this viewer cannot save: someone else's, or anyone's when the
+// viewer lacks Style-save rights. The draft itself stays stored.
+const prefsRec = (owner) => ({
+  key: prefsDraftKey("instructions_md"),
+  meta: { kind: "prefs", section: "instructions_md" },
+  payload: { text: typed, base: start, ...(owner != null ? { owner } : {}) },
+});
+const verseDraft = { key: "verse:ZEC:1:1:ult", meta: { kind: "verse" }, payload: {} };
+// Owner X who can save: counted.
+assert.ok(draftCountsAsUnsaved(prefsRec(7), 7, true));
+// Viewer Y, even one who can save: X's typing is not counted.
+assert.ok(!draftCountsAsUnsaved(prefsRec(7), 8, true));
+// A viewer who cannot save: not counted, whoever typed it.
+assert.ok(!draftCountsAsUnsaved(prefsRec(7), 7, false));
+assert.ok(!draftCountsAsUnsaved(prefsRec(7), 8, false));
+assert.ok(!draftCountsAsUnsaved(prefsRec(null), 8, false));
+// No author recorded (written before #913): counted for anyone who can save,
+// since it may be theirs.
+assert.ok(draftCountsAsUnsaved(prefsRec(null), 8, true));
+// Signed out: a recorded owner is never "this viewer".
+assert.ok(!draftCountsAsUnsaved(prefsRec(7), null, true));
+// Other kinds of draft always count.
+assert.ok(draftCountsAsUnsaved(verseDraft, 8, false));
+assert.ok(draftCountsAsUnsaved(verseDraft, null, false));
+
+// ── one person's Style typing per key (#928) ───────────────────────────────
+// Each signed-in user's typing is stored under their own key, so admin Y's
+// typing never overwrites admin X's on a shared browser. The old shared key
+// (prefsDraftKey, before #928) is still read, for the viewer's own or an
+// ownerless (pre-#913) record only; another person's stays stored untouched.
+assert.strictEqual(prefsOwnDraftKey("brief", 7), "prefs:brief:7");
+assert.notStrictEqual(prefsOwnDraftKey("brief", 7), prefsOwnDraftKey("brief", 8));
+assert.notStrictEqual(prefsOwnDraftKey("brief", 7), prefsDraftKey("brief"));
+assert.notStrictEqual(prefsOwnDraftKey("brief", 7), prefsOwnDraftKey("instructions_md", 7));
+{
+  const X = 7;
+  const Y = 8;
+  const rec = (key, owner, text = typed) => ({
+    key,
+    payload: { text, base: start, ...(owner != null ? { owner } : {}) },
+    expectedVersion: 3,
+    generation: `g-${key}`,
+    updatedAt: 1,
+    meta: { kind: "prefs", section: "common_issues_md" },
+  });
+  const legacyKey = prefsDraftKey("common_issues_md");
+  // X's draft under the old shared key: not restored for Y, restored for X.
+  const xOld = rec(legacyKey, X);
+  assert.strictEqual(prefsRestorable(undefined, xOld, Y), undefined);
+  assert.strictEqual(prefsRestorable(undefined, xOld, X), xOld);
+  // An ownerless (pre-#913) draft: restored for whoever opens it, as before.
+  const anon = rec(legacyKey, null);
+  assert.strictEqual(prefsRestorable(undefined, anon, Y), anon);
+  // Signed out: only an ownerless record.
+  assert.strictEqual(prefsRestorable(undefined, xOld, null), undefined);
+  // The viewer's own key wins over the old shared one.
+  const yOwn = rec(prefsOwnDraftKey("common_issues_md", Y), Y, { common_issues_md: "Y typed" });
+  assert.strictEqual(prefsRestorable(yOwn, anon, Y), yOwn);
+  assert.strictEqual(prefsRestorable(yOwn, xOld, Y), yOwn);
+  // A record under the viewer's own key typed by someone else (not written by
+  // this code) is never restored either.
+  assert.strictEqual(prefsRestorable(rec(prefsOwnDraftKey("common_issues_md", Y), X), undefined, Y), undefined);
+
+  // Y types and saves while X's draft is stored: a store simulated as a Map.
+  // Y's typing goes under Y's key and Y's save clears only that key, so X's
+  // record is byte-for-byte what it was, and X still gets it back.
+  const store = new Map([[legacyKey, xOld]]);
+  const before = JSON.stringify(xOld);
+  assert.strictEqual(prefsRestorable(store.get(prefsOwnDraftKey("common_issues_md", Y)), store.get(legacyKey), Y), undefined);
+  const yKey = prefsOwnDraftKey("common_issues_md", Y);
+  store.set(yKey, rec(yKey, Y, { common_issues_md: "Y typed" }));
+  store.delete(yKey); // Y saved
+  assert.strictEqual(JSON.stringify(store.get(legacyKey)), before);
+  assert.strictEqual(prefsRestorable(store.get(prefsOwnDraftKey("common_issues_md", X)), store.get(legacyKey), X), xOld);
+  // The same with X's draft already under X's own key.
+  const xKey = prefsOwnDraftKey("common_issues_md", X);
+  const xNew = rec(xKey, X);
+  const store2 = new Map([[xKey, xNew]]);
+  assert.strictEqual(prefsRestorable(store2.get(yKey), store2.get(legacyKey), Y), undefined);
+  store2.set(yKey, rec(yKey, Y, { common_issues_md: "Y typed" }));
+  store2.delete(yKey);
+  assert.strictEqual(store2.get(xKey), xNew);
+  assert.strictEqual(prefsRestorable(store2.get(xKey), store2.get(legacyKey), X), xNew);
+}
 
 // ── prefsConflictRow (gate review H3) ──────────────────────────────────────
 const row = { version: 4, error: undefined };

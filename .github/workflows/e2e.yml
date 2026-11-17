@@ -23,7 +23,8 @@ concurrency:
 
 jobs:
   smoke:
-    runs-on: ubuntu-latest
+    # Pinned: Playwright refuses ubuntu-latest (26.04) as of 2026-11-16 (#930).
+    runs-on: ubuntu-24.04
     # Normally ~2 min; the cap catches a webServer that never turns healthy.
     # 20 rather than 15 so a worst-case install (two capped attempts plus the
     # dpkg repair, ~13 min) still leaves the suite room to run (#655).
@@ -100,7 +101,8 @@ jobs:
           if-no-files-found: ignore
 
   concurrency:
-    runs-on: ubuntu-latest
+    # Pinned: Playwright refuses ubuntu-latest (26.04) as of 2026-11-16 (#930).
+    runs-on: ubuntu-24.04
     # Normally 5-8 min of real work; 30 leaves room for a slow day plus the
     # install step's worst case (two capped attempts plus repair, ~13 min; #655).
     timeout-minutes: 30
