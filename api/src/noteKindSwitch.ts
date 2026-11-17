@@ -40,6 +40,7 @@
 // of notes is still two statements.
 
 import type { Env } from "./index";
+import { exportTsvShrinkRefused } from "./export.ts";
 
 type Db = Env["DB"];
 
@@ -180,4 +181,83 @@ export async function hideSwitchedOffKinds(db: Db, opts: { book?: string } = {})
     }
     return 0;
   }
+}
+
+// ── The nightly export's shrink guard and switched-off notes (#924, option A) ──
+// The whole-book guard (export.ts exportTsvShrinkRefused) refuses a tN render
+// that drops more than 25 rows and more than 5% of master's rows. A switch-off
+// of a common kind looks exactly like that, so the guard ignores rows switched
+// off on purpose, and only those. A row is exempt only when ALL of these hold:
+//   - it is a data row on master (the file the commit would replace);
+//   - its ID is absent from the render;
+//   - D1 holds that exact (book, id) hidden by a switch-off (switched_off_kind
+//     set, deleted_at set);
+//   - master's own SupportReference for that row is of the kind D1 names.
+// Identity, never kind or count: a truncated load that is missing rows of a
+// switched-off kind has no marks for them, so they stay unexplained, and
+// switched-off notes that never reached master add no headroom.
+// The limit is then applied as if master never had the exempt rows:
+// exportTsvShrinkRefused(rendered, master - exempt). Removing them from the
+// denominator too makes this the stricter reading for what remains.
+// Fails closed: any D1 error, or a master or render header without ID or
+// SupportReference, gives exempt = 0 (the guard as it was before #924).
+
+export interface TnShrinkCheck {
+  refused: boolean;
+  masterRows: number;
+  renderedRows: number;
+  /** Master rows left out of the render because they were switched off. */
+  exempt: number;
+}
+
+function tsvBody(text: string): { header: string[]; rows: string[][] } {
+  const lines = (text.charCodeAt(0) === 0xfeff ? text.slice(1) : text).split(/\r?\n/).filter((l) => l.length > 0);
+  return { header: (lines[0] ?? "").split("\t"), rows: lines.slice(1).map((l) => l.split("\t")) };
+}
+
+const isOfKind = (supportReference: string, kind: string) => {
+  const s = supportReference.trim();
+  return s === kind || s.endsWith("/" + kind);
+};
+
+/** (id -> kind) for the notes of one book hidden by a switch-off now. */
+async function switchedOffInBook(db: Db, book: string): Promise<Map<string, string>> {
+  const rs = await db
+    .prepare(`SELECT id, switched_off_kind FROM tn_rows WHERE book = ?1 AND switched_off_kind IS NOT NULL AND deleted_at IS NOT NULL`)
+    .bind(book)
+    .all<{ id: string; switched_off_kind: string }>();
+  return new Map((rs.results ?? []).map((r) => [r.id, r.switched_off_kind]));
+}
+
+/** The whole-book tN shrink guard, with switched-off rows exempt (see above). */
+export async function tnShrinkCheck(db: Db, book: string, masterTsv: string, renderedTsv: string): Promise<TnShrinkCheck> {
+  const master = tsvBody(masterTsv);
+  const rendered = tsvBody(renderedTsv);
+  const masterRows = master.rows.length;
+  const renderedRows = rendered.rows.length;
+  let exempt = 0;
+  const idCol = master.header.indexOf("ID");
+  const refCol = master.header.indexOf("SupportReference");
+  const renderedIdCol = rendered.header.indexOf("ID");
+  if (idCol >= 0 && refCol >= 0 && renderedIdCol >= 0) {
+    try {
+      const marked = await switchedOffInBook(db, book);
+      if (marked.size > 0) {
+        const renderedIds = new Set(rendered.rows.map((r) => r[renderedIdCol] ?? ""));
+        for (const row of master.rows) {
+          const id = row[idCol] ?? "";
+          const kind = marked.get(id);
+          if (kind && !renderedIds.has(id) && isOfKind(row[refCol] ?? "", kind)) exempt++;
+        }
+      }
+    } catch (err) {
+      // Without 0090 there are no marks; anything else is logged. Either way
+      // no exemption: the guard behaves as it did before #924.
+      if (!tableMissing(err)) {
+        console.error("shrink guard: reading switched-off notes failed", err instanceof Error ? err.message : String(err));
+      }
+      exempt = 0;
+    }
+  }
+  return { refused: exportTsvShrinkRefused(renderedRows, masterRows - exempt), masterRows, renderedRows, exempt };
 }

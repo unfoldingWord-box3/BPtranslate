@@ -89,4 +89,4 @@ Below the cards, **Note kinds marked Not needed** lists the kinds of translation
 Switched-off kinds are listed under **Switched-off note kinds**, with how many notes each one hides. **Switch back on** brings back exactly the notes the switch-off hid, as they were, even weeks later. A note that was deleted another way stays deleted.
 
 - Every note hidden or brought back is recorded in the app's edit log.
-- If a switched-off kind had many notes in one book (more than 25, and more than 5% of that book's notes), the nightly publish of that book's notes is refused every night, as it is for any large drop. Ask your developer before you switch off such a kind.
+- Before each nightly publish, the app checks that it is not about to remove many of a book's notes at once (more than 25, and more than 5% of that book's notes), and refuses to publish that book's notes if it is. Notes you switched off do not count toward that limit, so switching off even a large kind does not block publishing. Any other large drop is still refused.
