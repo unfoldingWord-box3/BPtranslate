@@ -61,7 +61,7 @@ import { reimportBookFromDcs, recordResourceSync, resourceSourceRef, type Resour
 import { lintTnRows, lintUsfmVerses } from "./lint";
 import type { TnRow, VerseRow } from "./types";
 import { ensureLaneState, requireLaneState, origSourceGeneration, activeLaneConfig } from "./scriptureLane";
-import { hideSwitchedOffKinds } from "./noteKindSwitch.ts";
+import { hideSwitchedOffKinds, keptSwitchedOffIds, TN_WIPE_SQL } from "./noteKindSwitch.ts";
 import {
   acquireExportLease,
   releaseExportLease,
@@ -1051,7 +1051,9 @@ async function importBookFromDcs(
             AND replacement_required = 0
             AND active_generation = ?1`,
       ).bind(simGen),
-      env.DB.prepare(`DELETE FROM tn_rows  WHERE book = ?1`).bind(book),
+      // Notes hidden by a note-kind switch-off (#924) survive the wipe, so
+      // Switch back on can still restore them; insertTnRows skips their ids.
+      env.DB.prepare(TN_WIPE_SQL).bind(book),
       env.DB.prepare(`DELETE FROM tq_rows  WHERE book = ?1`).bind(book),
       env.DB.prepare(`DELETE FROM twl_rows WHERE book = ?1`).bind(book),
       env.DB.prepare(
@@ -1221,8 +1223,8 @@ async function importBookFromDcs(
       if (sha) await recordResourceSync(env, book, resource, sha, "import", src);
     }
 
-    // The wipe above dropped every note this book had, hidden ones included.
-    // Hide and mark the fresh notes of any switched-off kind (#924).
+    // The wipe above kept the notes a switch-off hid (#924). Hide and mark
+    // the fresh notes of any switched-off kind too.
     await hideSwitchedOffKinds(env.DB, { book });
 
     return counts;
@@ -1350,6 +1352,12 @@ async function insertTnRows(
       WHERE changes() > 0`,
   );
 
+  // Switched-off notes the wipe kept (#924): master's row with the same id is
+  // skipped (the kept note stands for it, and Switch back on restores it), and
+  // no re-minted id may land on one.
+  const kept = await keptSwitchedOffIds(env.DB, book);
+  for (const id of kept) usedIds?.add(id);
+
   let expected = 0;
   let landed = 0;
   const nextSort = makeVerseSortOrder();
@@ -1393,6 +1401,7 @@ async function insertTnRows(
     // path, where that scan deliberately doesn't run.)
     if (seen.has(rawId)) continue; // duplicate ID in master's file — first-in wins
     seen.add(rawId);
+    if (kept.has(rawId)) continue; // a kept switched-off note holds this id
     const id = usedIds ? pickId(rawId, usedIds) : rawId;
     if (id !== rawId) {
       console.warn("import: cross-source tn id collision remapped", { book, from: rawId, to: id });

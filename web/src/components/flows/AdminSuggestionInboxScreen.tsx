@@ -177,7 +177,11 @@ function NotNeededKinds() {
         // Switched back on by another admin already: drop it, as a reload would.
         if (!(err instanceof ApiError && err.status === 404)) throw err;
       }
-      setData((d) => (d ? { ...d, switchedOff: d.switchedOff.filter((x) => x.kind !== k.kind) } : d));
+      // Re-read the lists: the kind's notes are back, so it can show again
+      // under Not needed. If the re-read fails, just drop it from the
+      // switched-off list (a reload shows the rest).
+      const fresh = await api.getNotNeededKinds().catch(() => null);
+      setData((d) => fresh ?? (d ? { ...d, switchedOff: d.switchedOff.filter((x) => x.kind !== k.kind) } : d));
     });
 
   const dismiss = async (k: NotNeededKind) => {

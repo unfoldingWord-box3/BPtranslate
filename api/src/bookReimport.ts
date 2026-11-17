@@ -49,7 +49,7 @@ import type { WorkflowStep } from "cloudflare:workers";
 // and can stay extensionless.
 import { dcsUrls, dcsResourceFile, dcsRawUrl, fileCommitSha, fetchText, fetchTextWithStatus, heldOutNoteResources, releaseLockedLaneHoldOuts, unlockedLaneHoldOutsToProbe, shouldReleaseProbedHoldOut, NT_BOOKS, type FetchTextResult, type LockedLanes } from "./dcsSources.ts";
 import { getProjectConfig, type ProjectConfig } from "./projectConfig.ts";
-import { hideSwitchedOffKinds } from "./noteKindSwitch.ts";
+import { clearSwitchRestored, hideSwitchedOffKinds } from "./noteKindSwitch.ts";
 import { heldOutChapters, isChapterHeldOut, NOTHING_HELD_OUT, type HeldOut } from "./bookSource.ts";
 import {
   collectSourceWords,
@@ -2527,10 +2527,7 @@ async function clearSwitchRestoredOnMaster(env: Env, book: string, masterIds: Se
   const rs = await env.DB.prepare(`SELECT id FROM tn_rows WHERE book = ?1 AND switch_restored_at IS NOT NULL`)
     .bind(book)
     .all<{ id: string }>();
-  for (const r of rs.results ?? []) {
-    if (!masterIds.has(r.id)) continue;
-    await env.DB.prepare(`UPDATE tn_rows SET switch_restored_at = NULL WHERE id = ?1 AND book = ?2`).bind(r.id, book).run();
-  }
+  await clearSwitchRestored(env.DB, book, (rs.results ?? []).map((r) => r.id).filter((id) => masterIds.has(id)));
 }
 
 export async function changedTsvChapters(
@@ -2674,10 +2671,11 @@ export async function softDeleteRemovedTsvRows(
         switch_restored_at: number | null;
         latest_source: string | null;
       }>();
-    for (const r of rs.results ?? []) {
-      if (r.switch_restored_at == null || !incomingIds.has(r.id)) continue;
-      await env.DB.prepare(`UPDATE tn_rows SET switch_restored_at = NULL WHERE id = ?1 AND book = ?2`).bind(r.id, book).run();
-    }
+    await clearSwitchRestored(
+      env.DB,
+      book,
+      (rs.results ?? []).filter((r) => r.switch_restored_at != null && incomingIds.has(r.id)).map((r) => r.id),
+    );
     const targets = (rs.results ?? []).filter(
       (r) =>
         !incomingIds.has(r.id) &&

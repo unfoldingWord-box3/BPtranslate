@@ -164,15 +164,63 @@ export async function switchOnKind(db: Db, kind: string, userId: number | null, 
  * number hidden. Never throws: a failure here must not fail the import that
  * called it (the nightly tick retries), so it logs and returns 0.
  */
+// The fresh book import's tN wipe (bookImport.ts): every note of the book
+// except the ones a switch-off hid, so Switch back on can still restore them
+// after a whole-book import. The import then skips master's rows whose id a
+// kept note holds (keptSwitchedOffIds) and never mints a new id onto one.
+export const TN_WIPE_SQL = `DELETE FROM tn_rows WHERE book = ?1 AND switched_off_kind IS NULL`;
+
+/** Ids of one book's notes hidden by a switch-off (the ones TN_WIPE_SQL keeps). */
+export async function keptSwitchedOffIds(db: Db, book: string): Promise<Set<string>> {
+  const rs = await db
+    .prepare(`SELECT id FROM tn_rows WHERE book = ?1 AND switched_off_kind IS NOT NULL`)
+    .bind(book)
+    .all<{ id: string }>();
+  return new Set((rs.results ?? []).map((r) => r.id));
+}
+
+const KINDS_PER_BATCH = 45; // 90 statements, under D1's 100 per batch
+
+// D1 binds at most 100 parameters per statement: ids per UPDATE (plus the book).
+const IDS_PER_STATEMENT = 90;
+// Statements per db.batch, under D1's 100.
+const STATEMENTS_PER_BATCH = 90;
+
+/**
+ * Clear the Switch back on wait (switch_restored_at) on these notes of one
+ * book: the reimport calls it once master carries them again. Set-based, so
+ * the pre-export sync (bound by Cloudflare's subrequest cap) spends one D1 call
+ * per 8,100 notes, not one per note.
+ */
+export async function clearSwitchRestored(db: Db, book: string, ids: readonly string[]): Promise<void> {
+  const stmts = [];
+  for (let i = 0; i < ids.length; i += IDS_PER_STATEMENT) {
+    const chunk = ids.slice(i, i + IDS_PER_STATEMENT);
+    const marks = chunk.map((_, j) => `?${j + 2}`).join(", ");
+    stmts.push(
+      db
+        .prepare(`UPDATE tn_rows SET switch_restored_at = NULL WHERE book = ?1 AND switch_restored_at IS NOT NULL AND id IN (${marks})`)
+        .bind(book, ...chunk),
+    );
+  }
+  for (let i = 0; i < stmts.length; i += STATEMENTS_PER_BATCH) await db.batch(stmts.slice(i, i + STATEMENTS_PER_BATCH));
+}
+
 export async function hideSwitchedOffKinds(db: Db, opts: { book?: string } = {}): Promise<number> {
   try {
     const rs = await db.prepare(`SELECT kind FROM note_kinds_switched_off`).all<{ kind: string }>();
     const kinds = (rs.results ?? []).map((r) => r.kind);
     if (kinds.length === 0) return 0;
     const now = Math.floor(Date.now() / 1000);
-    const results = await db.batch(kinds.flatMap((k) => hideStatements(db, k, now, null, opts.book ?? null)));
+    // D1 allows at most 100 statements in one batch: KINDS_PER_BATCH kinds (two
+    // statements each, the INSERT/UPDATE pair kept together) per batch. Each
+    // pair is idempotent, so a later batch failing leaves earlier kinds hidden.
     let hidden = 0;
-    for (let i = 1; i < results.length; i += 2) hidden += Number(results[i]?.meta?.changes ?? 0);
+    for (let i = 0; i < kinds.length; i += KINDS_PER_BATCH) {
+      const chunk = kinds.slice(i, i + KINDS_PER_BATCH);
+      const results = await db.batch(chunk.flatMap((k) => hideStatements(db, k, now, null, opts.book ?? null)));
+      for (let j = 1; j < results.length; j += 2) hidden += Number(results[j]?.meta?.changes ?? 0);
+    }
     if (hidden > 0) console.log("switched-off note kinds: hid new notes", { book: opts.book ?? "*", hidden });
     return hidden;
   } catch (err) {

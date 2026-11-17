@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 
 import { suggestionInbox } from "./suggestionInbox.ts";
-import { hideSwitchedOffKinds, tnShrinkCheck } from "./noteKindSwitch.ts";
+import { hideSwitchedOffKinds, keptSwitchedOffIds, tnShrinkCheck, TN_WIPE_SQL } from "./noteKindSwitch.ts";
 import { applyTsvRows, changedTsvChapters, softDeleteRemovedTsvRows } from "./bookReimport.ts";
 import { buildTnTsv, exportTsvShrinkRefused } from "./export.ts";
 
@@ -425,4 +425,83 @@ test("shrink guard: a master file without ID or SupportReference columns gets no
   const r = await tnShrinkCheck(h.env.DB, "ZEC", noHeader, render(h));
   assert.equal(r.refused, true);
   assert.equal(r.exempt, 0);
+});
+
+// ── D1 bounds (review round 1) ──────────────────────────────────────────────
+// Wrap a fixture's DB to count D1 calls (each all/first/run outside a batch,
+// and each batch) and record every batch's statement count.
+function counted(db) {
+  const stats = { calls: 0, batchSizes: [] };
+  const wrap = (stmt) => ({
+    ...stmt,
+    bind: (...a) => wrap(stmt.bind(...a)),
+    all: async () => (stats.calls++, stmt.all()),
+    first: async () => (stats.calls++, stmt.first()),
+    run: () => (stats.calls++, stmt.run()),
+    _raw: stmt,
+  });
+  return {
+    stats,
+    db: {
+      prepare: (sql) => wrap(db.prepare(sql)),
+      async batch(stmts) {
+        stats.calls++;
+        stats.batchSizes.push(stmts.length);
+        return db.batch(stmts.map((s) => s._raw ?? s));
+      },
+    },
+  };
+}
+
+test("hiding new notes of 60 switched-off kinds stays under D1's 100 statements per batch", async () => {
+  const h = fixture();
+  for (let i = 0; i < 60; i++) {
+    const kind = `figs-kind${i}`;
+    h.sqlite.prepare(`INSERT INTO note_kinds_switched_off (kind, switched_off_at) VALUES (?, ?)`).run(kind, NOW);
+    h.note({ chapter: (i % 9) + 1, kind: `rc://*/ta/man/translate/${kind}` });
+  }
+  const c = counted(h.env.DB);
+  assert.equal(await hideSwitchedOffKinds(c.db), 60, "every kind's note hidden");
+  assert.ok(c.stats.batchSizes.length >= 2, "split into several batches");
+  assert.ok(Math.max(...c.stats.batchSizes) <= 100, `largest batch ${Math.max(...c.stats.batchSizes)}`);
+  assert.ok(c.stats.batchSizes.every((n) => n % 2 === 0), "INSERT/UPDATE pairs kept together");
+  assert.equal(h.sqlite.prepare(`SELECT COUNT(*) n FROM tn_rows WHERE switched_off_kind IS NOT NULL AND deleted_at IS NOT NULL`).get().n, 60);
+});
+
+test("clearing the restore wait on 500 restored notes takes a bounded number of D1 calls", async () => {
+  // Chapter diff (changedTsvChapters) and the prune (softDeleteRemovedTsvRows)
+  // both clear switch_restored_at once master carries the note again.
+  for (const path of ["diff", "prune"]) {
+    const h = fixture();
+    const ids = Array.from({ length: 500 }, () => h.note({ chapter: 4, verse: 1, kind: OTHER }));
+    h.sqlite.exec(`UPDATE tn_rows SET switch_restored_at = ${NOW} WHERE book = 'ZEC'`);
+    const tsv = buildTnTsv(h.exportRows("ZEC"));
+    const c = counted(h.env.DB);
+    const env = { ...h.env, DB: c.db };
+    if (path === "diff") await changedTsvChapters(env, "ZEC", "tn", tsv);
+    else await softDeleteRemovedTsvRows(env, "ZEC", "tn", tsv, [4]);
+    assert.equal(
+      h.sqlite.prepare(`SELECT COUNT(*) n FROM tn_rows WHERE book = 'ZEC' AND switch_restored_at IS NOT NULL`).get().n,
+      0,
+      `${path}: every wait cleared`,
+    );
+    assert.ok(c.stats.calls <= 10, `${path}: ${c.stats.calls} D1 calls for ${ids.length} notes`);
+    assert.ok(Math.max(0, ...c.stats.batchSizes) <= 100, `${path}: batch size bounded`);
+  }
+});
+
+test("a fresh book import's wipe keeps switched-off notes, so Switch back on still restores them", async () => {
+  // bookImport.ts runs TN_WIPE_SQL, then insertTnRows skips master's rows whose
+  // id keptSwitchedOffIds returns (bookImport.ts is not loadable under node's
+  // strip-types runner, so the insert loop itself is not run here).
+  const h = fixture();
+  const { youIds, otherIds } = seedBook(h, { other: 3, you: 2 });
+  await switchOffYou(h);
+  h.sqlite.prepare(TN_WIPE_SQL).run("ZEC");
+  for (const id of otherIds) assert.equal(h.row(id), undefined, `${id} wiped`);
+  for (const id of youIds) assert.equal(h.row(id).switched_off_kind, YOU_ID, `${id} kept, hidden and marked`);
+  assert.deepEqual([...(await keptSwitchedOffIds(h.env.DB, "ZEC"))].sort(), [...youIds].sort());
+  assert.equal((await keptSwitchedOffIds(h.env.DB, "HAG")).size, 0, "per book");
+  const on = await h.call("POST", "/not-needed-kinds/switch-on", { kind: YOU_ID });
+  assert.equal(on.body.restored, 2, "Switch back on restores them");
 });
