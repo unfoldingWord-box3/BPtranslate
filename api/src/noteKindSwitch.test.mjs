@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 
 import { suggestionInbox } from "./suggestionInbox.ts";
-import { hideSwitchedOffKinds, keptSwitchedOffIds, tnShrinkCheck, TN_WIPE_SQL } from "./noteKindSwitch.ts";
+import { hideSwitchedOffKinds, keptNoteHoldsRow, keptSwitchedOffNotes, tnShrinkCheck, TN_WIPE_SQL } from "./noteKindSwitch.ts";
 import { applyTsvRows, changedTsvChapters, softDeleteRemovedTsvRows } from "./bookReimport.ts";
 import { buildTnTsv, exportTsvShrinkRefused } from "./export.ts";
 
@@ -490,18 +490,71 @@ test("clearing the restore wait on 500 restored notes takes a bounded number of 
   }
 });
 
-test("a fresh book import's wipe keeps switched-off notes, so Switch back on still restores them", async () => {
-  // bookImport.ts runs TN_WIPE_SQL, then insertTnRows skips master's rows whose
-  // id keptSwitchedOffIds returns (bookImport.ts is not loadable under node's
-  // strip-types runner, so the insert loop itself is not run here).
+test("a fresh book import's wipe keeps switched-off notes and restored-not-yet-exported ones", async () => {
+  // bookImport.ts runs TN_WIPE_SQL, then insertTnRows skips master's row for
+  // a kept note (keptNoteHoldsRow) and re-mints any other row sharing its id
+  // (bookImport.ts is not loadable under node's strip-types runner, so the
+  // insert loop itself is not run here).
   const h = fixture();
-  const { youIds, otherIds } = seedBook(h, { other: 3, you: 2 });
+  const { youIds, otherIds } = seedBook(h, { other: 3, you: 3 });
   await switchOffYou(h);
+  // An earlier Switch back on restored this note; no export has run since.
+  const restored = otherIds[0];
+  h.sqlite.prepare(`UPDATE tn_rows SET switch_restored_at = ? WHERE id = ? AND book = 'ZEC'`).run(NOW, restored);
   h.sqlite.prepare(TN_WIPE_SQL).run("ZEC");
-  for (const id of otherIds) assert.equal(h.row(id), undefined, `${id} wiped`);
+  for (const id of otherIds.slice(1)) assert.equal(h.row(id), undefined, `${id} wiped`);
+  assert.ok(h.row(restored), "a restored note master lacks survives the wipe");
   for (const id of youIds) assert.equal(h.row(id).switched_off_kind, YOU_ID, `${id} kept, hidden and marked`);
-  assert.deepEqual([...(await keptSwitchedOffIds(h.env.DB, "ZEC"))].sort(), [...youIds].sort());
-  assert.equal((await keptSwitchedOffIds(h.env.DB, "HAG")).size, 0, "per book");
+  const kept = await keptSwitchedOffNotes(h.env.DB, "ZEC");
+  assert.deepEqual([...kept.keys()].sort(), [...youIds, restored].sort());
+  assert.equal(kept.get(youIds[0]).kind, YOU_ID);
+  assert.equal(kept.get(restored).kind, "figs-metaphor", "a restored note's kind is its own SupportReference");
+  assert.equal((await keptSwitchedOffNotes(h.env.DB, "HAG")).size, 0, "per book");
   const on = await h.call("POST", "/not-needed-kinds/switch-on", { kind: YOU_ID });
-  assert.equal(on.body.restored, 2, "Switch back on restores them");
+  assert.equal(on.body.restored, 3, "Switch back on restores them");
+});
+
+test("a kept note holds master's row only when it is the same note", () => {
+  const kept = { chapter: 4, verse: 2, kind: YOU_ID };
+  assert.equal(keptNoteHoldsRow(kept, { chapter: 4, verse: 2, supportReference: YOU }), true, "same note: skipped");
+  assert.equal(keptNoteHoldsRow(kept, { chapter: 4, verse: 2, supportReference: YOU_ID }), true, "bare id form");
+  assert.equal(keptNoteHoldsRow(kept, { chapter: 4, verse: 3, supportReference: YOU }), false, "other verse: re-minted");
+  assert.equal(keptNoteHoldsRow(kept, { chapter: 5, verse: 2, supportReference: YOU }), false, "other chapter: re-minted");
+  assert.equal(keptNoteHoldsRow(kept, { chapter: 4, verse: 2, supportReference: OTHER }), false, "other kind: re-minted");
+  assert.equal(keptNoteHoldsRow(kept, { chapter: 4, verse: 2, supportReference: null }), false, "no kind: re-minted");
+  assert.equal(keptNoteHoldsRow(undefined, { chapter: 4, verse: 2, supportReference: YOU }), false, "no kept note");
+  assert.equal(keptNoteHoldsRow({ chapter: 4, verse: 2, kind: "" }, { chapter: 4, verse: 2, supportReference: "" }), false, "kept note with no kind never matches");
+});
+
+test("a kind switched back on during a hide pass is not hidden again", async () => {
+  const h = fixture();
+  await switchOffYou(h);
+  const fresh = h.note({ chapter: 8 }); // a new live note of the kind
+  // The pass reads the list, then an admin switches the kind back on before
+  // the hide batch runs.
+  const db = h.env.DB;
+  const racing = {
+    prepare: (sql) => db.prepare(sql),
+    async batch(stmts) {
+      h.sqlite.exec(`DELETE FROM note_kinds_switched_off`);
+      return db.batch(stmts);
+    },
+  };
+  assert.equal(await hideSwitchedOffKinds(racing), 0);
+  assert.equal(h.row(fresh).deleted_at, null, "still live");
+  assert.equal(h.row(fresh).switched_off_kind, null, "no orphan mark");
+  assert.equal(h.logs("switch_off").filter((l) => l.row_key === fresh).length, 0, "no audit row");
+});
+
+test("shrink guard: a duplicated master id counts its switched-off note once", async () => {
+  const h = fixture();
+  const { master, youIds } = seedBook(h, { other: 200, you: 20 });
+  await switchOffYou(h);
+  // Master repeats each switched-off note's line twice more: 60 lines for 20 notes.
+  const extra = master.trimEnd().split("\n").filter((l) => youIds.includes(l.split("\t")[1]));
+  const doubled = master + [...extra, ...extra].join("\n") + "\n";
+  const r = await tnShrinkCheck(h.env.DB, "ZEC", doubled, render(h));
+  assert.equal(r.exempt, 20, "each marked note once");
+  assert.equal(r.masterRows, 260);
+  assert.equal(r.refused, true, "the 40 repeated lines are unexplained");
 });

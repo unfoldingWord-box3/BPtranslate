@@ -61,7 +61,7 @@ import { reimportBookFromDcs, recordResourceSync, resourceSourceRef, type Resour
 import { lintTnRows, lintUsfmVerses } from "./lint";
 import type { TnRow, VerseRow } from "./types";
 import { ensureLaneState, requireLaneState, origSourceGeneration, activeLaneConfig } from "./scriptureLane";
-import { hideSwitchedOffKinds, keptSwitchedOffIds, TN_WIPE_SQL } from "./noteKindSwitch.ts";
+import { hideSwitchedOffKinds, keptNoteHoldsRow, keptSwitchedOffNotes, TN_WIPE_SQL } from "./noteKindSwitch.ts";
 import {
   acquireExportLease,
   releaseExportLease,
@@ -1352,11 +1352,12 @@ async function insertTnRows(
       WHERE changes() > 0`,
   );
 
-  // Switched-off notes the wipe kept (#924): master's row with the same id is
-  // skipped (the kept note stands for it, and Switch back on restores it), and
-  // no re-minted id may land on one.
-  const kept = await keptSwitchedOffIds(env.DB, book);
-  for (const id of kept) usedIds?.add(id);
+  // Notes the wipe kept (#924, TN_WIPE_SQL): master's row for the same note
+  // is skipped (the kept note stands for it); a different note that only
+  // shares a kept id is re-minted, so no id ever lands on a kept note.
+  const kept = await keptSwitchedOffNotes(env.DB, book);
+  const idSet = usedIds ?? (kept.size > 0 ? new Set<string>() : undefined);
+  for (const id of kept.keys()) idSet?.add(id);
 
   let expected = 0;
   let landed = 0;
@@ -1401,8 +1402,8 @@ async function insertTnRows(
     // path, where that scan deliberately doesn't run.)
     if (seen.has(rawId)) continue; // duplicate ID in master's file — first-in wins
     seen.add(rawId);
-    if (kept.has(rawId)) continue; // a kept switched-off note holds this id
-    const id = usedIds ? pickId(rawId, usedIds) : rawId;
+    if (keptNoteHoldsRow(kept.get(rawId), { chapter: ch, verse: v, supportReference: r["SupportReference"] })) continue;
+    const id = idSet ? pickId(rawId, idSet) : rawId;
     if (id !== rawId) {
       console.warn("import: cross-source tn id collision remapped", { book, from: rawId, to: id });
     }

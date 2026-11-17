@@ -87,7 +87,11 @@ export async function listSwitchedOffKinds(db: Db): Promise<SwitchedOffKind[] | 
 // The two statements that hide the live notes of one kind (optionally in one
 // book). ?1 kind, ?2 now, ?3 book (when given), ?4 user id (audit only).
 function hideStatements(db: Db, kind: string, now: number, userId: number | null, book: string | null) {
-  const where = `${KIND_MATCH} AND ${LIVE}${book ? " AND book = ?3" : ""}`;
+  // Still switched off when the statement runs: a kind switched back on after
+  // hideSwitchedOffKinds read the list must not be hidden again with a mark
+  // whose registry row is gone (nothing could then offer Switch back on).
+  const where = `${KIND_MATCH} AND ${LIVE}${book ? " AND book = ?3" : ""}
+    AND EXISTS (SELECT 1 FROM note_kinds_switched_off WHERE kind = ?1)`;
   return [
     db
       .prepare(
@@ -164,19 +168,53 @@ export async function switchOnKind(db: Db, kind: string, userId: number | null, 
  * number hidden. Never throws: a failure here must not fail the import that
  * called it (the nightly tick retries), so it logs and returns 0.
  */
-// The fresh book import's tN wipe (bookImport.ts): every note of the book
-// except the ones a switch-off hid, so Switch back on can still restore them
-// after a whole-book import. The import then skips master's rows whose id a
-// kept note holds (keptSwitchedOffIds) and never mints a new id onto one.
-export const TN_WIPE_SQL = `DELETE FROM tn_rows WHERE book = ?1 AND switched_off_kind IS NULL`;
+// The fresh book import's tN wipe (bookImport.ts) keeps two kinds of note
+// that master may not carry: notes a switch-off hid (so Switch back on can
+// still restore them), and notes Switch back on restored that no export has
+// put back on master yet (switch_restored_at). Every other note goes.
+export const TN_WIPE_SQL = `DELETE FROM tn_rows WHERE book = ?1 AND switched_off_kind IS NULL AND switch_restored_at IS NULL`;
 
-/** Ids of one book's notes hidden by a switch-off (the ones TN_WIPE_SQL keeps). */
-export async function keptSwitchedOffIds(db: Db, book: string): Promise<Set<string>> {
+export interface KeptNote {
+  chapter: number;
+  verse: number;
+  /** The kind the note is of: its switch-off mark, else its own SupportReference's tA id. */
+  kind: string;
+}
+
+/** One book's notes TN_WIPE_SQL keeps, by id. */
+export async function keptSwitchedOffNotes(db: Db, book: string): Promise<Map<string, KeptNote>> {
   const rs = await db
-    .prepare(`SELECT id FROM tn_rows WHERE book = ?1 AND switched_off_kind IS NOT NULL`)
+    .prepare(
+      `SELECT id, chapter, verse, switched_off_kind, support_reference FROM tn_rows
+        WHERE book = ?1 AND (switched_off_kind IS NOT NULL OR switch_restored_at IS NOT NULL)`,
+    )
     .bind(book)
-    .all<{ id: string }>();
-  return new Set((rs.results ?? []).map((r) => r.id));
+    .all<{ id: string; chapter: number; verse: number; switched_off_kind: string | null; support_reference: string | null }>();
+  return new Map(
+    (rs.results ?? []).map((r) => {
+      const sr = (r.support_reference ?? "").trim();
+      const kind = r.switched_off_kind ?? sr.slice(sr.lastIndexOf("/") + 1);
+      return [r.id, { chapter: Number(r.chapter), verse: Number(r.verse), kind }];
+    }),
+  );
+}
+
+/**
+ * Whether master's incoming row is the same note a kept note stands for (same
+ * id, chapter, verse and kind): the import then skips it. A different note
+ * that only shares the id is imported under a new id instead.
+ */
+export function keptNoteHoldsRow(
+  kept: KeptNote | undefined,
+  incoming: { chapter: number; verse: number; supportReference: string | null | undefined },
+): boolean {
+  return (
+    kept != null &&
+    kept.kind !== "" &&
+    kept.chapter === incoming.chapter &&
+    kept.verse === incoming.verse &&
+    isOfKind(incoming.supportReference ?? "", kept.kind)
+  );
 }
 
 const KINDS_PER_BATCH = 45; // 90 statements, under D1's 100 per batch
@@ -292,10 +330,14 @@ export async function tnShrinkCheck(db: Db, book: string, masterTsv: string, ren
       const marked = await switchedOffInBook(db, book);
       if (marked.size > 0) {
         const renderedIds = new Set(rendered.rows.map((r) => r[renderedIdCol] ?? ""));
+        const counted = new Set<string>();
         for (const row of master.rows) {
           const id = row[idCol] ?? "";
           const kind = marked.get(id);
-          if (kind && !renderedIds.has(id) && isOfKind(row[refCol] ?? "", kind)) exempt++;
+          if (kind && !counted.has(id) && !renderedIds.has(id) && isOfKind(row[refCol] ?? "", kind)) {
+            counted.add(id); // each marked note at most once, even if master repeats its id
+            exempt++;
+          }
         }
       }
     } catch (err) {
