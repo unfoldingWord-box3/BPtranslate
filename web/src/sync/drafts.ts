@@ -122,7 +122,8 @@ export type DraftMeta =
       supportRef: string;
     }
   // Translation preferences (#909): the Brief, Instructions or Common issues
-  // editor of the Style / Preferences pages, keyed by prefsDraftKey. Book-
+  // editor of the Style / Preferences pages, keyed by prefsOwnDraftKey (the
+  // shared prefsDraftKey before #928, still read). Book-
   // agnostic like articles and templates; the payload is prefsDraft.ts's
   // { text, base } and expectedVersion the prefs version it was typed against.
   | {

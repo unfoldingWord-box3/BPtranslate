@@ -14,6 +14,8 @@ import {
   prefsDraftDroppable,
   prefsDraftKey,
   prefsDraftLost,
+  prefsOwnDraftKey,
+  prefsRestorable,
   prefsSavePayload,
   prefsVersionToSend,
   sameFields,
@@ -38,19 +40,33 @@ import {
 // not a translation project): no draft is written for them, and one they typed
 // before (when they could save) is dropped when the editor opens, so the "N
 // unsaved" count, the unload prompt and the reminder toast never point at text
-// that cannot be saved (#909 gate review H2). Drafts are per workspace, not
-// per user, so another user's draft on a shared browser is left alone (#913
-// item 5): each draft records who typed it.
+// that cannot be saved (#909 gate review H2). Each draft records who typed it
+// (#913 item 5) and, since #928, is stored under that person's own key, so on
+// a shared browser one admin's typing is neither shown to nor overwritten by
+// another. The old shared key is still read for the viewer's own or ownerless
+// record, which moves to the viewer's key on their first change; another
+// person's record there is left alone.
 export function usePrefsDraft<F extends PrefsFields>(
   section: PrefsDraftSection,
   prefs: TranslationPrefs | null,
   pick: (p: TranslationPrefs) => F,
   canSave: boolean,
 ) {
-  const key = prefsDraftKey(section);
+  const userId = currentUserId();
+  const sharedKey = prefsDraftKey(section);
+  const key = userId != null ? prefsOwnDraftKey(section, userId) : sharedKey;
+  // Signed out (the app does not show these editors then): nothing is stored
+  // or restored, so no record can be written without an owner (#928).
+  const store = canSave && userId != null;
   const [state, setState] = useState<PrefsDraftState<F> | null>(null);
   const stateRef = useRef<PrefsDraftState<F> | null>(null);
-  const [stored, setStored] = useState<{ rec: DraftRecord | undefined } | null>(null);
+  const [stored, setStored] = useState<{ own: DraftRecord | undefined; shared: DraftRecord | undefined } | null>(
+    null,
+  );
+  // The record under the old shared key that this editor restored (#928):
+  // still where it was until this editor first writes, then moved to `key`.
+  // While set, that key is this editor's too (discards, the write-back).
+  const fromShared = useRef<{ generation?: string; updatedAt: number } | null>(null);
   // The text this tab last wrote under `key`: a clear only deletes a record
   // holding it (or the text being settled to), never another tab's (H5).
   const lastWritten = useRef<F | null>(null);
@@ -58,11 +74,12 @@ export function usePrefsDraft<F extends PrefsFields>(
   // made while that save was in flight survives its 200 (round 2, J2).
   const textAtSave = useRef<F | null>(null);
   // Discarded from the unsaved menu before this editor finished loading: the
-  // stored record it read (or is reading) must not come back (#913 item 6).
-  const discardedEarly = useRef(false);
+  // stored record it read (or is reading) under that key must not come back
+  // (#913 item 6).
+  const discardedEarly = useRef(new Set<string>());
   // The same, when the discard came from another tab: only a record holding
   // the discarded text is ignored (round 2, B3).
-  const discardedElsewhere = useRef<PrefsFields | null>(null);
+  const discardedElsewhere = useRef(new Map<string, PrefsFields>());
   const prefsRef = useRef(prefs);
   useEffect(() => {
     prefsRef.current = prefs;
@@ -70,16 +87,24 @@ export function usePrefsDraft<F extends PrefsFields>(
 
   useEffect(() => {
     let cancelled = false;
-    drafts
-      .get(key)
-      .catch(() => undefined)
-      .then((rec) => {
-        if (!cancelled) setStored({ rec });
-      });
+    const get = (k: string) => drafts.get(k).catch(() => undefined);
+    void Promise.all([get(key), key === sharedKey ? undefined : get(sharedKey)]).then(([own, shared]) => {
+      if (!cancelled) setStored({ own, shared });
+    });
     return () => {
       cancelled = true;
     };
-  }, [key]);
+  }, [key, sharedKey]);
+
+  // Delete the shared-key record this editor restored, once its text is under
+  // `key` (or nothing is typed any more). Only that exact record: another
+  // tab's newer one is not this editor's to delete.
+  const dropShared = useCallback(() => {
+    const old = fromShared.current;
+    if (!old) return;
+    fromShared.current = null;
+    void drafts.clearIf(sharedKey, (r) => r.generation === old.generation && r.updatedAt === old.updatedAt);
+  }, [sharedKey]);
 
   // Store typed state as this editor's draft, stamped with who typed it.
   // `ifAbsent`: only when no record is stored (the write-back below, B4), and
@@ -95,10 +120,21 @@ export function usePrefsDraft<F extends PrefsFields>(
         const cur = stateRef.current;
         return !!cur && sameFields(cur.text, s.text) && typedKeys(cur.text, cur.base).length > 0;
       };
-      if (ifAbsent) void drafts.setIfAbsent(key, payload, s.baseVersion, meta, still);
-      else void drafts.set(key, payload, s.baseVersion, meta);
+      const written = ifAbsent
+        ? drafts.setIfAbsent(key, payload, s.baseVersion, meta, still)
+        : drafts.set(key, payload, s.baseVersion, meta);
+      // A restored shared-key record moves here (#928): deleted once a record
+      // is stored under `key`, never before, so the typing is always stored.
+      if (fromShared.current) {
+        void written
+          .then(() => drafts.get(key))
+          .then((rec) => {
+            if (rec) dropShared();
+          })
+          .catch(() => undefined);
+      }
     },
-    [key, section],
+    [key, section, dropShared],
   );
 
   // Write the state and keep the store in step: a draft while a box is typed
@@ -107,7 +143,7 @@ export function usePrefsDraft<F extends PrefsFields>(
     (next: PrefsDraftState<F>) => {
       stateRef.current = next;
       setState(next);
-      if (!canSave) return;
+      if (!store) return;
       if (typedKeys(next.text, next.base).length === 0) {
         // Nothing unsaved here any more, whoever deletes the record: another
         // tab's clear can get to it first (a save there of the same text), and
@@ -115,11 +151,12 @@ export function usePrefsDraft<F extends PrefsFields>(
         drafts.forget(key);
         const own = [next.text, ...(lastWritten.current ? [lastWritten.current] : [])];
         void drafts.clearIf(key, (rec) => prefsDraftClearable(rec.payload, own));
+        dropShared();
       } else {
         write(next);
       }
     },
-    [key, canSave, write],
+    [key, store, write, dropShared],
   );
 
   // Another tab that restored this editor's draft can delete it (a one-step
@@ -128,50 +165,64 @@ export function usePrefsDraft<F extends PrefsFields>(
   // find it (#913 item 1). Only a missing record is rewritten, and only while
   // it is still missing (one transaction, review B4), so two tabs cannot take
   // turns overwriting each other and newer typing from another tab is kept.
+  // A restored shared-key record not yet moved counts as this editor's (#928).
   useEffect(() => {
-    if (!canSave) return;
+    if (!store) return;
     return drafts.subscribe(
       (all) => {
         const s = stateRef.current;
-        if (s && prefsDraftLost(s.text, s.base, all.some((d) => d.key === key))) write(s, true);
+        const held = all.some((d) => d.key === key || (!!fromShared.current && d.key === sharedKey));
+        if (s && prefsDraftLost(s.text, s.base, held)) write(s, true);
       },
       { remote: true },
     );
-  }, [key, canSave, write]);
+  }, [key, sharedKey, store, write]);
 
   useEffect(() => {
     if (stateRef.current || !prefs || !stored) return;
-    const read = stored.rec;
+    // Only the viewer's own (or an ownerless) record; another person's typing
+    // is neither shown nor touched (#928).
+    const read = prefsRestorable(stored.own, stored.shared, userId);
     const readText = (read?.payload as { text?: PrefsFields } | null | undefined)?.text;
+    const thrownText = read && discardedElsewhere.current.get(read.key);
     const thrownAway =
-      discardedEarly.current ||
-      (!!discardedElsewhere.current && !!readText && sameFields(readText, discardedElsewhere.current));
+      !!read &&
+      (discardedEarly.current.has(read.key) || (!!thrownText && !!readText && sameFields(readText, thrownText)));
     const rec = thrownAway ? undefined : read;
-    const h = hydratePrefsDraft(pick(prefs), prefs.version, canSave ? rec : undefined);
+    const h = hydratePrefsDraft(pick(prefs), prefs.version, store ? rec : undefined);
     // Delete only the record that was read, not one written since (by another
     // tab, say). A user who cannot save leaves another user's draft alone.
-    if (rec && (h.clearStored || (!canSave && prefsDraftDroppable(rec.payload, currentUserId())))) {
-      void drafts.clearIf(key, (r) => r.generation === rec.generation && r.updatedAt === rec.updatedAt);
-    } else if (rec && canSave) {
+    if (rec && (h.clearStored || (!canSave && prefsDraftDroppable(rec.payload, userId)))) {
+      void drafts.clearIf(rec.key, (r) => r.generation === rec.generation && r.updatedAt === rec.updatedAt);
+    } else if (rec && store) {
       // The restored record is this editor's own: a later "nothing typed any
       // more" (a save, an undo) clears it even though the merged text shown
       // differs from it (round 2, J1).
       const restored = (rec.payload as { text?: F } | null)?.text;
       if (restored) lastWritten.current = restored;
+      if (rec.key !== key) fromShared.current = { generation: rec.generation, updatedAt: rec.updatedAt };
     }
     const next = { text: h.text, base: h.base, baseVersion: h.baseVersion };
     stateRef.current = next;
     setState(next);
-  }, [prefs, stored, key, pick, canSave]);
+  }, [prefs, stored, key, pick, canSave, store, userId]);
+
+  // Whether a discard of `k` is of this editor's record: its own key, or the
+  // shared key while that is where its typing is stored (restored from there
+  // and not yet moved, or not loaded yet; #928).
+  const mine = useCallback(
+    (k: string) => k === key || (k === sharedKey && (!stateRef.current || !!fromShared.current)),
+    [key, sharedKey],
+  );
 
   // Discarded from the unsaved menu, in this tab or another one (#913 review
   // A1), while this editor is open: show the server's text again instead of
   // keeping the thrown-away typing (H7). Nothing is written.
-  const discarded = useCallback(() => {
+  const discarded = useCallback((k: string) => {
     const s = stateRef.current;
     if (!s) {
       // Not loaded yet: the draft must not be restored (#913 item 6).
-      discardedEarly.current = true;
+      discardedEarly.current.add(k);
       return;
     }
     // The server's text as this page knows it; if the prefs row is gone for
@@ -181,6 +232,7 @@ export function usePrefsDraft<F extends PrefsFields>(
     const next = { text: fields, base: fields, baseVersion: p ? p.version : s.baseVersion };
     stateRef.current = next;
     lastWritten.current = null;
+    fromShared.current = null;
     // A save of the discarded typing may be in flight. Its 200 compares
     // with what the box shows now, so the box settles on the saved text
     // instead of this reset coming back as typing (#913 item 2).
@@ -190,26 +242,26 @@ export function usePrefsDraft<F extends PrefsFields>(
   useEffect(
     () =>
       onDraftDiscarded((k) => {
-        if (k === key) discarded();
+        if (mine(k)) discarded(k);
       }),
-    [key, discarded],
+    [mine, discarded],
   );
 
   // Another tab discarded this draft (A1) or saved this editor's fields (A2).
   useEffect(
     () =>
       onPrefsDraftElsewhere((m) => {
-        if (m.key !== key) return;
+        if (m.type === "prefs-discard" ? !mine(m.key) : m.key !== key) return;
         const s = stateRef.current;
         if (m.type === "prefs-discard") {
           if (!s) {
-            discardedElsewhere.current = m.text;
+            discardedElsewhere.current.set(m.key, m.text);
             return;
           }
           // Only the text thrown away is reset; other typing here stays, and
           // the write-back above stores it once the record is gone (B3).
           if (!prefsDiscardMatches(s.text, s.base, m.text)) return;
-          discarded();
+          discarded(m.key);
           // This tab no longer holds unsaved typing (B2). If this tab's own
           // write-back got in first, the discarded text is stored again:
           // delete it, and only it (B3).
@@ -227,10 +279,10 @@ export function usePrefsDraft<F extends PrefsFields>(
         // commit() drops this tab's unsaved mark (B2).
         if (next) commit(next);
       }),
-    [key, discarded, commit, pick],
+    [key, mine, discarded, commit, pick],
   );
 
-  useShowDraftEditors(state ? [key] : []);
+  useShowDraftEditors(state ? (key === sharedKey ? [key] : [key, sharedKey]) : []);
 
   return {
     text: state?.text ?? null,

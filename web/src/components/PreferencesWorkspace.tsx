@@ -32,6 +32,7 @@ import { useTranslation } from "react-i18next";
 import {
   api,
   ApiError,
+  currentUserId,
   isAdmin,
   isReadOnly,
   REGISTERS,
@@ -53,7 +54,14 @@ import {
   useContextExportStatus,
 } from "../hooks/useTranslationMemory";
 import { prefsConflictRow } from "../sync/prefsConflict";
-import { briefFields, commonIssuesFields, instructionsFields, prefsDraftKey } from "../sync/prefsDraft";
+import {
+  briefFields,
+  commonIssuesFields,
+  instructionsFields,
+  prefsDraftKey,
+  prefsOwnDraftKey,
+  prefsRestorable,
+} from "../sync/prefsDraft";
 import { drafts } from "../sync/drafts";
 import { usePrefsDraft } from "../hooks/usePrefsDraft";
 import { useUnsavedGuard } from "../hooks/useUnsavedGuard";
@@ -176,18 +184,31 @@ export function PreferencesWorkspace({ onNavigate, onBack, section, role }: Prop
   // typed and unsaved, in any tab) blocks "Move to Common issues", as the desk
   // page's mounted editor does: the move would otherwise come back under that
   // draft and a "save again" would erase the moved line (gate review H6).
+  // Only this user's own (or an ownerless) draft, the one their editor would
+  // restore: another admin's typing on a shared browser is not shown to them
+  // (#928).
   const [commonIssuesDraft, setCommonIssuesDraft] = useState(false);
   useEffect(
     () =>
       drafts.subscribe(
-        (all) => setCommonIssuesDraft(all.some((d) => d.key === prefsDraftKey("common_issues_md") && !d.quarantined)),
+        (all) => {
+          const uid = currentUserId();
+          const at = (k: string) => all.find((d) => d.key === k);
+          const own = uid != null ? at(prefsOwnDraftKey("common_issues_md", uid)) : undefined;
+          const rec = prefsRestorable(own, at(prefsDraftKey("common_issues_md")), uid);
+          setCommonIssuesDraft(!!rec && !rec.quarantined);
+        },
         { remote: true },
       ),
     [],
   );
   // The subscription above lands a moment after the store changes, so a move
   // clicked straight after typing re-reads the store first (round 2, J3).
-  const commonIssuesDraftNow = async () => !!(await drafts.get(prefsDraftKey("common_issues_md")));
+  const commonIssuesDraftNow = async () => {
+    const uid = currentUserId();
+    const own = uid != null ? await drafts.get(prefsOwnDraftKey("common_issues_md", uid)) : undefined;
+    return !!prefsRestorable(own, await drafts.get(prefsDraftKey("common_issues_md")), uid);
+  };
 
   // Deep-link / rail-driven anchor scroll: when the routed section is a memory
   // section and the long page is available, scroll it into view. Runs on mount

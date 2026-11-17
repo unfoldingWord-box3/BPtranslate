@@ -32,8 +32,39 @@ export interface PrefsDraftState<F extends PrefsFields = PrefsFields> {
   baseVersion: number;
 }
 
+// The key every user's typing shared before #928. Still read (prefsRestorable)
+// so typing stored there is not stranded, but no longer written.
 export function prefsDraftKey(section: PrefsDraftSection): string {
   return `prefs:${section}`;
+}
+
+// The key a signed-in user's typing is stored under (#928): one per person, so
+// on a shared browser one admin's typing never loads into another admin's box
+// or gets overwritten by it.
+export function prefsOwnDraftKey(section: PrefsDraftSection, userId: number): string {
+  return `prefs:${section}:${userId}`;
+}
+
+// Whether a stored prefs draft is this viewer's to see: they typed it, or no
+// author is recorded (a draft from before #913 may be theirs). Another
+// person's typing is hidden from them, and stays stored for its owner (#920).
+export function prefsDraftVisible(payload: unknown, userId: number | null): boolean {
+  const p = payload as Partial<PrefsDraftPayload> | null;
+  return p?.owner == null || p.owner === userId;
+}
+
+// The stored record an editor restores (#928): the one under the viewer's own
+// key, else the one under the old shared key, each only when it is this
+// viewer's to see. Another person's record is never restored, so it is never
+// rewritten or cleared by this viewer either.
+export function prefsRestorable<R extends { payload: unknown }>(
+  own: R | undefined,
+  shared: R | undefined,
+  userId: number | null,
+): R | undefined {
+  if (own && prefsDraftVisible(own.payload, userId)) return own;
+  if (!own && shared && prefsDraftVisible(shared.payload, userId)) return shared;
+  return undefined;
 }
 
 export function sameFields(a: PrefsFields, b: PrefsFields): boolean {
@@ -213,9 +244,10 @@ export function prefsDraftLost(text: PrefsFields, base: PrefsFields, stored: boo
 
 // Whether a user who cannot save may delete a stored prefs draft when the
 // editor opens (#909 gate review H2): only one they typed themselves, before
-// they lost the right to save. The store is per workspace, not per user, so on
-// a shared browser it can hold an admin's typing, which is left alone, as is a
-// draft with no author recorded (#913 item 5).
+// they lost the right to save. The store is per workspace, so on a shared
+// browser it can hold another admin's typing (under the old shared key, or
+// their own key since #928), which is left alone, as is a draft with no author
+// recorded (#913 item 5).
 export function prefsDraftDroppable(payload: unknown, userId: number | null): boolean {
   const p = payload as Partial<PrefsDraftPayload> | null;
   return userId != null && !!p && p.owner === userId;
@@ -235,8 +267,7 @@ export function draftCountsAsUnsaved(
 ): boolean {
   if (d.meta.kind !== "prefs") return true;
   if (!canSavePrefs) return false;
-  const p = d.payload as Partial<PrefsDraftPayload> | null;
-  return p?.owner == null || p.owner === userId;
+  return prefsDraftVisible(d.payload, userId);
 }
 
 function isFields(v: unknown): v is PrefsFields {
