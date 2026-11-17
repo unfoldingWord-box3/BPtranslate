@@ -167,13 +167,22 @@ const Row = memo(function Row({
       if (typeof patch.response === "string") setResponse(patch.response);
     });
   }, [draftKey]);
+  // Their row after Keep theirs (#892 review K4), the baseline until the cached
+  // row reaches its version: until rowRebuild has re-read the row, the cache
+  // still holds this browser's refused text, and diffing against it would
+  // show their text as unsaved and write it to the drafts store.
+  const [adopted, setAdopted] = useState<{ version: number; ref_raw: string; question: string; response: string } | null>(
+    null,
+  );
+  if (adopted && row.version >= adopted.version) setAdopted(null);
+  const base = adopted && row.version < adopted.version ? adopted : null;
   const diff = useMemo<Partial<TqRow>>(() => {
     const out: Partial<TqRow> = {};
-    if (refRaw !== (row.ref_raw ?? "")) out.ref_raw = refRaw;
-    if (question !== (row.question ?? "")) out.question = question;
-    if (response !== (row.response ?? "")) out.response = response;
+    if (refRaw !== (base ? base.ref_raw : (row.ref_raw ?? ""))) out.ref_raw = refRaw;
+    if (question !== (base ? base.question : (row.question ?? ""))) out.question = question;
+    if (response !== (base ? base.response : (row.response ?? ""))) out.response = response;
     return out;
-  }, [refRaw, question, response, row.ref_raw, row.question, row.response]);
+  }, [refRaw, question, response, row.ref_raw, row.question, row.response, base]);
   const isDirty = Object.keys(diff).length > 0;
 
   // Sync the draft store as the source of crash-recovery truth. Cleared
@@ -206,8 +215,8 @@ const Row = memo(function Row({
   // A save of this question the server refused because someone else saved it
   // first (#892): both versions show under the row until the user picks one.
   // Keep theirs drops every queued save of the row (a later one would
-  // overwrite theirs) and puts their text in the fields. The cached row
-  // follows when rowRebuild has re-read it, and the draft clears then.
+  // overwrite theirs) and puts their text in the fields, which are then the
+  // baseline (`adopted`) until the cached row catches up.
   const conflict = useRowConflict("tq", row.id, row.book);
   const keepMine = () => {
     if (conflict?.theirsVersion == null) return;
@@ -215,11 +224,19 @@ const Row = memo(function Row({
   };
   const keepTheirs = async () => {
     const theirs = conflict?.theirs;
-    if (!conflict || !theirs) return;
+    if (!conflict || !theirs || conflict.theirsVersion == null) return;
+    const version = conflict.theirsVersion;
     if ((await outbox.dropRowForKeepTheirs(conflict.opId)) === 0) return;
-    setRefRaw((theirs.ref_raw as string | null | undefined) ?? "");
-    setQuestion((theirs.question as string | null | undefined) ?? "");
-    setResponse((theirs.response as string | null | undefined) ?? "");
+    const next = {
+      version,
+      ref_raw: (theirs.ref_raw as string | null | undefined) ?? "",
+      question: (theirs.question as string | null | undefined) ?? "",
+      response: (theirs.response as string | null | undefined) ?? "",
+    };
+    setAdopted(next);
+    setRefRaw(next.ref_raw);
+    setQuestion(next.question);
+    setResponse(next.response);
     await drafts.clear(draftKey);
   };
 
@@ -329,7 +346,14 @@ const Row = memo(function Row({
       )}
       {conflict && (
         <Box sx={{ gridColumn: "1 / -1" }}>
-          <RowConflictPanel kind="tq" view={conflict} onKeepMine={keepMine} onKeepTheirs={() => void keepTheirs()} />
+          <RowConflictPanel
+            kind="tq"
+            view={conflict}
+            editor={{ ref_raw: refRaw, question, response }}
+            dirty={Object.keys(diff)}
+            onKeepMine={keepMine}
+            onKeepTheirs={() => void keepTheirs()}
+          />
         </Box>
       )}
     </Box>

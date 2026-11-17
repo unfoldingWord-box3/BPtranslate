@@ -1204,12 +1204,14 @@ function NoteCardInner({
       support_reference: (theirs.support_reference as string | null | undefined) ?? null,
     };
     // The cached row keeps this browser's refused text until rowRebuild has
-    // re-read the row. Put their values in it now and rebase the baseline at
-    // the cached version (another version would be undone by the rebase rule
-    // above), so the card shows no unsaved change in the meantime.
+    // re-read the row. Put their values in it now and rebase the baseline on
+    // their row and its version (review K5). If the cached row is still at an
+    // older version, the rebase rule above takes the cached row instead, which
+    // onChange below has just given their values, so the card shows no unsaved
+    // change in the meantime either way.
     pendingRef.current = {};
     sentRef.current = null;
-    const nextSaved = { ...next, version: row.version };
+    const nextSaved = { ...next, version: conflict.theirsVersion ?? row.version };
     savedRef.current = nextSaved;
     setSaved(nextSaved);
     setQuote(tsvToDisplay(next.quote));
@@ -1685,7 +1687,14 @@ function NoteCardInner({
       </Stack>
 
       {conflict && (
-        <RowConflictPanel kind="tn" view={conflict} onKeepMine={keepMine} onKeepTheirs={() => void keepTheirs()} />
+        <RowConflictPanel
+          kind="tn"
+          view={conflict}
+          editor={{ quote: toTsv(quote), note: toTsv(note), support_reference: supportRef }}
+          dirty={Object.keys(rowDiff)}
+          onKeepMine={keepMine}
+          onKeepTheirs={() => void keepTheirs()}
+        />
       )}
 
       {collapsedValidated ? (

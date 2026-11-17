@@ -119,12 +119,17 @@ function QuestionCardInner({
     });
   }, [draftKey]);
 
+  // Their row after Keep theirs (#892 review K4), the baseline until the
+  // cached row reaches its version (as in QuestionsTable).
+  const [adopted, setAdopted] = useState<{ version: number; question: string; response: string } | null>(null);
+  if (adopted && row.version >= adopted.version) setAdopted(null);
+  const base = adopted && row.version < adopted.version ? adopted : null;
   const diff = useMemo<Partial<TqRow>>(() => {
     const out: Partial<TqRow> = {};
-    if (question !== tsvToDisplay(row.question)) out.question = question;
-    if (response !== tsvToDisplay(row.response)) out.response = response;
+    if (question !== (base ? base.question : tsvToDisplay(row.question))) out.question = question;
+    if (response !== (base ? base.response : tsvToDisplay(row.response))) out.response = response;
     return out;
-  }, [question, response, row.question, row.response]);
+  }, [question, response, row.question, row.response, base]);
   const isDirty = Object.keys(diff).length > 0;
 
   useEffect(() => {
@@ -188,10 +193,17 @@ function QuestionCardInner({
   };
   const keepTheirs = async () => {
     const theirs = conflict?.theirs;
-    if (!conflict || !theirs) return;
+    if (!conflict || !theirs || conflict.theirsVersion == null) return;
+    const version = conflict.theirsVersion;
     if ((await outbox.dropRowForKeepTheirs(conflict.opId)) === 0) return;
-    setQuestion(tsvToDisplay((theirs.question as string | null | undefined) ?? null));
-    setResponse(tsvToDisplay((theirs.response as string | null | undefined) ?? null));
+    const next = {
+      version,
+      question: tsvToDisplay((theirs.question as string | null | undefined) ?? null),
+      response: tsvToDisplay((theirs.response as string | null | undefined) ?? null),
+    };
+    setAdopted(next);
+    setQuestion(next.question);
+    setResponse(next.response);
     await drafts.clear(draftKey);
   };
 
@@ -269,7 +281,14 @@ function QuestionCardInner({
       </Stack>
 
       {conflict && (
-        <RowConflictPanel kind="tq" view={conflict} onKeepMine={keepMine} onKeepTheirs={() => void keepTheirs()} />
+        <RowConflictPanel
+          kind="tq"
+          view={conflict}
+          editor={{ question, response }}
+          dirty={Object.keys(diff)}
+          onKeepMine={keepMine}
+          onKeepTheirs={() => void keepTheirs()}
+        />
       )}
 
       {collapsedValidated ? (

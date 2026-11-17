@@ -25,7 +25,7 @@ import CircularProgress from "@mui/material/CircularProgress";
 import Stack from "@mui/material/Stack";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
-import type { RowConflictView } from "../sync/rowConflictView";
+import { withEditorValues, type RowConflictView } from "../sync/rowConflictView";
 
 /** One field the conflicting op patched, with both sides' values. */
 export interface ConflictFieldView {
@@ -322,19 +322,28 @@ export function ConflictActions({
  * comes from the 409 (`view.theirs`), so there is nothing to load. Keep mine
  * re-sends at their version; Keep theirs drops this browser's queued saves of
  * the row and puts their text in the editor (the owner does both).
+ *
+ * "Mine" is the editor as it stands (`editor`, with `dirty` naming the fields
+ * that differ from the card's baseline), so typing made after the refused
+ * save shows too: it is what Keep theirs throws away (review K1).
  */
 export function RowConflictPanel({
   kind,
-  view,
+  view: queued,
+  editor,
+  dirty,
   onKeepMine,
   onKeepTheirs,
 }: {
   kind: "tn" | "tq";
   view: RowConflictView;
+  editor: Record<string, unknown>;
+  dirty: readonly string[];
   onKeepMine: () => void;
   onKeepTheirs: () => void;
 }) {
   const { t } = useTranslation();
+  const view = withEditorValues(queued, editor, dirty);
   const textField = kind === "tq" ? "response" : "note";
   const fields: ConflictFieldView[] = view.fields.map((field) => ({
     field,

@@ -201,6 +201,31 @@ test("tN card: a refused save shows both versions; Keep theirs puts Bob's note b
   await context.close();
 });
 
+test("tN card: typing after the refused save shows under Mine, and Keep theirs replaces it", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const row = await pickRow("tn", 3);
+  const { context } = await newUserContext(browser, "alice-892-typing");
+  const page = await context.newPage();
+  const alice = `ALICE typing ${Date.now()}`;
+  const bob = `BOB typing ${Date.now()}`;
+  await makeNoteConflict(page, context, row, alice, bob);
+
+  // Review K1: Mine is what Keep theirs throws away, unsaved typing included.
+  const more = `${alice} and more typed after the refusal`;
+  await noteTextarea(page, row.id).fill(more);
+  const panel = notePanel(page, row.id);
+  await expect(panel).toContainText(more);
+  await expect(panel).toContainText(bob);
+
+  await panel.getByRole("button", { name: "Keep theirs" }).click();
+  await expect(panel).toHaveCount(0);
+  await expect(noteTextarea(page, row.id)).toHaveValue(bob);
+  await expect.poll(() => draftPatch(page, `row:tn:ZEC:${row.id}`)).toBeNull();
+  await expectNoUnsaved(page);
+  expect((await serverRow("tn", row.id))?.note).toBe(bob);
+  await context.close();
+});
+
 test("tN card: Keep mine re-sends Alice's note over Bob's at the newer version", async ({ browser }) => {
   test.setTimeout(90_000);
   const row = await pickRow("tn", 1);
@@ -298,9 +323,19 @@ test("tQ table: Keep theirs puts Bob's question back for good", async ({ browser
   await expectNoUnsaved(page);
   expect((await serverRow("tq", row.id))?.question).toBe(bob);
 
+  // Review K4: the row is clean after Keep theirs, and a new edit saves.
+  const saveIcon = questionRow.locator('button:has([data-testid="SaveIcon"])');
+  await expect(saveIcon).toHaveCount(0);
+  const after = `ALICE after keep theirs ${Date.now()}`;
+  await questionField.fill(after);
+  await saveIcon.click();
+  await expect.poll(() => serverRow("tq", row.id).then((r) => r?.question)).toBe(after);
+  await expect.poll(() => queuedOps(page, row.id).then((o) => o.length)).toBe(0);
+  await expect(panel).toHaveCount(0);
+
   await page.reload();
   await page.getByRole("button", { name: /^Questions/ }).click();
-  await expect(questionField).toHaveValue(bob);
+  await expect(questionField).toHaveValue(after);
   await expect(panel).toHaveCount(0);
   await expectNoUnsaved(page);
   await context.close();

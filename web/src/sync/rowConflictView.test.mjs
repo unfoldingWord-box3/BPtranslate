@@ -2,7 +2,7 @@
 // editor shows for a refused save, and the ops "Keep theirs" drops.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { opsDroppedByKeepTheirs, rowConflictView } from "./rowConflictView.ts";
+import { opsDroppedByKeepTheirs, rowConflictView, withEditorValues } from "./rowConflictView.ts";
 
 const target = { kind: "row", rowKind: "tn", id: "abcd", book: "ZEC" };
 const other = { kind: "row", rowKind: "tn", id: "wxyz", book: "ZEC" };
@@ -57,13 +57,56 @@ test("a 409 without a usable row leaves theirs empty and every field listed", ()
   assert.deepEqual(v.fields, ["note"]);
 });
 
-test("Keep theirs drops every queued op for the row, not just the refused one", () => {
+test("Keep theirs drops the refused save and the saves queued behind it, not just the refused one", () => {
   const c = op({ status: "conflict", conflictCurrent: theirs });
   const p1 = op({});
-  const p2 = op({ status: "failed" });
+  const p2 = op({});
   const elsewhere = op({ target: other });
   const dropped = opsDroppedByKeepTheirs([c, p1, p2, elsewhere], c.id).map((o) => o.id);
   assert.deepEqual(dropped, [c.id, p1.id, p2.id]);
+});
+
+test("Keep theirs leaves a failed save and a queued delete of the row alone (review K2, K3)", () => {
+  const c = op({ status: "conflict", conflictCurrent: theirs });
+  const failed = op({ status: "failed" });
+  const del = op({ action: "delete" });
+  assert.deepEqual(opsDroppedByKeepTheirs([c, failed, del], c.id).map((o) => o.id), [c.id]);
+});
+
+test("Mine shows the editor's text, including typing after the refused save (review K1)", () => {
+  const c = op({ status: "conflict", patch: { note: "Alice's note" }, conflictCurrent: theirs });
+  const v = withEditorValues(rowConflictView([c], target), { note: "Alice's note and more", quote: "q", support_reference: null }, ["note"]);
+  assert.equal(v.mine.note, "Alice's note and more");
+  assert.deepEqual(v.fields, ["note"]);
+});
+
+test("Mine adds a field typed after the refused save, and skips one never touched", () => {
+  const c = op({ status: "conflict", patch: { note: "Alice's note" }, conflictCurrent: theirs });
+  // quote: never touched, still the old value; Bob's row has the same "q".
+  // support_reference: typed after the save, dirty, differs from theirs.
+  const v = withEditorValues(
+    rowConflictView([c], target),
+    { note: "Alice's note", quote: "old quote", support_reference: "rc://new" },
+    ["note", "support_reference"],
+  );
+  assert.deepEqual(v.fields.sort(), ["note", "support_reference"]);
+  assert.equal(v.mine.support_reference, "rc://new");
+});
+
+test("a queued field the editor shows unchanged keeps the queued text", () => {
+  // The tQ table puts Bob's text on screen when his write arrives; the queued
+  // patch still holds Alice's, which is what Keep mine would send.
+  const c = op({ status: "conflict", patch: { note: "Alice's note" }, conflictCurrent: theirs });
+  const v = withEditorValues(rowConflictView([c], target), { note: "Bob's note" }, []);
+  assert.equal(v.mine.note, "Alice's note");
+  assert.deepEqual(v.fields, ["note"]);
+});
+
+test("Mine compares newlines in display form", () => {
+  const c = op({ status: "conflict", patch: { note: "a\\nb" }, conflictCurrent: { ...theirs, note: "a\\nb" } });
+  const v = withEditorValues(rowConflictView([c], target), { note: "a\nb" }, ["note"]);
+  // Same text on both sides: falls back to the queued fields rather than none.
+  assert.deepEqual(v.fields, ["note"]);
 });
 
 test("Keep theirs leaves an op on the wire alone", () => {
