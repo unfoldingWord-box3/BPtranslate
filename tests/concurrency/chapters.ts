@@ -108,8 +108,10 @@ export const ZEC_CHAPTERS = {
   },
   keepsTextAway: {
     chapter: 8,
-    specs: ["refused-save-keeps-text.spec.ts"],
-    why: "Only visited (8:2) to unmount refused-save-keeps-text's chapter; never written.",
+    specs: ["refused-save-keeps-text.spec.ts", "classic-conflict-compare.spec.ts"],
+    why:
+      "refused-save-keeps-text only visits 8:2 to unmount its own chapter and reads nothing here. " +
+      "classic-conflict-compare writes one tN or tQ row per case (Alice and Bob saving the same row).",
   },
   keepsText: {
     chapter: 9,

@@ -65,6 +65,8 @@ import {
 } from "../sync/draftSaveState";
 import { onOpDropped, onOutboxResult, outbox, type DroppedOp, type OutboxOp } from "../sync/outbox";
 import { useRefusedSaveHold } from "../hooks/useRefusedSaveHold";
+import { useRowConflict } from "../hooks/useRowConflict";
+import { RowConflictPanel } from "./ConflictCompare";
 import { isAquiferDraftRow } from "./flows/translateShared";
 import { noteLockedReadOnly } from "../lib/chapterLock";
 
@@ -592,7 +594,8 @@ function NoteCardInner({
   // Clear the in-flight gate once the server-confirmed version moves past
   // the one we saved against. A conflict (409) keeps row.version stuck and
   // savePendingVersion stays set — that's intentional, the user has to
-  // resolve via the SyncStatusBar before sending another save. A save that ends
+  // resolve it (Keep mine / Keep theirs on this card, #892, or the
+  // SyncStatusBar) before sending another save. A save that ends
   // without landing (fatal, "locked", discarded) clears it in the save-end
   // listener below instead, since the version never moves (#660). Adjusted during
   // render, in the same pass as the `saved` rebase above, so both react to the
@@ -1180,6 +1183,50 @@ function NoteCardInner({
       offDrop();
     };
   }, [row.id, row.book]);
+
+  // A save of this note the server refused because someone else saved it
+  // first (#892): the card shows both versions until the user picks one.
+  // Keep mine re-sends at their version; the Save gate opens when it lands.
+  const conflict = useRowConflict("tn", row.id, row.book);
+  const keepMine = () => {
+    if (conflict?.theirsVersion == null) return;
+    void outbox.resolveConflict(conflict.opId, conflict.theirsVersion);
+  };
+  // Keep theirs drops every queued save of this note (a later one would
+  // overwrite theirs) and puts their text in the editor, with no draft left.
+  const keepTheirs = async () => {
+    const theirs = conflict?.theirs;
+    if (!conflict || !theirs) return;
+    if ((await outbox.dropRowForKeepTheirs(conflict.opId)) === 0) return;
+    const next = {
+      quote: (theirs.quote as string | null | undefined) ?? null,
+      note: (theirs.note as string | null | undefined) ?? null,
+      support_reference: (theirs.support_reference as string | null | undefined) ?? null,
+    };
+    // The cached row keeps this browser's refused text until rowRebuild has
+    // re-read the row. Put their values in it now and rebase the baseline at
+    // the cached version (another version would be undone by the rebase rule
+    // above), so the card shows no unsaved change in the meantime.
+    pendingRef.current = {};
+    sentRef.current = null;
+    const nextSaved = { ...next, version: row.version };
+    savedRef.current = nextSaved;
+    setSaved(nextSaved);
+    setQuote(tsvToDisplay(next.quote));
+    setNote(tsvToDisplay(next.note));
+    setSupportRef(next.support_reference);
+    if (sessionSnapshotRef.current !== null) {
+      setSessionSnapshot({
+        quote: tsvToDisplay(next.quote),
+        note: tsvToDisplay(next.note),
+        support_reference: next.support_reference,
+      });
+    }
+    setSavePendingVersion(null);
+    onChange(next);
+    await drafts.clear(draftKey);
+  };
+
   useEffect(() => {
     if (readOnly) return;
     const draftPatch = withPendingReverts(
@@ -1636,6 +1683,10 @@ function NoteCardInner({
         )}
         </Stack>
       </Stack>
+
+      {conflict && (
+        <RowConflictPanel kind="tn" view={conflict} onKeepMine={keepMine} onKeepTheirs={() => void keepTheirs()} />
+      )}
 
       {collapsedValidated ? (
         /* Validated → collapsed one-line preview (green). Click to expand for

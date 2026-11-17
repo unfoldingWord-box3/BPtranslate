@@ -3555,7 +3555,8 @@
       "occurrence": "رقم التكرار",
       "verse": "الآية",
       "refRaw": "الشاهد",
-      "sortOrder": "الترتيب"
+      "sortOrder": "الترتيب",
+      "supportReference": "المرجع الداعم"
     },
     "fieldLower": {
       "note": "الملاحظة",
@@ -3565,7 +3566,8 @@
       "occurrence": "رقم التكرار",
       "verse": "الآية",
       "refRaw": "الشاهد",
-      "sortOrder": "الترتيب"
+      "sortOrder": "الترتيب",
+      "supportReference": "المرجع الداعم"
     },
     "lock": {
       "save": "عملية ذكاء اصطناعي تحتجز هذا الأصحاح — تُرفض تعديلات الأسئلة حتى تنتهي",

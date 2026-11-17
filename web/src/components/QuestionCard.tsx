@@ -23,6 +23,9 @@ import { drafts, rowKey, draftDirtyBorderSx } from "../sync/drafts";
 import { tqCardBaseline, tsvToDisplay } from "../lib/tqRowFields";
 import { reconcileField } from "../lib/twlRowFields";
 import { useRefusedSaveHold } from "../hooks/useRefusedSaveHold";
+import { useRowConflict } from "../hooks/useRowConflict";
+import { outbox } from "../sync/outbox";
+import { RowConflictPanel } from "./ConflictCompare";
 
 // Translation-review card for translationQuestions — the tQ analogue of
 // NoteCard's translation mode. Only rendered in a gateway-language project
@@ -176,6 +179,22 @@ function QuestionCardInner({
     onSave(diff);
   };
 
+  // A refused save of this question (#892), as in QuestionsTable: both
+  // versions show on the card until the user picks one.
+  const conflict = useRowConflict("tq", row.id, row.book);
+  const keepMine = () => {
+    if (conflict?.theirsVersion == null) return;
+    void outbox.resolveConflict(conflict.opId, conflict.theirsVersion);
+  };
+  const keepTheirs = async () => {
+    const theirs = conflict?.theirs;
+    if (!conflict || !theirs) return;
+    if ((await outbox.dropRowForKeepTheirs(conflict.opId)) === 0) return;
+    setQuestion(tsvToDisplay((theirs.question as string | null | undefined) ?? null));
+    setResponse(tsvToDisplay((theirs.response as string | null | undefined) ?? null));
+    await drafts.clear(draftKey);
+  };
+
   const draftRtl = isRtl(question) || isRtl(response);
 
   return (
@@ -248,6 +267,10 @@ function QuestionCardInner({
           </IconButton>
         )}
       </Stack>
+
+      {conflict && (
+        <RowConflictPanel kind="tq" view={conflict} onKeepMine={keepMine} onKeepTheirs={() => void keepTheirs()} />
+      )}
 
       {collapsedValidated ? (
         /* Validated → collapsed one-line preview (green). Click to expand. */

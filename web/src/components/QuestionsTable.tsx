@@ -9,6 +9,9 @@ import { drafts, rowKey, draftDirtyBorderSx } from "../sync/drafts";
 import { tqTableBaseline } from "../lib/tqRowFields";
 import { reconcileField } from "../lib/twlRowFields";
 import { useRefusedSaveHold } from "../hooks/useRefusedSaveHold";
+import { useRowConflict } from "../hooks/useRowConflict";
+import { outbox } from "../sync/outbox";
+import { RowConflictPanel } from "./ConflictCompare";
 import { useTranslation } from "react-i18next";
 
 interface Props {
@@ -200,6 +203,26 @@ const Row = memo(function Row({
     onSave(diff);
   };
 
+  // A save of this question the server refused because someone else saved it
+  // first (#892): both versions show under the row until the user picks one.
+  // Keep theirs drops every queued save of the row (a later one would
+  // overwrite theirs) and puts their text in the fields. The cached row
+  // follows when rowRebuild has re-read it, and the draft clears then.
+  const conflict = useRowConflict("tq", row.id, row.book);
+  const keepMine = () => {
+    if (conflict?.theirsVersion == null) return;
+    void outbox.resolveConflict(conflict.opId, conflict.theirsVersion);
+  };
+  const keepTheirs = async () => {
+    const theirs = conflict?.theirs;
+    if (!conflict || !theirs) return;
+    if ((await outbox.dropRowForKeepTheirs(conflict.opId)) === 0) return;
+    setRefRaw((theirs.ref_raw as string | null | undefined) ?? "");
+    setQuestion((theirs.question as string | null | undefined) ?? "");
+    setResponse((theirs.response as string | null | undefined) ?? "");
+    await drafts.clear(draftKey);
+  };
+
   return (
     <Box
       data-question-id={row.id}
@@ -303,6 +326,11 @@ const Row = memo(function Row({
         >
           <DeleteOutlineIcon fontSize="inherit" />
         </IconButton>
+      )}
+      {conflict && (
+        <Box sx={{ gridColumn: "1 / -1" }}>
+          <RowConflictPanel kind="tq" view={conflict} onKeepMine={keepMine} onKeepTheirs={() => void keepTheirs()} />
+        </Box>
       )}
     </Box>
   );

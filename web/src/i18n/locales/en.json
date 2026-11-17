@@ -3295,7 +3295,8 @@
       "occurrence": "Occurrence",
       "verse": "Verse",
       "refRaw": "Reference",
-      "sortOrder": "Order"
+      "sortOrder": "Order",
+      "supportReference": "Support reference"
     },
     "fieldLower": {
       "note": "note",
@@ -3305,7 +3306,8 @@
       "occurrence": "occurrence",
       "verse": "verse",
       "refRaw": "reference",
-      "sortOrder": "order"
+      "sortOrder": "order",
+      "supportReference": "support reference"
     },
     "lock": {
       "save": "Chapter is locked by an AI run — question edits are rejected until it finishes",
