@@ -3197,6 +3197,10 @@
     }
   },
   "flowAlign": {
+    "hosted": {
+      "close": "Close the aligner and go back to the notes",
+      "unsavedBody": "This verse has alignment changes that aren't saved. Save them before closing, or discard them."
+    },
     "link": {
       "brokenTooltip": "{{tooltip}} — has unaligned words"
     },
@@ -3520,7 +3524,8 @@
       "noHebrewAlignment": "no Hebrew alignment for this word",
       "preview": "Preview",
       "occurrence": "occurrence {{n}}",
-      "useSelection": "Use selection"
+      "useSelection": "Use selection",
+      "editAlignment": "Edit alignment"
     },
     "history": {
       "currentVersion": "current: v{{version}}",
