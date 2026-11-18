@@ -65,6 +65,10 @@ export interface Env {
   // Absent/other on the dev worker (no nightly export cron) — the UI uses this to show the
   // 05:30 schedule vs. a manual-exports notice (#240).
   NIGHTLY_EXPORTS_ENABLED?: string;
+  // "true" turns on the hourly 180-day edit_log retention delete in the */5
+  // tick. Set only in [env.production.vars]: the live dev Worker runs that tick
+  // for AI-run polling (#938) but does not delete edit history.
+  EDIT_LOG_RETENTION_ENABLED?: string;
   DCS_CLIENT_ID?: string;
   DCS_CLIENT_SECRET?: string;
   JWT_SIGNING_KEY?: string;
@@ -523,7 +527,7 @@ async function runScheduledTick(controller: ScheduledController, env: Env, _ctx:
       // entry per save, rare, and the only record of who changed the
       // instructions every AI draft is given.
       const minuteOfHour = Math.floor(Date.now() / 60_000) % 60;
-      if (minuteOfHour < 5) {
+      if (minuteOfHour < 5 && env.EDIT_LOG_RETENTION_ENABLED === "true") {
         await env.DB.prepare(
           `DELETE FROM edit_log WHERE created_at < unixepoch() - (180 * 86400) AND kind <> 'prefs'`,
         ).run();
