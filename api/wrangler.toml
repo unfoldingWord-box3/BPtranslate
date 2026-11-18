@@ -116,18 +116,25 @@ name = "bptranslate-translate-dev"
 binding = "TRANSLATE_WORKFLOW"
 class_name = "TranslateWorkflow"
 
-# The default env registers ONLY the daily context-pack export (#793,
-# CONTEXT_CRON in src/index.ts). The nightly DCS export and the pipeline poller
-# are registered only on production (below) so an accidental dev deploy can't
-# double-fire the nightly export. Validated notes only reach the AI's example
-# set through a context export, and nothing else schedules one here.
+# The default env registers the daily context-pack export (#793, CONTEXT_CRON
+# in src/index.ts) and the 5-minute poll (POLL_CRON, #938). The nightly DCS
+# export is registered only on production (below) so an accidental dev deploy
+# can't double-fire it. Validated notes only reach the AI's example set through
+# a context export, and nothing else schedules one here. The poll is here
+# because this is the live app: without it, a finished AI run was applied only
+# when its owner's browser polled it, and a chapter could stay locked for hours
+# (LUK 18, 2026-11-18). Besides polling AI runs, that tick populates referenced
+# tW/tA articles, syncs note templates every 6h, sweeps the context-export
+# queue and clears stale book-import locks. Its hourly 180-day edit_log delete
+# runs only where EDIT_LOG_RETENTION_ENABLED = "true" (production vars), so the
+# live app's edit history is not deleted.
 # `wrangler dev --test-scheduled` exposes /__scheduled regardless.
 # This is spelled as an explicit list rather than an omitted [triggers]
 # block on purpose — omitting it leaves whatever crons are already attached to
 # the dev script in place, so it can't guarantee which crons the dev worker has.
 # An explicit list replaces them on every deploy.
 [triggers]
-crons = ["15 4 * * *"]
+crons = ["15 4 * * *", "*/5 * * * *"]
 
 # Public-safe defaults; secrets go in `wrangler secret put` (DCS_CLIENT_ID,
 # DCS_CLIENT_SECRET, JWT_SIGNING_KEY, DCS_SERVICE_TOKEN, BT_API_TOKEN,
@@ -309,6 +316,9 @@ ASSISTANT_DAILY_CAP_USD = "7"
 # "use Run export now" notice, so a cron-less deployment doesn't imply exports
 # are silently failing (#240). Keep it in sync with the crons list above.
 NIGHTLY_EXPORTS_ENABLED = "true"
+# Hourly 180-day edit_log retention delete in the */5 tick. Production only:
+# the dev Worker runs that tick for AI-run polling (#938) but keeps its history.
+EDIT_LOG_RETENTION_ENABLED = "true"
 DCS_EXPORT_OWNER = "BibleEditorService"
 TN_QUICK_URL = "https://uw-bt-bot.fly.dev/api/tn-quick"
 PIPELINE_API_BASE = "https://uw-bt-bot.fly.dev"
