@@ -176,7 +176,7 @@ export interface Env {
 }
 
 // Cron patterns must match the crons lists in wrangler.toml: production
-// registers EXPORT_CRON and POLL_CRON, the default env only CONTEXT_CRON.
+// registers EXPORT_CRON and POLL_CRON, the default env CONTEXT_CRON and POLL_CRON.
 // There's no runtime way to assert they line up (wrangler doesn't expose
 // triggers to the Worker), but constants in code give grep something to find
 // when the schedule changes.

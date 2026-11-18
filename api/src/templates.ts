@@ -37,9 +37,8 @@ function parseIfMatch(header: string | undefined): number | null {
 // GET /api/templates — list unit metadata for the rail (source_md/target_md
 // excluded for weight). Ordered by support_ref then sheet_order.
 templates.get("/", requireEditor, async (c) => {
-  // First-run backstop (see ensureTemplatesPopulated) — dev workers register
-  // no crons, so without this a fresh template_units table would sit empty
-  // forever. A sync failure (Google Sheet down, etc.) must not turn this list
+  // First-run backstop (see ensureTemplatesPopulated) — a local worker runs no
+  // crons, and a new org would otherwise wait for the next 6h cron sync. A sync failure (Google Sheet down, etc.) must not turn this list
   // route into a 500 — log and fall through to the SELECT below as today.
   try {
     await ensureTemplatesPopulated(c.env);

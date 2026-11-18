@@ -431,8 +431,8 @@ export async function syncTemplates(
 // First-run backstop: if template_units has never been synced (no row, or
 // last_synced_at IS NULL), run syncTemplates once. This is separate from the
 // 6h cron refresh in index.ts's POLL_CRON branch — that keeps running exactly
-// as it does today. This only exists so a dev worker (no nightly or poll crons registered —
-// see wrangler.toml) or a brand-new org isn't stuck showing zero templates
+// as it does today. This only exists so a local worker (no crons run) or a
+// brand-new org isn't stuck showing zero templates
 // until someone happens to trigger a cron tick. syncTemplates always calls
 // writeSyncState, including on the sheet-parse-abort path, so a failed sync
 // still stamps last_synced_at and this gate cannot retry in a loop.
