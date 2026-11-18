@@ -723,6 +723,9 @@ export default function TranslateAlignScreen({
   };
 
   const dirty = interaction === "drag" ? dragDirty : tapDirty;
+  // Hosted over Rapid check (#942), a reload or tab close would otherwise drop
+  // single-mode drags made in the last moments before the crash draft lands.
+  useUnsavedGuard(hosted != null && dirty);
 
   // Hosted close (#942): unsaved work asks first, the same save-or-discard
   // choice the dual aligner gives. Dual mode reuses that gate as is.
