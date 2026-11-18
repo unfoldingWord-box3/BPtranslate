@@ -421,6 +421,9 @@ export async function refreshAuthOnce(): Promise<boolean> {
 // target FIFO means a hung op holds back everything on that row).
 // Exported so the outbox can derive its in-flight recovery threshold from it.
 export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+// GET /api/pipelines/:jobId can run the whole apply of a finished AI run (see
+// pipelineStatus below), so it gets a timeout well past the longest apply.
+export const PIPELINE_STATUS_TIMEOUT_MS = 300_000;
 
 export interface RequestInitWithTimeout extends RequestInit {
   /** Override the default 30s timeout. Pass 0 to disable. */
@@ -2865,7 +2868,11 @@ export const api = {
   pipelineStatus: (jobId: string, signal?: AbortSignal) =>
     request<PipelineStatusResponse>(
       `/api/pipelines/${encodeURIComponent(jobId)}`,
-      { signal },
+      // This poll is also what applies a finished run's output to D1, which
+      // takes over a minute for a long chapter. The default 30s timeout aborted
+      // it partway (the Worker is cancelled when the browser disconnects), so a
+      // chapter applied in 30-second slices and stayed locked in between.
+      { signal, timeoutMs: PIPELINE_STATUS_TIMEOUT_MS },
     ),
 
   pipelineList: (

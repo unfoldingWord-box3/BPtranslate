@@ -56,6 +56,7 @@ import {
   getLaneState,
   type LaneKey,
 } from "./scriptureLane.ts";
+import { claimLostStatus } from "./pipelineImportClaim.ts";
 import { BOOK_NUMBERS } from "./dcsSources.ts";
 import { resourceTargetsFor } from "./export.ts";
 
@@ -800,10 +801,12 @@ async function pollPipelineJob(
         // may still be mid-apply. Do NOT fall through to the finalize
         // block: writing output_json / state='done' here would mark the import
         // complete before the owning poll's apply finishes, and if that poll
-        // then fails the set output_json would suppress the retry. Return the
-        // upstream status unchanged; the owning poll finalizes when it's done,
-        // and the next poll (or this client's next tick) sees the result.
-        return { kind: "ok", text, status: httpStatus, state: data.state ?? "running" };
+        // then fails the set output_json would suppress the retry. The owning
+        // poll finalizes when it's done, and the next poll (or this client's
+        // next tick) sees the result. Report 'running', not the bot's 'done':
+        // the output is not applied yet, and a 'done' here ends the browser's
+        // polling while D1 keeps the chapter locked (claimLostStatus).
+        return { kind: "ok", text: JSON.stringify(claimLostStatus(data)), status: httpStatus, state: "running" };
       }
       appliedChapters = importResult.applied?.affectedChapters ?? [];
       if (importResult.applied) applySkipped = applySkippedOf(importResult.applied);
