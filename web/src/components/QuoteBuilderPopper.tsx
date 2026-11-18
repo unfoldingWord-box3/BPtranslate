@@ -92,6 +92,10 @@ interface Props {
   // focus back on close. Opt-in (the notes flows screen, whose Rapid check
   // opens the picker with Q); the classic callers keep the old behavior.
   manageFocus?: boolean;
+  // Optional "Edit alignment" button (#942): this picker only chooses the
+  // note's quote, so a reader who came here to fix word alignment gets a
+  // direct way to the aligner. Absent ⇒ no button (the classic callers).
+  onEditAlignment?: () => void;
 }
 
 export function QuoteBuilderPopper({
@@ -111,6 +115,7 @@ export function QuoteBuilderPopper({
   onCancel,
   onCommit,
   manageFocus = false,
+  onEditAlignment,
 }: Props) {
   const { t } = useTranslation();
   const theme = useTheme();
@@ -387,6 +392,11 @@ export function QuoteBuilderPopper({
             </Typography>
           )}
         </Box>
+        {onEditAlignment && (
+          <Button size="small" onClick={onEditAlignment} data-quote-edit-alignment="">
+            {t("dialogs.quoteBuilder.editAlignment")}
+          </Button>
+        )}
         <Button size="small" onClick={onCancel}>
           {t("common.cancel")}
         </Button>

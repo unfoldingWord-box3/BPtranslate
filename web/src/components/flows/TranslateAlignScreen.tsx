@@ -170,6 +170,15 @@ export interface TranslateAlignScreenProps extends FlowScreenContext {
   chapter: number;
   verse: number;
   mode: "single" | "dual";
+  // Hosted inside another screen (Rapid check's "Edit alignment", #942)
+  // instead of on its own #/alignment route. Verse and mode changes go to the
+  // host instead of the hash, the back chevron closes the host's dialog
+  // (asking first when there is unsaved work), and the Scripture jump is
+  // hidden, so the screen underneath never loses its place.
+  hosted?: {
+    onClose: () => void;
+    onRoute: (verse: number, mode: "single" | "dual") => void;
+  };
 }
 
 // The two alignable lanes (AlignScreen.tsx:98-99 uses the same role codes:
@@ -247,6 +256,7 @@ export default function TranslateAlignScreen({
   chapter,
   verse,
   mode,
+  hosted,
 }: TranslateAlignScreenProps) {
   const { t } = useTranslation();
   const theme = useTheme();
@@ -513,7 +523,7 @@ export default function TranslateAlignScreen({
   // Tap-mode save — serializeAlignment + alignmentPlainText are the library's
   // own writers, so the \zaln tree is rebuilt by the tested code path
   // (AlignScreen.tsx:388-409).
-  const handleTapSave = useCallback(() => {
+  const handleTapSave = useCallback((afterCommit?: () => void) => {
     if (!canEdit) {
       setNotice("flowAlign.notice.viewOnlyAlignment");
       return;
@@ -524,6 +534,7 @@ export default function TranslateAlignScreen({
     const commit = () => {
       enqueueAlignment(targetVerse, lane, content, plain, targetVerse.version);
       void alignmentDrafts.clear(draftKey);
+      afterCommit?.();
     };
     const lost = lostAlignedWords(targetVerse.content, content);
     if (lost.length > 0) {
@@ -659,15 +670,18 @@ export default function TranslateAlignScreen({
   const goVerse = useCallback(
     (n: number | null) => {
       if (n == null) return;
-      location.hash = hashFor(n, mode);
+      if (hosted) hosted.onRoute(n, mode);
+      else location.hash = hashFor(n, mode);
     },
-    [hashFor, mode],
+    [hashFor, mode, hosted],
   );
   const setRouteMode = useCallback(
     (m: "single" | "dual") => {
-      if (m !== mode) location.hash = hashFor(verse, m);
+      if (m === mode) return;
+      if (hosted) hosted.onRoute(verse, m);
+      else location.hash = hashFor(verse, m);
     },
-    [hashFor, verse, mode],
+    [hashFor, verse, mode, hosted],
   );
 
   // Anything that leaves or re-targets the dual aligner asks first when either
@@ -680,7 +694,9 @@ export default function TranslateAlignScreen({
   const requestCloseDual = () => requestDualAction(() => setRouteMode("single"));
   const dualNavTo = (n: number | null) =>
     requestDualAction(() => {
-      if (n != null) location.hash = hashFor(n, "dual");
+      if (n == null) return;
+      if (hosted) hosted.onRoute(n, "dual");
+      else location.hash = hashFor(n, "dual");
     });
   const resolveDualAction = (choice: "save" | "discard") => {
     const action = pendingDualAction;
@@ -707,6 +723,42 @@ export default function TranslateAlignScreen({
   };
 
   const dirty = interaction === "drag" ? dragDirty : tapDirty;
+
+  // Hosted close (#942): unsaved work asks first, the same save-or-discard
+  // choice the dual aligner gives. Dual mode reuses that gate as is.
+  const [pendingClose, setPendingClose] = useState(false);
+  const requestHostedClose = () => {
+    if (!hosted) return;
+    if (mode === "dual") requestDualAction(hosted.onClose);
+    else if (dirty) setPendingClose(true);
+    else hosted.onClose();
+  };
+  const resolveHostedClose = (choice: "save" | "discard") => {
+    setPendingClose(false);
+    if (!hosted) return;
+    if (choice === "discard") {
+      if (interaction === "drag") {
+        panelRef.current?.discard();
+        hosted.onClose();
+        return;
+      }
+      // Tap mode: reset first, then clear the crash draft on the next tick,
+      // after the persist effect's cleanup has flushed its pending write
+      // (clearing first would let that flush bring the discarded work back).
+      const onClose = hosted.onClose;
+      const key = draftKey;
+      setTapState(computedInitial);
+      setTimeout(() => {
+        void alignmentDrafts.clear(key);
+        onClose();
+      }, 0);
+      return;
+    }
+    // Saving may stop at the unalign confirm; the dialog closes only once the
+    // save is actually queued.
+    if (interaction === "drag") panelRef.current?.save(hosted.onClose);
+    else handleTapSave(hosted.onClose);
+  };
 
   // ── per-verse honest status for the list + progress bar ──────────────────
   // Same two checks as verseHasUnalignedWork (lib/alignment.ts:550-558), via
@@ -813,9 +865,10 @@ export default function TranslateAlignScreen({
             fits beside the account controls it now shares (#299). */}
         <Stack direction="row" alignItems="center" spacing={isTabletUp ? 1.25 : 0.5}>
           <IconButton
-            aria-label={t("flowAlign.desk.backToPackage", { book })}
+            aria-label={hosted ? t("flowAlign.hosted.close") : t("flowAlign.desk.backToPackage", { book })}
             onClick={() => {
-              location.hash = `#/package/${book}`;
+              if (hosted) requestHostedClose();
+              else location.hash = `#/package/${book}`;
             }}
             sx={{ bgcolor: skip.soft, width: 34, height: 34, flex: "none" }}
           >
@@ -836,7 +889,7 @@ export default function TranslateAlignScreen({
               back-chevron above only returns to the package hub, not
               scripture itself. Dropped on phones, where the row has no room
               for it; the package hub still reaches scripture (#517). */}
-          {isTabletUp && (
+          {isTabletUp && !hosted && (
             <Button
               size="small"
               startIcon={<MenuBookIcon fontSize="small" />}
@@ -1293,7 +1346,7 @@ export default function TranslateAlignScreen({
                 </Button>
                 <Button
                   variant="contained"
-                  onClick={handleTapSave}
+                  onClick={() => handleTapSave()}
                   disabled={!tapDirty || !canEdit}
                   sx={{ minHeight: 44, fontWeight: 700 }}
                 >
@@ -1455,6 +1508,25 @@ export default function TranslateAlignScreen({
             {t("shell.discard")}
           </Button>
           <Button variant="contained" onClick={() => resolveDualAction("save")} sx={{ minHeight: 44 }}>
+            {t("common.save")}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* save-or-discard gate for closing the hosted aligner (#942) */}
+      <Dialog open={pendingClose} onClose={() => setPendingClose(false)}>
+        <DialogTitle>{t("shell.unsavedChanges")}</DialogTitle>
+        <DialogContent>
+          <DialogContentText>{t("flowAlign.hosted.unsavedBody")}</DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPendingClose(false)} sx={{ minHeight: 44 }}>
+            {t("common.cancel")}
+          </Button>
+          <Button color="error" onClick={() => resolveHostedClose("discard")} sx={{ minHeight: 44 }}>
+            {t("shell.discard")}
+          </Button>
+          <Button variant="contained" onClick={() => resolveHostedClose("save")} sx={{ minHeight: 44 }}>
             {t("common.save")}
           </Button>
         </DialogActions>

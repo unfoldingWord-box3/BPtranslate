@@ -92,8 +92,8 @@
 // changed the row, with a reload affordance. The full merge dialog stays on
 // the authoring screen.
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { FlowHeader, PHONE_COUNT_SX, PHONE_TITLE_SX } from "./FlowHeader";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { FlowHeader, FlowHeaderSlotContext, PHONE_COUNT_SX, PHONE_TITLE_SX } from "./FlowHeader";
 import { useFlowAiRun } from "./FlowAiRunAction";
 import {
   Alert,
@@ -101,6 +101,7 @@ import {
   Button,
   Chip,
   CircularProgress,
+  Dialog,
   IconButton,
   MenuItem,
   Select,
@@ -132,6 +133,10 @@ import { collectStrongs } from "../HebrewLine";
 import { UltAlignmentStrip } from "./UltAlignmentStrip";
 import { buildAlignmentStrip } from "./alignmentStripModel";
 import type { FlowScreenContext } from "./types";
+
+// The aligner, opened in place from the quote picker (#942). Lazy: most
+// sessions never open it, and it pulls in the drag and tap aligners.
+const TranslateAlignScreen = lazy(() => import("./TranslateAlignScreen"));
 
 import { useBook } from "../../hooks/useBook";
 import { useChapter } from "../../hooks/useChapter";
@@ -332,7 +337,7 @@ function Lane({ label, text, segments, labelFontFamily, mark }: LaneProps) {
 const NO_QUOTES: readonly FlowQuote[] = [];
 const NO_HIDDEN_STATUSES: ReadonlySet<RapidStatusBucket> = new Set();
 
-export default function TranslateNotesScreen({ book, chapter, verse, rowId, role }: TranslateNotesScreenProps) {
+export default function TranslateNotesScreen({ book, chapter, verse, rowId, role, me, onNavigate }: TranslateNotesScreenProps) {
   const { t } = useTranslation();
   const theme = useTheme();
   const dark = theme.palette.mode === "dark";
@@ -1473,6 +1478,23 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
     [quoteOpen, quoteSourceVo],
   );
   const quoteLexicon = useLexicon(quoteStrongs);
+
+  // "Edit alignment" in the quote picker (#942): the aligner opens over this
+  // screen in a full-screen dialog, so closing it lands on the same note,
+  // in the same view, with the same filters. Its saves go through the outbox,
+  // and this screen's useChapter adopts the confirmed verse on its own.
+  const [alignAt, setAlignAt] = useState<{ chapter: number; verse: number; mode: "single" | "dual" } | null>(null);
+  function openAligner() {
+    if (!row || quoteVerse == null) return;
+    setQuoteOpenRowId(null);
+    setAlignAt({ chapter: row.chapter, verse: quoteVerse, mode: "single" });
+  }
+  function closeAligner() {
+    setAlignAt(null);
+    // The picker that opened the aligner is gone; hand focus back to its
+    // anchor (Rapid check's pencil), so J/K and Q keep working.
+    if (quoteAnchor?.isConnected) quoteAnchor.focus({ preventScroll: true });
+  }
 
   function openQuotePicker() {
     if (!row || !canPickQuote || editLocked) return;
@@ -3687,8 +3709,46 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId, role
           }
           onCancel={() => setQuoteOpenRowId(null)}
           onCommit={() => void commitQuote()}
+          onEditAlignment={openAligner}
           manageFocus
         />
+      )}
+      {alignAt && (
+        // Esc is left to the aligner's own dialogs; closing goes through its
+        // back button, which asks before dropping unsaved alignment work.
+        <Dialog
+          open
+          fullScreen
+          disableEscapeKeyDown
+          PaperProps={{ "aria-label": t("dialogs.quoteBuilder.editAlignment") }}
+        >
+          {/* Inline header: the app's header slot belongs to this screen. */}
+          <FlowHeaderSlotContext.Provider value={null}>
+            <Suspense
+              fallback={
+                <Box sx={{ display: "flex", justifyContent: "center", paddingBlock: 6 }}>
+                  <CircularProgress size={28} />
+                </Box>
+              }
+            >
+              <Box sx={{ display: "flex", flexDirection: "column", minHeight: "100%" }}>
+                <TranslateAlignScreen
+                  role={role}
+                  me={me}
+                  onNavigate={onNavigate}
+                  book={book}
+                  chapter={alignAt.chapter}
+                  verse={alignAt.verse}
+                  mode={alignAt.mode}
+                  hosted={{
+                    onClose: closeAligner,
+                    onRoute: (v, m) => setAlignAt((a) => (a ? { ...a, verse: v, mode: m } : a)),
+                  }}
+                />
+              </Box>
+            </Suspense>
+          </FlowHeaderSlotContext.Provider>
+        </Dialog>
       )}
       <Snackbar
         open={toast !== null}

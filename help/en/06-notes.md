@@ -55,6 +55,7 @@ To hide notes by status, press **Filter by status** (the funnel beside **Status 
 - The circle after a row's checkbox approves that note. It fills in when the note is approved. A note with unsaved typing has to be opened and saved first.
 - Click a filled circle to take the approval back. The note shows **Pending** again and a message says **Approval removed**. Click the circle again to approve it.
 - The pencil next to the current note's quote opens the quote picker, where you choose which original-language words the note is about. When the original-language column is hidden, **Q** still opens the picker.
+- The picker only chooses the note's words; it does not change how words are aligned. To fix an alignment, select **Edit alignment** in the picker. The aligner opens over Rapid check for that verse. Save your changes there, then use the back arrow at the top left to return to the same note.
 - To move to another verse, use the arrows on either side of the reference at the top, or select the reference to pick a verse from the list. The list shows only verses that have notes, with how many each has.
 - The short names at the end of the verse's top line, such as **ULT** and **UST**, show or hide each scripture text. A name stays there while its text is hidden, so you can always bring it back.
 - To make room for your note, hide the original-language column or the **English note** column with the crossed-out eye in its heading. A hidden column becomes a small **+** button at the end of the headings: select it to bring the column back.

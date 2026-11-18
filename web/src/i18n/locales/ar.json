@@ -3441,6 +3441,10 @@
     }
   },
   "flowAlign": {
+    "hosted": {
+      "close": "إغلاق أداة المحاذاة والعودة إلى الملاحظات",
+      "unsavedBody": "في هذه الآية تغييرات في المحاذاة لم تُحفظ. احفظها قبل الإغلاق أو تجاهلها."
+    },
     "link": {
       "brokenTooltip": "{{tooltip}} — توجد كلمات غير مُحاذاة"
     },
@@ -3792,7 +3796,8 @@
       "noHebrewAlignment": "لا توجد محاذاة عبرية لهذه الكلمة",
       "preview": "معاينة",
       "occurrence": "التكرار {{n}}",
-      "useSelection": "استخدام التحديد"
+      "useSelection": "استخدام التحديد",
+      "editAlignment": "تعديل المحاذاة"
     },
     "history": {
       "currentVersion": "الحالي: الإصدار {{version}}",

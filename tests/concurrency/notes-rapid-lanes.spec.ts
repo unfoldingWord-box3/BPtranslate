@@ -239,3 +239,71 @@ test("rapid check: type-filter mode draws lanes above every verse group (verses 
 
   await page.screenshot({ path: test.info().outputPath("rapid-lanes-1366x768.png") });
 });
+
+// #942: the quote picker only picks the note's words, so reviewers who came to
+// fix alignment could not. "Edit alignment" opens the aligner over Rapid
+// check; closing it lands on the same note with the keyboard still working.
+// Last in the file: it clears a verse's ULT alignment (global-setup re-imports
+// ZEC on every run), and no test after it reads that alignment.
+test("rapid check: Edit alignment opens the aligner in place and returns to the same note", async ({ browser }) => {
+  const probe = await newUserContext(browser, "rapid-align-probe");
+  openContexts.push(probe.context);
+  const chap = await fetchChapter(probe.context.request, probe.auth.token, BOOK, CHAPTER);
+  const live = (chap.tn as Row[]).filter((r) => r.trashed_at == null && r.verse > 0 && (r.quote ?? "") !== "");
+  const byVerse = new Map<number, Row[]>();
+  for (const r of live) byVerse.set(r.verse, [...(byVerse.get(r.verse) ?? []), r]);
+  const verse = [...byVerse.keys()].find((v) => byVerse.get(v)!.length >= 2);
+  expect(verse, `ZEC ${CHAPTER} needs a verse with 2+ quoted notes`).toBeDefined();
+  const [target] = byVerse.get(verse!)!;
+  type WithVerses = { verses: Record<string, Record<string, { version: number }>> };
+  const ultBefore = (chap as unknown as WithVerses).verses.ULT[String(verse)];
+
+  const { page, list } = await openRapid(browser, "rapid-align", `${verse}?row=${target.id}`);
+  const current = list.locator('[data-rapid-row][aria-current="true"]');
+  await expect(current).toHaveAttribute("data-rapid-row", target.id);
+  const hashBefore = await page.evaluate(() => location.hash);
+
+  await list.focus();
+  await page.keyboard.press("q");
+  const picker = page.getByRole("dialog", { name: new RegExp(`${BOOK} ${CHAPTER}:${verse}`) });
+  await expect(picker).toBeVisible();
+  await picker.getByRole("button", { name: "Edit alignment" }).click();
+  await expect(picker).toBeHidden();
+
+  // The aligner opens over the notes screen; the address does not change.
+  const aligner = page.getByRole("dialog", { name: "Edit alignment" });
+  await expect(aligner).toBeVisible();
+  await expect(aligner.getByRole("button", { name: "Clear", exact: true })).toBeVisible({ timeout: 20_000 });
+  expect(await page.evaluate(() => location.hash)).toBe(hashBefore);
+
+  // Unsaved work: the back button asks first, and Cancel keeps it open.
+  await aligner.getByRole("button", { name: "Clear", exact: true }).click();
+  const back = aligner.getByRole("button", { name: "Close the aligner and go back to the notes" });
+  await back.click();
+  const ask = page.getByRole("dialog").filter({ hasText: "Unsaved changes" });
+  await expect(ask).toBeVisible();
+  await ask.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(aligner).toBeVisible();
+
+  // Save from the close prompt: the alignment change reaches the server,
+  // then the aligner closes.
+  await back.click();
+  const verseSave = page.waitForResponse(
+    (r) => r.request().method() === "PATCH" && r.url().includes(`/api/verses/`) && r.url().includes("ULT"),
+    { timeout: 20_000 },
+  );
+  await ask.getByRole("button", { name: "Save", exact: true }).click();
+  // Clearing leaves words unaligned, so the unalign confirm comes first.
+  await page.getByRole("button", { name: "Save anyway" }).click();
+  expect((await verseSave).status()).toBe(200);
+  await expect(aligner).toBeHidden();
+
+  // Back on the same note, same view, same address, keyboard still live.
+  expect(await page.evaluate(() => location.hash)).toBe(hashBefore);
+  await expect(current).toHaveAttribute("data-rapid-row", target.id);
+  const after = await fetchChapter(probe.context.request, probe.auth.token, BOOK, CHAPTER);
+  const ultAfter = (after as unknown as WithVerses).verses.ULT[String(verse)];
+  expect(ultAfter.version).toBeGreaterThan(ultBefore.version);
+  await page.keyboard.press("j");
+  await expect(current).not.toHaveAttribute("data-rapid-row", target.id);
+});
