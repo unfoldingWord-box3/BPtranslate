@@ -139,7 +139,8 @@ export const ZEC_CHAPTERS = {
     chapter: 13,
     specs: ["notes-rapid-lanes.spec.ts", "notes-rapid-verse-placement.spec.ts"],
     why:
-      "notes-rapid-lanes approves, un-approves and edits quotes, so the notes are seeded as AI " +
+      "notes-rapid-lanes approves, un-approves and edits quotes (and saves one verse's ULT " +
+      "alignment, then restores it), so the notes are seeded as AI " +
       "drafts, which makes them read-only in the classic editor. notes-rapid-verse-placement " +
       "only reads it.",
     seed: "ai_draft",

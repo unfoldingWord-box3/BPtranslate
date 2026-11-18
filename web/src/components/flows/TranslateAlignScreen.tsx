@@ -754,6 +754,12 @@ export default function TranslateAlignScreen({
       }, 0);
       return;
     }
+    // A viewer's save is refused before it is queued: keep the aligner open
+    // so the view-only notice is seen, instead of closing on a dropped save.
+    if (!canEdit) {
+      setNotice("flowAlign.notice.viewOnlyAlignment");
+      return;
+    }
     // Saving may stop at the unalign confirm; the dialog closes only once the
     // save is actually queued.
     if (interaction === "drag") panelRef.current?.save(hosted.onClose);

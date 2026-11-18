@@ -1,5 +1,5 @@
 import { expect, test, type BrowserContext, type Page } from "@playwright/test";
-import { fetchChapter, newUserContext, type TnRow } from "./helpers";
+import { csrfToken, fetchChapter, newUserContext, type TnRow } from "./helpers";
 import { ZEC_CHAPTERS } from "./chapters";
 
 // Rapid check follow-ups (#831): the quote picker on the open row (pencil and
@@ -243,8 +243,8 @@ test("rapid check: type-filter mode draws lanes above every verse group (verses 
 // #942: the quote picker only picks the note's words, so reviewers who came to
 // fix alignment could not. "Edit alignment" opens the aligner over Rapid
 // check; closing it lands on the same note with the keyboard still working.
-// Last in the file: it clears a verse's ULT alignment (global-setup re-imports
-// ZEC on every run), and no test after it reads that alignment.
+// It clears a verse's ULT alignment, then puts the original back through the
+// API, so notes-rapid-verse-placement (same chapter) still sees the seed.
 test("rapid check: Edit alignment opens the aligner in place and returns to the same note", async ({ browser }) => {
   const probe = await newUserContext(browser, "rapid-align-probe");
   openContexts.push(probe.context);
@@ -255,7 +255,12 @@ test("rapid check: Edit alignment opens the aligner in place and returns to the 
   const verse = [...byVerse.keys()].find((v) => byVerse.get(v)!.length >= 2);
   expect(verse, `ZEC ${CHAPTER} needs a verse with 2+ quoted notes`).toBeDefined();
   const [target] = byVerse.get(verse!)!;
-  type WithVerses = { verses: Record<string, Record<string, { version: number }>> };
+  type WithVerses = {
+    verses: Record<
+      string,
+      Record<string, { version: number; content: unknown; plain_text: string | null; source_generation?: number }>
+    >;
+  };
   const ultBefore = (chap as unknown as WithVerses).verses.ULT[String(verse)];
 
   const { page, list } = await openRapid(browser, "rapid-align", `${verse}?row=${target.id}`);
@@ -306,4 +311,18 @@ test("rapid check: Edit alignment opens the aligner in place and returns to the 
   expect(ultAfter.version).toBeGreaterThan(ultBefore.version);
   await page.keyboard.press("j");
   await expect(current).not.toHaveAttribute("data-rapid-row", target.id);
+
+  // Put the seeded alignment back for the specs that read this chapter.
+  // An alignment edit must name the source generation it was made against.
+  const restore = await probe.context.request.patch(`/api/verses/${BOOK}/${CHAPTER}/${verse}/ULT`, {
+    headers: {
+      Authorization: `Bearer ${probe.auth.token}`,
+      "x-csrf-token": await csrfToken(probe.context.request),
+      "If-Match": String(ultAfter.version),
+      "X-Source-Generation": String(ultAfter.source_generation ?? 0),
+      "Content-Type": "application/json",
+    },
+    data: { content: ultBefore.content, plain_text: ultBefore.plain_text, alignment_intent: "alignment_edit" },
+  });
+  expect(restore.status()).toBe(200);
 });
