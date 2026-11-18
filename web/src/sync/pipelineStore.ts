@@ -184,6 +184,11 @@ async function pollOne(jobId: string) {
     const status = await api.pipelineStatus(jobId);
     const prev = jobs.get(jobId);
     if (!prev) return;
+    // Two polls of one job can overlap now that a poll may spend minutes
+    // applying the output. The one that lost the import claim reports
+    // 'running'; if it lands after the winner's 'done', ignore it rather than
+    // flip the job back and toast its completion a second time.
+    if (prev.state === "done" && status.state === "running") return;
     mergeAndNotify(jobId, rowFromStatus(prev, status));
   } catch (e) {
     if (e instanceof ApiError && e.status === 404) {

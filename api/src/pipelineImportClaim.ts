@@ -44,10 +44,10 @@ export function mayClaimImport(
 // 'running' instead, so the caller keeps polling until a poll finalizes.
 export function claimLostStatus<T extends { state?: string; output?: unknown; current?: object }>(
   upstream: T,
-): T & { state: "running" } {
+): Omit<T, "output"> & { state: "running" } {
   const { output: _output, ...rest } = upstream;
   return {
-    ...(rest as T),
+    ...rest,
     state: "running",
     current: { ...(upstream.current ?? {}), status: "applying AI output" },
   };
