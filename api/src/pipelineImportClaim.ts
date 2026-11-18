@@ -34,3 +34,21 @@ export function mayClaimImport(
 ): boolean {
   return currentClaim == null || currentClaim < now - staleSeconds;
 }
+
+// What a poll that lost the import claim tells its caller (issue: LUK 18,
+// 2026-11-18). The bot already says 'done', but this job's output is not in D1
+// yet: another poll is mid-apply, or died mid-apply and left its claim to go
+// stale. Passing the bot's 'done' through made the browser toast "AI output
+// applied", acknowledge the job and stop polling, while D1 still said 'running'
+// and kept the chapter locked, with nothing left to retry the apply. Report
+// 'running' instead, so the caller keeps polling until a poll finalizes.
+export function claimLostStatus<T extends { state?: string; output?: unknown; current?: object }>(
+  upstream: T,
+): T & { state: "running" } {
+  const { output: _output, ...rest } = upstream;
+  return {
+    ...(rest as T),
+    state: "running",
+    current: { ...(upstream.current ?? {}), status: "applying AI output" },
+  };
+}

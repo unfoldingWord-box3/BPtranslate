@@ -27,6 +27,7 @@ import {
   type PipelineType,
 } from "./api";
 import { currentPipelineUserId } from "./pipelineSession";
+import { hideDismissedRow } from "./pipelineDismiss";
 export { getSessionKey, setPipelineUser } from "./pipelineSession";
 
 const POLL_INTERVAL_MS = 120_000; // contract §5
@@ -233,8 +234,9 @@ async function loadFromServer() {
     const nowSec = Math.floor(Date.now() / 1000);
     for (const row of res.jobs) {
       // Skip jobs the user has explicitly dismissed from the chip. They
-      // stay in D1; we just don't resurrect them into the local map.
-      if (dismissed.has(row.job_id)) continue;
+      // stay in D1; we just don't resurrect them into the local map. A job
+      // the server still runs is kept regardless (hideDismissedRow).
+      if (hideDismissedRow(row.state, dismissed.has(row.job_id))) continue;
       const isTerminal = !NON_TERMINAL_STATES.has(row.state) || row.state === "failed";
       if (
         isTerminal &&

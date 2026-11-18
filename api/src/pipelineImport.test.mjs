@@ -10,7 +10,7 @@
 //
 // Not a test framework; a failed assert exits non-zero.
 
-import { mayClaimImport, IMPORT_CLAIM_STALE_SECONDS } from "./pipelineImportClaim.ts";
+import { mayClaimImport, IMPORT_CLAIM_STALE_SECONDS, claimLostStatus } from "./pipelineImportClaim.ts";
 import { rawUrlOriginError } from "./rawUrlPin.ts";
 
 function assert(cond, msg) {
@@ -146,4 +146,24 @@ console.log("pipelineImport (claim guard): all assertions passed");
     "tqPayload: absent Question/Response stay null after the curl wiring",
   );
   console.log("pipelineImport (payload quote curling): all assertions passed");
+}
+
+// --- A poll that lost the claim must not report the bot's 'done' (LUK 18) ---
+// The output is not applied yet. Passing 'done' through made the browser stop
+// polling while D1 kept the chapter locked.
+{
+  const upstream = {
+    jobId: "stream_x",
+    state: "done",
+    current: { chapter: 18, skill: "translate-tn", status: "done", startedAt: "t" },
+    output: [{ type: "tn", repo: "BSOJ/ar_tn", path: "tn_LUK.tsv" }],
+    interrupted: false,
+  };
+  const s = claimLostStatus(upstream);
+  assert(s.state === "running", "claim lost → state reported as running, not done");
+  assert(s.output === undefined, "claim lost → no output listed (nothing applied yet)");
+  assert(s.current.chapter === 18 && s.current.skill === "translate-tn", "claim lost → keeps progress fields");
+  assert(s.current.status === "applying AI output", "claim lost → says the apply is in progress");
+  assert(upstream.state === "done", "claim lost → does not mutate the bot's payload");
+  assert(claimLostStatus({ state: "done" }).current.status === "applying AI output", "claim lost → works without current");
 }
