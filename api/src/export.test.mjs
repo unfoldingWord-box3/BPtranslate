@@ -5,7 +5,7 @@
 // instead of getting silently flattened to `\v 6`. Not a test framework;
 // failures exit non-zero.
 
-import { buildChapterExportBranch, buildExportBranch, buildTnTsv, buildTwlTsv, buildUsfm, commitToDcs, ensureDcsPr, exportTsvShrinkRefused, findDcsOpenPr, masterFetchGate, recreateExportBranchFromMaster, updateDcsPrBranch, usfmAlignmentShrinkRefused } from "./export.ts";
+import { buildChapterExportBranch, buildExportBranch, buildTnTsv, buildTwlTsv, buildUsfm, commitToDcs, ensureDcsPr, exportTsvShrinkRefused, findDcsOpenPr, missingMasterIdCount, masterFetchGate, recreateExportBranchFromMaster, updateDcsPrBranch, usfmAlignmentShrinkRefused } from "./export.ts";
 import { CorruptContentJsonError } from "./contentJson.ts";
 import { extractVersesForRange } from "./importParsers.ts";
 
@@ -1128,6 +1128,50 @@ function utf8Base64(s) {
   assert(exportTsvShrinkRefused(0, 0) === false, `empty master never refuses`);
   // A render to zero rows against a populated master is the strongest signal.
   assert(exportTsvShrinkRefused(0, 4000) === true, `render-to-empty against populated master refused`);
+}
+
+// --- #934: the guard counts master IDs missing from the render, not net rows ---
+// A render that loses 200 master notes but adds 200 notes master never had has
+// the same row count; the old net-count check passed it and master lost 200 notes.
+{
+  const HDR = "Reference\tID\tTags\tSupportReference\tQuote\tOccurrence\tNote";
+  const id = (p, i) => p + String(i).padStart(3, "0");
+  const tsv = (ids) => [HDR, ...ids.map((x) => `1:1\t${x}\t\t\t\t0\tnote`)].join("\n") + "\n";
+  const masterIds = Array.from({ length: 1000 }, (_, i) => id("a", i));
+  const master = tsv(masterIds);
+
+  // Swap: drop 200 master IDs, add 200 new ones. Same row count.
+  const swap = tsv([...masterIds.slice(200), ...Array.from({ length: 200 }, (_, i) => id("n", i))]);
+  assert(missingMasterIdCount(master, swap) === 200, `swap: 200 master IDs missing from the render`);
+  assert(exportTsvShrinkRefused(1000, 1000, missingMasterIdCount(master, swap)) === true,
+    `swap of 200 of 1000 master IDs (same row count) is refused`);
+
+  // Only additions: every master ID still present.
+  const grown = tsv([...masterIds, ...Array.from({ length: 300 }, (_, i) => id("n", i))]);
+  assert(missingMasterIdCount(master, grown) === 0, `additions only: no master ID missing`);
+  assert(exportTsvShrinkRefused(1300, 1000, 0) === false, `additions only pass`);
+
+  // A small swap under the 25-row floor still passes.
+  const small = tsv([...masterIds.slice(20), ...Array.from({ length: 20 }, (_, i) => id("n", i))]);
+  assert(exportTsvShrinkRefused(1000, 1000, missingMasterIdCount(master, small)) === false,
+    `swap of 20 IDs (under the 25-row floor) passes`);
+
+  // The net-count floor still holds when master repeats an ID: 40 duplicate
+  // rows collapsed to one each leave no ID missing but still drop 40 rows of 500.
+  const dupMaster = tsv([...masterIds.slice(0, 460), ...masterIds.slice(0, 40)]);
+  const dedup = tsv(masterIds.slice(0, 460));
+  assert(missingMasterIdCount(dupMaster, dedup) === 0, `duplicate master IDs: none missing by ID`);
+  assert(exportTsvShrinkRefused(460, 500, 0) === true, `net loss of 40 of 500 rows still refused`);
+
+  // tQ and tWL files carry ID in the second column too, under their own headers.
+  const tq = (ids) => ["Reference\tID\tTags\tQuote\tOccurrence\tQuestion\tResponse", ...ids.map((x) => `1:1\t${x}\t\t\t\tq\tr`)].join("\n") + "\n";
+  assert(missingMasterIdCount(tq(masterIds), tq(masterIds.slice(100))) === 100, `tq: missing IDs counted`);
+  const twl = (ids) => ["Reference\tID\tTags\tOrigWords\tOccurrence\tTWLink", ...ids.map((x) => `1:1\t${x}\t\t\t1\trc://x`)].join("\n") + "\n";
+  assert(missingMasterIdCount("﻿" + twl(masterIds), twl(masterIds.slice(100)).replace(/\n/g, "\r\n")) === 100,
+    `twl: missing IDs counted (BOM, CRLF)`);
+
+  // No ID column on either side: nothing to compare by ID, so the count rule alone decides.
+  assert(missingMasterIdCount("A\tB\nx\ty\n", "A\tB\n") === 0, `no ID column: 0 (count rule decides)`);
 }
 
 // --- masterFetchGate: first-export bootstrap vs fail-closed (#235) ---
