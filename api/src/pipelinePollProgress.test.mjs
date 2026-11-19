@@ -142,23 +142,29 @@ test("a paused_for_usage_limit job survives past 100 ticks, keeps its updated_at
     createdAt: "2026-11-19T00:00:00.000Z",
     interrupted: false,
   };
-  globalThis.fetch = async () => new Response(JSON.stringify(paused), { status: 200 });
+  let tickNo = 0;
+  // The status line changes on some ticks (a countdown, a retry counter): that
+  // must not refresh updated_at while the job stays paused.
+  globalThis.fetch = async () => {
+    const status = tickNo % 3 === 0 ? `waiting for usage limit (${tickNo})` : paused.current.status;
+    return new Response(JSON.stringify({ ...paused, current: { ...paused.current, status } }), { status: 200 });
+  };
 
-  const pausedSince = now(sqlite) - 3600;
-  seedJob(sqlite, { jobId: "job-paused", runner: "proxy", state: "paused_for_usage_limit", updatedAt: pausedSince });
-  // The first poll records the paused status (a change from nothing), which
-  // stamps updated_at; after that nothing changes.
+  seedJob(sqlite, { jobId: "job-paused", runner: "proxy", state: "paused_for_usage_limit", updatedAt: now(sqlite) });
   await pollAllNonTerminal(env);
-  const stamped = row(sqlite, "job-paused").updated_at;
-  for (let tick = 2; tick <= 110; tick++) {
+  // Backdate so a refresh would be visible (unixepoch() has 1s resolution and
+  // these ticks run in milliseconds).
+  const pausedSince = now(sqlite) - 3600;
+  sqlite.prepare("UPDATE pipeline_jobs SET updated_at = ? WHERE job_id = ?").run(pausedSince, "job-paused");
+  for (tickNo = 2; tickNo <= 110; tickNo++) {
     await pollAllNonTerminal(env);
     const r = row(sqlite, "job-paused");
-    assert.equal(r.state, "paused_for_usage_limit", `still paused at tick ${tick} (${r.error_message})`);
+    assert.equal(r.state, "paused_for_usage_limit", `still paused at tick ${tickNo} (${r.error_message})`);
   }
   assert.equal(
     row(sqlite, "job-paused").updated_at,
-    stamped,
-    "a poll that sees the same paused status leaves updated_at alone, so the 48h clock can bind",
+    pausedSince,
+    "a poll that sees the job still paused leaves updated_at alone, so the 48h clock can bind",
   );
 
   // 48h later with still no change: the no-progress sweep frees the slot.

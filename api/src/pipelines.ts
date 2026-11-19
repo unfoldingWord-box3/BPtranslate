@@ -869,9 +869,10 @@ async function pollPipelineJob(
   // (the CASE expressions read the row's pre-UPDATE values). Upstream
   // `updatedAt` is deliberately not part of the signal: an internal row with
   // no wf_status_json yet synthesizes it from the clock (readInternalStatus),
-  // so it would count as progress on every poll. A paused job that is still
-  // paused with the same status keeps its updated_at, so the 48h no-progress
-  // sweep binds on it; paused jobs are not counted toward the poll cap.
+  // so it would count as progress on every poll. A job still in the same
+  // paused state keeps its updated_at even if its status text changes, so the
+  // 48h no-progress sweep means "paused continuously for 48h" and binds on it;
+  // paused jobs are not counted toward the poll cap.
   await env.DB.prepare(
     `UPDATE pipeline_jobs SET
        attempt_count = CASE
@@ -879,8 +880,7 @@ async function pollPipelineJob(
          ELSE attempt_count
        END,
        updated_at = CASE
-         WHEN ?2 IN ('paused_for_outage', 'paused_for_usage_limit')
-              AND state IS ?2 AND current_skill IS ?3 AND current_status IS ?4 THEN updated_at
+         WHEN ?2 IN ('paused_for_outage', 'paused_for_usage_limit') AND state IS ?2 THEN updated_at
          ELSE unixepoch()
        END,
        state = ?2,
