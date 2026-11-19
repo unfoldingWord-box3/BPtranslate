@@ -119,9 +119,11 @@ test("a running job with no progress is still force-failed at the cap and its Wo
     await pollAllNonTerminal(env);
     if (row(sqlite, "job-frozen").state === "failed") failedAt = tick;
   }
-  // Tick 1 records the first status (a change from nothing), so the count
-  // starts there; the sweep fails a row whose count is > 100 before the bump.
-  assert.equal(failedAt, 102, `force-failed on the tick after 101 polls without progress (got ${failedAt})`);
+  // Tick 1 records the first status (a change from nothing), which resets the
+  // count; ticks 2-102 are 101 polls without progress, and the sweep at the
+  // start of tick 103 fails a row whose count is > 100. (On main, with no
+  // reset, it failed at tick 102.)
+  assert.equal(failedAt, 103, `force-failed on the tick after 101 polls without progress (got ${failedAt})`);
   assert.equal(row(sqlite, "job-frozen").error_message, "auto-failed: poll attempts exhausted");
   assert.deepEqual(terminated, ["translate-bsoj-job-frozen"]);
 });

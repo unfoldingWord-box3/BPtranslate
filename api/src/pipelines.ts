@@ -823,7 +823,7 @@ async function pollPipelineJob(
   // failure (e.g. a D1 write hiccup). But 'running' both occupies the single
   // bot dispatch slot and globally locks the chapter for writes — so a
   // *deterministically* bad apply (malformed output that throws identically
-  // every time) must not ride the 8h MAX_POLL_ATTEMPTS / 48h guards. If the
+  // every time) must not ride the ~8h-without-progress MAX_POLL_ATTEMPTS / 48h guards. If the
   // prior poll already failed the import, give up now: force 'failed', which is
   // terminal and frees both the slot (dispatchNext below) and the chapter lock.
   // Surface the failure via error_kind either way so the UI can flag it.
@@ -831,7 +831,7 @@ async function pollPipelineJob(
   // was not resumed (a crash during a skill). It then keeps returning the
   // frozen last-known state='running' on every poll, so without honoring this
   // flag we hold the bot slot AND the chapter write-lock until the blunt
-  // MAX_POLL_ATTEMPTS backstop (~8h of polling; took ~26h in the wild). The bot
+  // MAX_POLL_ATTEMPTS backstop (~8h of polls without progress; took ~26h in the wild). The bot
   // is telling us the run is dead — fail it now and free both. (justplainjane47
   // ISA 41 notes, 2026-06-20: bot EACCES'd writing notes.log, reported
   // interrupted:true for ~26h before the poll-count backstop caught it.) Healthy
@@ -864,8 +864,25 @@ async function pollPipelineJob(
       ? (data.current?.error ?? "upstream reported interrupted")
       : (data.current?.error ?? null);
 
+  // #944: attempt_count counts polls WITHOUT PROGRESS, so it resets whenever
+  // this poll records a different state, skill or status than the row holds
+  // (the CASE expressions read the row's pre-UPDATE values). Upstream
+  // `updatedAt` is deliberately not part of the signal: an internal row with
+  // no wf_status_json yet synthesizes it from the clock (readInternalStatus),
+  // so it would count as progress on every poll. A paused job that is still
+  // paused with the same status keeps its updated_at, so the 48h no-progress
+  // sweep binds on it; paused jobs are not counted toward the poll cap.
   await env.DB.prepare(
     `UPDATE pipeline_jobs SET
+       attempt_count = CASE
+         WHEN state IS NOT ?2 OR current_skill IS NOT ?3 OR current_status IS NOT ?4 THEN 0
+         ELSE attempt_count
+       END,
+       updated_at = CASE
+         WHEN ?2 IN ('paused_for_outage', 'paused_for_usage_limit')
+              AND state IS ?2 AND current_skill IS ?3 AND current_status IS ?4 THEN updated_at
+         ELSE unixepoch()
+       END,
        state = ?2,
        current_skill = ?3,
        current_status = ?4,
@@ -873,7 +890,6 @@ async function pollPipelineJob(
        error_message = ?6,
        output_json = ?7,
        raw_status_json = ?8,
-       updated_at = unixepoch(),
        last_polled_at = unixepoch()
      WHERE job_id = ?1`,
   )
@@ -959,9 +975,13 @@ async function pollPipelineJob(
 // from the UI; the failed row will be replaced on the next start.
 const STUCK_JOB_THRESHOLD_SECONDS = 86400 * 2;
 
-// Belt-and-suspenders for jobs that keep returning state="running" forever
-// (some upstream failure modes refresh updated_at on every poll). ~100 polls
-// at the */5 cron cadence ≈ 8 hours; well past any legitimate slow run.
+// Belt-and-suspenders for jobs that keep returning the same state="running"
+// forever (every successful poll refreshes updated_at, so the 48h sweep never
+// reaches them). Counts polls WITHOUT PROGRESS: pollPipelineJob resets
+// attempt_count when the state, skill or status changes (#944). ~100 polls at
+// the */5 cron cadence ≈ 8 hours with no change; well past any legitimate
+// step. Running jobs only: a paused job keeps its updated_at while unchanged,
+// so the 48h no-progress sweep bounds it instead.
 const MAX_POLL_ATTEMPTS = 100;
 
 // A 'dispatching' row is mid-flight on the upstream POST, which returns in
@@ -1107,7 +1127,7 @@ export async function pollAllNonTerminal(env: Env): Promise<void> {
     `SELECT job_id FROM pipeline_jobs
       WHERE state IN ('running', 'paused_for_outage', 'paused_for_usage_limit')
         AND runner = 'internal'
-        AND (updated_at < unixepoch() - ?1 OR attempt_count > ?2)`,
+        AND (updated_at < unixepoch() - ?1 OR (state = 'running' AND attempt_count > ?2))`,
   )
     .bind(STUCK_JOB_THRESHOLD_SECONDS, MAX_POLL_ATTEMPTS)
     .all<{ job_id: string }>();
@@ -1122,16 +1142,17 @@ export async function pollAllNonTerminal(env: Env): Promise<void> {
   )
     .bind(STUCK_JOB_THRESHOLD_SECONDS)
     .run();
-  // Auto-fail anything that has been polled more than MAX_POLL_ATTEMPTS times
-  // without reaching a terminal state. Independent backstop from the time-
-  // based one above — catches the "fresh updated_at but never done" case.
+  // Auto-fail a running job polled more than MAX_POLL_ATTEMPTS times in a row
+  // without progress. Independent backstop from the time-based one above —
+  // catches the "fresh updated_at but never done" case. Paused states are
+  // left to the 48h sweep (#944).
   await env.DB.prepare(
     `UPDATE pipeline_jobs
         SET state = 'failed',
             error_kind = 'interrupted',
             error_message = 'auto-failed: poll attempts exhausted',
             updated_at = unixepoch()
-      WHERE state IN ('running', 'paused_for_outage', 'paused_for_usage_limit')
+      WHERE state = 'running'
         AND attempt_count > ?1`,
   )
     .bind(MAX_POLL_ATTEMPTS)
@@ -1256,13 +1277,16 @@ export async function pollAllNonTerminal(env: Env): Promise<void> {
     }
   }
   if (jobs.length > 0) {
-    // Bump attempt_count for everything we're about to poll, in one batch. We
-    // do this BEFORE the upstream calls so a Worker crash doesn't undo the
-    // increment — the cap is the whole point of this column.
+    // Bump attempt_count for every running job we're about to poll, in one
+    // batch. We do this BEFORE the upstream calls so a Worker crash doesn't undo
+    // the increment — the cap is the whole point of this column. A poll that
+    // sees progress resets it (pollPipelineJob); paused jobs are not counted
+    // (#944).
     await env.DB.prepare(
       `UPDATE pipeline_jobs
           SET attempt_count = attempt_count + 1
-        WHERE job_id IN (${jobs.map((_, i) => `?${i + 1}`).join(",")})`,
+        WHERE state = 'running'
+          AND job_id IN (${jobs.map((_, i) => `?${i + 1}`).join(",")})`,
     )
       .bind(...jobs.map((j) => j.job_id))
       .run();
