@@ -1,0 +1,633 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Rapid check by verse</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=Noto+Naskh+Arabic:wght@400;600&amp;family=Noto+Serif+Hebrew:wght@400;600&amp;display=swap">
+<style>
+body{margin:0}
+</style>
+</helmet>
+<div style="position: relative; width: 100%; height: 768px; overflow: hidden; display: flex; flex-direction: column; background: #F4F5F7; color: #1B1F24; font-family: Inter, system-ui, sans-serif; font-size: 13px; line-height: 1.45">
+
+<header style="flex: none; height: 44px; background: #FFFFFF; border-bottom: 1px solid #E3E7EC; display: flex; align-items: center; gap: 14px; padding: 0 16px; box-sizing: border-box">
+<a href="#" style="display: flex; align-items: center; gap: 4px; color: #3A4450; text-decoration: none; font-weight: 500; min-height: 32px">
+<svg width="16" height="16" viewBox="0 0 18 18" aria-hidden="true"><path d="M11 4L6 9l5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg>Obadiah</a>
+<h1 style="margin: 0; font-size: 15px; font-weight: 700">Chapter 1 notes</h1>
+<span style="font-size: 11px; font-weight: 600; color: #1F4FA0; background: #E8EEFB; border-radius: 999px; padding: 1px 8px">Rapid check</span>
+<nav aria-label="Check mode" style="margin-left: auto; margin-right: auto; display: flex; background: #EEF0F3; border-radius: 8px; padding: 3px; gap: 3px">
+<a href="Main.dc.html" aria-current="page" style="display: flex; align-items: center; min-height: 28px; padding: 0 12px; border-radius: 6px; background: #FFFFFF; color: #1B1F24; font-weight: 600; text-decoration: none; box-shadow: 0 1px 2px rgba(0,0,0,0.12)">By verse</a>
+<a href="Issue.dc.html" style="display: flex; align-items: center; min-height: 28px; padding: 0 12px; border-radius: 6px; color: #3A4450; font-weight: 500; text-decoration: none">By issue type</a>
+</nav>
+<div style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #3A4450">
+<span><strong style="color: #1B1F24">{{chapterApproved}}</strong> of 152 approved</span>
+<div style="width: 90px; height: 5px; background: #E3E7EC; border-radius: 3px; overflow: hidden"><div style="height: 5px; width: {{chapterPct}}; background: #1F5FBF"></div></div>
+</div>
+<button type="button" aria-expanded="{{keysOpen}}" onClick="{{flipKeys}}" style="min-height: 28px; padding: 0 10px; border-radius: 6px; border: 1px solid #C9D0D8; background: #FFFFFF; color: #3A4450; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer">Keys</button>
+</header>
+
+<sc-if value="{{showKeys}}" hint-placeholder-val="{{false}}">
+<div role="dialog" aria-label="Keyboard shortcuts" style="position: absolute; top: 48px; right: 16px; z-index: 10; width: 300px; background: #FFFFFF; border: 1px solid #C9D0D8; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.14); padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: #3A4450">
+<span style="font-size: 10px; font-weight: 700; letter-spacing: 0.08em; color: #5B6570">KEYS</span>
+<span><kbd style="font-family: ui-monospace, Menlo, monospace; border: 1px solid #C9D0D8; border-bottom-width: 2px; border-radius: 4px; padding: 0 4px">J</kbd> <kbd style="font-family: ui-monospace, Menlo, monospace; border: 1px solid #C9D0D8; border-bottom-width: 2px; border-radius: 4px; padding: 0 4px">K</kbd> next / previous note</span>
+<span><kbd style="font-family: ui-monospace, Menlo, monospace; border: 1px solid #C9D0D8; border-bottom-width: 2px; border-radius: 4px; padding: 0 4px">Space</kbd> check · <kbd style="font-family: ui-monospace, Menlo, monospace; border: 1px solid #C9D0D8; border-bottom-width: 2px; border-radius: 4px; padding: 0 4px">Shift</kbd> + click range</span>
+<span><kbd style="font-family: ui-monospace, Menlo, monospace; border: 1px solid #C9D0D8; border-bottom-width: 2px; border-radius: 4px; padding: 0 4px">Enter</kbd> edit · <kbd style="font-family: ui-monospace, Menlo, monospace; border: 1px solid #C9D0D8; border-bottom-width: 2px; border-radius: 4px; padding: 0 4px">A</kbd> approve checked (or current)</span>
+<span><kbd style="font-family: ui-monospace, Menlo, monospace; border: 1px solid #C9D0D8; border-bottom-width: 2px; border-radius: 4px; padding: 0 4px">Ctrl</kbd> <kbd style="font-family: ui-monospace, Menlo, monospace; border: 1px solid #C9D0D8; border-bottom-width: 2px; border-radius: 4px; padding: 0 4px">A</kbd> check all · <kbd style="font-family: ui-monospace, Menlo, monospace; border: 1px solid #C9D0D8; border-bottom-width: 2px; border-radius: 4px; padding: 0 4px">[</kbd> <kbd style="font-family: ui-monospace, Menlo, monospace; border: 1px solid #C9D0D8; border-bottom-width: 2px; border-radius: 4px; padding: 0 4px">]</kbd> verse (not in mockup)</span>
+<span>Inside the editor: <kbd style="font-family: ui-monospace, Menlo, monospace; border: 1px solid #C9D0D8; border-bottom-width: 2px; border-radius: 4px; padding: 0 4px">Ctrl</kbd> <kbd style="font-family: ui-monospace, Menlo, monospace; border: 1px solid #C9D0D8; border-bottom-width: 2px; border-radius: 4px; padding: 0 4px">Enter</kbd> save &amp; approve, <kbd style="font-family: ui-monospace, Menlo, monospace; border: 1px solid #C9D0D8; border-bottom-width: 2px; border-radius: 4px; padding: 0 4px">Esc</kbd> cancel</span>
+<span style="color: #5B6570">Click in the notes list first so it has keyboard focus. A approves the current note and moves to the next.</span>
+</div>
+</sc-if>
+
+<div role="region" aria-label="Notes for Obadiah 1:3" tabindex="0" onKeyDown="{{onKey}}" style="flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 0 16px 24px; outline: none">
+
+<div data-sticky="1" style="position: sticky; top: 0; z-index: 3; background: #F4F5F7; padding-top: 8px">
+
+<section aria-label="Verse" style="background: #FFFFFF; border: 1px solid #E3E7EC; border-radius: 10px; padding: 8px 14px 10px; display: flex; flex-direction: column; gap: 6px">
+<div style="display: flex; align-items: center; gap: 6px">
+<button type="button" aria-label="Previous verse" style="width: 28px; height: 28px; border-radius: 6px; border: 1px solid #C9D0D8; background: #FFFFFF; display: flex; align-items: center; justify-content: center; cursor: pointer; color: #3A4450; padding: 0"><svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3L5 8l5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg></button>
+<h2 style="margin: 0 2px; font-size: 16px; font-weight: 700; white-space: nowrap">Obadiah 1:3</h2>
+<button type="button" aria-label="Next verse" style="width: 28px; height: 28px; border-radius: 6px; border: 1px solid #C9D0D8; background: #FFFFFF; display: flex; align-items: center; justify-content: center; cursor: pointer; color: #3A4450; padding: 0"><svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3l5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg></button>
+<div role="group" aria-label="Verses in chapter 1" style="display: flex; gap: 2px; margin-left: 10px">
+<sc-for list="{{strip}}" as="v" hint-placeholder-count="21">
+<button type="button" aria-label="{{v.aria}}" aria-current="{{v.current}}" style="width: 28px; height: 30px; border-radius: 5px; border: 1px solid {{v.border}}; background: {{v.bg}}; color: {{v.fg}}; font: inherit; font-size: 11px; font-weight: 700; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0; cursor: pointer; padding: 0; line-height: 1.1">
+<span>{{v.n}}</span><span style="font-size: 9px; font-weight: 500; opacity: 0.85">{{v.sub}}</span>
+</button>
+</sc-for>
+</div>
+<div style="margin-left: auto; display: flex; align-items: center; gap: 4px">
+<sc-for list="{{toggles}}" as="t" hint-placeholder-count="3">
+<button type="button" aria-pressed="{{t.pressed}}" onClick="{{t.flip}}" style="min-height: 26px; padding: 0 8px; border-radius: 999px; border: 1px solid {{t.border}}; background: {{t.bg}}; color: {{t.fg}}; font: inherit; font-size: 12px; font-weight: 600; display: flex; align-items: center; gap: 4px; cursor: pointer">
+<svg width="12" height="12" viewBox="0 0 14 14" aria-hidden="true" style="opacity: {{t.tickOpacity}}"><path d="M2.5 7.2l2.8 2.8 6-6.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg>{{t.label}}</button>
+</sc-for>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 2px">
+<div style="display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 2px 12px; align-items: baseline">
+<span style="font-size: 10px; font-weight: 700; letter-spacing: 0.06em; color: #5B6570; line-height: 1.2">ARABIC LITERAL</span>
+<p dir="rtl" style="margin: 0; font-family: 'Noto Naskh Arabic', 'Amiri', serif; font-size: 19px; line-height: 1.75; text-align: start"><sc-for list="{{arVerse}}" as="s"><span style="background: {{s.bg}}; border-radius: 4px; box-shadow: 0 0 0 2px {{s.bg}}">{{s.t}}</span></sc-for></p>
+</div>
+<sc-if value="{{showUlt}}" hint-placeholder-val="{{true}}">
+<div style="display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 2px 12px; align-items: baseline">
+<span style="font-size: 10px; font-weight: 700; letter-spacing: 0.06em; color: #5B6570">ULT</span>
+<p dir="ltr" style="margin: 0; font-size: 14px; line-height: 1.5; color: #2B323A"><sc-for list="{{ultVerse}}" as="s"><span style="background: {{s.bg}}; border-radius: 3px; box-shadow: 0 0 0 2px {{s.bg}}">{{s.t}}</span></sc-for></p>
+</div>
+</sc-if>
+<sc-if value="{{showHe}}" hint-placeholder-val="{{false}}">
+<div style="display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 2px 12px; align-items: baseline">
+<span style="font-size: 10px; font-weight: 700; letter-spacing: 0.06em; color: #5B6570">HEBREW</span>
+<p dir="rtl" style="margin: 0; font-family: 'Noto Serif Hebrew', 'SBL Hebrew', 'Ezra SIL', serif; font-size: 18px; line-height: 1.7; text-align: start"><sc-for list="{{heVerse}}" as="s"><span style="background: {{s.bg}}; border-radius: 3px; box-shadow: 0 0 0 2px {{s.bg}}">{{s.t}}</span></sc-for></p>
+</div>
+</sc-if>
+</div>
+</section>
+
+<div style="margin-top: 8px; background: #FFFFFF; border: 1px solid #E3E7EC; border-bottom: 0; border-radius: 10px 10px 0 0">
+<div style="min-height: 40px; display: flex; align-items: center; gap: 10px; padding: 4px 12px 4px 0; border-bottom: 1px solid #E3E7EC; background: {{barBg}}; border-radius: 10px 10px 0 0">
+<button type="button" role="checkbox" aria-checked="{{all.aria}}" aria-label="Select all notes in this verse" onClick="{{all.toggle}}" style="width: 32px; height: 32px; flex: none; border: 0; background: transparent; padding: 0; display: flex; align-items: center; justify-content: center; cursor: pointer">
+<span style="width: 16px; height: 16px; box-sizing: border-box; border-radius: 4px; border: 2px solid {{all.border}}; background: {{all.bg}}; display: flex; align-items: center; justify-content: center">
+<sc-if value="{{all.on}}" hint-placeholder-val="{{false}}"><svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 6.2l2.3 2.3 4.7-5" fill="none" stroke="#FFFFFF" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"></path></svg></sc-if>
+<sc-if value="{{all.mixed}}" hint-placeholder-val="{{false}}"><svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 6h6" fill="none" stroke="#FFFFFF" stroke-width="2.2" stroke-linecap="round"></path></svg></sc-if>
+</span>
+</button>
+
+<sc-if value="{{noSel}}" hint-placeholder-val="{{true}}">
+<sc-if value="{{hasMsg}}" hint-placeholder-val="{{false}}">
+<span style="font-weight: 600; color: #0E5B3E">{{msg}}</span>
+<button type="button" onClick="{{undo}}" style="min-height: 28px; padding: 0 10px; border-radius: 6px; border: 1px solid #C9D0D8; background: #FFFFFF; font: inherit; font-weight: 600; color: #1F4FA0; cursor: pointer">Undo</button>
+</sc-if>
+<sc-if value="{{noMsg}}" hint-placeholder-val="{{true}}">
+<span style="color: #5B6570">{{verseLine}} <strong style="color: #3A4450">J / K</strong> move the blue bar; Shift-click for a range.</span>
+<span aria-label="Status key" style="margin-left: auto; display: flex; align-items: center; gap: 10px; font-size: 11px; color: #3A4450; white-space: nowrap"><span style="display: flex; align-items: center; gap: 4px"><span aria-hidden="true" style="width: 13px; height: 13px; box-sizing: border-box; border-radius: 50%; border: 2px solid #D55E00; background: #FFFFFF; display: inline-flex; align-items: center; justify-content: center"></span>Draft · AI</span><span style="display: flex; align-items: center; gap: 4px"><span aria-hidden="true" style="width: 13px; height: 13px; box-sizing: border-box; border-radius: 50%; border: 2px solid #E69F00; background: linear-gradient(90deg, #E69F00 50%, #FFFFFF 50%); display: inline-flex; align-items: center; justify-content: center"></span>Edited</span><span style="display: flex; align-items: center; gap: 4px"><span aria-hidden="true" style="width: 13px; height: 13px; box-sizing: border-box; border-radius: 50%; border: 2px solid #009E73; background: #009E73; display: inline-flex; align-items: center; justify-content: center"><svg width="8" height="8" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 6.2l2.3 2.3 4.7-5" fill="none" stroke="#FFFFFF" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"></path></svg></span>Approved</span><span style="display: flex; align-items: center; gap: 4px"><span aria-hidden="true" style="width: 13px; height: 13px; box-sizing: border-box; border-radius: 50%; border: 2px solid #8A94A0; background: #E3E7EC; display: inline-flex; align-items: center; justify-content: center"><svg width="7" height="7" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 6h6" fill="none" stroke="#5E6670" stroke-width="2.6" stroke-linecap="round"></path></svg></span>Not needed</span><span style="color: #5B6570">· click a circle to approve</span></span>
+</sc-if>
+</sc-if>
+
+<sc-if value="{{hasSel}}" hint-placeholder-val="{{false}}">
+<span style="font-weight: 700">{{selCount}} selected</span>
+<sc-if value="{{hasDirtySel}}" hint-placeholder-val="{{false}}">
+<span style="display: flex; align-items: center; gap: 5px; color: #7A5200; font-weight: 500"><span style="width: 7px; height: 7px; border-radius: 4px; background: #D08A00"></span>{{dirtySelText}}</span>
+</sc-if>
+<div style="display: flex; gap: 6px; margin-left: 6px">
+<button type="button" onClick="{{approveSel}}" style="min-height: 30px; padding: 0 12px; border-radius: 6px; border: 0; background: #1F5FBF; color: #FFFFFF; font: inherit; font-weight: 600; display: flex; align-items: center; gap: 5px; cursor: pointer"><svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.3l3.2 3.2L13 4.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg>Approve {{selCount}}</button>
+<button type="button" onClick="{{redoSel}}" style="min-height: 30px; padding: 0 10px; border-radius: 6px; border: 1px solid #C9D0D8; background: #FFFFFF; color: #1B1F24; font: inherit; font-weight: 600; cursor: pointer">Redo with AI</button>
+<button type="button" onClick="{{notNeededSel}}" style="min-height: 30px; padding: 0 10px; border-radius: 6px; border: 1px solid #C9D0D8; background: #FFFFFF; color: #1B1F24; font: inherit; font-weight: 600; cursor: pointer">Not needed</button>
+<button type="button" onClick="{{clearSel}}" style="min-height: 30px; padding: 0 8px; border-radius: 6px; border: 0; background: transparent; color: #1F4FA0; font: inherit; font-weight: 600; cursor: pointer">Clear</button>
+</div>
+<span style="margin-left: auto; font-size: 11px; color: #5B6570; text-align: right">Approve saves any unsaved edit first.</span>
+</sc-if>
+</div>
+
+<div style="display: grid; grid-template-columns: {{cols}}; gap: 12px; padding: 4px 8px 4px 0; border-bottom: 1px solid #E3E7EC; font-size: 10px; font-weight: 700; letter-spacing: 0.06em; color: #5B6570; background: #FAFBFC; align-items: center; min-height: 24px">
+<span></span>
+<span>STATUS · TYPE</span>
+<span dir="rtl" style="text-align: start">QUOTE</span>
+<sc-if value="{{showEn}}" hint-placeholder-val="{{true}}">
+<span>ENGLISH NOTE</span>
+</sc-if>
+<span>ARABIC NOTE · CLICK TO EDIT</span>
+</div>
+</div>
+</div>
+
+<div style="background: #FFFFFF; border: 1px solid #E3E7EC; border-top: 0; border-radius: 0 0 10px 10px; overflow: hidden">
+<sc-for list="{{rows}}" as="r" hint-placeholder-count="9">
+<div data-row="{{r.id}}" style="display: grid; grid-template-columns: {{cols}}; gap: 12px; padding: 6px 8px 6px 0; border-bottom: 1px solid #EDF0F3; background: {{r.bg}}; box-shadow: {{r.curBar}}; opacity: {{r.opacity}}; align-items: start">
+
+<div style="display: flex; flex-direction: column; align-items: center">
+<button type="button" role="checkbox" aria-checked="{{r.aria}}" aria-label="Select note {{r.id}}" data-cb="{{r.id}}" onClick="{{r.toggle}}" onMouseDown="{{r.noTextSelect}}" style="width: 32px; height: 32px; border: 0; background: transparent; padding: 0; display: flex; align-items: center; justify-content: center; cursor: pointer">
+<span style="width: 16px; height: 16px; box-sizing: border-box; border-radius: 4px; border: 2px solid {{r.cbBorder}}; background: {{r.cbBg}}; display: flex; align-items: center; justify-content: center">
+<sc-if value="{{r.sel}}" hint-placeholder-val="{{false}}"><svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 6.2l2.3 2.3 4.7-5" fill="none" stroke="#FFFFFF" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"></path></svg></sc-if>
+</span>
+</button>
+<sc-if value="{{r.isAnchor}}" hint-placeholder-val="{{false}}"><span style="font-size: 9px; font-weight: 600; color: #1F4FA0; text-align: center; line-height: 1.1">range<br>start</span></sc-if>
+</div>
+
+<div style="display: flex; flex-direction: column; align-items: flex-start; gap: 1px; padding-top: 2px; min-width: 0">
+<div style="display: flex; align-items: center; gap: 3px; margin-left: -5px">
+<button type="button" aria-pressed="{{r.approvedAria}}" aria-label="{{r.circleAria}}" title="{{r.circleAria}}" onClick="{{r.flip}}" style="width: 28px; height: 28px; flex: none; border: 0; background: transparent; padding: 0; display: flex; align-items: center; justify-content: center; cursor: pointer">
+<span style="width: 20px; height: 20px; box-sizing: border-box; border-radius: 50%; border: 2px {{r.ringStyle}} {{r.ring}}; background: {{r.fill}}; display: flex; align-items: center; justify-content: center">
+<sc-if value="{{r.markCheck}}" hint-placeholder-val="{{false}}"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 6.2l2.3 2.3 4.7-5" fill="none" stroke="#FFFFFF" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"></path></svg></sc-if>
+<sc-if value="{{r.markDash}}" hint-placeholder-val="{{false}}"><svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 6h6" fill="none" stroke="#5E6670" stroke-width="2.2" stroke-linecap="round"></path></svg></sc-if>
+<sc-if value="{{r.markDot}}" hint-placeholder-val="{{false}}"><span style="width: 6px; height: 6px; border-radius: 50%; background: #E69F00"></span></sc-if>
+</span>
+</button>
+<span style="font-size: 11px; font-weight: 700; color: {{r.stFg}}; white-space: nowrap">{{r.stLabel}}</span>
+</div>
+<button type="button" aria-label="Make {{r.id}} the current note" onClick="{{r.makeCurrent}}" style="border: 0; background: transparent; padding: 0; margin: 0; font: inherit; text-align: left; cursor: pointer; display: flex; flex-direction: column; gap: 1px; color: inherit">
+<span style="font-size: 12px; font-weight: 600; color: #2B323A; line-height: 1.25">{{r.typeLabel}}</span>
+<span style="font-family: ui-monospace, Menlo, monospace; font-size: 10px; color: #8A94A0">{{r.id}}</span>
+</button>
+</div>
+
+<div dir="rtl" style="display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding-top: 4px; min-width: 0">
+<span style="font-family: 'Noto Serif Hebrew', 'SBL Hebrew', 'Ezra SIL', serif; font-size: 16px; line-height: 1.55">{{r.he}}</span>
+<span style="font-family: 'Noto Naskh Arabic', 'Amiri', serif; font-size: 15px; line-height: 1.65; background: #FFF1C2; border-radius: 4px; padding: 0 5px">{{r.arq}}</span>
+</div>
+
+<sc-if value="{{showEn}}" hint-placeholder-val="{{true}}">
+<p dir="ltr" style="margin: 0; padding-top: 6px; font-size: 13px; line-height: 1.5; color: #2B323A; min-width: 0"><sc-for list="{{r.enSeg}}" as="s"><span style="font-weight: {{s.w}}">{{s.t}}</span></sc-for></p>
+</sc-if>
+
+<div style="min-width: 0">
+<sc-if value="{{r.isEditing}}" hint-placeholder-val="{{false}}">
+<div style="display: flex; flex-direction: column; gap: 6px; padding-top: 2px">
+<label for="ed-{{r.id}}" style="position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0)">Edit Arabic note {{r.id}}</label>
+<textarea id="ed-{{r.id}}" dir="rtl" rows="4" value="{{r.draft}}" onChange="{{r.onEdit}}" style="width: 100%; box-sizing: border-box; border: 2px solid #1F5FBF; border-radius: 6px; padding: 6px 10px; font-family: 'Noto Naskh Arabic', 'Amiri', serif; font-size: 16px; line-height: 1.7; color: #1B1F24; resize: vertical; background: #FFFFFF"></textarea>
+<div style="display: flex; gap: 6px; align-items: center">
+<span style="font-size: 11px; color: #5B6570; margin-right: auto">Ctrl+Enter save &amp; approve · Esc cancel</span>
+<button type="button" onClick="{{r.cancel}}" style="min-height: 28px; padding: 0 8px; border-radius: 6px; border: 0; background: transparent; color: #1F4FA0; font: inherit; font-weight: 600; cursor: pointer">Cancel</button>
+<button type="button" onClick="{{r.save}}" style="min-height: 28px; padding: 0 10px; border-radius: 6px; border: 1px solid #C9D0D8; background: #FFFFFF; color: #1B1F24; font: inherit; font-weight: 600; cursor: pointer">Save</button>
+<button type="button" onClick="{{r.saveApprove}}" style="min-height: 28px; padding: 0 10px; border-radius: 6px; border: 0; background: #1F5FBF; color: #FFFFFF; font: inherit; font-weight: 600; cursor: pointer">Save &amp; approve</button>
+</div>
+</div>
+</sc-if>
+<sc-if value="{{r.notEditing}}" hint-placeholder-val="{{true}}">
+<button type="button" aria-label="Edit Arabic note {{r.id}}" onClick="{{r.edit}}" style="display: block; width: 100%; text-align: start; border: 1px solid {{r.cellBorder}}; border-radius: 6px; background: {{r.cellBg}}; padding: 3px 8px; margin: 0; font: inherit; color: #1B1F24; cursor: text">
+<span dir="rtl" style="display: block; font-family: 'Noto Naskh Arabic', 'Amiri', serif; font-size: 16px; line-height: 1.7; text-align: start"><sc-for list="{{r.arSeg}}" as="s"><span style="font-weight: {{s.w}}">{{s.t}}</span></sc-for></span>
+</button>
+</sc-if>
+</div>
+
+</div>
+</sc-for>
+
+<sc-if value="{{enHidden}}" hint-placeholder-val="{{false}}">
+<div style="padding: 6px 12px; font-size: 12px; color: #5B6570; background: #FAFBFC">English note column hidden. <button type="button" onClick="{{showEnFn}}" style="border: 0; background: transparent; color: #1F4FA0; font: inherit; font-weight: 600; cursor: pointer; padding: 0">Show it</button></div>
+</sc-if>
+</div>
+
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"scenario":{"editor":"enum","options":["default","action"],"default":"default"},"$preview":{"width":1366,"height":768}}'>
+const VERSE = {
+  ar: 'تكبر قلبك قد خدعك أيها الساكن في محاجئ الصخر، رفعة مقعده، القائل في قلبه: من يحدرني إلى الأرض؟',
+  ult: 'The pride of your heart has deceived you: he who dwells in the clefts of the rock, lofty in his dwelling; he who says in his heart, “Who will bring me down to earth?”',
+  he: 'זְד֤וֹן לִבְּ⁠ךָ֙ הִשִּׁיאֶ֔⁠ךָ שֹׁכְנִ֥י בְ⁠חַגְוֵי־סֶּ֖לַע מְר֣וֹם שִׁבְתּ֑⁠וֹ אֹמֵ֣ר בְּ⁠לִבּ֔⁠וֹ מִ֥י יוֹרִדֵ֖⁠נִי אָֽרֶץ׃'
+};
+
+const ROWS = [
+  { id: 'kjbt', typeLabel: 'Personification', status: 'approved',
+    he: 'זְד֤וֹן לִבְּ⁠ךָ֙ הִשִּׁיאֶ֔⁠ךָ', arq: 'تكبر قلبك قد خدعك', ulq: 'The pride of your heart has deceived you',
+    en: 'Here, **pride** is spoken of as though it were a person who could deceive someone. If this is not clear, you could say this with plain language. Alternate translation: [Because you are so proud, you have deceived yourselves]',
+    ar: `يتحدث الكاتب عن **الكبرياء** كما لو كان شخصًا يستطيع أن يخدع أحدًا. إذا لم يكن ذلك واضحًا، يمكنك التعبير عن المعنى بلغة مباشرة. ترجمة بديلة: [لأنك متكبر جدًا، فقد خدعت نفسك]` },
+  { id: 'hzdk', typeLabel: 'You (singular group)', status: 'approved',
+    he: 'זְד֤וֹן לִבְּ⁠ךָ֙ הִשִּׁיאֶ֔⁠ךָ', arq: 'تكبر قلبك قد خدعك', ulq: 'The pride of your heart has deceived you',
+    en: 'Here, **you** is singular, since it refers to the people of Edom as a single nation, but if this is confusing in your language, you can use a plural form of “you” here and throughout this book.',
+    ar: `هنا، **أنت** ضمير مفرد، لأنه يشير إلى شعب أدوم كأمة واحدة، لكن إذا كان هذا مربكًا في لغتك، يمكنك استخدام صيغة الجمع لـ"أنتم" هنا وفي بقية هذا السفر.` },
+  { id: 'kcc3', typeLabel: 'Abstract nouns', status: 'edited',
+    he: 'זְד֤וֹן לִבְּ⁠ךָ֙', arq: 'تكبر قلبك', ulq: 'The pride of your heart',
+    en: 'If your language does not use an abstract noun for the idea behind the word **pride**, you can express the same idea with an adjective such as “proud.” Alternate translation: [Your proud attitude]',
+    ar: `إذا كانت لغتك لا تستخدم اسمًا مجرّدًا للتعبير عن فكرة **الكبرياء**، يمكنك التعبير عن الفكرة نفسها بصفة مثل "متكبر." ترجمة بديلة: [موقفك المتكبر]` },
+  { id: 'qpw7', typeLabel: 'Metaphor', status: 'draft',
+    he: 'זְד֤וֹן לִבְּ⁠ךָ֙', arq: 'تكبر قلبك', ulq: 'The pride of your heart',
+    en: 'Here, **heart** is used to refer to a person’s thoughts and feelings. Alternate translation: [Your proud attitude]',
+    ar: `هنا، تُستخدم **القلب** للإشارة إلى أفكار الشخص ومشاعره. ترجمة بديلة: [موقفك المتكبر]` },
+  { id: 'k9sw', typeLabel: '1st / 2nd / 3rd person', status: 'draft',
+    he: 'שֹׁכְנִ֥י בְ⁠חַגְוֵי־סֶּ֖לַע', arq: 'الساكن في محاجئ الصخر', ulq: 'he who dwells in the clefts of the rock',
+    en: 'Here, the pronoun switches from **you** to **he** even though Yahweh is still talking to the people of Edom. If this is confusing in your language, you can continue to use **you**, since this is part of Yahweh’s continuing message to the people of Edom. Alternate translation: [you who live in the clefts of the rock]',
+    ar: `هنا، يتحول الضمير من **أنت** إلى **هو** مع أن يهوه ما زال يتحدث إلى شعب أدوم. إذا كان هذا مربكًا في لغتك، يمكنك الاستمرار في استخدام **أنت**، لأن هذا جزء من كلام يهوه المستمر لشعب أدوم. ترجمة بديلة: [أنت الذي تسكن في شقوق الصخر]` },
+  { id: 'q6sz', typeLabel: 'No type', status: 'draft',
+    he: 'בְ⁠חַגְוֵי־סֶּ֖לַע', arq: 'في محاجئ الصخر', ulq: 'in the clefts of the rock',
+    en: 'This means a place that is protected because it is surrounded by rocks.',
+    ar: `هذا يعني مكانًا محميًا لأنه محاط بالصخور.` },
+  { id: 'r5zj', typeLabel: '1st / 2nd / 3rd person', status: 'draft',
+    he: 'אֹמֵ֣ר בְּ⁠לִבּ֔⁠וֹ', arq: 'القائل في قلبه', ulq: 'he who says in his heart',
+    en: 'This says **he** and **his**, as if Yahweh were talking aloud about Edom rather than to Edom, but it can be translated with **you** as part of Yahweh’s continuing words to the people. Alternate translation: [you who say in your heart] or [you who say to yourselves]',
+    ar: `هذا يقول **هو** و**له**، كما لو كان يهوه يتحدث بصوت عالٍ عن أدوم بدلًا من التحدث إليه، لكن يمكن ترجمته بـ**أنت** كجزء من كلام يهوه المستمر لشعبه. ترجمة بديلة: [أنت الذي تقول في قلبك] أو [أنت الذي تقول لنفسك]` },
+  { id: 'jd3r', typeLabel: 'Metaphor', status: 'draft',
+    he: 'אֹמֵ֣ר בְּ⁠לִבּ֔⁠וֹ', arq: 'القائل في قلبه', ulq: 'he who says in his heart',
+    en: 'Here, the heart is used to refer to a person’s thoughts and feelings. Alternate translation: [he who says to himself] or [you who think]',
+    ar: `هنا، يُستخدم القلب للإشارة إلى أفكار الشخص ومشاعره. ترجمة بديلة: [الذي يقول لنفسه] أو [أنت الذي تفكر]` },
+  { id: 'i2hx', typeLabel: 'Rhetorical question', status: 'draft',
+    he: 'מִ֥י יוֹרִדֵ֖⁠נִי אָֽרֶץ', arq: 'من يحدرني إلى الأرض', ulq: 'Who will bring me down to earth?',
+    en: 'This rhetorical question expresses how proud the Edomites were and how safe they felt. Alternate translation: [no one can bring me down to the ground] or [I am safe from all attackers]',
+    ar: `لا يطلب الكاتب معلومات هنا، بل يستخدم صيغة السؤال للتعبير عن مدى كبرياء الأدوميين وشعورهم بالأمان. إذا كانت لغتك لا تستخدم السؤال البلاغي بهذه الطريقة، يمكنك ترجمة كلماته كعبارة تقريرية أو تعجبية. ترجمة بديلة: [لا أحد يستطيع أن ينزلني إلى الأرض] أو [أنا آمن من كل المهاجمين]` }
+];
+
+const VERSE_COUNTS = [14, 5, 9, 6, 5, 5, 8, 8, 9, 7, 7, 7, 5, 3, 7, 7, 5, 9, 11, 10, 5];
+
+const CHIPS = {
+  approved: { label: 'Approved', bg: '#E2F2EA', fg: '#0E5B3E', dot: '#1E8A5F' },
+  edited: { label: 'Edited', bg: '#FFF0D9', fg: '#8A4600', dot: '#D07A00' },
+  draft: { label: 'Draft · AI', bg: '#ECEFF3', fg: '#3A4450', dot: '#8A94A0' },
+  pending: { label: 'Pending · AI', bg: '#E8EEFB', fg: '#1F4FA0', dot: '#1F5FBF' },
+  notneeded: { label: 'Not needed', bg: '#F1F1F1', fg: '#5E6670', dot: '#A0A7AF' },
+  unsaved: { label: 'Unsaved', bg: '#FFF3CC', fg: '#7A5200', dot: '#D08A00' }
+};
+
+
+const STAT = {
+  draft: { label: 'Draft · AI', fg: '#B34700', ring: '#D55E00', style: 'solid', fill: '#FFFFFF', mark: '' },
+  pending: { label: 'Pending · AI', fg: '#0B5A8F', ring: '#0072B2', style: 'dashed', fill: '#FFFFFF', mark: '' },
+  edited: { label: 'Edited', fg: '#8A5A00', ring: '#E69F00', style: 'solid', fill: 'linear-gradient(90deg, #E69F00 50%, #FFFFFF 50%)', mark: '' },
+  unsaved: { label: 'Unsaved edit', fg: '#8A5A00', ring: '#E69F00', style: 'dashed', fill: '#FFFFFF', mark: 'dot' },
+  approved: { label: 'Approved', fg: '#00704F', ring: '#009E73', style: 'solid', fill: '#009E73', mark: 'check' },
+  notneeded: { label: 'Not needed', fg: '#5E6670', ring: '#8A94A0', style: 'solid', fill: '#E3E7EC', mark: 'dash' }
+};
+
+function statVals(key, id) {
+  const v = STAT[key];
+  return {
+    stLabel: v.label, stFg: v.fg, ring: v.ring, ringStyle: v.style, fill: v.fill,
+    markCheck: v.mark === 'check', markDash: v.mark === 'dash', markDot: v.mark === 'dot',
+    approvedAria: key === 'approved' ? 'true' : 'false',
+    circleAria: key === 'approved' ? 'Approved. Click to take approval off ' + id : 'Approve ' + id + ' (A)'
+  };
+}
+
+const LIST = ROWS;
+const ORDER = ROWS.map((r) => r.id);
+
+function strip(s) { return s.replace(/⁠/g, ''); }
+
+function marks(text, quote, color) {
+  const t = strip(text);
+  const q = quote ? strip(quote) : '';
+  const i = q ? t.indexOf(q) : -1;
+  if (i < 0) return [{ t: t, bg: 'transparent' }];
+  return [
+    { t: t.slice(0, i), bg: 'transparent' },
+    { t: q, bg: color },
+    { t: t.slice(i + q.length), bg: 'transparent' }
+  ];
+}
+
+function md(text) {
+  return text.split('**').map((t, i) => ({ t: t, w: i % 2 ? 700 : 400 }));
+}
+
+class Component extends DCLogic {
+  defaults() {
+    const base = { sel: {}, anchor: null, editing: null, drafts: {}, statusOv: {}, arOv: {}, showEn: true, showUlt: true, showHe: false, showKeys: false, focus: 'qpw7', msg: null, undoSnap: null };
+    if ((this.props.scenario ?? 'default') === 'action') {
+      base.sel = { kcc3: true, qpw7: true, k9sw: true, q6sz: true };
+      base.anchor = 'kcc3';
+      base.editing = 'qpw7';
+      base.focus = 'qpw7';
+      base.drafts = { qpw7: 'هنا، يُستخدم **القلب** للإشارة إلى أفكار الإنسان ومشاعره. ترجمة بديلة: [موقفك المتكبر] أو [كبرياؤك]' };
+    }
+    return base;
+  }
+
+  s() { return Object.assign({}, this.defaults(), this.state || {}); }
+
+  snap(s) { return { statusOv: s.statusOv, arOv: s.arOv, drafts: s.drafts }; }
+
+  statusOf(s, r) { return s.statusOv[r.id] ?? r.status; }
+  arOf(s, r) { return s.arOv[r.id] ?? r.ar; }
+
+  toggle(id, e) {
+    const s = this.s();
+    const ids = ROWS.map((r) => r.id);
+    const sel = Object.assign({}, s.sel);
+    const val = !sel[id];
+    if (e && e.shiftKey && s.anchor && s.anchor !== id) {
+      const a = ids.indexOf(s.anchor), b = ids.indexOf(id);
+      const lo = Math.min(a, b), hi = Math.max(a, b);
+      for (let k = lo; k <= hi; k++) { if (val) sel[ids[k]] = true; else delete sel[ids[k]]; }
+    } else {
+      if (val) sel[id] = true; else delete sel[id];
+    }
+    this.setState({ sel: sel, anchor: id, focus: id, msg: null });
+  }
+
+  toggleAll() {
+    const s = this.s();
+    const n = Object.keys(s.sel).length;
+    if (n === ROWS.length) this.setState({ sel: {}, anchor: null, msg: null });
+    else {
+      const sel = {};
+      ROWS.forEach((r) => { sel[r.id] = true; });
+      this.setState({ sel: sel, msg: null });
+    }
+  }
+
+  bulk(kind) {
+    const s = this.s();
+    const ids = Object.keys(s.sel);
+    if (!ids.length) return;
+    const statusOv = Object.assign({}, s.statusOv);
+    const arOv = Object.assign({}, s.arOv);
+    const drafts = Object.assign({}, s.drafts);
+    let savedFirst = 0;
+    ids.forEach((id) => {
+      if (kind === 'approve') {
+        if (drafts[id] !== undefined) { arOv[id] = drafts[id]; delete drafts[id]; savedFirst++; }
+        statusOv[id] = 'approved';
+      } else if (kind === 'redo') {
+        statusOv[id] = 'pending';
+      } else if (kind === 'notneeded') {
+        statusOv[id] = 'notneeded';
+      }
+    });
+    const n = ids.length;
+    const msg = kind === 'approve'
+      ? 'Approved ' + n + ' note' + (n === 1 ? '' : 's') + (savedFirst ? ' (saved ' + savedFirst + ' unsaved edit first)' : '') + '.'
+      : kind === 'redo'
+        ? 'Asked the AI to redo ' + n + ' note' + (n === 1 ? '' : 's') + '. New drafts appear when ready.'
+        : 'Set aside ' + n + ' note' + (n === 1 ? '' : 's') + ' as not needed.';
+    const editing = ids.indexOf(s.editing) >= 0 ? null : s.editing;
+    this.setState({ statusOv: statusOv, arOv: arOv, drafts: drafts, sel: {}, anchor: null, editing: editing, msg: msg, undoSnap: this.snap(s) });
+  }
+
+  undo() {
+    const s = this.s();
+    if (!s.undoSnap) return;
+    this.setState(Object.assign({}, s.undoSnap, { msg: null, undoSnap: null }));
+  }
+
+  one(id, kind) {
+    const s = this.s();
+    const statusOv = Object.assign({}, s.statusOv);
+    const arOv = Object.assign({}, s.arOv);
+    const drafts = Object.assign({}, s.drafts);
+    if (kind === 'cancel') { delete drafts[id]; this.setState({ drafts: drafts, editing: null }); return; }
+    if (drafts[id] !== undefined) { arOv[id] = drafts[id]; delete drafts[id]; }
+    statusOv[id] = kind === 'save' ? 'edited' : 'approved';
+    const sel = Object.assign({}, s.sel);
+    if (kind !== 'save') delete sel[id];
+    this.setState({ statusOv: statusOv, arOv: arOv, drafts: drafts, editing: null, sel: sel, msg: kind === 'save' ? 'Saved ' + id + '.' : 'Approved ' + id + '.', undoSnap: this.snap(s) });
+  }
+
+  edit(id) {
+    const s = this.s();
+    const r = ROWS.find((x) => x.id === id);
+    const drafts = Object.assign({}, s.drafts);
+    if (drafts[id] === undefined) drafts[id] = this.arOf(s, r);
+    this.setState({ editing: id, focus: id, drafts: drafts });
+  }
+
+
+  flipApprove(id) {
+    const s = this.s();
+    const n = LIST.find((x) => x.id === id);
+    if (this.statusOf(s, n) === 'approved') {
+      const statusOv = Object.assign({}, s.statusOv);
+      statusOv[id] = n.status === 'approved' || s.arOv[id] !== undefined ? 'edited' : n.status;
+      this.setState({ statusOv: statusOv, focus: id, msg: 'Took approval off ' + id + '.', undoSnap: this.snap(s) });
+    } else {
+      this.one(id, 'approve');
+      this.setState({ focus: id });
+    }
+  }
+
+  focusRow(root, id) {
+    setTimeout(() => {
+      if (!root || !root.querySelector) return;
+      const cb = root.querySelector('[data-cb="' + id + '"]');
+      if (!cb) return;
+      const scrolls = root.scrollHeight > root.clientHeight + 2;
+      if (!scrolls) { cb.focus(); return; }
+      cb.focus({ preventScroll: true });
+      const row = cb.closest('[data-row]') || cb;
+      const sticky = root.querySelector('[data-sticky]');
+      const rr = row.getBoundingClientRect();
+      const cr = root.getBoundingClientRect();
+      const top = (sticky ? sticky.getBoundingClientRect().bottom : cr.top) + 4;
+      if (rr.top < top) root.scrollTop -= (top - rr.top);
+      else if (rr.bottom > cr.bottom - 8) root.scrollTop += Math.min(rr.bottom - cr.bottom + 8, rr.top - top);
+    }, 0);
+  }
+
+  onKey(e) {
+    const root = e.currentTarget;
+    const t = e.target || {};
+    const tag = (t.tagName || '').toLowerCase();
+    const s = this.s();
+    const ids = ORDER;
+    if (tag === 'textarea' || tag === 'input') {
+      if (!s.editing) return;
+      if (e.key === 'Escape') { e.preventDefault(); const id = s.editing; this.one(id, 'cancel'); this.focusRow(root, id); }
+      else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        const id = s.editing;
+        const next = ids[Math.min(ids.length - 1, ids.indexOf(id) + 1)];
+        this.one(id, 'approve');
+        this.setState({ focus: next });
+        this.focusRow(root, next);
+      }
+      return;
+    }
+    if (e.altKey) return;
+    const k = e.key;
+    const cur = ids.indexOf(s.focus) >= 0 ? s.focus : ids[0];
+    const down = k === 'j' || k === 'J' || k === 'ArrowDown';
+    const up = k === 'k' || k === 'K' || k === 'ArrowUp';
+    if ((down || up) && !e.ctrlKey && !e.metaKey) {
+      e.preventDefault();
+      const i = ids.indexOf(cur);
+      const nid = ids[Math.max(0, Math.min(ids.length - 1, i + (down ? 1 : -1)))];
+      const patch = { focus: nid, msg: null };
+      if (e.shiftKey) {
+        const sel = Object.assign({}, s.sel);
+        sel[cur] = true; sel[nid] = true;
+        patch.sel = sel;
+        patch.anchor = s.anchor || cur;
+      }
+      this.setState(patch);
+      this.focusRow(root, nid);
+    } else if (k === ' ' && tag !== 'button') {
+      e.preventDefault();
+      this.toggle(cur, { shiftKey: e.shiftKey });
+      this.focusRow(root, cur);
+    } else if (k === 'Enter' && !e.ctrlKey && !e.metaKey && (tag !== 'button' || (t.getAttribute && t.getAttribute('data-cb')))) {
+      e.preventDefault();
+      this.edit(cur);
+      setTimeout(() => { const ta = root.querySelector('textarea'); if (ta) { ta.focus({ preventScroll: true }); ta.setSelectionRange(ta.value.length, ta.value.length); } }, 30);
+    } else if ((k === 'a' || k === 'A') && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      this.toggleAll();
+    } else if ((k === 'a' || k === 'A') && !e.shiftKey) {
+      e.preventDefault();
+      if (Object.keys(s.sel).length) { this.bulk('approve'); return; }
+      const next = ids[Math.min(ids.length - 1, ids.indexOf(cur) + 1)];
+      this.one(cur, 'approve');
+      this.setState({ focus: next });
+      this.focusRow(root, next);
+    }
+  }
+
+  renderVals() {
+    const s = this.s();
+    const focusRow = ROWS.find((r) => r.id === s.focus) || ROWS[3];
+    const selIds = Object.keys(s.sel);
+    const selCount = selIds.length;
+    const dirtySel = selIds.filter((id) => s.drafts[id] !== undefined).length;
+    const cols = s.showEn
+      ? '32px 112px 170px minmax(0, 1fr) minmax(0, 1.2fr)'
+      : '32px 112px 170px minmax(0, 1.8fr)';
+
+    const rows = ROWS.map((r) => {
+      const st = this.statusOf(s, r);
+      const sel = !!s.sel[r.id];
+      const draft = s.drafts[r.id];
+      const dirty = draft !== undefined && draft !== this.arOf(s, r);
+      const chip = dirty ? CHIPS.unsaved : CHIPS[st];
+      const isEditing = s.editing === r.id;
+      return {
+        id: r.id,
+        typeLabel: r.typeLabel,
+        he: strip(r.he),
+        arq: r.arq,
+        enSeg: md(r.en),
+        arSeg: md(dirty ? draft : this.arOf(s, r)),
+        draft: draft ?? this.arOf(s, r),
+        sel: sel,
+        aria: sel ? 'true' : 'false',
+        cbBorder: sel ? '#1F5FBF' : '#6B7480',
+        cbBg: sel ? '#1F5FBF' : '#FFFFFF',
+        isAnchor: s.anchor === r.id && selCount > 0,
+        bg: sel ? '#EAF1FC' : (s.focus === r.id ? '#F5F8FE' : '#FFFFFF'),
+        curBar: s.focus === r.id ? 'inset 4px 0 0 #1F5FBF' : 'none',
+        opacity: st === 'notneeded' ? 0.55 : 1,
+        cellBorder: dirty ? '#E3B341' : (s.focus === r.id ? '#C9D0D8' : 'transparent'),
+        cellBg: dirty ? '#FFFBEA' : 'transparent',
+        ...statVals(dirty ? 'unsaved' : st, r.id),
+        flip: (e) => { if (e && e.stopPropagation) e.stopPropagation(); this.flipApprove(r.id); },
+        makeCurrent: () => this.setState({ focus: r.id }),
+        canApprove: st !== 'approved' && st !== 'notneeded',
+        isEditing: isEditing,
+        notEditing: !isEditing,
+        toggle: (e) => { if (e && e.stopPropagation) e.stopPropagation(); this.toggle(r.id, e); },
+        noTextSelect: (e) => { if (e && e.shiftKey) e.preventDefault(); },
+        focus: () => { if (s.focus !== r.id) this.setState({ focus: r.id }); },
+        edit: (e) => { if (e && e.stopPropagation) e.stopPropagation(); this.edit(r.id); },
+        onEdit: (e) => { const d = Object.assign({}, this.s().drafts); d[r.id] = e.target.value; this.setState({ drafts: d }); },
+        cancel: (e) => { if (e && e.stopPropagation) e.stopPropagation(); this.one(r.id, 'cancel'); },
+        save: (e) => { if (e && e.stopPropagation) e.stopPropagation(); this.one(r.id, 'save'); },
+        saveApprove: (e) => { if (e && e.stopPropagation) e.stopPropagation(); this.one(r.id, 'approve'); },
+        approve: (e) => { if (e && e.stopPropagation) e.stopPropagation(); this.one(r.id, 'approve'); }
+      };
+    });
+
+    const verseApproved = ROWS.filter((r) => this.statusOf(s, r) === 'approved').length;
+    const chapterApproved = 19 + verseApproved;
+
+    const allOn = selCount === ROWS.length;
+    const mixed = selCount > 0 && !allOn;
+
+    const tog = (label, key) => {
+      const on = !!s[key];
+      return {
+        label: label,
+        pressed: on ? 'true' : 'false',
+        border: on ? '#1F5FBF' : '#C9D0D8',
+        bg: on ? '#E8EEFB' : '#FFFFFF',
+        fg: on ? '#1F4FA0' : '#3A4450',
+        tickOpacity: on ? 1 : 0,
+        flip: () => { const p = {}; p[key] = !on; this.setState(p); }
+      };
+    };
+
+    const stripItems = VERSE_COUNTS.map((c, i) => {
+      const n = i + 1;
+      const current = n === 3;
+      const done = n < 3;
+      return {
+        n: n,
+        sub: done ? '✓' : String(c),
+        aria: 'Verse ' + n + ', ' + c + ' notes' + (done ? ', all approved' : ''),
+        current: current ? 'true' : 'false',
+        border: current ? '#1F5FBF' : (done ? '#B9DCCB' : '#D5DAE0'),
+        bg: current ? '#1F5FBF' : (done ? '#E2F2EA' : '#FFFFFF'),
+        fg: current ? '#FFFFFF' : (done ? '#0E5B3E' : '#3A4450')
+      };
+    });
+
+    return {
+      cols: cols,
+      rows: rows,
+      strip: stripItems,
+      showEn: s.showEn,
+      enHidden: !s.showEn,
+      showUlt: s.showUlt,
+      showHe: s.showHe,
+      toggles: [tog('ULT', 'showUlt'), tog('Hebrew', 'showHe'), tog('English note', 'showEn')],
+      hideEn: () => this.setState({ showEn: false }),
+      showEnFn: () => this.setState({ showEn: true }),
+      arVerse: marks(VERSE.ar, focusRow.arq, '#FFE08A'),
+      ultVerse: marks(VERSE.ult, focusRow.ulq, '#FFE08A'),
+      heVerse: marks(VERSE.he, focusRow.he, '#FFE08A'),
+      focusId: focusRow.id,
+      verseLine: '9 notes, ' + verseApproved + ' approved.',
+      onKey: (e) => this.onKey(e),
+      showKeys: s.showKeys,
+      keysOpen: s.showKeys ? 'true' : 'false',
+      flipKeys: () => this.setState({ showKeys: !s.showKeys }),
+      verseApproved: verseApproved,
+      chapterApproved: chapterApproved,
+      chapterPct: Math.round(chapterApproved / 152 * 100) + '%',
+      all: {
+        aria: allOn ? 'true' : (mixed ? 'mixed' : 'false'),
+        on: allOn,
+        mixed: mixed,
+        border: selCount ? '#1F5FBF' : '#6B7480',
+        bg: selCount ? '#1F5FBF' : '#FFFFFF',
+        toggle: () => this.toggleAll()
+      },
+      barBg: selCount ? '#EAF1FC' : '#FFFFFF',
+      hasSel: selCount > 0,
+      noSel: selCount === 0,
+      selCount: selCount,
+      hasDirtySel: dirtySel > 0,
+      dirtySelText: dirtySel + ' with unsaved edits',
+      hasMsg: !!s.msg,
+      noMsg: !s.msg,
+      msg: s.msg || '',
+      undo: () => this.undo(),
+      approveSel: () => this.bulk('approve'),
+      redoSel: () => this.bulk('redo'),
+      notNeededSel: () => this.bulk('notneeded'),
+      clearSel: () => this.setState({ sel: {}, anchor: null })
+    };
+  }
+}
+</script>
+</body>
+</html>
