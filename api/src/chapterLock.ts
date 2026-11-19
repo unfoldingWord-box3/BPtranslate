@@ -47,7 +47,7 @@ const CHAPTER_WIDE_TN_TRANSLATE_SQL = `pipeline_type = 'translate'
 // The book introduction (chapter 0, front:intro) is covered by a chapter-wide
 // tn TRANSLATE job that starts at chapter 1: that job translates the intro too
 // (the same rule as sliceChapterRows, parseOutputEntry's frontInScope and
-// applyTranslateTnRow's `chapter = 0 AND start = 1`), so the intro has to be
+// loadTnTargets' `chapter = 0 AND start = 1`), so the intro has to be
 // locked with it (issue #561). Other job types never write chapter 0, and a
 // row-scoped or verse-ranged redraft writes the intro only when it selected it
 // — the tn PATCH check (translateLockForTnRow) handles that per row.

@@ -1572,9 +1572,10 @@ test("import (internal, #794): an Approve landing between the row read and the w
   // not bump the version, so only the state guard stops the write.
   const batch = env.DB.batch.bind(env.DB);
   let fired = 0;
+  // Since #945 a batch carries many rows' writes, so look for cd34's UPDATE
+  // anywhere in it, not only as the first statement.
   env.DB.batch = async (stmts) => {
-    const s = stmts[0];
-    if (/UPDATE tn_rows\s+SET note/.test(s?.sql ?? "") && (s.args ?? []).includes("cd34")) {
+    if (stmts.some((s) => /UPDATE tn_rows\s+SET note/.test(s?.sql ?? "") && (s.args ?? []).includes("cd34"))) {
       fired++;
       sqlite.prepare(`UPDATE tn_rows SET translation_state = 'validated' WHERE id = 'cd34'`).run();
     }

@@ -813,7 +813,25 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
       }
       recordSkip("approved", r.kind, r);
     }
-    const tnTouched =await touchedLookup("tn", tnProposals, job.book, "id", requested);
+    const tnTouched = await touchedLookup("tn", tnProposals, job.book, "id", requested);
+    // #945: the rows are written in batches (applyRowsBatched); the outcomes
+    // are then recorded below in proposal order, exactly as the per-row loop did.
+    const tnOutcomes = await applyRowsBatched(
+      env,
+      tnProposals.filter((p) => tnTouched(p) === null),
+      (ids) => loadTnTargets(env, job, ids),
+      (p, target, now) => {
+        const payload = JSON.parse(p.payload_json) as { id?: unknown; note?: unknown };
+        const id = typeof payload.id === "string" ? payload.id : null;
+        const source = english.get(p.chapter);
+        const englishEcho =
+          source?.ok === true && id !== null && isEnglishEcho(payload.note, source.notes.get(id));
+        return planTranslateTnRow(env, p, target, job, userId, houseRules, { keepApproved, englishEcho }, now);
+      },
+      // #794: the write changed nothing. If the state guard was on and the note
+      // is approved now, an Approve landed after the read: report it as kept.
+      async (id) => (keepApproved && (await approvedNow(env, "tn_rows", id, job.book)) ? "approved" : "no_match"),
+    );
     for (const p of tnProposals) {
       const proposedId = tnTouched(p);
       if (proposedId !== null) {
@@ -822,12 +840,10 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
         recordSkip("touched", "tn", p);
         continue;
       }
-      const payload = JSON.parse(p.payload_json) as { id?: unknown; note?: unknown };
+      const payload = JSON.parse(p.payload_json) as { id?: unknown };
       const id = typeof payload.id === "string" ? payload.id : null;
       const source = english.get(p.chapter);
-      const englishEcho =
-        source?.ok === true && id !== null && isEnglishEcho(payload.note, source.notes.get(id));
-      const outcome = await applyTranslateTnRow(env, p, job, userId, houseRules, { keepApproved, englishEcho });
+      const outcome = tnOutcomes.get(p);
       if (outcome === "drafted") {
         affected.add(p.chapter);
         result.tnHintExpanded += 1; // reuses the "updated in place" counter
@@ -852,6 +868,14 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
       // preserving the row-identity guarantee. Surfaced via pending_imports.
     }
     const tqTouched = await touchedLookup("tq", tqProposals, job.book, "id", requested);
+    const tqOutcomes = await applyRowsBatched(
+      env,
+      tqProposals.filter((p) => tqTouched(p) === null),
+      (ids) => loadTqTargets(env, job, ids),
+      (p, target, now) => planTranslateTqRow(env, p, target, job, userId, houseRules, { keepApproved }, now),
+      // #794: see the tn call above.
+      async (id) => (keepApproved && (await approvedNow(env, "tq_rows", id, job.book)) ? "approved" : "no_match"),
+    );
     for (const p of tqProposals) {
       const proposedId = tqTouched(p);
       if (proposedId !== null) {
@@ -860,7 +884,7 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
         recordSkip("touched", "tq", p);
         continue;
       }
-      const outcome = await applyTranslateTqRow(env, p, job, userId, houseRules, { keepApproved });
+      const outcome = tqOutcomes.get(p);
       if (outcome === "drafted") {
         affected.add(p.chapter);
         result.tqUpdated += 1; // reuses the "updated in place" counter
@@ -945,6 +969,122 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
   throw new Error(`apply: pipeline type '${job.pipelineType}' is retired; its output is not imported`);
 }
 
+type TnApplyOutcome = "drafted" | "no_match" | "trashed" | "approved" | "same_as_english";
+type TqApplyOutcome = "drafted" | "no_match" | "approved";
+
+// #945: what the plan step decides for one proposal. Either an outcome reached
+// without writing, or the row's three statements (UPDATE, edit_log, accept),
+// which applyRowsBatched sends in one batch and reads back as "drafted" when
+// the UPDATE changed the row.
+type RowPlan<O> = { outcome: O } | { id: string; statements: [D1PreparedStatement, D1PreparedStatement, D1PreparedStatement] };
+
+// D1 caps a batch at 100 statements and a query at 100 bound parameters. A row
+// writes three statements, so 33 rows fill a batch; the target read for those
+// 33 rows binds 33 ids plus 3 scope parameters.
+const APPLY_ROWS_PER_BATCH = 33;
+
+const proposalIdOf = (p: PendingImportRow): string | null => {
+  const id = (JSON.parse(p.payload_json) as Record<string, unknown>).id;
+  return typeof id === "string" && id ? id : null;
+};
+
+// #945: applies translate proposals in batches. Before, every row awaited its
+// own target read and then its own three-statement batch: two D1 round trips
+// per row (161 notes, LUK 18, took over a minute with the chapter locked).
+// Now each chunk of APPLY_ROWS_PER_BATCH rows costs two: one read of the
+// chunk's targets and one batch of all its writes. The read sits right before
+// its chunk's write, so the gap a concurrent edit can fall into stays short;
+// the version CAS and the approved guard in each UPDATE still catch one.
+//
+// Retry safety is unchanged. A row's three statements always go in the same
+// batch() call, which D1 runs atomically, so a crash leaves each row either
+// fully drafted, logged and accepted, or untouched; a retry reads only the
+// still-unaccepted proposals.
+//
+// Kept sequential: a second proposal for a row already in this pass. Its
+// write depends on the first one's (the new version), and in one batch its
+// UPDATE would lose the CAS while its edit_log and accept statements, gated on
+// the version the first write produced, would still pass. So each pass takes
+// only the first proposal per row id and repeats go to the next pass, which
+// reads the row again after the first write committed, as the per-row loop did.
+// Also per row: the approvedNow read after a write that changed nothing (a lost
+// race), which is rare.
+async function applyRowsBatched<T, O extends string>(
+  env: Env,
+  proposals: PendingImportRow[],
+  load: (ids: string[]) => Promise<Map<string, T>>,
+  plan: (p: PendingImportRow, target: T | undefined, now: number) => RowPlan<O>,
+  lost: (id: string) => Promise<O>,
+): Promise<Map<PendingImportRow, O | "drafted" | "no_match">> {
+  const outcomes = new Map<PendingImportRow, O | "drafted" | "no_match">();
+  let pass = proposals;
+  while (pass.length > 0) {
+    const seen = new Set<string>();
+    const first: PendingImportRow[] = [];
+    const next: PendingImportRow[] = [];
+    for (const p of pass) {
+      const id = proposalIdOf(p);
+      if (id === null) outcomes.set(p, "no_match");
+      else if (seen.has(id)) next.push(p);
+      else {
+        seen.add(id);
+        first.push(p);
+      }
+    }
+    for (let i = 0; i < first.length; i += APPLY_ROWS_PER_BATCH) {
+      const chunk = first.slice(i, i + APPLY_ROWS_PER_BATCH);
+      const targets = await load(chunk.map((p) => proposalIdOf(p) as string));
+      const at = Math.floor(Date.now() / 1000);
+      const writes: { p: PendingImportRow; id: string }[] = [];
+      const statements: D1PreparedStatement[] = [];
+      for (const p of chunk) {
+        const planned = plan(p, targets.get(proposalIdOf(p) as string), at);
+        if ("outcome" in planned) outcomes.set(p, planned.outcome);
+        else {
+          writes.push({ p, id: planned.id });
+          statements.push(...planned.statements);
+        }
+      }
+      if (statements.length === 0) continue;
+      const res = await env.DB.batch(statements);
+      for (let w = 0; w < writes.length; w++) {
+        const changed = (res[w * 3]?.meta?.changes ?? 0) > 0;
+        outcomes.set(writes[w].p, changed ? "drafted" : await lost(writes[w].id));
+      }
+    }
+    pass = next;
+  }
+  return outcomes;
+}
+
+interface TnTarget {
+  id: string;
+  version: number;
+  note: string | null;
+  tags: string | null;
+  translation_state: string | null;
+  pre_draft_json: string | null;
+  trashed_at: number | null;
+}
+
+// The live tn rows a chunk of proposals would write, by id. `chapter = 0 AND
+// ?2 = 1`: the book introduction (front:intro) rides along with a job that
+// starts at chapter 1, as in parseOutputEntry's staging scope. trashed_at is
+// read, not filtered, so a note marked Not needed reports "trashed" rather than
+// "no_match" (#735).
+async function loadTnTargets(env: Env, job: ImportContext, ids: string[]): Promise<Map<string, TnTarget>> {
+  const places = ids.map((_, i) => `?${i + 4}`).join(", ");
+  const rs = await env.DB.prepare(
+    `SELECT id, version, note, tags, translation_state, pre_draft_json, trashed_at FROM tn_rows
+      WHERE deleted_at IS NULL
+        AND book = ?1 AND (chapter BETWEEN ?2 AND ?3 OR (chapter = 0 AND ?2 = 1))
+        AND id IN (${places})`,
+  )
+    .bind(job.book, job.startChapter, job.endChapter, ...ids)
+    .all<TnTarget>();
+  return new Map((rs.results ?? []).map((r) => [r.id, r]));
+}
+
 // Translate-pipeline apply (multilingual; PIPELINE-SPEC §2.1). The translate
 // output is exactly one target row per input row, keyed by the same rowId, with
 // only the Note translated — Reference/ID/SupportReference/Quote/Occurrence are
@@ -957,48 +1097,27 @@ async function applyJobOutput(env: Env, job: ImportContext): Promise<ApplyResult
 // in result, not inserted — inventing a row would break the row-identity
 // guarantee the whole contract rests on). Stamps translation_state='ai_draft'
 // and writes edit_log source='ai_pipeline' so the review UI shows the AI chip.
-async function applyTranslateTnRow(
+function planTranslateTnRow(
   env: Env,
   p: PendingImportRow,
+  target: TnTarget | undefined,
   job: ImportContext,
   userId: number,
   houseRules: HouseStyleRule[],
   guard: { keepApproved: boolean; englishEcho: boolean },
-): Promise<"drafted" | "no_match" | "trashed" | "approved" | "same_as_english"> {
+  now: number,
+): RowPlan<TnApplyOutcome> {
   const payload = JSON.parse(p.payload_json) as Record<string, unknown>;
-  const proposedId = typeof payload.id === "string" ? payload.id : null;
-  if (!proposedId) return "no_match";
-
-  // `chapter = 0 AND ?3 = 1`: the book introduction (front:intro) rides along
-  // with a job that starts at chapter 1, as in parseOutputEntry's staging scope.
-  // trashed_at is read, not filtered, so a note marked Not needed reports
-  // "trashed" rather than "no_match" (#735).
-  const target = await env.DB.prepare(
-    `SELECT id, version, note, tags, translation_state, pre_draft_json, trashed_at FROM tn_rows
-      WHERE id = ?1 AND deleted_at IS NULL
-        AND book = ?2 AND (chapter BETWEEN ?3 AND ?4 OR (chapter = 0 AND ?3 = 1))`,
-  )
-    .bind(proposedId, job.book, job.startChapter, job.endChapter)
-    .first<{
-      id: string;
-      version: number;
-      note: string | null;
-      tags: string | null;
-      translation_state: string | null;
-      pre_draft_json: string | null;
-      trashed_at: number | null;
-    }>();
-  if (!target) return "no_match";
+  if (!target) return { outcome: "no_match" };
   // A note marked Not needed gets no AI draft, as on the English apply path:
   // restoring it later must not bring back AI text nobody reviewed (#735).
-  if (target.trashed_at != null) return "trashed";
+  if (target.trashed_at != null) return { outcome: "trashed" };
   // #794: a whole-chapter run leaves an approved note as it is; only a run
   // that names the note (one-note redo, verse range) redrafts it.
-  if (guard.keepApproved && target.translation_state === "validated") return "approved";
+  if (guard.keepApproved && target.translation_state === "validated") return { outcome: "approved" };
   // #794: a draft that is the English source note copied back is not applied.
-  if (guard.englishEcho) return "same_as_english";
+  if (guard.englishEcho) return { outcome: "same_as_english" };
 
-  const now = Math.floor(Date.now() / 1000);
   const newVersion = target.version + 1;
   // House-style rules (#815) fix the model's note before it is stored. The
   // staged payload stays raw; the edit_log payload gains raw_note +
@@ -1017,7 +1136,7 @@ async function applyTranslateTnRow(
     tags: target.tags,
   });
 
-  const res = await env.DB.batch([
+  return { id: target.id, statements: [
     env.DB
       .prepare(
         // Only the translated Note (+ optional localized Tags) and the
@@ -1065,11 +1184,7 @@ async function applyTranslateTnRow(
           )`,
       )
       .bind(p.id, userId, target.id, job.book, newVersion, now),
-  ]);
-  if ((res[0]?.meta?.changes ?? 0) > 0) return "drafted";
-  // #794: the write changed nothing. If the state guard was on and the note is
-  // approved now, an Approve landed after the read above: report it as kept.
-  return guard.keepApproved && (await approvedNow(env, "tn_rows", target.id, job.book)) ? "approved" : "no_match";
+  ] };
 }
 
 // #794: is this row approved right now? Read only after a guarded write changed
@@ -1090,52 +1205,59 @@ async function approvedNow(env: Env, table: "tn_rows" | "tq_rows", id: string, b
 // has no matching row is skipped (surfaced in result, not inserted). Stamps
 // translation_state='ai_draft' and writes edit_log kind='tq' source='ai_pipeline'
 // so the review UI shows the AI chip.
-async function applyTranslateTqRow(
+interface TqTarget {
+  id: string;
+  version: number;
+  question: string | null;
+  response: string | null;
+  translation_state: string | null;
+  pre_draft_json: string | null;
+}
+
+// The live tq rows a chunk of proposals would write, by id (see loadTnTargets).
+async function loadTqTargets(env: Env, job: ImportContext, ids: string[]): Promise<Map<string, TqTarget>> {
+  const places = ids.map((_, i) => `?${i + 4}`).join(", ");
+  const rs = await env.DB.prepare(
+    `SELECT id, version, question, response, translation_state, pre_draft_json FROM tq_rows
+      WHERE deleted_at IS NULL
+        AND book = ?1 AND chapter BETWEEN ?2 AND ?3
+        AND id IN (${places})`,
+  )
+    .bind(job.book, job.startChapter, job.endChapter, ...ids)
+    .all<TqTarget>();
+  return new Map((rs.results ?? []).map((r) => [r.id, r]));
+}
+
+function planTranslateTqRow(
   env: Env,
   p: PendingImportRow,
+  target: TqTarget | undefined,
   job: ImportContext,
   userId: number,
   houseRules: HouseStyleRule[],
   guard: { keepApproved: boolean },
-): Promise<"drafted" | "no_match" | "approved"> {
+  now: number,
+): RowPlan<TqApplyOutcome> {
   const payload = JSON.parse(p.payload_json) as Record<string, unknown>;
-  const proposedId = typeof payload.id === "string" ? payload.id : null;
-  if (!proposedId) return "no_match";
-
-  const target = await env.DB.prepare(
-    `SELECT id, version, question, response, translation_state, pre_draft_json FROM tq_rows
-      WHERE id = ?1 AND deleted_at IS NULL
-        AND book = ?2 AND chapter BETWEEN ?3 AND ?4`,
-  )
-    .bind(proposedId, job.book, job.startChapter, job.endChapter)
-    .first<{
-      id: string;
-      version: number;
-      question: string | null;
-      response: string | null;
-      translation_state: string | null;
-      pre_draft_json: string | null;
-    }>();
-  if (!target) return "no_match";
+  if (!target) return { outcome: "no_match" };
   // #794: a whole-chapter run leaves an approved question as it is.
-  if (guard.keepApproved && target.translation_state === "validated") return "approved";
+  if (guard.keepApproved && target.translation_state === "validated") return { outcome: "approved" };
 
-  const now = Math.floor(Date.now() / 1000);
   const newVersion = target.version + 1;
-  // House-style rules (#815), as in applyTranslateTnRow, on both the question
+  // House-style rules (#815), as in planTranslateTnRow, on both the question
   // and the response (raw_question / raw_response in the edit_log payload).
   const house = houseStyleForProposal(payload, ["question", "response"], houseRules);
   const question = house.values.question;
   const response = house.values.response;
   const srcHash = (payload.source_row_hash as string | null | undefined) ?? null;
   const draftMeta = house.draftMetaJson;
-  // Last-published snapshot for export gating — see applyTranslateTnRow.
+  // Last-published snapshot for export gating — see planTranslateTnRow.
   const preDraftJson = nextPreDraftJson(target.translation_state, target.pre_draft_json, {
     question: target.question,
     response: target.response,
   });
 
-  const res = await env.DB.batch([
+  return { id: target.id, statements: [
     env.DB
       .prepare(
         // Only the translated Question/Response and the translation bookkeeping
@@ -1155,7 +1277,7 @@ async function applyTranslateTqRow(
           WHERE id = ?7 AND book = ?8 AND deleted_at IS NULL AND version = ?9
             AND (?11 = 0 OR translation_state IS NOT 'validated')`,
       )
-      // ?11: as in applyTranslateTnRow (#794).
+      // ?11: as in planTranslateTnRow (#794).
       .bind(question, response, srcHash, draftMeta, now, userId, target.id, job.book, target.version, preDraftJson, guard.keepApproved ? 1 : 0),
     env.DB
       .prepare(
@@ -1180,14 +1302,11 @@ async function applyTranslateTqRow(
           )`,
       )
       .bind(p.id, userId, target.id, job.book, newVersion, now),
-  ]);
-  if ((res[0]?.meta?.changes ?? 0) > 0) return "drafted";
-  // #794: see applyTranslateTnRow.
-  return guard.keepApproved && (await approvedNow(env, "tq_rows", target.id, job.book)) ? "approved" : "no_match";
+  ] };
 }
 
 // Translate-pipeline apply for tw/ta markdown articles (multilingual). The
-// article analogue of applyTranslateTqRow: UPDATEs target_md of the EXISTING
+// article analogue of planTranslateTqRow: UPDATEs target_md of the EXISTING
 // article_unit keyed by (resource, path), stamps translation_state='ai_draft',
 // CAS-guarded on version, edit_log kind='tw'|'ta' source='ai_pipeline'. Never
 // inserts — a path with no matching unit is skipped (the importer seeds units
@@ -1219,7 +1338,7 @@ async function applyTranslateArticle(
   const now = Math.floor(Date.now() / 1000);
   const newVersion = target.version + 1;
   const draftMeta = payload.draft_meta != null ? JSON.stringify(payload.draft_meta) : null;
-  // Last-published snapshot for export gating — see applyTranslateTnRow. A
+  // Last-published snapshot for export gating — see planTranslateTnRow. A
   // null target_md snapshot means "never previously translated": the export
   // then OMITS the file rather than shipping the unapproved draft.
   const preDraftJson = nextPreDraftJson(target.translation_state, target.pre_draft_json, {
@@ -1326,7 +1445,7 @@ async function recordArticleNoApplyAlert(
 // job reads only its own rows' history, not the book's. The window between
 // this read and the apply's write is covered by the #561/#602 route locks (the
 // job is 'running' while it applies), and a content edit is also caught by the
-// version CAS in applyTranslateTnRow / applyTranslateTqRow. For questions the
+// version CAS in planTranslateTnRow / planTranslateTqRow. For questions the
 // lock covers PATCH, Approve (/rows/tq/:id/validate) and the admin
 // review-state approve sweep (#752).
 // tW/tA articles (#734): kind is the resource, ids are paths, and `book` is
