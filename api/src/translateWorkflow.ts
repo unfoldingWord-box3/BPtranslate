@@ -112,8 +112,9 @@ export class TranslateWorkflow extends WorkflowEntrypoint<Env, TranslateWorkflow
     // tenant at all, and workspace_unknown names one this deployment has no
     // binding for — so the refusal writes NOTHING, by design. The job row is
     // left to the sweeps that already own abandoned rows (pipelines.ts):
-    // pollAllNonTerminal bumps attempt_count on every poll and auto-fails a
-    // still-'running' row after MAX_POLL_ATTEMPTS (~8h at the */5 cron), with
+    // pollAllNonTerminal bumps attempt_count on every poll that sees no
+    // progress and auto-fails a still-'running' row after MAX_POLL_ATTEMPTS
+    // (~8h without progress at the */5 cron), with
     // the 48h no-progress sweep behind it. The immediate signal is the errored
     // Workflow instance, which is what an operator has to look at anyway for a
     // refusal that names a workspace this deployment does not have.
