@@ -693,7 +693,7 @@ rows.patch("/:kind/:id", requireEditor, async (c) => {
   // chapter overwrites them. TN edits stay allowed during a non-translate run —
   // the first PATCH on an updated_by-NULL row implicitly "keeps" it; further
   // PATCHes on already-kept rows are normal edits. A TRANSLATE run ignores
-  // keep/hint (applyTranslateTnRow writes its draft over whatever the row
+  // keep/hint (planTranslateTnRow writes its draft over whatever the row
   // holds at apply time), so a note that run will write is read-only until it
   // finishes (issue #561, decision B). That is every note in a chapter-wide
   // run (the book intro too when it starts at chapter 1), and only the
@@ -1403,7 +1403,7 @@ async function setTnTrashed(
 
 // The translate run, if any, that will write over this tn row when it applies
 // (issue #602, decision B on #561). Approve, Not needed and Restore check it:
-// applyTranslateTnRow sets translation_state='ai_draft' and replaces the note
+// planTranslateTnRow sets translation_state='ai_draft' and replaces the note
 // whatever its trashed_at, so an approval or trash made mid-run would be
 // silently undone. /preserve and /hint stay exempt — the apply never writes
 // those bits. An unknown row returns null so the route still answers 404.
@@ -1616,7 +1616,7 @@ async function chapterLockForTqId(env: Env, id: string, book: string) {
 // expected_state?, expected_updated_at? } (1 → validated, 0 → back to edited);
 // If-Match, expected_state and expected_updated_at pin as there. Non-version-
 // bumping. Approving (value=1) is refused (409 chapter_locked) while any AI run
-// holds the question's chapter (#752), since applyTranslateTqRow resets
+// holds the question's chapter (#752), since planTranslateTqRow resets
 // translation_state to ai_draft and the version CAS cannot see an approve.
 // Un-approve stays allowed, as for notes.
 rows.post("/tq/:id/validate", requireEditor, async (c) => {

@@ -2533,7 +2533,7 @@ const draft: ToolDef = {
       if (coversBounds || takesAll(live.filter((r) => verseRange(r) !== null))) throw new ToolInputError(WHOLE);
     }
     // The apply leaves a note marked Not needed as it is (#735,
-    // pipelineImport.ts applyTranslateTnRow "trashed"), so it is not counted.
+    // pipelineImport.ts planTranslateTnRow "trashed"), so it is not counted.
     // Questions have no Not needed mark.
     const leftAlone = selected.filter((r) => r.trashed_at);
     const redo = selected

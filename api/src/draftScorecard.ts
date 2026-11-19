@@ -12,7 +12,7 @@
 //   draft      the note in the payload of the row's LATEST edit_log entry with
 //              source 'ai_pipeline' (kind 'tn', action create/update). That is
 //              what the translate apply wrote (pipelineImport.ts,
-//              applyTranslateTnRow). No such entry, or one whose payload has
+//              planTranslateTnRow). No such entry, or one whose payload has
 //              no string note → "no draft logged". The prod cron prunes
 //              edit_log after 180 days, so old chapters lose their drafts;
 //              they are counted, never treated as unchanged.
