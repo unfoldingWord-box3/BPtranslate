@@ -18,6 +18,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { pollAllNonTerminal } from "./pipelines.ts";
+import { runningStatus, writeWfStatus } from "./translate/status.ts";
 
 function makeDb(sqlite) {
   const mk = (sql, args) => ({
@@ -81,27 +82,25 @@ function seedJob(sqlite, { jobId, runner, state = "running", updatedAt }) {
     .run(jobId, state, runner, `up-${jobId}`, updatedAt);
 }
 
-// The internal runner's status channel, in the shape translate/status.ts writes.
-function writeWfStatus(sqlite, jobId, status) {
-  const wf = {
-    version: 1,
-    runner: "internal",
-    state: "running",
-    current: { chapter: 1, skill: "translate", status, startedAt: "2026-11-19T00:00:00.000Z" },
-    updatedAt: new Date().toISOString(),
-  };
-  sqlite.prepare("UPDATE pipeline_jobs SET wf_status_json = ? WHERE job_id = ?").run(JSON.stringify(wf), jobId);
+// The internal runner's status channel, through the REAL single writer
+// (translate/status.ts), which also sets current_skill, current_status and
+// updated_at on the row in the same UPDATE. A test helper that wrote only
+// wf_status_json hid the first version of this fix never resetting for
+// internal jobs (review of #944).
+async function writeStatus(env, jobId, status) {
+  const scope = { chapter: 1, skill: "translate", startedAt: "2026-11-19T00:00:00.000Z" };
+  assert.ok(await writeWfStatus(env.DB, jobId, runningStatus(scope, status)));
 }
 
 const row = (sqlite, jobId) =>
   sqlite.prepare("SELECT state, error_message, attempt_count, updated_at FROM pipeline_jobs WHERE job_id = ?").get(jobId);
 const now = (sqlite) => sqlite.prepare("SELECT unixepoch() AS n").get().n;
 
-test("a running job that reports progress on every tick survives well past 100 ticks (#944)", async () => {
+test("an internal running job that reports progress on every tick survives well past 100 ticks (#944)", async () => {
   const { sqlite, env, terminated } = freshEnv();
   seedJob(sqlite, { jobId: "job-progress", runner: "internal", updatedAt: now(sqlite) });
   for (let tick = 1; tick <= 110; tick++) {
-    writeWfStatus(sqlite, "job-progress", `verse ${tick}`);
+    await writeStatus(env, "job-progress", `batch ${tick}/200 done`);
     await pollAllNonTerminal(env);
     const r = row(sqlite, "job-progress");
     assert.equal(r.state, "running", `still running at tick ${tick} (${r.error_message})`);
@@ -110,10 +109,10 @@ test("a running job that reports progress on every tick survives well past 100 t
   assert.deepEqual(terminated, []);
 });
 
-test("a running job with no progress is still force-failed at the cap and its Workflow terminated (#944)", async () => {
+test("an internal running job with no progress is still force-failed at the cap and its Workflow terminated (#944)", async () => {
   const { sqlite, env, terminated } = freshEnv();
   seedJob(sqlite, { jobId: "job-frozen", runner: "internal", updatedAt: now(sqlite) });
-  writeWfStatus(sqlite, "job-frozen", "stuck on verse 3");
+  await writeStatus(env, "job-frozen", "batch 3/200 done");
   let failedAt = null;
   for (let tick = 1; tick <= 110 && failedAt === null; tick++) {
     await pollAllNonTerminal(env);
@@ -126,6 +125,47 @@ test("a running job with no progress is still force-failed at the cap and its Wo
   assert.equal(failedAt, 103, `force-failed on the tick after 101 polls without progress (got ${failedAt})`);
   assert.equal(row(sqlite, "job-frozen").error_message, "auto-failed: poll attempts exhausted");
   assert.deepEqual(terminated, ["translate-bsoj-job-frozen"]);
+});
+
+test("an internal running job with no status written yet is not kept alive by the synthesized clock (#944)", async () => {
+  // With wf_status_json NULL, readInternalStatus fills updatedAt from the
+  // clock, so it differs on every poll; that must not count as progress.
+  const { sqlite, env, terminated } = freshEnv();
+  seedJob(sqlite, { jobId: "job-nostatus", runner: "internal", updatedAt: now(sqlite) });
+  let failedAt = null;
+  for (let tick = 1; tick <= 110 && failedAt === null; tick++) {
+    await pollAllNonTerminal(env);
+    if (row(sqlite, "job-nostatus").state === "failed") failedAt = tick;
+  }
+  assert.equal(failedAt, 103, `force-failed after 101 polls without progress (got ${failedAt})`);
+  assert.deepEqual(terminated, ["translate-bsoj-job-nostatus"]);
+});
+
+test("a proxy running job whose bot status advances every tick survives well past 100 ticks (#944)", async (t) => {
+  const { sqlite, env } = freshEnv();
+  const realFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = realFetch; });
+  let tickNo = 0;
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        jobId: "up-job-bot",
+        pipelineType: "translate",
+        scope: { book: "OBA", startChapter: 1, endChapter: 1 },
+        state: "running",
+        current: { chapter: 1, skill: "translate", status: `batch ${tickNo}/200 done`, startedAt: "2026-11-19T00:00:00.000Z" },
+        updatedAt: new Date().toISOString(),
+        createdAt: "2026-11-19T00:00:00.000Z",
+        interrupted: false,
+      }),
+      { status: 200 },
+    );
+  seedJob(sqlite, { jobId: "job-bot", runner: "proxy", updatedAt: now(sqlite) });
+  for (tickNo = 1; tickNo <= 110; tickNo++) {
+    await pollAllNonTerminal(env);
+    const r = row(sqlite, "job-bot");
+    assert.equal(r.state, "running", `still running at tick ${tickNo} (${r.error_message})`);
+  }
 });
 
 test("a paused_for_usage_limit job survives past 100 ticks, keeps its updated_at, and the 48h sweep still fails it (#944)", async (t) => {
