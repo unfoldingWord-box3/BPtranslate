@@ -33,6 +33,7 @@ import {
   exportTsvShrinkRefused,
   findDcsOpenPr,
   masterFetchGate,
+  missingMasterIdCount,
   recreateExportBranchFromMaster,
   updateDcsPrBranch,
   usfmAlignmentShrinkRefused,
@@ -1549,7 +1550,7 @@ export class ExportWorkflow extends WorkflowEntrypoint<Env, ExportParams> {
         book, resource, built.rowCount, built.content, dcsOwner, dcsRepo, "master",
       );
       if (!guard.ok) {
-        await this.recordShrinkSkipAlert(book, resource, built.rowCount, guard.masterRows, guard.detail);
+        await this.recordShrinkSkipAlert(book, resource, built.rowCount, guard.masterRows, guard.detail, guard.missingIds);
         const reason = `shrink_guard:${guard.detail}`;
         await this.recordSnapshot(book, resource, null, null, built.rowCount, reason);
         return {
@@ -2883,7 +2884,7 @@ export class ExportWorkflow extends WorkflowEntrypoint<Env, ExportParams> {
     destOwner: string,
     destRepo: string,
     baseRef = "master",
-  ): Promise<{ ok: boolean; detail: string; masterRows: number | null }> {
+  ): Promise<{ ok: boolean; detail: string; masterRows: number | null; missingIds?: number }> {
     const gate = await this.fetchResourceMasterGate(book, resource, destOwner, destRepo, baseRef);
     if (gate.kind === "no_file") return { ok: true, detail: "no_file", masterRows: null };
     // First export of a new org/book: master has no file yet, so there is
@@ -2897,24 +2898,26 @@ export class ExportWorkflow extends WorkflowEntrypoint<Env, ExportParams> {
     }
     if (gate.kind === "unreadable") return { ok: false, detail: "master_unreadable", masterRows: null };
     const masterRows = this.countTsvDataRows(gate.text);
+    // #934: the limit applies to master rows whose ID the render lacks, not to
+    // the net row count, so new D1 rows can't hide lost master rows.
     // tN: notes an admin switched off on purpose (#924) are not counted as
     // lost, matched row by row against D1's marks (noteKindSwitch.ts
-    // tnShrinkCheck); every other drop is held to the same limit as before.
+    // tnShrinkCheck); every other missing ID is held to the same limit.
     if (resource === "tn") {
       const check = await tnShrinkCheck(this.env.DB, book, gate.text, renderedContent);
       if (check.exempt > 0) {
         console.log("shrink guard: switched-off notes left out of the count", { book, resource, exempt: check.exempt, masterRows });
       }
       if (check.refused) {
-        const lost = check.masterRows - check.exempt - check.renderedRows;
         const of = check.masterRows - check.exempt;
         const tail = check.exempt > 0 ? `_plus_${check.exempt}_switched_off` : "";
-        return { ok: false, detail: `shrink_${lost}_of_${of}${tail}`, masterRows };
+        return { ok: false, detail: `missing_${check.missing}_ids_of_${of}_rows_${check.renderedRows}${tail}`, masterRows, missingIds: check.missing };
       }
       return { ok: true, detail: "ok", masterRows };
     }
-    if (exportTsvShrinkRefused(renderedRows, masterRows)) {
-      return { ok: false, detail: `shrink_${masterRows - renderedRows}_of_${masterRows}`, masterRows };
+    const missingIds = missingMasterIdCount(gate.text, renderedContent);
+    if (exportTsvShrinkRefused(renderedRows, masterRows, missingIds)) {
+      return { ok: false, detail: `missing_${missingIds}_ids_of_${masterRows}_rows_${renderedRows}`, masterRows, missingIds };
     }
     return { ok: true, detail: "ok", masterRows };
   }
@@ -3122,13 +3125,16 @@ export class ExportWorkflow extends WorkflowEntrypoint<Env, ExportParams> {
     renderedRows: number,
     masterRows: number | null,
     detail: string,
+    missingIds?: number,
   ): Promise<void> {
     const source = `export_shrink:${book}:${resource}`;
+    const what = missingIds != null
+      ? `${missingIds} of master's ${masterRows ?? "?"} rows have an ID the render does not carry (render: ${renderedRows} rows)`
+      : `the render has ${renderedRows} rows but master has ${masterRows ?? "?"}`;
     const message =
-      `Benjamin — nightly export BLOCKED ${book} ${resource.toUpperCase()}: the render has ${renderedRows} rows ` +
-      `but master has ${masterRows ?? "?"} (${detail}). This looks like an incomplete D1 load (truncated fetch), ` +
-      `not a real deletion — refusing to shrink master. Re-sync ${book} ${resource.toUpperCase()} from master, ` +
-      `verify the row count, then re-export.`;
+      `Benjamin — nightly export BLOCKED ${book} ${resource.toUpperCase()}: ${what} (${detail}). ` +
+      `This looks like an incomplete or mismatched D1 load, not a real deletion — refusing to remove them from master. ` +
+      `Re-sync ${book} ${resource.toUpperCase()} from master, check that master's rows are in D1, then re-export.`;
     await this.writeAlert(source, message, await exportOwnerUrl(this.env));
   }
 

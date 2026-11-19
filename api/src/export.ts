@@ -220,8 +220,35 @@ export function buildTwlTsv(rows: TwlRow[], input?: UsfmInputs): TwlTsvResult {
 // The threshold itself is the shared `shrinkRefused` policy (in articleExport.ts,
 // the lower module — imported here without a cycle) so the TSV export and the
 // article export can't drift apart on this safety-critical number.
-export function exportTsvShrinkRefused(renderedRows: number, masterRows: number): boolean {
-  return shrinkRefused(renderedRows, masterRows);
+//
+// #934: the number held to those limits is the master rows the render LOSES,
+// counted by ID (missingIds, from missingMasterIdCount), not the net change in
+// row count. A render that drops 200 master notes and adds 200 new ones has the
+// same row count, and a net-count check let it delete those 200 notes. The net
+// loss stays as a floor so a master that repeats an ID (no ID goes missing, yet
+// rows do) is held to the same limit as before.
+export function exportTsvShrinkRefused(renderedRows: number, masterRows: number, missingIds = 0): boolean {
+  const lost = Math.max(masterRows - renderedRows, missingIds);
+  return shrinkRefused(masterRows - lost, masterRows);
+}
+
+function tsvIdColumn(text: string): { idCol: number; rows: string[][] } {
+  const lines = (text.charCodeAt(0) === 0xfeff ? text.slice(1) : text).split(/\r?\n/).filter((l) => l.length > 0);
+  const header = (lines[0] ?? "").split("\t");
+  return { idCol: header.indexOf("ID"), rows: lines.slice(1).map((l) => l.split("\t")) };
+}
+
+// Master data rows whose ID does not appear anywhere in the render (tn, tq and
+// twl all carry an "ID" header). 0 when either file has no ID column: there is
+// nothing to compare by ID, so the row-count rule alone decides, as before #934.
+export function missingMasterIdCount(masterTsv: string, renderedTsv: string): number {
+  const master = tsvIdColumn(masterTsv);
+  const rendered = tsvIdColumn(renderedTsv);
+  if (master.idCol < 0 || rendered.idCol < 0) return 0;
+  const renderedIds = new Set(rendered.rows.map((r) => r[rendered.idCol] ?? ""));
+  let missing = 0;
+  for (const row of master.rows) if (!renderedIds.has(row[master.idCol] ?? "")) missing++;
+  return missing;
 }
 
 // ── Master-fetch gate (shared by both export shrink guards) ──────────────────
