@@ -40,7 +40,7 @@
 // of notes is still two statements.
 
 import type { Env } from "./index";
-import { exportTsvShrinkRefused } from "./export.ts";
+import { exportTsvShrinkRefused, missingMasterIdCount } from "./export.ts";
 
 type Db = Env["DB"];
 
@@ -322,8 +322,11 @@ export async function hideSwitchedOffKinds(db: Db, opts: { book?: string; throwO
 // switched-off kind has no marks for them, so they stay unexplained, and
 // switched-off notes that never reached master add no headroom.
 // The limit is then applied as if master never had the exempt rows:
-// exportTsvShrinkRefused(rendered, master - exempt). Removing them from the
-// denominator too makes this the stricter reading for what remains.
+// exportTsvShrinkRefused(rendered, master - exempt, missing). Removing them from
+// the denominator too makes this the stricter reading for what remains.
+// #934: `missing` is the master rows whose ID the render lacks, minus the exempt
+// ones, so a render that swaps master notes for new ones is judged on the notes
+// it loses, not on its net row count.
 // Fails closed: any D1 error, or a master or render header without ID or
 // SupportReference, gives exempt = 0 (the guard as it was before #924).
 
@@ -333,6 +336,8 @@ export interface TnShrinkCheck {
   renderedRows: number;
   /** Master rows left out of the render because they were switched off. */
   exempt: number;
+  /** Master rows whose ID is absent from the render, not counting the exempt ones (#934). */
+  missing: number;
 }
 
 function tsvBody(text: string): { header: string[]; rows: string[][] } {
@@ -388,5 +393,6 @@ export async function tnShrinkCheck(db: Db, book: string, masterTsv: string, ren
       exempt = 0;
     }
   }
-  return { refused: exportTsvShrinkRefused(renderedRows, masterRows - exempt), masterRows, renderedRows, exempt };
+  const missing = Math.max(0, missingMasterIdCount(masterTsv, renderedTsv) - exempt);
+  return { refused: exportTsvShrinkRefused(renderedRows, masterRows - exempt, missing), masterRows, renderedRows, exempt, missing };
 }
