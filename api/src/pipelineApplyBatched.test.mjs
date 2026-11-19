@@ -60,6 +60,8 @@ function makeDb(sqlite, counter) {
     return sqlite.prepare(sql).all(...args);
   };
   const mk = (sql, args) => ({
+    sql,
+    args,
     bind: (...a) => mk(sql, a),
     exec: () => exec(sql, args),
     all() {
@@ -256,6 +258,35 @@ test("#945: a retried apply writes nothing twice", async () => {
   const second = plain(snapshot(sqlite));
   assert.deepEqual(second.tn, first.tn, "no row was bumped again");
   assert.deepEqual(second.editLog, first.editLog, "no edit_log row was added");
+});
+
+test("#945: an apply cut off between two write batches resumes on retry without writing anything twice", async () => {
+  const clean = fresh({ draftCount: 40 });
+  await clean.apply();
+  const expected = plain(snapshot(clean.sqlite));
+
+  const { sqlite, env, apply } = fresh({ draftCount: 40 });
+  const realBatch = env.DB.batch;
+  let writeBatches = 0;
+  env.DB.batch = async (stmts) => {
+    if (stmts.length >= 3 && /UPDATE tn_rows/.test(stmts[0].sql ?? "") && ++writeBatches === 2) {
+      throw new Error("Worker cut off mid-apply");
+    }
+    return realBatch(stmts);
+  };
+  await assert.rejects(apply(), /cut off/);
+  const partial = sqlite.prepare(`SELECT COUNT(*) AS n FROM tn_rows WHERE version = 4`).get().n;
+  assert.ok(partial > 0 && partial < 40, `the first batch landed and the rest did not (${partial} drafted)`);
+  env.DB.batch = realBatch;
+  await apply();
+  const after = plain(snapshot(sqlite));
+  assert.deepEqual(after.tn, expected.tn, "every row ends where a clean run left it");
+  assert.deepEqual(after.editLog, expected.editLog, "one edit_log row per write, none doubled");
+  assert.deepEqual(
+    after.pending.map((p) => p.accepted),
+    expected.pending.map((p) => p.accepted),
+    "the same proposals are accepted",
+  );
 });
 
 test("#945 round trips: a 161-note run takes far fewer than two D1 calls per note", async () => {
