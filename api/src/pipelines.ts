@@ -865,18 +865,27 @@ async function pollPipelineJob(
       : (data.current?.error ?? null);
 
   // #944: attempt_count counts polls WITHOUT PROGRESS, so it resets whenever
-  // this poll records a different state, skill or status than the row holds
-  // (the CASE expressions read the row's pre-UPDATE values). Upstream
+  // this poll sees a different upstream state, chapter, skill or status than
+  // the PREVIOUS POLL saw. The comparison is against raw_status_json, which
+  // only this UPDATE writes (the CASE reads the row's pre-UPDATE values).
+  // Not against current_skill/current_status: the internal runner's
+  // writeWfStatus sets those columns itself together with wf_status_json, so
+  // they always already match what readInternalStatus returns. Upstream
   // `updatedAt` is deliberately not part of the signal: an internal row with
   // no wf_status_json yet synthesizes it from the clock (readInternalStatus),
-  // so it would count as progress on every poll. A job still in the same
-  // paused state keeps its updated_at even if its status text changes, so the
-  // 48h no-progress sweep means "paused continuously for 48h" and binds on it;
-  // paused jobs are not counted toward the poll cap.
+  // so it would count as progress on every poll. CASE evaluates in order, so
+  // json_extract never runs on a NULL or malformed raw_status_json. A job still
+  // in the same paused state keeps its updated_at even if its status text
+  // changes, so the 48h no-progress sweep means "paused continuously for 48h"
+  // and binds on it; paused jobs are not counted toward the poll cap.
   await env.DB.prepare(
     `UPDATE pipeline_jobs SET
        attempt_count = CASE
-         WHEN state IS NOT ?2 OR current_skill IS NOT ?3 OR current_status IS NOT ?4 THEN 0
+         WHEN COALESCE(json_valid(raw_status_json), 0) = 0 THEN 0
+         WHEN json_extract(raw_status_json, '$.state') IS NOT ?9
+           OR json_extract(raw_status_json, '$.current.chapter') IS NOT ?10
+           OR json_extract(raw_status_json, '$.current.skill') IS NOT ?11
+           OR json_extract(raw_status_json, '$.current.status') IS NOT ?12 THEN 0
          ELSE attempt_count
        END,
        updated_at = CASE
@@ -902,6 +911,10 @@ async function pollPipelineJob(
       effectiveErrorMessage,
       data.output && !importFailed ? JSON.stringify(data.output) : null,
       text,
+      data.state ?? null,
+      data.current?.chapter ?? null,
+      data.current?.skill ?? null,
+      data.current?.status ?? null,
     )
     .run();
 
